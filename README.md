@@ -8,19 +8,21 @@ The goal is to learn: BIOS booting, real mode, protected mode, interrupts, drive
 
 - [NASM](https://www.nasm.us/) (assembler)
 - [QEMU](https://www.qemu.org/) (emulator)
+- [CMake](https://cmake.org/) 3.16 or newer (or `make`)
 
-## Build
+## Build and Run (CMake)
 
 ```bash
-nasm -f bin boot/boot.asm -o build/boot.bin
+cmake -S . -B build                    # configure (once)
+cmake --build build                    # build build/haris.img
+cmake --build build --target run       # boot in QEMU
 ```
+
 ## Run
 
 ```bash
-qemu-system-x86_64 -drive format=raw,file=build/boot.bin
+qemu-system-x86_64 -drive format=raw,file=build/haris.img
 ```
-
-You should see the welcome message in the QEMU window.
 
 ## Resources
 
