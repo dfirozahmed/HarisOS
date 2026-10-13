@@ -1,28 +1,141 @@
 cmake_minimum_required(VERSION 3.16)
-project(HarisOS NONE)
+project(HarisOS_UEFI NONE)
 
-find_program(NASM_EXECUTABLE nasm)
-if(NOT NASM_EXECUTABLE)
-    message(FATAL_ERROR "NASM not found. Install it and make sure it is in PATH.")
+# ------------------------------------------------------------
+#   Tools: clang (compiler) + lld-link (makes the PE/EFI file)
+#   Windows:  winget install LLVM.LLVM   (then add C:\Program Files\LLVM\bin to PATH)
+#   Linux:    sudo apt install clang lld
+# ------------------------------------------------------------
+find_program(CLANG_CC clang)
+find_program(LLD_LINK lld-link)
+
+if(NOT CLANG_CC OR NOT LLD_LINK)
+    message(FATAL_ERROR
+        "clang and/or lld-link not found.\n"
+        "Windows: winget install LLVM.LLVM and add C:\\Program Files\\LLVM\\bin to PATH.\n"
+        "Linux:   sudo apt install clang lld")
 endif()
 
-find_program(QEMU_EXECUTABLE NAMES qemu-system-x86_64 qemu-system-i386)
+find_program(QEMU_EXECUTABLE NAMES qemu-system-x86_64)
 
-set(IMAGE ${CMAKE_BINARY_DIR}/haris.img)
+# ------------------------------------------------------------
+# Build: uefi_loader.c -> uefi_loader.obj -> BOOTX64.EFI
+# A UEFI app is a PE32+ executable with the "efi_application" subsystem.
+# ------------------------------------------------------------
+set(EFI_SRC ${CMAKE_SOURCE_DIR}/boot/uefi/uefi_loader.c)
+set(EFI_OBJ ${CMAKE_BINARY_DIR}/uefi_loader.obj)
+set(EFI_BIN ${CMAKE_BINARY_DIR}/BOOTX64.EFI)
+
+set(EFI_CFLAGS
+    --target=x86_64-pc-win32-coff       # PE/COFF object, Microsoft x64 calling convention
+    -ffreestanding -fno-builtin -fno-stack-protector
+    -fshort-wchar                       # wide strings L"..." are 16-bit (UTF-16)
+    -mno-red-zone
+    -O2 -Wall -Wextra -std=gnu11)
 
 add_custom_command(
-    OUTPUT  ${IMAGE}
-    COMMAND ${NASM_EXECUTABLE} -f bin ${CMAKE_SOURCE_DIR}/boot/boot.asm -o ${IMAGE}
-    DEPENDS ${CMAKE_SOURCE_DIR}/boot/boot.asm
-    COMMENT "Assembling boot.asm -> haris.img"
+    OUTPUT  ${EFI_OBJ}
+    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${EFI_SRC} -o ${EFI_OBJ}
+    DEPENDS ${EFI_SRC}
+    COMMENT "Compiling uefi_loader.c"
     VERBATIM
 )
-add_custom_target(haris ALL DEPENDS ${IMAGE})
 
-if(QEMU_EXECUTABLE)
+add_custom_command(
+    OUTPUT  ${EFI_BIN}
+    COMMAND ${LLD_LINK} -subsystem:efi_application -entry:efi_main -machine:x64
+            -nodefaultlib -out:${EFI_BIN} ${EFI_OBJ}
+    DEPENDS ${EFI_OBJ}
+    COMMENT "Linking BOOTX64.EFI"
+    VERBATIM
+)
+
+# ------------------------------------------------------------
+# "EFI System Partition" folder: firmware boots EFI/BOOT/BOOTX64.EFI by default.
+# QEMU can present a plain folder as a FAT disk (fat:rw:esp), so no disk image is needed.
+# ------------------------------------------------------------
+set(ESP_FILE ${CMAKE_BINARY_DIR}/esp/EFI/BOOT/BOOTX64.EFI)
+
+add_custom_command(
+    OUTPUT  ${ESP_FILE}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/esp/EFI/BOOT
+    COMMAND ${CMAKE_COMMAND} -E copy ${EFI_BIN} ${ESP_FILE}
+    DEPENDS ${EFI_BIN}
+    COMMENT "Copying to esp/EFI/BOOT/BOOTX64.EFI"
+    VERBATIM
+)
+
+add_custom_target(haris ALL DEPENDS ${ESP_FILE})
+
+# ------------------------------------------------------------
+# Running needs UEFI firmware for the virtual machine (OVMF / edk2).
+# The QEMU installer ships it in its "share" folder; Linux distros have an ovmf package.
+# If it is not found automatically, pass it yourself:
+#   cmake -S . -B build -DOVMF_CODE="C:/Program Files/qemu/share/edk2-x86_64-code.fd"
+# ------------------------------------------------------------
+set(OVMF_CODE "" CACHE FILEPATH "UEFI firmware code image (edk2-x86_64-code.fd, OVMF_CODE.fd or OVMF.fd)")
+
+set(FW_CODE "${OVMF_CODE}")
+if(NOT FW_CODE)
+    if(QEMU_EXECUTABLE)
+        get_filename_component(QEMU_DIR "${QEMU_EXECUTABLE}" DIRECTORY)
+    endif()
+    find_file(FW_CODE_AUTO
+        NAMES edk2-x86_64-code.fd OVMF_CODE_4M.fd OVMF_CODE.fd OVMF.fd
+        PATHS "${QEMU_DIR}/share" "${QEMU_DIR}/../share/qemu" "C:/Program Files/qemu/share"
+              /usr/share/qemu /usr/share/OVMF /usr/share/ovmf /usr/share/edk2/x64
+              /usr/share/edk2/ovmf /usr/local/share/qemu /opt/homebrew/share/qemu
+        NO_DEFAULT_PATH)
+    if(FW_CODE_AUTO)
+        set(FW_CODE "${FW_CODE_AUTO}")
+    endif()
+endif()
+
+# Firmware "code" images need a matching writable "vars" file (variable storage);
+# a combined OVMF.fd does not.
+set(FW_MODE "none")
+if(FW_CODE)
+    get_filename_component(FW_CODE_NAME "${FW_CODE}" NAME)
+    get_filename_component(FW_DIR "${FW_CODE}" DIRECTORY)
+    set(FW_VARS_NAME "")
+    if(FW_CODE_NAME STREQUAL "edk2-x86_64-code.fd")
+        set(FW_VARS_NAME "edk2-i386-vars.fd")
+    elseif(FW_CODE_NAME STREQUAL "OVMF_CODE_4M.fd")
+        set(FW_VARS_NAME "OVMF_VARS_4M.fd")
+    elseif(FW_CODE_NAME STREQUAL "OVMF_CODE.fd")
+        set(FW_VARS_NAME "OVMF_VARS.fd")
+    endif()
+
+    if(FW_VARS_NAME AND EXISTS "${FW_DIR}/${FW_VARS_NAME}")
+        set(FW_MODE "pflash")
+        configure_file("${FW_DIR}/${FW_VARS_NAME}" "${CMAKE_BINARY_DIR}/ovmf_vars.fd" COPYONLY)
+    else()
+        set(FW_MODE "bios")
+    endif()
+    message(STATUS "UEFI firmware: ${FW_CODE} (mode: ${FW_MODE})")
+endif()
+
+if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
     add_custom_target(run
-        COMMAND ${QEMU_EXECUTABLE} -drive format=raw,file=${IMAGE}
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M
+                -drive if=pflash,format=raw,unit=0,readonly=on,file=${FW_CODE}
+                -drive if=pflash,format=raw,unit=1,file=${CMAKE_BINARY_DIR}/ovmf_vars.fd
+                -drive format=raw,file=fat:rw:esp
+                -nic none
         DEPENDS haris
-        USES_TERMINAL
-    )
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        USES_TERMINAL VERBATIM)
+elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
+    add_custom_target(run
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M
+                -bios ${FW_CODE}
+                -drive format=raw,file=fat:rw:esp
+                -nic none
+        DEPENDS haris
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        USES_TERMINAL VERBATIM)
+else()
+    message(WARNING
+        "Build works, but the 'run' target is unavailable: QEMU or the UEFI firmware was not found.\n"
+        "Pass the firmware with -DOVMF_CODE=<path to edk2-x86_64-code.fd or OVMF.fd>.")
 endif()

@@ -7,6 +7,12 @@ The goal is to learn: BIOS booting, real mode, protected mode, interrupts, drive
 ## Requirements
 
 - [NASM](https://www.nasm.us/) (assembler)
+- [Clang](https://clang.llvm.org/) (Compiler)
+or
+MSYS2 UCRT64
+```bash
+pacman -S mingw-w64-ucrt-x86_64-clang
+```
 - [QEMU](https://www.qemu.org/) (emulator)
 - [CMake](https://cmake.org/) 3.16 or newer (or `make`)
 
