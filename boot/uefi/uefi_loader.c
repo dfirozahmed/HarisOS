@@ -1,160 +1,22 @@
 /* ============================================================
- * HarisOS - UEFI version
+ * HarisOS - UEFI loader (boot/uefi/uefi_loader.c)
  *
- * A UEFI application is just a Windows-style PE32+ executable
- * that the firmware loads and calls. The firmware hands us a
- * pointer to the "System Table", which contains function
- * pointers for everything we need: text output, keyboard,
- * timers, shutdown...
+ * The firmware starts this file as BOOTX64.EFI. Its only job is:
+ *   1. show a banner
+ *   2. read \KERNEL.EFI from the same disk it was booted from
+ *   3. start the kernel (kernel/kernel.c) with LoadImage/StartImage
  *
- * Unlike BIOS boot:
- *   - the firmware already put the CPU in 64-bit mode
- *   - no assembly, no boot sector, no GDT setup needed
- *   - we get ready-made services for screen and keyboard
- *
+ * The kernel itself lives in kernel/kernel.c.
  * ============================================================ */
-
-/* ------------------------------------------------------------
- * Minimal UEFI types (x86_64)
- * ------------------------------------------------------------ */
-typedef unsigned char      UINT8;
-typedef unsigned short     UINT16;
-typedef unsigned int       UINT32;
-typedef unsigned long long UINT64;
-typedef UINT64             UINTN;
-typedef UINT16             CHAR16;
-typedef UINT8              BOOLEAN;
-typedef UINTN              EFI_STATUS;
-typedef void              *EFI_HANDLE;
-typedef void              *EFI_EVENT;
-
-#define EFIAPI __attribute__((ms_abi))
-
-#define NULL        ((void *)0)
-#define EFI_SUCCESS 0
-
-typedef struct {
-    UINT64 Signature;
-    UINT32 Revision;
-    UINT32 HeaderSize;
-    UINT32 CRC32;
-    UINT32 Reserved;
-} EFI_TABLE_HEADER;
-
-typedef struct {
-    UINT16 ScanCode;
-    CHAR16 UnicodeChar;
-} EFI_INPUT_KEY;
-
-/* --- Keyboard (Simple Text Input Protocol) --- */
-typedef struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
-    EFI_STATUS (EFIAPI *Reset)(struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, BOOLEAN ExtendedVerification);
-    EFI_STATUS (EFIAPI *ReadKeyStroke)(struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
-    EFI_EVENT  WaitForKey;
-} EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
-
-/* --- Screen (Simple Text Output Protocol) --- */
-typedef struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
-    EFI_STATUS (EFIAPI *Reset)(struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, BOOLEAN ExtendedVerification);
-    EFI_STATUS (EFIAPI *OutputString)(struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, CHAR16 *String);
-    void *TestString;
-    void *QueryMode;
-    void *SetMode;
-    EFI_STATUS (EFIAPI *SetAttribute)(struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, UINTN Attribute);
-    EFI_STATUS (EFIAPI *ClearScreen)(struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This);
-    void *SetCursorPosition;
-    void *EnableCursor;
-    void *Mode;
-} EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
-
-/* --- Boot services (only the entries we use are typed; the rest are
- *     placeholders that keep the structure layout correct) --- */
-typedef struct {
-    EFI_TABLE_HEADER Hdr;
-    void *RaiseTPL;
-    void *RestoreTPL;
-    void *AllocatePages;
-    void *FreePages;
-    void *GetMemoryMap;
-    void *AllocatePool;
-    void *FreePool;
-    void *CreateEvent;
-    void *SetTimer;
-    EFI_STATUS (EFIAPI *WaitForEvent)(UINTN NumberOfEvents, EFI_EVENT *Event, UINTN *Index);
-    void *SignalEvent;
-    void *CloseEvent;
-    void *CheckEvent;
-    void *InstallProtocolInterface;
-    void *ReinstallProtocolInterface;
-    void *UninstallProtocolInterface;
-    void *HandleProtocol;
-    void *Reserved;
-    void *RegisterProtocolNotify;
-    void *LocateHandle;
-    void *LocateDevicePath;
-    void *InstallConfigurationTable;
-    void *LoadImage;
-    void *StartImage;
-    void *Exit;
-    void *UnloadImage;
-    void *ExitBootServices;
-    void *GetNextMonotonicCount;
-    EFI_STATUS (EFIAPI *Stall)(UINTN Microseconds);
-    EFI_STATUS (EFIAPI *SetWatchdogTimer)(UINTN Timeout, UINT64 WatchdogCode, UINTN DataSize, CHAR16 *WatchdogData);
-} EFI_BOOT_SERVICES;
-
-typedef struct {
-    EFI_TABLE_HEADER Hdr;
-    void *GetTime;
-    void *SetTime;
-    void *GetWakeupTime;
-    void *SetWakeupTime;
-    void *SetVirtualAddressMap;
-    void *ConvertPointer;
-    void *GetVariable;
-    void *GetNextVariableName;
-    void *SetVariable;
-    void *GetNextHighMonotonicCount;
-    void (EFIAPI *ResetSystem)(UINT32 ResetType, EFI_STATUS ResetStatus, UINTN DataSize, void *ResetData);
-} EFI_RUNTIME_SERVICES;
-
-#define EFI_RESET_SHUTDOWN 2
-
-/* --- System table: the one pointer the firmware gives us --- */
-typedef struct {
-    EFI_TABLE_HEADER Hdr;
-    CHAR16 *FirmwareVendor;
-    UINT32  FirmwareRevision;
-    EFI_HANDLE ConsoleInHandle;
-    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *ConIn;
-    EFI_HANDLE ConsoleOutHandle;
-    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
-    EFI_HANDLE StandardErrorHandle;
-    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
-    EFI_RUNTIME_SERVICES *RuntimeServices;
-    EFI_BOOT_SERVICES *BootServices;
-    UINTN NumberOfTableEntries;
-    void *ConfigurationTable;
-} EFI_SYSTEM_TABLE;
-
-/* ------------------------------------------------------------
- * Colors: attribute = text color | (background color << 4)
- * Background colors can only be 0-7.
- * ------------------------------------------------------------ */
-#define COLOR_DEFAULT 0x07      /* light gray on black */
-#define COLOR_BANNER  0x1F      /* white on blue       */
-#define COLOR_GREEN   0x0A
-#define COLOR_RED     0x0C
-#define COLOR_YELLOW  0x0E
-#define COLOR_WHITE   0x0F
-
-#define SCAN_ESC      0x17
+#include "uefi.h"
 
 static EFI_SYSTEM_TABLE *ST;    /* saved system table pointer */
 
+static EFI_GUID LoadedImageGuid    = { 0x5B1B31A1, 0x9562, 0x11D2, { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
+static EFI_GUID SimpleFileSystemGuid = { 0x964E5B22, 0x6459, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
+
 /* ------------------------------------------------------------
- * Print helpers (UEFI strings are UTF-16: use L"..." literals,
- * and "\r\n" for a new line)
+ * Print helpers
  * ------------------------------------------------------------ */
 static void print(const CHAR16 *s)
 {
@@ -168,76 +30,76 @@ static void print_color(const CHAR16 *s, UINTN attribute)
     ST->ConOut->SetAttribute(ST->ConOut, COLOR_DEFAULT);
 }
 
-static void print_char(CHAR16 c)
+static void print_hex(UINT64 v)
 {
-    CHAR16 s[2];
-    s[0] = c;
-    s[1] = 0;
-    print(s);
+    static const CHAR16 digits[] = L"0123456789ABCDEF";
+    CHAR16 buf[19];
+    buf[0] = L'0';
+    buf[1] = L'x';
+    for (int i = 0; i < 16; i++)
+        buf[2 + i] = digits[(v >> (60 - 4 * i)) & 0xF];
+    buf[18] = 0;
+    print(buf);
+}
+
+static void fail(const CHAR16 *what, EFI_STATUS status)
+{
+    print_color(L"ERROR: ", COLOR_RED);
+    print(what);
+    print(L" (status ");
+    print_hex(status);
+    print(L")\r\n");
 }
 
 /* ------------------------------------------------------------
- * Keyboard: wait for a key, return its character (0 for keys
- * without one, like arrows). The scan code tells special keys apart.
+ * Read a whole file from the disk we booted from into memory.
+ * On success *out_buf / *out_size describe the file contents.
  * ------------------------------------------------------------ */
-static CHAR16 read_key(UINT16 *scan_code)
+static EFI_STATUS load_file(EFI_HANDLE image, const CHAR16 *path, void **out_buf, UINTN *out_size)
 {
-    UINTN index;
-    EFI_INPUT_KEY key;
+    EFI_STATUS st;
+    EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
+    EFI_FILE_PROTOCOL *root = NULL, *file = NULL;
+    UINT64 size = 0;
+    UINTN read_size;
+    void *buf = NULL;
 
-    for (;;) {
-        ST->BootServices->WaitForEvent(1, &ST->ConIn->WaitForKey, &index);
-        if (ST->ConIn->ReadKeyStroke(ST->ConIn, &key) == EFI_SUCCESS) {
-            *scan_code = key.ScanCode;
-            return key.UnicodeChar;
-        }
+    /* Which device did the loader come from? */
+    st = ST->BootServices->HandleProtocol(image, &LoadedImageGuid, (void **)&li);
+    if (EFI_ERROR(st)) { fail(L"LoadedImage protocol", st); return st; }
+
+    /* Open that device's file system */
+    st = ST->BootServices->HandleProtocol(li->DeviceHandle, &SimpleFileSystemGuid, (void **)&fs);
+    if (EFI_ERROR(st)) { fail(L"file system protocol", st); return st; }
+
+    st = fs->OpenVolume(fs, &root);
+    if (EFI_ERROR(st)) { fail(L"OpenVolume", st); return st; }
+
+    st = root->Open(root, &file, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(st)) { fail(L"cannot open kernel file", st); root->Close(root); return st; }
+
+    /* File size: seek to the end, ask for the position, seek back */
+    file->SetPosition(file, 0xFFFFFFFFFFFFFFFFULL);
+    file->GetPosition(file, &size);
+    file->SetPosition(file, 0);
+
+    st = ST->BootServices->AllocatePool(EFI_LOADER_DATA, (UINTN)size, &buf);
+    if (EFI_ERROR(st)) { fail(L"AllocatePool", st); file->Close(file); root->Close(root); return st; }
+
+    read_size = (UINTN)size;
+    st = file->Read(file, &read_size, buf);
+    file->Close(file);
+    root->Close(root);
+    if (EFI_ERROR(st) || read_size != (UINTN)size) {
+        fail(L"reading kernel file", st);
+        ST->BootServices->FreePool(buf);
+        return EFI_ERROR(st) ? st : (EFI_STATUS)0x8000000000000001ULL;
     }
-}
 
-#define LINE_MAX 64
-
-static void prompt_loop(void)
-{
-    CHAR16 line[LINE_MAX];
-
-    for (;;) {
-        print_color(L"haris> ", COLOR_YELLOW);
-
-        UINTN len = 0;
-        for (;;) {
-            UINT16 scan;
-            CHAR16 c = read_key(&scan);
-
-            if (scan == SCAN_ESC) {                 /* ESC: power off */
-                print(L"\r\nShutting down...\r\n");
-                ST->BootServices->Stall(500000);    /* half a second */
-                ST->RuntimeServices->ResetSystem(EFI_RESET_SHUTDOWN, EFI_SUCCESS, 0, NULL);
-                for (;;) { }
-            }
-            if (c == L'\r') {                       /* Enter */
-                print(L"\r\n");
-                break;
-            }
-            if (c == L'\b') {                       /* Backspace */
-                if (len > 0) {
-                    len--;
-                    print(L"\b \b");                /* back, erase, back */
-                }
-                continue;
-            }
-            if (c >= L' ' && len < LINE_MAX - 1) {  /* printable character */
-                line[len++] = c;
-                print_char(c);
-            }
-        }
-        line[len] = 0;
-
-        if (len > 0) {
-            print(L"You typed: ");
-            print(line);
-            print(L"\r\n");
-        }
-    }
+    *out_buf  = buf;
+    *out_size = (UINTN)size;
+    return EFI_SUCCESS;
 }
 
 /* ------------------------------------------------------------
@@ -245,7 +107,11 @@ static void prompt_loop(void)
  * ------------------------------------------------------------ */
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
-    (void)ImageHandle;
+    EFI_STATUS st;
+    void *kernel_buf = NULL;
+    UINTN kernel_size = 0;
+    EFI_HANDLE kernel_image = NULL;
+
     ST = SystemTable;
 
     /* The firmware reboots us after 5 minutes unless we disable this timer. */
@@ -256,14 +122,34 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     print_color(L" Welcome to HarisOS ", COLOR_BANNER);
     print(L"\r\n\r\n");
 
-    print_color(L"GREEN ", COLOR_GREEN);
-    print_color(L"RED ", COLOR_RED);
-    print_color(L"YELLOW", COLOR_YELLOW);
-    print(L"\r\n\r\n");
+    print(L"Loading \\KERNEL.EFI ...\r\n");
+    st = load_file(ImageHandle, L"\\KERNEL.EFI", &kernel_buf, &kernel_size);
+    if (EFI_ERROR(st))
+        goto halt;
 
-    print(L"Type something and press Enter. ESC = shut down.\r\n\r\n");
+    print(L"Kernel loaded, starting it...\r\n");
+    ST->BootServices->Stall(300000);
 
-    prompt_loop();
+    /* Prepare the kernel image (firmware does the PE relocation for us) ... */
+    st = ST->BootServices->LoadImage(FALSE, ImageHandle, NULL, kernel_buf, kernel_size, &kernel_image);
+    ST->BootServices->FreePool(kernel_buf);
+    if (EFI_ERROR(st)) {
+        fail(L"LoadImage (is KERNEL.EFI a valid EFI image?)", st);
+        goto halt;
+    }
 
-    return EFI_SUCCESS;
+    /* ... and jump to kernel_main(). It does not return in normal use. */
+    st = ST->BootServices->StartImage(kernel_image, NULL, NULL);
+    if (EFI_ERROR(st))
+        fail(L"kernel exited with an error", st);
+    else
+        print(L"Kernel returned.\r\n");
+
+halt:
+    print(L"\r\nPress any key to stop.\r\n");
+    {
+        UINTN index;
+        ST->BootServices->WaitForEvent(1, &ST->ConIn->WaitForKey, &index);
+    }
+    return st;
 }

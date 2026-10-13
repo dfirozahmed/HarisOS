@@ -19,53 +19,68 @@ endif()
 find_program(QEMU_EXECUTABLE NAMES qemu-system-x86_64)
 
 # ------------------------------------------------------------
-# Build: uefi_loader.c -> uefi_loader.obj -> BOOTX64.EFI
-# A UEFI app is a PE32+ executable with the "efi_application" subsystem.
+#   Build two separate programs (both are PE32+ "efi_application" files):
+#   boot/uefi/uefi_loader.c  ->  BOOTX64.EFI   (started by the firmware)
+#   kernel/kernel.c          ->  KERNEL.EFI     (loaded + started by the loader)
 # ------------------------------------------------------------
-set(EFI_SRC ${CMAKE_SOURCE_DIR}/boot/uefi/uefi_loader.c)
-set(EFI_OBJ ${CMAKE_BINARY_DIR}/uefi_loader.obj)
-set(EFI_BIN ${CMAKE_BINARY_DIR}/BOOTX64.EFI)
-
 set(EFI_CFLAGS
-    --target=x86_64-pc-win32-coff       # PE/COFF object, Microsoft x64 calling convention
-    -ffreestanding -fno-builtin -fno-stack-protector
+    --target=x86_64-pc-win32-coff       
     -fshort-wchar                       # wide strings L"..." are 16-bit (UTF-16)
     -mno-red-zone
+    -I${CMAKE_SOURCE_DIR}/include
     -O2 -Wall -Wextra -std=gnu11)
 
-add_custom_command(
-    OUTPUT  ${EFI_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${EFI_SRC} -o ${EFI_OBJ}
-    DEPENDS ${EFI_SRC}
-    COMMENT "Compiling uefi_loader.c"
-    VERBATIM
-)
+# helper: haris_efi_program
+function(haris_efi_program NAME SRC ENTRY OUTNAME)
+    set(OBJ ${CMAKE_BINARY_DIR}/${NAME}.obj)
+    set(BIN ${CMAKE_BINARY_DIR}/${OUTNAME})
+    add_custom_command(
+        OUTPUT  ${OBJ}
+        COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${SRC} -o ${OBJ}
+        DEPENDS ${SRC} ${CMAKE_SOURCE_DIR}/include/uefi.h
+        COMMENT "Compiling ${NAME}"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${BIN}
+        COMMAND ${LLD_LINK} -subsystem:efi_application -entry:${ENTRY} -machine:x64
+                -nodefaultlib -out:${BIN} ${OBJ}
+        DEPENDS ${OBJ}
+        COMMENT "Linking ${OUTNAME}"
+        VERBATIM
+    )
+endfunction()
 
-add_custom_command(
-    OUTPUT  ${EFI_BIN}
-    COMMAND ${LLD_LINK} -subsystem:efi_application -entry:efi_main -machine:x64
-            -nodefaultlib -out:${EFI_BIN} ${EFI_OBJ}
-    DEPENDS ${EFI_OBJ}
-    COMMENT "Linking BOOTX64.EFI"
-    VERBATIM
-)
+haris_efi_program(uefi_loader ${CMAKE_SOURCE_DIR}/boot/uefi/uefi_loader.c efi_main    BOOTX64.EFI)
+haris_efi_program(kernel      ${CMAKE_SOURCE_DIR}/kernel/kernel.c         kernel_main KERNEL.EFI)
 
 # ------------------------------------------------------------
 # "EFI System Partition" folder: firmware boots EFI/BOOT/BOOTX64.EFI by default.
+# KERNEL.EFI goes in the root of the same disk (the loader opens \KERNEL.EFI).
 # QEMU can present a plain folder as a FAT disk (fat:rw:esp), so no disk image is needed.
 # ------------------------------------------------------------
-set(ESP_FILE ${CMAKE_BINARY_DIR}/esp/EFI/BOOT/BOOTX64.EFI)
+set(ESP_LOADER ${CMAKE_BINARY_DIR}/esp/EFI/BOOT/BOOTX64.EFI)
+set(ESP_KERNEL ${CMAKE_BINARY_DIR}/esp/KERNEL.EFI)
 
 add_custom_command(
-    OUTPUT  ${ESP_FILE}
+    OUTPUT  ${ESP_LOADER}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/esp/EFI/BOOT
-    COMMAND ${CMAKE_COMMAND} -E copy ${EFI_BIN} ${ESP_FILE}
-    DEPENDS ${EFI_BIN}
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${ESP_LOADER}
+    DEPENDS ${CMAKE_BINARY_DIR}/BOOTX64.EFI
     COMMENT "Copying to esp/EFI/BOOT/BOOTX64.EFI"
     VERBATIM
 )
 
-add_custom_target(haris ALL DEPENDS ${ESP_FILE})
+add_custom_command(
+    OUTPUT  ${ESP_KERNEL}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/esp
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/KERNEL.EFI ${ESP_KERNEL}
+    DEPENDS ${CMAKE_BINARY_DIR}/KERNEL.EFI
+    COMMENT "Copying to esp/KERNEL.EFI"
+    VERBATIM
+)
+
+add_custom_target(haris ALL DEPENDS ${ESP_LOADER} ${ESP_KERNEL})
 
 # ------------------------------------------------------------
 # Running needs UEFI firmware for the virtual machine (OVMF / edk2).
