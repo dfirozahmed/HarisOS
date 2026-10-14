@@ -1,6 +1,7 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
 #include "bootinfo.h"
 #include "desktop.h"
+#include "gfx.h"
 #include "pmm.h"
 
 static char *put_str(char *out, const char *s)
@@ -28,8 +29,8 @@ void kernel_main(const BootInfo *info)
 {
     static char status[96];
 
-    desktop_set_framebuffer(info->framebuffer, info->width, info->height,
-                            info->pitch, info->red_mask_mode);
+    gfx_init(info->framebuffer, info->width, info->height,
+             info->pitch, info->red_mask_mode);
 
     char *p = status;
     if (pmm_init(info) == 0)
