@@ -27,6 +27,7 @@ typedef void *EFI_EVENT;
 #define EFI_INVALID_PARAMETER ((EFI_STATUS)0x8000000000000002ULL)
 #define EFI_UNSUPPORTED ((EFI_STATUS)0x8000000000000003ULL)
 #define EFI_DEVICE_ERROR ((EFI_STATUS)0x8000000000000007ULL)
+#define EFI_BUFFER_TOO_SMALL ((EFI_STATUS)0x8000000000000005ULL)
 #define EFI_ERROR(s) (((EFI_STATUS)(s)) & 0x8000000000000000ULL)
 
 typedef struct
@@ -75,6 +76,17 @@ typedef struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL
     void *Mode;
 } EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
 
+/* --- Memory map (GetMemoryMap / ExitBootServices) --- */
+typedef struct
+{
+    UINT32 Type;
+    UINT32 Pad; /* keeps PhysicalStart 8-byte aligned, as the spec requires */
+    UINT64 PhysicalStart;
+    UINT64 VirtualStart;
+    UINT64 NumberOfPages;
+    UINT64 Attribute;
+} EFI_MEMORY_DESCRIPTOR;
+
 /* --- Boot services (unused entries are placeholders that keep the layout correct) --- */
 typedef struct
 {
@@ -83,7 +95,8 @@ typedef struct
     void *RestoreTPL;
     void *AllocatePages;
     void *FreePages;
-    void *GetMemoryMap;
+    EFI_STATUS(EFIAPI *GetMemoryMap)(UINTN *MemoryMapSize, EFI_MEMORY_DESCRIPTOR *MemoryMap,
+                                     UINTN *MapKey, UINTN *DescriptorSize, UINT32 *DescriptorVersion);
     EFI_STATUS(EFIAPI *AllocatePool)(UINT32 PoolType, UINTN Size, void **Buffer);
     EFI_STATUS(EFIAPI *FreePool)(void *Buffer);
     void *CreateEvent;
@@ -106,7 +119,7 @@ typedef struct
     EFI_STATUS(EFIAPI *StartImage)(EFI_HANDLE ImageHandle, UINTN *ExitDataSize, CHAR16 **ExitData);
     void *Exit;
     EFI_STATUS(EFIAPI *UnloadImage)(EFI_HANDLE ImageHandle);
-    void *ExitBootServices;
+    EFI_STATUS(EFIAPI *ExitBootServices)(EFI_HANDLE ImageHandle, UINTN MapKey);
     void *GetNextMonotonicCount;
     EFI_STATUS(EFIAPI *Stall)(UINTN Microseconds);
     EFI_STATUS(EFIAPI *SetWatchdogTimer)(UINTN Timeout, UINT64 WatchdogCode, UINTN DataSize, CHAR16 *WatchdogData);
