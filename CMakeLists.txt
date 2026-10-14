@@ -52,7 +52,40 @@ function(haris_efi_program NAME SRC ENTRY OUTNAME)
 endfunction()
 
 haris_efi_program(uefi_loader ${CMAKE_SOURCE_DIR}/boot/uefi/uefi_loader.c efi_main    BOOTX64.EFI)
-haris_efi_program(kernel      ${CMAKE_SOURCE_DIR}/kernel/kernel.c         kernel_main KERNEL.EFI)
+# Kernel image: UEFI entry wrapper is separate from the ordinary C kernel.
+set(KERNEL_OBJ ${CMAKE_BINARY_DIR}/kernel.obj)
+set(EFI_ENTRY_OBJ ${CMAKE_BINARY_DIR}/efi_entry.obj)
+set(DESKTOP_OBJ ${CMAKE_BINARY_DIR}/desktop.obj)
+set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
+add_custom_command(
+    OUTPUT ${KERNEL_OBJ}
+    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/kernel.c -o ${KERNEL_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/kernel.c ${CMAKE_SOURCE_DIR}/include/desktop.h
+    COMMENT "Compiling kernel core"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT ${DESKTOP_OBJ}
+    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/desktop.c -o ${DESKTOP_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/desktop.c ${CMAKE_SOURCE_DIR}/include/desktop.h
+    COMMENT "Compiling desktop renderer (UEFI-independent)"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT ${EFI_ENTRY_OBJ}
+    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/boot/efi_entry.c -o ${EFI_ENTRY_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/boot/efi_entry.c ${CMAKE_SOURCE_DIR}/include/uefi.h
+    COMMENT "Compiling UEFI entry wrapper"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT ${KERNEL_BIN}
+    COMMAND ${LLD_LINK} -subsystem:efi_application -entry:efi_kernel_entry -machine:x64
+            -nodefaultlib -out:${KERNEL_BIN} ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ}
+    DEPENDS ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ}
+    COMMENT "Linking KERNEL.EFI"
+    VERBATIM
+)
 
 # ------------------------------------------------------------
 # "EFI System Partition" folder: firmware boots EFI/BOOT/BOOTX64.EFI by default.
