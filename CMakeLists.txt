@@ -56,11 +56,13 @@ haris_efi_program(uefi_loader ${CMAKE_SOURCE_DIR}/boot/uefi/uefi_loader.c efi_ma
 set(KERNEL_OBJ ${CMAKE_BINARY_DIR}/kernel.obj)
 set(EFI_ENTRY_OBJ ${CMAKE_BINARY_DIR}/efi_entry.obj)
 set(DESKTOP_OBJ ${CMAKE_BINARY_DIR}/desktop.obj)
+set(PMM_OBJ ${CMAKE_BINARY_DIR}/pmm.obj)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
 add_custom_command(
     OUTPUT ${KERNEL_OBJ}
     COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/kernel.c -o ${KERNEL_OBJ}
     DEPENDS ${CMAKE_SOURCE_DIR}/kernel/kernel.c ${CMAKE_SOURCE_DIR}/include/desktop.h
+            ${CMAKE_SOURCE_DIR}/include/bootinfo.h ${CMAKE_SOURCE_DIR}/include/pmm.h
     COMMENT "Compiling kernel core"
     VERBATIM
 )
@@ -72,17 +74,24 @@ add_custom_command(
     VERBATIM
 )
 add_custom_command(
+    OUTPUT ${PMM_OBJ}
+    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/pmm.c -o ${PMM_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/pmm.c ${CMAKE_SOURCE_DIR}/include/pmm.h ${CMAKE_SOURCE_DIR}/include/bootinfo.h
+    COMMENT "Compiling physical memory manager"
+    VERBATIM
+)
+add_custom_command(
     OUTPUT ${EFI_ENTRY_OBJ}
     COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/boot/efi_entry.c -o ${EFI_ENTRY_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/boot/efi_entry.c ${CMAKE_SOURCE_DIR}/include/uefi.h
+    DEPENDS ${CMAKE_SOURCE_DIR}/boot/efi_entry.c ${CMAKE_SOURCE_DIR}/include/uefi.h ${CMAKE_SOURCE_DIR}/include/bootinfo.h
     COMMENT "Compiling UEFI entry wrapper"
     VERBATIM
 )
 add_custom_command(
     OUTPUT ${KERNEL_BIN}
     COMMAND ${LLD_LINK} -subsystem:efi_application -entry:efi_kernel_entry -machine:x64
-            -nodefaultlib -out:${KERNEL_BIN} ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ}
-    DEPENDS ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ}
+            -nodefaultlib -out:${KERNEL_BIN} ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ}
+    DEPENDS ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ}
     COMMENT "Linking KERNEL.EFI"
     VERBATIM
 )

@@ -1,12 +1,19 @@
 /* UEFI-specific entry point. Firmware interfaces stop at this boundary. */
 #include "uefi.h"
-#include "desktop.h"
+#include "bootinfo.h"
 
 static EFI_GUID GopGuid = {0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
 
-void kernel_main(void);
+void kernel_main(const BootInfo *info);
 
-static EFI_STATUS leave_boot_services(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
+/* Lives in the kernel image (EfiLoaderData), which stays valid after ExitBootServices. */
+static BootInfo boot_info;
+
+/* Leave UEFI Boot Services. After this returns EFI_SUCCESS the firmware no longer
+ * owns the machine: no ConOut, no LocateProtocol, no AllocatePool, no Stall.
+ * Rules: nothing may touch Boot Services between GetMemoryMap and ExitBootServices,
+ * otherwise MapKey becomes stale and ExitBootServices fails. */
+static EFI_STATUS leave_boot_services(EFI_HANDLE image, EFI_SYSTEM_TABLE *st, BootInfo *out)
 {
     EFI_BOOT_SERVICES *bs = st->BootServices;
     EFI_MEMORY_DESCRIPTOR *map = NULL;
@@ -34,7 +41,15 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
         status = bs->ExitBootServices(image, map_key);
         if (!EFI_ERROR(status))
-            return EFI_SUCCESS; /* Boot Services are gone from here on. */
+        {
+            /* Boot Services are gone from here on. The map buffer is EfiLoaderData,
+             * which the firmware does not reuse, so the kernel may read it. */
+            out->memmap = map;
+            out->memmap_size = size;
+            out->desc_size = desc_size;
+            out->desc_version = desc_ver;
+            return EFI_SUCCESS;
+        }
         /* Stale map key: fetch the map again and retry. */
     }
     return status;
@@ -77,9 +92,13 @@ EFI_STATUS EFIAPI efi_kernel_entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sys
 
     /* The framebuffer address/size above was read while Boot Services were still alive.
      * It stays valid afterwards, so we only store it and then leave UEFI. */
-    desktop_set_framebuffer(framebuffer, width, height, pitch, red_mask_mode);
+    boot_info.framebuffer = framebuffer;
+    boot_info.width = width;
+    boot_info.height = height;
+    boot_info.pitch = pitch;
+    boot_info.red_mask_mode = red_mask_mode;
 
-    status = leave_boot_services(ImageHandle, SystemTable);
+    status = leave_boot_services(ImageHandle, SystemTable, &boot_info);
     if (EFI_ERROR(status))
     {
         /* Still inside UEFI, so printing is allowed. */
@@ -91,7 +110,9 @@ EFI_STATUS EFIAPI efi_kernel_entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sys
     __asm__ volatile("cli"); /* firmware's interrupt handlers/timers are no longer ours to rely on */
 #endif
 
-    kernel_main(); /* never returns */
-    for (;;) {}
+    kernel_main(&boot_info); /* never returns */
+    for (;;)
+    {
+    }
     return EFI_SUCCESS;
 }

@@ -4,6 +4,9 @@
 static unsigned int *FB;
 static unsigned int W, H, PITCH;
 static unsigned int RED_MASK_MODE;
+static const char *STATUS_LINE;
+
+void desktop_set_status(const char *line) { STATUS_LINE = line; }
 
 void desktop_set_framebuffer(void *framebuffer, unsigned int width,
                              unsigned int height, unsigned int pixels_per_scanline,
@@ -96,6 +99,8 @@ static void desktop(void)
     text(wx + 24, wy + 104, "UEFI GRAPHICS DESKTOP", rgb(48, 75, 104), 1);
     rect(wx + 24, wy + 134, ww - 48, 1, rgb(190, 202, 216));
     text(wx + 24, wy + 151, "YOUR DESKTOP IS READY", rgb(36, 113, 90), 1);
+    if (STATUS_LINE)
+        text(wx + 24, wy + 171, STATUS_LINE, rgb(48, 75, 104), 1);
     rect(wx + 24, wy + wh - 48, 118, 28, blue);
     text(wx + 39, wy + wh - 38, "START", white, 1);
     /* bottom taskbar */
