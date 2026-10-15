@@ -58,20 +58,28 @@ set(EFI_ENTRY_OBJ ${CMAKE_BINARY_DIR}/efi_entry.obj)
 set(DESKTOP_OBJ ${CMAKE_BINARY_DIR}/desktop.obj)
 set(PMM_OBJ ${CMAKE_BINARY_DIR}/pmm.obj)
 set(GFX_OBJ ${CMAKE_BINARY_DIR}/gfx.obj)
+set(TASKBAR_OBJ ${CMAKE_BINARY_DIR}/taskbar.obj)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
 add_custom_command(
     OUTPUT ${KERNEL_OBJ}
     COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/kernel.c -o ${KERNEL_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/kernel.c ${CMAKE_SOURCE_DIR}/include/desktop.h ${CMAKE_SOURCE_DIR}/include/gfx.h
+    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/kernel.c ${CMAKE_SOURCE_DIR}/include/desktop.h ${CMAKE_SOURCE_DIR}/include/gfx.h ${CMAKE_SOURCE_DIR}/include/taskbar.h
             ${CMAKE_SOURCE_DIR}/include/bootinfo.h ${CMAKE_SOURCE_DIR}/include/pmm.h
     COMMENT "Compiling kernel core"
     VERBATIM
 )
 add_custom_command(
     OUTPUT ${DESKTOP_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/desktop.c -o ${DESKTOP_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/desktop.c ${CMAKE_SOURCE_DIR}/include/desktop.h ${CMAKE_SOURCE_DIR}/include/gfx.h
+    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/ui/desktop.c -o ${DESKTOP_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/ui/desktop.c ${CMAKE_SOURCE_DIR}/include/desktop.h ${CMAKE_SOURCE_DIR}/include/gfx.h ${CMAKE_SOURCE_DIR}/include/taskbar.h
     COMMENT "Compiling desktop renderer (UEFI-independent)"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT ${TASKBAR_OBJ}
+    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/ui/taskbar.c -o ${TASKBAR_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/ui/taskbar.c ${CMAKE_SOURCE_DIR}/include/taskbar.h ${CMAKE_SOURCE_DIR}/include/gfx.h
+    COMMENT "Compiling taskbar"
     VERBATIM
 )
 add_custom_command(
@@ -98,8 +106,8 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${KERNEL_BIN}
     COMMAND ${LLD_LINK} -subsystem:efi_application -entry:efi_kernel_entry -machine:x64
-            -nodefaultlib -out:${KERNEL_BIN} ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ} ${GFX_OBJ}
-    DEPENDS ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ} ${GFX_OBJ}
+            -nodefaultlib -out:${KERNEL_BIN} ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ} ${GFX_OBJ} ${TASKBAR_OBJ}
+    DEPENDS ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ} ${GFX_OBJ} ${TASKBAR_OBJ}
     COMMENT "Linking KERNEL.EFI"
     VERBATIM
 )

@@ -3,6 +3,7 @@
 #include "desktop.h"
 #include "gfx.h"
 #include "pmm.h"
+#include "taskbar.h"
 
 static char *put_str(char *out, const char *s)
 {
