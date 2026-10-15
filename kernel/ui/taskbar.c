@@ -24,6 +24,16 @@ void taskbar_set_apps(const TaskbarApp *apps, int count)
     APP_COUNT = count > MAX_APPS ? MAX_APPS : count;
 }
 
+void taskbar_set_time(int hour, int minute, int day, int month, int year)
+{
+    HAS_TIME = 1;
+    T_HOUR = hour;
+    T_MIN = minute;
+    T_DAY = day;
+    T_MON = month;
+    T_YEAR = year;
+}
+
 /* ---- tiny helpers ------------------------------------------ */
 static char *put2(char *o, int v) /* two digits */
 {
@@ -164,7 +174,7 @@ void taskbar_draw(void)
     {
         gfx_fill_round_rect(x, cy - 15, search_w, 30, 15, gfx_rgb(34, 45, 68));
         gfx_circle(x + 18, cy - 1, 5, dim);
-       // gfx_line(x + 22, cy + 3, x + 26, cy + 7, dim);
+        gfx_line(x + 22, cy + 3, x + 26, cy + 7, dim);
         gfx_draw_text(x + 36, cy - 3, "SEARCH", gfx_rgb(122, 136, 162), 1);
         x += search_w + GAP;
     }
@@ -182,9 +192,44 @@ void taskbar_draw(void)
         x += SLOT + GAP;
     }
 
-    /* tray icons, right to left*/
+    /* right: clock (two lines) */
+    char tbuf[8], dbuf[12];
+    if (HAS_TIME)
+    {
+        char *o = put2(tbuf, T_HOUR);
+        *o++ = ':';
+        o = put2(o, T_MIN);
+        *o = 0;
+        o = put2(dbuf, T_DAY);
+        *o++ = '/';
+        o = put2(o, T_MON);
+        *o++ = '/';
+        o = put4(o, T_YEAR);
+        *o = 0;
+    }
+    else
+    {
+        const char *t = "--:--", *d = "--/--/----";
+        char *o = tbuf;
+        while ((*o++ = *t++))
+        {
+        }
+        o = dbuf;
+        while ((*o++ = *d++))
+        {
+        }
+    }
+    int rx = W - 14;
+    int dw = gfx_text_width(dbuf, 1), tw = gfx_text_width(tbuf, 1);
+    int ty = by + TASKBAR_HEIGHT / 2 - 9;
+    gfx_draw_text(rx - tw, ty, tbuf, text, 1);
+    gfx_draw_text(rx - dw, ty + 11, dbuf, dim, 1);
+
+    /* tray icons, right to left, with a divider before the clock */
+    int tx = rx - dw - 14;
     int mid = by + TASKBAR_HEIGHT / 2;
-    int tx = W - 32;
+    gfx_vline(tx, mid - 11, 22, gfx_rgb(60, 74, 100));
+    tx -= 12 + 22;
     tray_battery(tx, mid, text);
     tx -= 14 + 14;
     tray_volume(tx, mid, text);

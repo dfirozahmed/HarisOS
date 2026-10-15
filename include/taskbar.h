@@ -1,4 +1,5 @@
-/* HarisOS taskbar */
+/* HarisOS taskbar: a centered dock (start, search, apps) with a system tray
+ * and clock on the right. Drawn only through the gfx layer. */
 #ifndef HARIS_TASKBAR_H
 #define HARIS_TASKBAR_H
 
@@ -20,6 +21,8 @@ typedef struct
 } TaskbarApp;
 
 void taskbar_set_apps(const TaskbarApp *apps, int count);
+
+void taskbar_set_time(int hour, int minute, int day, int month, int year);
 
 /* Draw the taskbar along the bottom of the screen. */
 void taskbar_draw(void);

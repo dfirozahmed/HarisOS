@@ -3,6 +3,7 @@
 #include "desktop.h"
 #include "gfx.h"
 #include "pmm.h"
+#include "rtc.h"
 #include "taskbar.h"
 
 static char *put_str(char *out, const char *s)
@@ -65,6 +66,10 @@ void kernel_main(const BootInfo *info)
     p = put_str(p, double_buffered ? "\nGRAPHICS DOUBLE BUFFERED" : "\nGRAPHICS DIRECT");
     *p = 0;
     desktop_set_status(status);
+
+    RtcTime now;
+    if (rtc_read(&now) == 0)
+        taskbar_set_time(now.hour, now.minute, now.day, now.month, now.year);
 
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
