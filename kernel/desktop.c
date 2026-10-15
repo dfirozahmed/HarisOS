@@ -22,8 +22,8 @@ static void desktop(void)
     int ww = W * 48 / 100, wh = H * 43 / 100;
     if (ww < 360)
         ww = 360;
-    if (wh < 220)
-        wh = 220;
+    if (wh < 240)
+        wh = 240;
     int wx = (W - ww) / 2, wy = (H - wh) / 2 - 8;
 
     gfx_fill_rect_alpha(wx + 7, wy + 8, ww, wh, 0, 0, 0, 110); /* soft shadow */

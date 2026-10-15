@@ -2,7 +2,7 @@
 
 HarisOS is a **learning project** where I build a small operating system from scratch, step by step, to understand how computers work at the lowest level.
 
-The goal is to learn: BIOS booting, real mode, protected mode, interrupts, drivers, memory management, and more.
+The goal is to learn: BIOS/UEFI booting, real mode, protected mode, interrupts, drivers, memory management, and more.
 
 ## Requirements
 

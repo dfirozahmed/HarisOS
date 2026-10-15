@@ -152,5 +152,44 @@ void pmm_free_page(unsigned long long phys)
     search_hint = (phys / PMM_PAGE_SIZE) / 64;
 }
 
+unsigned long long pmm_alloc_contiguous(unsigned long long count)
+{
+    if (!bitmap || count == 0)
+        return 0;
+    unsigned long long run = 0, start = 0;
+    for (unsigned long long p = 0; p < page_count;)
+    {
+        if ((p % 64) == 0 && bitmap[p / 64] == ~0ULL)
+        {
+            run = 0; /* a whole word of used pages: skip it quickly */
+            p += 64;
+            continue;
+        }
+        if (page_used(p))
+        {
+            run = 0;
+            p++;
+            continue;
+        }
+        if (run == 0)
+            start = p;
+        run++;
+        p++;
+        if (run == count)
+        {
+            for (unsigned long long k = 0; k < count; k++)
+                mark_used(start + k);
+            return start * PMM_PAGE_SIZE;
+        }
+    }
+    return 0;
+}
+
+void pmm_free_contiguous(unsigned long long phys, unsigned long long count)
+{
+    for (unsigned long long k = 0; k < count; k++)
+        pmm_free_page(phys + k * PMM_PAGE_SIZE);
+}
+
 unsigned long long pmm_total_pages(void) { return usable_pages; }
 unsigned long long pmm_free_pages(void) { return free_count; }

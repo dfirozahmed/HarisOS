@@ -27,13 +27,29 @@ static char *put_num(char *out, unsigned long long v)
 
 void kernel_main(const BootInfo *info)
 {
-    static char status[96];
+    static char status[160];
 
     gfx_init(info->framebuffer, info->width, info->height,
              info->pitch, info->red_mask_mode);
 
+    int pmm_ok = (pmm_init(info) == 0);
+
+    /* Double buffering: needs a contiguous block of RAM, so it comes after pmm_init.
+     * If no block is found we simply keep drawing directly to the screen. */
+    int double_buffered = 0;
+    if (pmm_ok && gfx_ready())
+    {
+        unsigned long long pages = (gfx_backbuffer_size() + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+        unsigned long long mem = pmm_alloc_contiguous(pages);
+        if (mem && gfx_enable_backbuffer((void *)mem) == 0)
+            double_buffered = 1;
+        else if (mem)
+            pmm_free_contiguous(mem, pages);
+    }
+
+    /* Status text (after the allocation above, so the free-memory figure includes it). */
     char *p = status;
-    if (pmm_init(info) == 0)
+    if (pmm_ok)
     {
         p = put_str(p, "MEMORY ");
         p = put_num(p, pmm_free_pages() * PMM_PAGE_SIZE / (1024 * 1024));
@@ -45,10 +61,12 @@ void kernel_main(const BootInfo *info)
     {
         p = put_str(p, "MEMORY MANAGER FAILED");
     }
+    p = put_str(p, double_buffered ? "\nGRAPHICS DOUBLE BUFFERED" : "\nGRAPHICS DIRECT");
     *p = 0;
     desktop_set_status(status);
 
     desktop_draw();
+    gfx_present(); /* show the finished frame (does nothing without a back buffer) */
 
     for (;;)
     {

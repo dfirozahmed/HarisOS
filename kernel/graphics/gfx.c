@@ -4,10 +4,13 @@
  * stops the compiler from turning fill loops into calls to memset(). */
 #include "gfx.h"
 
-static volatile unsigned int *FB;
-static int W, H, PITCH;
-static int RED_FIRST; /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
-static int CX0, CY0, CX1, CY1; /* active clip rectangle, CX1/CY1 exclusive */
+static volatile unsigned int *FB;   /* the real screen */
+static volatile unsigned int *DRAW; /* where primitives draw: FB, or the back buffer */
+static int W, H, PITCH, DPITCH;     /* PITCH: screen scanline, DPITCH: draw target scanline */
+static int BACK;                    /* 1 while double buffering is on */
+static int DX0, DY0, DX1, DY1;      /* dirty rectangle (back buffer areas not yet shown) */
+static int RED_FIRST;               /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
+static int CX0, CY0, CX1, CY1;      /* active clip rectangle, CX1/CY1 exclusive */
 
 void gfx_init(void *framebuffer, unsigned int width, unsigned int height,
               unsigned int pitch, unsigned int red_mask_mode)
@@ -17,6 +20,10 @@ void gfx_init(void *framebuffer, unsigned int width, unsigned int height,
     H = (int)height;
     PITCH = (int)pitch;
     RED_FIRST = red_mask_mode ? 1 : 0;
+    DRAW = FB;
+    DPITCH = PITCH;
+    BACK = 0;
+    DX0 = DY0 = DX1 = DY1 = 0;
     gfx_reset_clip();
 }
 
@@ -62,16 +69,95 @@ void gfx_set_clip(int x, int y, int w, int h)
     CY1 = (h <= 0 || y + h > H) ? (h <= 0 ? CY0 : H) : y + h;
 }
 
+/* ---- double buffering --------------------------------------- */
+/* Remember which part of the back buffer changed, so gfx_present() only copies that. */
+static void mark_dirty(int x0, int y0, int x1, int y1)
+{
+    if (!BACK || x1 <= x0 || y1 <= y0)
+        return;
+    if (DX1 <= DX0 || DY1 <= DY0)
+    {
+        DX0 = x0;
+        DY0 = y0;
+        DX1 = x1;
+        DY1 = y1;
+        return;
+    }
+    if (x0 < DX0)
+        DX0 = x0;
+    if (y0 < DY0)
+        DY0 = y0;
+    if (x1 > DX1)
+        DX1 = x1;
+    if (y1 > DY1)
+        DY1 = y1;
+}
+
+unsigned long long gfx_backbuffer_size(void)
+{
+    return (unsigned long long)W * (unsigned long long)H * 4ULL;
+}
+
+int gfx_enable_backbuffer(void *memory)
+{
+    if (!FB || !memory || BACK)
+        return -1;
+    volatile unsigned int *mem = (volatile unsigned int *)memory;
+    /* Start from what is on screen now, so nothing visible jumps. */
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            mem[(long long)y * W + x] = FB[(long long)y * PITCH + x];
+    DRAW = mem;
+    DPITCH = W;
+    BACK = 1;
+    DX0 = DY0 = DX1 = DY1 = 0;
+    return 0;
+}
+
+void gfx_present(void)
+{
+    if (!BACK || DX1 <= DX0 || DY1 <= DY0)
+        return;
+    for (int y = DY0; y < DY1; y++)
+    {
+        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
+        volatile unsigned int *dst = FB + (long long)y * PITCH;
+        for (int x = DX0; x < DX1; x++)
+            dst[x] = src[x];
+    }
+    DX0 = DY0 = DX1 = DY1 = 0;
+}
+
+void gfx_disable_backbuffer(void)
+{
+    if (!BACK)
+        return;
+    /* Show everything pending, then draw straight to the screen again. */
+    DX0 = 0;
+    DY0 = 0;
+    DX1 = W;
+    DY1 = H;
+    gfx_present();
+    DRAW = FB;
+    DPITCH = PITCH;
+    BACK = 0;
+}
+
+int gfx_double_buffered(void) { return BACK; }
+
 /* ---- primitives -------------------------------------------- */
 void gfx_pixel(int x, int y, GfxColor c)
 {
-    if (FB && x >= CX0 && x < CX1 && y >= CY0 && y < CY1)
-        FB[(long long)y * PITCH + x] = c;
+    if (DRAW && x >= CX0 && x < CX1 && y >= CY0 && y < CY1)
+    {
+        DRAW[(long long)y * DPITCH + x] = c;
+        mark_dirty(x, y, x + 1, y + 1);
+    }
 }
 
 void gfx_fill_rect(int x, int y, int w, int h, GfxColor c)
 {
-    if (!FB || w <= 0 || h <= 0)
+    if (!DRAW || w <= 0 || h <= 0)
         return;
     int x0 = x < CX0 ? CX0 : x;
     int y0 = y < CY0 ? CY0 : y;
@@ -79,10 +165,11 @@ void gfx_fill_rect(int x, int y, int w, int h, GfxColor c)
     int y1 = y + h > CY1 ? CY1 : y + h;
     for (int yy = y0; yy < y1; yy++)
     {
-        volatile unsigned int *row = FB + (long long)yy * PITCH;
+        volatile unsigned int *row = DRAW + (long long)yy * DPITCH;
         for (int xx = x0; xx < x1; xx++)
             row[xx] = c;
     }
+    mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_clear(GfxColor c)
@@ -90,7 +177,10 @@ void gfx_clear(GfxColor c)
     int sx0 = CX0, sy0 = CY0, sx1 = CX1, sy1 = CY1;
     gfx_reset_clip();
     gfx_fill_rect(0, 0, W, H, c);
-    CX0 = sx0; CY0 = sy0; CX1 = sx1; CY1 = sy1;
+    CX0 = sx0;
+    CY0 = sy0;
+    CX1 = sx1;
+    CY1 = sy1;
 }
 
 void gfx_hline(int x, int y, int len, GfxColor c) { gfx_fill_rect(x, y, len, 1, c); }
@@ -119,8 +209,16 @@ void gfx_line(int x0, int y0, int x1, int y1, GfxColor c)
         if (x0 == x1 && y0 == y1)
             break;
         int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
+        if (e2 >= dy)
+        {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx)
+        {
+            err += dx;
+            y0 += sy;
+        }
     }
 }
 
@@ -169,16 +267,17 @@ void gfx_fill_rect_alpha(int x, int y, int w, int h,
                          unsigned char r, unsigned char g, unsigned char b,
                          unsigned char alpha)
 {
-    if (!FB || w <= 0 || h <= 0)
+    if (!DRAW || w <= 0 || h <= 0)
         return;
     int x0 = x < CX0 ? CX0 : x;
     int y0 = y < CY0 ? CY0 : y;
     int x1 = x + w > CX1 ? CX1 : x + w;
     int y1 = y + h > CY1 ? CY1 : y + h;
     unsigned int a = alpha, ia = 255u - alpha;
+    mark_dirty(x0, y0, x1, y1);
     for (int yy = y0; yy < y1; yy++)
     {
-        volatile unsigned int *row = FB + (long long)yy * PITCH;
+        volatile unsigned int *row = DRAW + (long long)yy * DPITCH;
         for (int xx = x0; xx < x1; xx++)
         {
             unsigned char dr, dg, db;
@@ -219,10 +318,17 @@ static const unsigned char *glyph(char c)
         return font[c - 'A'];
     if (c >= '0' && c <= '9')
         return font[26 + c - '0'];
-    static const struct { char ch; unsigned char rows[7]; } extra[] = {
-        {'.', {0, 0, 0, 0, 0, 12, 12}},   {':', {0, 12, 12, 0, 12, 12, 0}},
-        {'-', {0, 0, 0, 31, 0, 0, 0}},    {'/', {1, 1, 2, 4, 8, 16, 16}},
-        {'_', {0, 0, 0, 0, 0, 0, 31}},    {'!', {4, 4, 4, 4, 4, 0, 4}},
+    static const struct
+    {
+        char ch;
+        unsigned char rows[7];
+    } extra[] = {
+        {'.', {0, 0, 0, 0, 0, 12, 12}},
+        {':', {0, 12, 12, 0, 12, 12, 0}},
+        {'-', {0, 0, 0, 31, 0, 0, 0}},
+        {'/', {1, 1, 2, 4, 8, 16, 16}},
+        {'_', {0, 0, 0, 0, 0, 0, 31}},
+        {'!', {4, 4, 4, 4, 4, 0, 4}},
         {'+', {0, 4, 4, 31, 4, 4, 0}},
     };
     for (unsigned int i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)

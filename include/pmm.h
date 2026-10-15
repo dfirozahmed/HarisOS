@@ -13,6 +13,10 @@ int pmm_init(const BootInfo *info);
 unsigned long long pmm_alloc_page(void);
 void pmm_free_page(unsigned long long phys);
 
+/* `count` physically consecutive pages (e.g. for a frame buffer). 0 if none found. */
+unsigned long long pmm_alloc_contiguous(unsigned long long count);
+void pmm_free_contiguous(unsigned long long phys, unsigned long long count);
+
 unsigned long long pmm_total_pages(void); /* usable pages found in the map */
 unsigned long long pmm_free_pages(void);
 
