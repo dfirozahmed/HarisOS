@@ -66,6 +66,7 @@ void gfx_rect(int x, int y, int w, int h, GfxColor c); /* 1px outline */
 void gfx_fill_rect(int x, int y, int w, int h, GfxColor c);
 void gfx_fill_round_rect(int x, int y, int w, int h, int radius, GfxColor c);
 void gfx_fill_circle(int cx, int cy, int radius, GfxColor c);
+void gfx_circle(int cx, int cy, int radius, GfxColor c); /* 1px outline */
 
 /* Semi-transparent fill: alpha 0 = invisible, 255 = solid. */
 void gfx_fill_rect_alpha(int x, int y, int w, int h,
