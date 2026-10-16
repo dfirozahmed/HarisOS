@@ -58,28 +58,57 @@ GfxColor gfx_mix(GfxColor a, GfxColor b, unsigned char t); /* t: 0 = a, 255 = b 
 /* Restrict all drawing to a rectangle (e.g. the inside of a window). */
 void gfx_set_clip(int x, int y, int w, int h);
 void gfx_reset_clip(void);
+/* Shrink the clip to the overlap of the current clip and this rectangle. */
+void gfx_clip_intersect(int x, int y, int w, int h);
+/* Remember / restore the current clip (use around nested widgets). */
+typedef struct { int x0, y0, x1, y1; } GfxClip;
+GfxClip gfx_get_clip(void);
+void gfx_restore_clip(GfxClip c);
 
-/* ---- primitives --------------------------------------------- */
+/* ---- plain (pixel exact) primitives ------------------------- */
 void gfx_clear(GfxColor c);
-void gfx_pixel(int x, int y, GfxColor c);
 void gfx_hline(int x, int y, int len, GfxColor c);
 void gfx_vline(int x, int y, int len, GfxColor c);
-void gfx_line(int x0, int y0, int x1, int y1, GfxColor c);
-void gfx_rect(int x, int y, int w, int h, GfxColor c); /* 1px outline */
-void gfx_fill_rect(int x, int y, int w, int h, GfxColor c);
-void gfx_fill_round_rect(int x, int y, int w, int h, int radius, GfxColor c);
-void gfx_fill_circle(int cx, int cy, int radius, GfxColor c);
-void gfx_circle(int cx, int cy, int radius, GfxColor c); /* 1px outline */
 
-/* Semi-transparent fill: alpha 0 = invisible, 255 = solid. */
+void gfx_fill_rect(int x, int y, int w, int h, GfxColor c);
+/* Semi-transparent rectangle (alpha 0 = invisible, 255 = solid). */
 void gfx_fill_rect_alpha(int x, int y, int w, int h,
                          unsigned char r, unsigned char g, unsigned char b,
                          unsigned char alpha);
 
+/* ---- smooth (anti-aliased) shapes --------------------------- */
+/* Rounded rectangle. radius is clamped to half the shorter side. */
+void gfx_fill_round_rect(int x, int y, int w, int h, int radius, GfxColor c);
+void gfx_fill_round_rect_alpha(int x, int y, int w, int h, int radius, GfxColor c, unsigned char alpha);
+/* Outline of thickness `thick` pixels, drawn inside the given rectangle. */
+void gfx_round_rect(int x, int y, int w, int h, int radius, int thick, GfxColor c);
+void gfx_round_rect_alpha(int x, int y, int w, int h, int radius, int thick, GfxColor c, unsigned char alpha);
+
+void gfx_fill_circle(int cx, int cy, int radius, GfxColor c);
+void gfx_circle(int cx, int cy, int radius, GfxColor c); /* 1px ring */
+/* Sub-pixel versions: center and radius in Q4. thick_q = ring thickness. */
+void gfx_fill_circle_q(int cx_q, int cy_q, int r_q, GfxColor c, unsigned char alpha);
+void gfx_ring_q(int cx_q, int cy_q, int r_q, int thick_q, GfxColor c, unsigned char alpha);
+
+/* Line with round caps. width_q is the thickness in Q4 (e.g. 24 = 1.5 px). */
+void gfx_line_q(int x0_q, int y0_q, int x1_q, int y1_q, int width_q, GfxColor c, unsigned char alpha);
+void gfx_line(int x0, int y0, int x1, int y1, GfxColor c); /* smooth 1px line */
+
+/* Filled convex polygon (triangle, quad, arrow...), up to 8 corners, Q4 coordinates:
+ * pts = {x0,y0, x1,y1, ...}. Either winding direction works. */
+void gfx_fill_poly_q(const int *pts, int count, GfxColor c, unsigned char alpha);
+/* ---- gradients ---------------------------------------------- */
 /* Vertical gradient from color 1 (top) to color 2 (bottom). */
 void gfx_gradient_v(int x, int y, int w, int h,
                     unsigned char r1, unsigned char g1, unsigned char b1,
                     unsigned char r2, unsigned char g2, unsigned char b2);
+/* Horizontal gradient from color 1 (left) to color 2 (right). */
+void gfx_gradient_h(int x, int y, int w, int h,
+                    unsigned char r1, unsigned char g1, unsigned char b1,
+                    unsigned char r2, unsigned char g2, unsigned char b2);
+/* Vertical gradient inside a rounded rectangle (buttons, bars). */
+void gfx_fill_round_rect_gradient(int x, int y, int w, int h, int radius,
+                                  GfxColor top, GfxColor bottom);
 
 /* ---- text (5x7 font; A-Z, 0-9 and . : - / _ ! +; lowercase is drawn uppercase) */
 #define GFX_FONT_W 5

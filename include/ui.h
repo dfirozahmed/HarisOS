@@ -35,4 +35,24 @@ typedef struct
 extern const UiTheme ui_theme_dark, ui_theme_light;
 const UiTheme *ui_theme(void);
 void ui_set_theme(const UiTheme *t); /* NULL = default (dark) */
+
+/* ---- icons --------------------------------------------------- */
+typedef enum
+{
+    UI_ICON_LOGO,     /* HarisOS "H" */
+    UI_ICON_FILES,
+    UI_ICON_TERMINAL,
+    UI_ICON_SETTINGS,
+    UI_ICON_BROWSER,
+    UI_ICON_SEARCH,
+    UI_ICON_WIFI,
+    UI_ICON_VOLUME,
+    UI_ICON_BATTERY,
+    UI_ICON_CLOSE,
+    UI_ICON_CHECK
+} UiIcon;
+
+/* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons
+ * (files, terminal, browser, logo) have their own colors; the others use `tint`. */
+void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint);
 #endif
