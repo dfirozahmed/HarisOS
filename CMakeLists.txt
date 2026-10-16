@@ -25,6 +25,7 @@ find_program(QEMU_EXECUTABLE NAMES qemu-system-x86_64)
 # ------------------------------------------------------------
 set(EFI_CFLAGS
     --target=x86_64-pc-win32-coff       
+    -ffreestanding
     -fshort-wchar                       # wide strings L"..." are 16-bit (UTF-16)
     -mno-red-zone
     -I${CMAKE_SOURCE_DIR}/include
@@ -52,70 +53,38 @@ function(haris_efi_program NAME SRC ENTRY OUTNAME)
 endfunction()
 
 haris_efi_program(uefi_loader ${CMAKE_SOURCE_DIR}/boot/uefi/uefi_loader.c efi_main    BOOTX64.EFI)
-# Kernel image: UEFI entry wrapper is separate from the ordinary C kernel.
-set(KERNEL_OBJ ${CMAKE_BINARY_DIR}/kernel.obj)
-set(EFI_ENTRY_OBJ ${CMAKE_BINARY_DIR}/efi_entry.obj)
-set(DESKTOP_OBJ ${CMAKE_BINARY_DIR}/desktop.obj)
-set(PMM_OBJ ${CMAKE_BINARY_DIR}/pmm.obj)
-set(GFX_OBJ ${CMAKE_BINARY_DIR}/gfx.obj)
-set(TASKBAR_OBJ ${CMAKE_BINARY_DIR}/taskbar.obj)
-set(RTC_OBJ ${CMAKE_BINARY_DIR}/rtc.obj)
+# Kernel image = UEFI entry wrapper + the ordinary (UEFI-independent) C kernel.
+# To add a source file, just add it to this list - nothing else to edit.
+set(KERNEL_SOURCES
+    boot/efi_entry.c            # UEFI entry: collects BootInfo, calls kernel_main
+    kernel/kernel.c
+    kernel/pmm.c
+    kernel/rtc.c
+    kernel/graphics/gfx.c       # drawing: anti-aliased shapes, alpha, gradients, double buffer
+    kernel/ui/desktop.c
+    kernel/ui/taskbar.c)
+
+file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
-add_custom_command(
-    OUTPUT ${KERNEL_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/kernel.c -o ${KERNEL_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/kernel.c ${CMAKE_SOURCE_DIR}/include/desktop.h ${CMAKE_SOURCE_DIR}/include/gfx.h ${CMAKE_SOURCE_DIR}/include/taskbar.h ${CMAKE_SOURCE_DIR}/include/rtc.h
-            ${CMAKE_SOURCE_DIR}/include/bootinfo.h ${CMAKE_SOURCE_DIR}/include/pmm.h
-    COMMENT "Compiling kernel core"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT ${DESKTOP_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/ui/desktop.c -o ${DESKTOP_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/ui/desktop.c ${CMAKE_SOURCE_DIR}/include/desktop.h ${CMAKE_SOURCE_DIR}/include/gfx.h ${CMAKE_SOURCE_DIR}/include/taskbar.h
-    COMMENT "Compiling desktop renderer (UEFI-independent)"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT ${TASKBAR_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/ui/taskbar.c -o ${TASKBAR_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/ui/taskbar.c ${CMAKE_SOURCE_DIR}/include/taskbar.h ${CMAKE_SOURCE_DIR}/include/gfx.h
-    COMMENT "Compiling taskbar"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT ${RTC_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/rtc.c -o ${RTC_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/rtc.c ${CMAKE_SOURCE_DIR}/include/rtc.h
-    COMMENT "Compiling RTC reader"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT ${GFX_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/graphics/gfx.c -o ${GFX_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/graphics/gfx.c ${CMAKE_SOURCE_DIR}/include/gfx.h
-    COMMENT "Compiling graphics layer"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT ${PMM_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/kernel/pmm.c -o ${PMM_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/kernel/pmm.c ${CMAKE_SOURCE_DIR}/include/pmm.h ${CMAKE_SOURCE_DIR}/include/bootinfo.h
-    COMMENT "Compiling physical memory manager"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT ${EFI_ENTRY_OBJ}
-    COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/boot/efi_entry.c -o ${EFI_ENTRY_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/boot/efi_entry.c ${CMAKE_SOURCE_DIR}/include/uefi.h ${CMAKE_SOURCE_DIR}/include/bootinfo.h
-    COMMENT "Compiling UEFI entry wrapper"
-    VERBATIM
-)
+set(KERNEL_OBJS "")
+foreach(SRC ${KERNEL_SOURCES})
+    get_filename_component(OBJ_NAME ${SRC} NAME_WE)
+    set(OBJ ${CMAKE_BINARY_DIR}/${OBJ_NAME}.obj)
+    add_custom_command(
+        OUTPUT  ${OBJ}
+        COMMAND ${CLANG_CC} ${EFI_CFLAGS} -c ${CMAKE_SOURCE_DIR}/${SRC} -o ${OBJ}
+        DEPENDS ${CMAKE_SOURCE_DIR}/${SRC} ${HARIS_HEADERS}
+        COMMENT "Compiling ${SRC}"
+        VERBATIM
+    )
+    list(APPEND KERNEL_OBJS ${OBJ})
+endforeach()
+
 add_custom_command(
     OUTPUT ${KERNEL_BIN}
     COMMAND ${LLD_LINK} -subsystem:efi_application -entry:efi_kernel_entry -machine:x64
-            -nodefaultlib -out:${KERNEL_BIN} ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ} ${GFX_OBJ} ${TASKBAR_OBJ} ${RTC_OBJ}
-    DEPENDS ${EFI_ENTRY_OBJ} ${KERNEL_OBJ} ${DESKTOP_OBJ} ${PMM_OBJ} ${GFX_OBJ} ${TASKBAR_OBJ} ${RTC_OBJ}
+            -nodefaultlib -out:${KERNEL_BIN} ${KERNEL_OBJS}
+    DEPENDS ${KERNEL_OBJS}
     COMMENT "Linking KERNEL.EFI"
     VERBATIM
 )
