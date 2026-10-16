@@ -1,6 +1,6 @@
 /* HarisOS taskbar. All drawing uses the gfx layer (include/gfx.h). */
 #include "taskbar.h"
-#include "gfx.h"
+#include "ui.h"
 
 #define SLOT 40 /* size of one clickable slot */
 #define GAP 4
@@ -146,17 +146,15 @@ void taskbar_draw(void)
 {
     if (!gfx_ready())
         return;
+    const UiTheme *t = ui_theme();
 
     int W = (int)gfx_width(), H = (int)gfx_height();
     int by = H - TASKBAR_HEIGHT;
-    int cy = by + TASKBAR_HEIGHT / 2 - 2; /* leave room for the indicators below */
-    GfxColor accent = gfx_rgb(70, 150, 255);
-    GfxColor text = gfx_rgb(236, 242, 252);
-    GfxColor dim = gfx_rgb(150, 164, 190);
+    int cy = by + TASKBAR_HEIGHT / 2;
 
-    /* translucent bar with a soft highlight along the top edge */
-    gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT, 14, 22, 38, 228);
-    gfx_fill_rect_alpha(0, by, W, 1, 255, 255, 255, 45);
+    /* translucent bar: the wallpaper shows through, with a light top edge */
+    gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT, t->surface.r, t->surface.g, t->surface.b, 232);
+    gfx_fill_rect_alpha(0, by, W, 1, 255, 255, 255, 40);
 
     /* left side: start button (H logo + "HARIS"), then search and apps */
     int search_w = W >= 760 ? 150 : 0;
@@ -165,17 +163,17 @@ void taskbar_draw(void)
 
     int name_w = gfx_text_width("HARIS", 2);
     int start_w = 8 + HLOGO + 8 + name_w + 12;
-    gfx_fill_round_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, 8, gfx_rgb(36, 48, 72));
+    gfx_fill_round_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, t->radius_m, ui_color(t->surface_alt));
     draw_h_logo(x + 8, cy - HLOGO / 2);
-    gfx_draw_text(x + 8 + HLOGO + 8, cy - 7, "HARIS", text, 2);
+    gfx_draw_text(x + 8 + HLOGO + 8, cy - 7, "HARIS", ui_color(t->text), 2);
     x += start_w + GAP;
 
     if (search_w)
     {
-        gfx_fill_round_rect(x, cy - 15, search_w, 30, 15, gfx_rgb(34, 45, 68));
-        gfx_circle(x + 18, cy - 1, 5, dim);
-        gfx_line(x + 22, cy + 3, x + 26, cy + 7, dim);
-        gfx_draw_text(x + 36, cy - 3, "SEARCH", gfx_rgb(122, 136, 162), 1);
+        gfx_fill_round_rect(x, cy - 15, search_w, 30, 15, ui_color(t->surface_alt));
+        gfx_circle(x + 18, cy - 1, 5, ui_color(t->text_dim));
+        gfx_line(x + 22, cy + 3, x + 26, cy + 7, ui_color(t->text_dim));
+        gfx_draw_text(x + 36, cy - 3, "SEARCH", ui_color(t->text), 1);
         x += search_w + GAP;
     }
 
@@ -183,12 +181,12 @@ void taskbar_draw(void)
     {
         int icx = x + SLOT / 2;
         if (APPS[i].active)
-            gfx_fill_round_rect(x, cy - SLOT / 2 + 2, SLOT, SLOT - 4, 8, gfx_rgb(46, 60, 88));
+            gfx_fill_round_rect(x, cy - SLOT / 2 + 2, SLOT, SLOT - 4, 8, ui_color(t->surface_alt));
         draw_icon(APPS[i].icon, icx, cy);
         if (APPS[i].active)
-            gfx_fill_round_rect(icx - 8, by + TASKBAR_HEIGHT - 6, 16, 3, 1, accent);
+            gfx_fill_round_rect(icx - 8, by + TASKBAR_HEIGHT - 6, 16, 3, 1, ui_color(t->accent));
         else if (APPS[i].running)
-            gfx_fill_round_rect(icx - 2, by + TASKBAR_HEIGHT - 6, 4, 3, 1, dim);
+            gfx_fill_round_rect(icx - 2, by + TASKBAR_HEIGHT - 6, 4, 3, 1, ui_color(t->text_dim));
         x += SLOT + GAP;
     }
 
@@ -222,17 +220,17 @@ void taskbar_draw(void)
     int rx = W - 14;
     int dw = gfx_text_width(dbuf, 1), tw = gfx_text_width(tbuf, 1);
     int ty = by + TASKBAR_HEIGHT / 2 - 9;
-    gfx_draw_text(rx - tw, ty, tbuf, text, 1);
-    gfx_draw_text(rx - dw, ty + 11, dbuf, dim, 1);
+    gfx_draw_text(rx - tw, ty, tbuf, ui_color(t->text), 1);
+    gfx_draw_text(rx - dw, ty + 11, dbuf, ui_color(t->text_dim), 1);
 
     /* tray icons, right to left, with a divider before the clock */
     int tx = rx - dw - 14;
     int mid = by + TASKBAR_HEIGHT / 2;
-    gfx_vline(tx, mid - 11, 22, gfx_rgb(60, 74, 100));
+    gfx_vline(tx, mid - 11, 22, ui_color(t->surface_alt));
     tx -= 12 + 22;
-    tray_battery(tx, mid, text);
+    tray_battery(tx, mid, ui_color(t->text));
     tx -= 14 + 14;
-    tray_volume(tx, mid, text);
+    tray_volume(tx, mid, ui_color(t->text));
     tx -= 12 + 18;
-    tray_wifi(tx, mid, text);
+    tray_wifi(tx, mid, ui_color(t->text));
 }

@@ -31,13 +31,16 @@ int gfx_ready(void) { return FB != 0 && W > 0 && H > 0; }
 unsigned int gfx_width(void) { return (unsigned int)W; }
 unsigned int gfx_height(void) { return (unsigned int)H; }
 
-GfxColor gfx_rgb(unsigned char r, unsigned char g, unsigned char b)
+/* ---- colors ------------------------------------------------- */
+static inline unsigned int pack(int r, int g, int b)
 {
-    return RED_FIRST ? ((GfxColor)r << 16) | ((GfxColor)g << 8) | b
-                     : ((GfxColor)b << 16) | ((GfxColor)g << 8) | r;
+    return RED_FIRST ? ((unsigned int)r << 16) | ((unsigned int)g << 8) | (unsigned int)b
+                     : ((unsigned int)b << 16) | ((unsigned int)g << 8) | (unsigned int)r;
 }
 
-static void unpack(GfxColor c, unsigned char *r, unsigned char *g, unsigned char *b)
+GfxColor gfx_rgb(unsigned char r, unsigned char g, unsigned char b) { return pack(r, g, b); }
+
+void gfx_unpack(GfxColor c, unsigned char *r, unsigned char *g, unsigned char *b)
 {
     *g = (unsigned char)(c >> 8);
     if (RED_FIRST)
@@ -50,6 +53,17 @@ static void unpack(GfxColor c, unsigned char *r, unsigned char *g, unsigned char
         *b = (unsigned char)(c >> 16);
         *r = (unsigned char)c;
     }
+}
+
+static inline int div255(int v) { return ((v + 128) * 257) >> 16; }
+
+GfxColor gfx_mix(GfxColor a, GfxColor b, unsigned char t)
+{
+    unsigned char ar, ag, ab, br, bg, bb;
+    gfx_unpack(a, &ar, &ag, &ab);
+    gfx_unpack(b, &br, &bg, &bb);
+    int it = 255 - t;
+    return pack(div255(ar * it + br * t), div255(ag * it + bg * t), div255(ab * it + bb * t));
 }
 
 /* ---- clipping ---------------------------------------------- */
@@ -307,7 +321,7 @@ void gfx_fill_rect_alpha(int x, int y, int w, int h,
         for (int xx = x0; xx < x1; xx++)
         {
             unsigned char dr, dg, db;
-            unpack(row[xx], &dr, &dg, &db);
+            gfx_unpack(row[xx], &dr, &dg, &db);
             row[xx] = gfx_rgb((unsigned char)((r * a + dr * ia) / 255u),
                               (unsigned char)((g * a + dg * ia) / 255u),
                               (unsigned char)((b * a + db * ia) / 255u));

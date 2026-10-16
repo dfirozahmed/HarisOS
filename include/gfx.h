@@ -50,6 +50,9 @@ int gfx_double_buffered(void);
 
 /* ---- colors ------------------------------------------------- */
 GfxColor gfx_rgb(unsigned char r, unsigned char g, unsigned char b);
+void gfx_unpack(GfxColor c, unsigned char *r, unsigned char *g, unsigned char *b);
+GfxColor gfx_mix(GfxColor a, GfxColor b, unsigned char t); /* t: 0 = a, 255 = b */
+
 
 /* ---- clipping ----------------------------------------------- */
 /* Restrict all drawing to a rectangle (e.g. the inside of a window). */

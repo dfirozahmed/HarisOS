@@ -61,6 +61,7 @@ set(KERNEL_SOURCES
     kernel/pmm.c
     kernel/rtc.c
     kernel/graphics/gfx.c       # drawing: anti-aliased shapes, alpha, gradients, double buffer
+    kernel/ui/ui.c             # HarisUI: theme
     kernel/ui/desktop.c
     kernel/ui/taskbar.c)
 
