@@ -2,22 +2,31 @@
  * HarisOS graphics layer (gfx)
  *
  * A small, reusable 2D drawing library on top of a linear 32-bit
- * framebuffer. It knows nothing about UEFI or the desktop: any code
- * (desktop, window manager, boot screen, panic screen) can call it.
+ * framebuffer. It knows nothing about UEFI, the desktop or any widgets: any
+ * code (desktop, window manager, boot screen, panic screen) can call it.
  *
  *   gfx_init(...)            once, with the framebuffer from the bootloader
  *   gfx_fill_rect(...) ...   drawing primitives
- *   gfx_draw_text(...)       built-in 5x7 bitmap font
+ *   font.h                   smooth text (gfx_text)
  *
- * All coordinates are in pixels, (0,0) is the top-left corner.
- * Every call is clipped to the screen and to the optional clip rectangle,
- * so drawing outside the visible area is always safe.
+ * Everything curved (rounded rectangles, circles, lines, rings) is
+ * ANTI-ALIASED: edges are blended with the background so they look smooth
+ * instead of jagged. All shapes accept an alpha value for transparency.
+ *
+ * Coordinates are pixels, (0,0) is the top-left corner. Every call is clipped
+ * to the screen and to the optional clip rectangle, so drawing outside the
+ * visible area is always safe.
+ *
+ * Functions ending in _q take "Q4" coordinates: 1/16 of a pixel
+ * (16 = one pixel). Use them for sub-pixel accurate shapes such as icons.
  * ============================================================ */
 #ifndef HARIS_GFX_H
 #define HARIS_GFX_H
 
 /* Packed pixel in the framebuffer's native format. Create it with gfx_rgb(). */
 typedef unsigned int GfxColor;
+
+#define GFX_Q 16 /* Q4 fixed point: GFX_Q units = 1 pixel */
 
 /* ---- setup -------------------------------------------------- */
 /* red_mask_mode != 0: pixel layout is 0x00RRGGBB, otherwise 0x00BBGGRR.
@@ -67,10 +76,15 @@ void gfx_restore_clip(GfxClip c);
 
 /* ---- plain (pixel exact) primitives ------------------------- */
 void gfx_clear(GfxColor c);
+void gfx_pixel(int x, int y, GfxColor c);
 void gfx_hline(int x, int y, int len, GfxColor c);
 void gfx_vline(int x, int y, int len, GfxColor c);
-
+void gfx_rect(int x, int y, int w, int h, GfxColor c); /* 1px outline */
 void gfx_fill_rect(int x, int y, int w, int h, GfxColor c);
+
+/* Blend one pixel: alpha 0 = nothing, 255 = solid. */
+void gfx_blend_pixel(int x, int y, GfxColor c, unsigned char alpha);
+
 /* Semi-transparent rectangle (alpha 0 = invisible, 255 = solid). */
 void gfx_fill_rect_alpha(int x, int y, int w, int h,
                          unsigned char r, unsigned char g, unsigned char b,
@@ -97,6 +111,16 @@ void gfx_line(int x0, int y0, int x1, int y1, GfxColor c); /* smooth 1px line */
 /* Filled convex polygon (triangle, quad, arrow...), up to 8 corners, Q4 coordinates:
  * pts = {x0,y0, x1,y1, ...}. Either winding direction works. */
 void gfx_fill_poly_q(const int *pts, int count, GfxColor c, unsigned char alpha);
+
+/* Soft drop shadow under a rounded rectangle (x,y,w,h = the shape that casts it).
+ * Draw it BEFORE the shape: the area under the shape itself is left unshaded, so
+ * the shape is expected to cover it. blur = pixels the shadow fades out over;
+ * (dx,dy) = offset; strength = 0..255 darkness at the edge. */
+void gfx_shadow(int x, int y, int w, int h, int radius, int blur, int dx, int dy, unsigned char strength);
+
+/* Soft round light/glow: color fades from `alpha` at the center to 0 at the edge. */
+void gfx_glow(int cx, int cy, int radius, GfxColor c, unsigned char alpha);
+
 /* ---- gradients ---------------------------------------------- */
 /* Vertical gradient from color 1 (top) to color 2 (bottom). */
 void gfx_gradient_v(int x, int y, int w, int h,

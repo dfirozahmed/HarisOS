@@ -61,7 +61,7 @@ static UiIcon app_icon(TaskbarIcon i)
         return UI_ICON_BROWSER;
     }
 }
-#define HLOGO 26
+
 void taskbar_draw(void)
 {
     if (!gfx_ready())
@@ -77,12 +77,14 @@ void taskbar_draw(void)
 
     int x = 10;
 
-    int name_w = gfx_text_width("HARIS", 2);
-    int start_w = 8 + HLOGO + 8 + name_w + 12;
+    /* start button: logo + name */
+    const Font *nf = t->font_title;
+    int name_w = gfx_text_w(nf, "Haris");
+    int start_w = 8 + 28 + 8 + name_w + 14;
     gfx_fill_round_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, t->radius_m, ui_color(t->surface_alt));
     ui_icon(UI_ICON_LOGO, x + 8 + 14, cy, 28, t->text);
-    gfx_draw_text(x + 8 + HLOGO + 8, cy - 7, "HARIS", ui_color(t->text), 2);
-    x += start_w + GAP;
+    ui_text_in(ui_rect(x + 8 + 28 + 8, cy - 14, name_w + 4, 28), "Haris", UI_TEXT_TITLE, UI_ALIGN_LEFT);
+    x += start_w + GAP + 4;
 
     /* search pill (only on wide screens) */
     if (W >= 780)
@@ -90,7 +92,8 @@ void taskbar_draw(void)
         int sw = 170;
         gfx_fill_round_rect(x, cy - 16, sw, 32, 16, ui_color(t->surface_alt));
         ui_icon(UI_ICON_SEARCH, x + 18, cy, 15, t->text_dim);
-        gfx_draw_text(x + 36, cy - 3, "SEARCH", ui_color(t->text), 1);
+        ui_text_in(ui_rect(x + 34, cy - 16, sw - 44, 32), "Search", UI_TEXT_BODY, UI_ALIGN_LEFT);
+        /* (colored by the "dim" style below) */
         x += sw + GAP + 6;
     }
 
@@ -137,11 +140,10 @@ void taskbar_draw(void)
         }
     }
     int rx = W - 14;
-    int dw = gfx_text_width(dbuf, 1), tw = gfx_text_width(tbuf, 1);
+    int dw = ui_text_width(dbuf, UI_TEXT_SMALL), tw = ui_text_width(tbuf, UI_TEXT_LABEL);
     int cw = dw > tw ? dw : tw;
-    int ty = by + TASKBAR_HEIGHT / 2 - 9;
-    gfx_draw_text(rx - tw, ty, tbuf, ui_color(t->text), 1);
-    gfx_draw_text(rx - dw, ty + 11, dbuf, ui_color(t->text_dim), 1);
+    ui_text_in(ui_rect(rx - cw, cy - 20, cw, 20), tbuf, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
+    ui_text_in(ui_rect(rx - cw, cy, cw, 18), dbuf, UI_TEXT_SMALL, UI_ALIGN_RIGHT);
 
     /* tray: wifi, volume, battery in one rounded pill */
     int tray_w = 14 + 20 + 14 + 22 + 14 + 26 + 14;

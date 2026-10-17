@@ -1,6 +1,14 @@
+/* ============================================================
+ * HarisUI - a small, reusable UI toolkit for HarisOS
+ *
+ * Built only on the gfx layer (gfx.h + font.h), so it works anywhere gfx works:
+ * desktop, window manager, installer, panic screen...
+ *
+ * ============================================================ */
 #ifndef HARIS_UI_H
 #define HARIS_UI_H
 
+#include "font.h"
 #include "gfx.h"
 
 /* ---- colors -------------------------------------------------- */
@@ -30,11 +38,46 @@ typedef struct
     int pad, gap;
     int titlebar_h;
     int shadow; /* 0..255 */
+    /* typography */
+    const Font *font_small, *font_body, *font_label, *font_title, *font_heading;
 } UiTheme;
 
 extern const UiTheme ui_theme_dark, ui_theme_light;
 const UiTheme *ui_theme(void);
 void ui_set_theme(const UiTheme *t); /* NULL = default (dark) */
+
+/* ---- layout -------------------------------------------------- */
+typedef struct { int x, y, w, h; } UiRect;
+
+UiRect ui_rect(int x, int y, int w, int h);
+
+/* ---- text ---------------------------------------------------- */
+typedef enum
+{
+    UI_TEXT_SMALL,   /* captions, hints */
+    UI_TEXT_BODY,    /* normal text */
+    UI_TEXT_DIM,     /* body size, secondary color */
+    UI_TEXT_LABEL,   /* medium weight: buttons, field labels */
+    UI_TEXT_TITLE,   /* section titles */
+    UI_TEXT_HEADING  /* large heading */
+} UiTextStyle;
+
+typedef enum { UI_ALIGN_LEFT, UI_ALIGN_CENTER, UI_ALIGN_RIGHT } UiAlign;
+
+const Font *ui_font(UiTextStyle style);
+int ui_text_width(const char *s, UiTextStyle style);
+int ui_text_height(UiTextStyle style);
+/* x,y = top-left of the text box. Color comes from the style. */
+void ui_text(int x, int y, const char *s, UiTextStyle style);
+void ui_text_color(int x, int y, const char *s, UiTextStyle style, UiRgb color);
+/* Text placed inside a rectangle: aligned horizontally, centered vertically,
+ * and shortened with "..." if it does not fit. */
+void ui_text_in(UiRect r, const char *s, UiTextStyle style, UiAlign align);
+void ui_text_in_color(UiRect r, const char *s, UiTextStyle style, UiAlign align, UiRgb color);
+
+/* ---- controls ------------------------------------------------ */
+typedef enum { UI_STATE_NORMAL, UI_STATE_HOVER, UI_STATE_PRESSED, UI_STATE_DISABLED } UiState;
+typedef enum { UI_BTN_PRIMARY, UI_BTN_SECONDARY, UI_BTN_DANGER, UI_BTN_GHOST } UiButtonKind;
 
 /* ---- icons --------------------------------------------------- */
 typedef enum

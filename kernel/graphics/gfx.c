@@ -1,7 +1,12 @@
 /* HarisOS graphics layer: see include/gfx.h.
  *
- * No libc is available, so row writes go through volatile pointers; this
- * stops the compiler from turning fill loops into calls to memset(). */
+ * No libc and no floating point are used: all anti-aliasing is done with
+ * integer "signed distance" math. For every edge pixel we measure how far its
+ * center is from the shape's border (in 1/16 pixel units, "Q4") and turn that
+ * into a 0..255 coverage value; the pixel is then blended with the background.
+ *
+ * Row writes go through volatile pointers; this stops the compiler from
+ * turning fill loops into calls to memset(). */
 #include "gfx.h"
 
 static volatile unsigned int *FB;   /* the real screen */
@@ -85,6 +90,17 @@ static inline void blend_ptr(volatile unsigned int *p, int r, int g, int b, int 
 /* 4x4 ordered dither: hides the banding of 8-bit gradients and glows. */
 static const unsigned char BAYER[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
 static inline int dither(int x, int y) { return BAYER[((y & 3) << 2) | (x & 3)] * 4096; }
+
+/* Blend with a 16-bit alpha (0..65535) plus dithering. */
+static inline void blend_ptr16(volatile unsigned int *p, int x, int y, int r, int g, int b, int a16)
+{
+    if (a16 <= 0)
+        return;
+    unsigned char dr, dg, db;
+    gfx_unpack(*p, &dr, &dg, &db);
+    int d = dither(x, y), ia = 65536 - a16;
+    *p = pack((r * a16 + dr * ia + d) >> 16, (g * a16 + dg * ia + d) >> 16, (b * a16 + db * ia + d) >> 16);
+}
 
 /* ---- clipping ---------------------------------------------- */
 void gfx_reset_clip(void)
@@ -227,6 +243,24 @@ int gfx_double_buffered(void) { return BACK; }
 /* ---- plain primitives -------------------------------------- */
 #define ROW(y) (DRAW + (long long)(y) * DPITCH)
 
+void gfx_pixel(int x, int y, GfxColor c)
+{
+    if (DRAW && x >= CX0 && x < CX1 && y >= CY0 && y < CY1)
+    {
+        DRAW[(long long)y * DPITCH + x] = c;
+        mark_dirty(x, y, x + 1, y + 1);
+    }
+}
+
+void gfx_blend_pixel(int x, int y, GfxColor c, unsigned char alpha)
+{
+    if (!DRAW || x < CX0 || x >= CX1 || y < CY0 || y >= CY1)
+        return;
+    unsigned char r, g, b;
+    gfx_unpack(c, &r, &g, &b);
+    blend_ptr(DRAW + (long long)y * DPITCH + x, r, g, b, alpha);
+    mark_dirty(x, y, x + 1, y + 1);
+}
 
 void gfx_fill_rect(int x, int y, int w, int h, GfxColor c)
 {
@@ -254,6 +288,16 @@ void gfx_clear(GfxColor c)
 
 void gfx_hline(int x, int y, int len, GfxColor c) { gfx_fill_rect(x, y, len, 1, c); }
 void gfx_vline(int x, int y, int len, GfxColor c) { gfx_fill_rect(x, y, 1, len, c); }
+
+void gfx_rect(int x, int y, int w, int h, GfxColor c)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    gfx_hline(x, y, w, c);
+    gfx_hline(x, y + h - 1, w, c);
+    gfx_vline(x, y + 1, h - 2, c);
+    gfx_vline(x + w - 1, y + 1, h - 2, c);
+}
 
 void gfx_fill_rect_alpha(int x, int y, int w, int h,
                          unsigned char r, unsigned char g, unsigned char b,
@@ -555,6 +599,71 @@ void gfx_line_q(int ax, int ay, int bx, int by, int width_q, GfxColor c, unsigne
 void gfx_line(int x0, int y0, int x1, int y1, GfxColor c)
 {
     gfx_line_q(x0 * 16 + 8, y0 * 16 + 8, x1 * 16 + 8, y1 * 16 + 8, 16, c, 255);
+}
+
+/* ---- shadow and glow ---------------------------------------- */
+void gfx_shadow(int x, int y, int w, int h, int radius, int blur, int dx, int dy, unsigned char strength)
+{
+    if (w <= 0 || h <= 0 || blur < 1 || strength == 0)
+        return;
+    radius = clamp_radius(w, h, radius);
+    int sx = x + dx, sy = y + dy;
+    int x0 = sx - blur, y0 = sy - blur, x1 = sx + w + blur, y1 = sy + h + blur;
+    if (!clip_box(&x0, &y0, &x1, &y1))
+        return;
+    int B = blur * 16;
+    /* the shape itself will cover this inner rectangle, so skip it */
+    int hx0 = x + radius, hy0 = y + radius, hx1 = x + w - radius, hy1 = y + h - radius;
+    for (int yy = y0; yy < y1; yy++)
+    {
+        volatile unsigned int *row = ROW(yy);
+        for (int xx = x0; xx < x1; xx++)
+        {
+            if (xx >= hx0 && xx < hx1 && yy >= hy0 && yy < hy1)
+            {
+                xx = hx1 - 1; /* jump over the hidden part of this row */
+                continue;
+            }
+            int sd = rr_sd(xx, yy, sx * 16, sy * 16, w * 16, h * 16, radius * 16);
+            int u = (B / 2 - sd) * 256 / B; /* 256 inside, 0 beyond the blur, centered on the edge */
+            if (u <= 0)
+                continue;
+            if (u > 256)
+                u = 256;
+            int f = u * u / 256 * (768 - 2 * u) / 256; /* smoothstep: u^2 (3 - 2u) */
+            int a16 = f * strength * 256 / 255; /* 0..65536 */
+            blend_ptr16(row + xx, xx, yy, 0, 0, 0, a16 > 65535 ? 65535 : a16);
+        }
+    }
+    mark_dirty(x0, y0, x1, y1);
+}
+
+void gfx_glow(int cx, int cy, int radius, GfxColor c, unsigned char alpha)
+{
+    if (radius <= 0 || alpha == 0)
+        return;
+    int x0 = cx - radius, y0 = cy - radius, x1 = cx + radius + 1, y1 = cy + radius + 1;
+    if (!clip_box(&x0, &y0, &x1, &y1))
+        return;
+    unsigned char r, g, b;
+    gfx_unpack(c, &r, &g, &b);
+    long long r2 = (long long)radius * radius;
+    for (int yy = y0; yy < y1; yy++)
+    {
+        volatile unsigned int *row = ROW(yy);
+        long long dy = yy - cy;
+        for (int xx = x0; xx < x1; xx++)
+        {
+            long long dx = xx - cx;
+            long long d2 = dx * dx + dy * dy;
+            if (d2 >= r2)
+                continue;
+            int t = (int)((r2 - d2) * 256 / r2);       /* 256 at the center, 0 at the edge */
+            int a16 = (int)(((long long)t * t * alpha) >> 8); /* smooth falloff, 16-bit alpha */
+            blend_ptr16(row + xx, xx, yy, r, g, b, a16);
+        }
+    }
+    mark_dirty(x0, y0, x1, y1);
 }
 
 /* ---- gradients ---------------------------------------------- */

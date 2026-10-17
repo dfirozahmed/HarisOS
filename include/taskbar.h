@@ -1,9 +1,9 @@
-/* HarisOS taskbar: a centered dock (start, search, apps) with a system tray
- * and clock on the right. Drawn only through the gfx layer. */
+/* HarisOS taskbar: start button, search, app buttons on the left; system tray
+ * and clock on the right. Built from HarisUI (ui.h), so it follows the theme. */
 #ifndef HARIS_TASKBAR_H
 #define HARIS_TASKBAR_H
 
-#define TASKBAR_HEIGHT 48
+#define TASKBAR_HEIGHT 52
 
 typedef enum
 {
