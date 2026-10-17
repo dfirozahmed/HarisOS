@@ -221,8 +221,25 @@ void gfx_present(void)
 {
     if (!BACK || DX1 <= DX0 || DY1 <= DY0)
         return;
-    cursor_restore(); /* take the pointer off the screen while we copy... */
+
+    extern const int gfx_cursor_h, gfx_cursor_hot;
+    int cy0 = 0, cy1 = 0; /* screen rows covered by the pointer */
+    if (CUR_DRAWN)
+    {
+        cy0 = CUR_Y - gfx_cursor_hot;
+        cy1 = cy0 + gfx_cursor_h;
+    }
     for (int y = DY0; y < DY1; y++)
+    {
+        if (y >= cy0 && y < cy1)
+            continue;
+        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
+        volatile unsigned int *dst = FB + (long long)y * PITCH;
+        for (int x = DX0; x < DX1; x++)
+            dst[x] = src[x];
+    }
+    cursor_restore();
+    for (int y = DY0 > cy0 ? DY0 : cy0; y < (DY1 < cy1 ? DY1 : cy1); y++)
     {
         volatile unsigned int *src = DRAW + (long long)y * DPITCH;
         volatile unsigned int *dst = FB + (long long)y * PITCH;
@@ -230,7 +247,7 @@ void gfx_present(void)
             dst[x] = src[x];
     }
     DX0 = DY0 = DX1 = DY1 = 0;
-    cursor_paint(); /* ...and put it back on top */
+    cursor_paint();
 }
 
 void gfx_disable_backbuffer(void)

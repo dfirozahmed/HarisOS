@@ -275,12 +275,15 @@ int desktop_pointer(int x, int y, unsigned buttons)
     if (!wm_take_damage(&area))
         return 0;
 
-    gfx_cursor_show(0); /* keeps the pointer correct even without a back buffer */
+    int direct = !gfx_double_buffered();
+    if (direct)
+        gfx_cursor_show(0);
     if (WALL_VALID && gfx_cache_valid())
         desktop_draw_region(area); /* fast: only what changed */
     else
         desktop_draw();            /* first frame, new theme, or no cache */
     gfx_present();
-    gfx_cursor_show(1);
+    if (direct)
+        gfx_cursor_show(1);
     return 1;
 }
