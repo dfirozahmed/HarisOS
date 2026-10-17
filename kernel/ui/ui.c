@@ -1,4 +1,4 @@
-/* HarisUI: theme, layout, text */
+/* HarisUI: theme, layout, text and widgets. See include/ui.h. */
 #include "ui.h"
 
 /* ---- colors -------------------------------------------------- */
@@ -83,7 +83,7 @@ const UiTheme ui_theme_light = {
     .font_heading = &font_bold_20,
 };
 
-static const UiTheme *THEME = &ui_theme_light;
+static const UiTheme *THEME = &ui_theme_dark;
 
 const UiTheme *ui_theme(void) { return THEME; }
 void ui_set_theme(const UiTheme *t) { THEME = t ? t : &ui_theme_dark; }
@@ -94,6 +94,61 @@ UiRect ui_rect(int x, int y, int w, int h)
     UiRect r = {x, y, w, h};
     return r;
 }
+
+UiRect ui_inset(UiRect r, int a)
+{
+    return ui_rect(r.x + a, r.y + a, r.w - 2 * a > 0 ? r.w - 2 * a : 0, r.h - 2 * a > 0 ? r.h - 2 * a : 0);
+}
+
+UiRect ui_center(UiRect o, int w, int h)
+{
+    return ui_rect(o.x + (o.w - w) / 2, o.y + (o.h - h) / 2, w, h);
+}
+
+UiRect ui_cut_top(UiRect *r, int h)
+{
+    if (h > r->h)
+        h = r->h;
+    UiRect s = ui_rect(r->x, r->y, r->w, h);
+    r->y += h;
+    r->h -= h;
+    return s;
+}
+
+UiRect ui_cut_bottom(UiRect *r, int h)
+{
+    if (h > r->h)
+        h = r->h;
+    UiRect s = ui_rect(r->x, r->y + r->h - h, r->w, h);
+    r->h -= h;
+    return s;
+}
+
+UiRect ui_cut_left(UiRect *r, int w)
+{
+    if (w > r->w)
+        w = r->w;
+    UiRect s = ui_rect(r->x, r->y, w, r->h);
+    r->x += w;
+    r->w -= w;
+    return s;
+}
+
+UiRect ui_cut_right(UiRect *r, int w)
+{
+    if (w > r->w)
+        w = r->w;
+    UiRect s = ui_rect(r->x + r->w - w, r->y, w, r->h);
+    r->w -= w;
+    return s;
+}
+
+int ui_contains(UiRect r, int x, int y)
+{
+    return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+}
+
+void ui_clip(UiRect r) { gfx_set_clip(r.x, r.y, r.w, r.h); }
 
 /* ---- text ---------------------------------------------------- */
 const Font *ui_font(UiTextStyle s)
@@ -164,4 +219,201 @@ void ui_text_in_color(UiRect r, const char *s, UiTextStyle st, UiAlign align, Ui
 void ui_text_in(UiRect r, const char *s, UiTextStyle st, UiAlign align)
 {
     ui_text_in_color(r, s, st, align, style_color(st));
+}
+
+/* ---- surfaces ------------------------------------------------ */
+void ui_background(void)
+{
+    const UiTheme *t = THEME;
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    gfx_gradient_v(0, 0, W, H, t->bg_top.r, t->bg_top.g, t->bg_top.b,
+                   t->bg_bottom.r, t->bg_bottom.g, t->bg_bottom.b);
+    /* two big soft lights give the wallpaper depth */
+    int big = (W > H ? W : H) * 6 / 10;
+    gfx_glow(W * 78 / 100, H * 20 / 100, big, ui_color(t->glow1), 90);
+    gfx_glow(W * 18 / 100, H * 88 / 100, big * 8 / 10, ui_color(t->glow2), 70);
+
+    /* soft abstract wallpaper waves */
+    gfx_fill_rect(W * 56 / 100, H * 16 / 100, W * 34 / 100, H * 48 / 100, gfx_rgb(29, 104, 169));
+    gfx_fill_rect(W * 62 / 100, H * 22 / 100, W * 25 / 100, H * 36 / 100, gfx_rgb(34, 126, 185));
+    gfx_fill_rect(W * 68 / 100, H * 28 / 100, W * 15 / 100, H * 24 / 100, gfx_rgb(42, 148, 199));
+}
+
+void ui_background1(void)
+{
+    // const UiTheme *t = THEME;
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    gfx_gradient_v(0, 0, W, H, 12, 45, 86, 40, 103, 162);
+
+    /* soft abstract wallpaper waves */
+    gfx_fill_rect(W * 56 / 100, H * 16 / 100, W * 34 / 100, H * 48 / 100, gfx_rgb(29, 104, 169));
+    gfx_fill_rect(W * 62 / 100, H * 22 / 100, W * 25 / 100, H * 36 / 100, gfx_rgb(34, 126, 185));
+    gfx_fill_rect(W * 68 / 100, H * 28 / 100, W * 15 / 100, H * 24 / 100, gfx_rgb(42, 148, 199));
+}
+
+void ui_card(UiRect r)
+{
+    const UiTheme *t = THEME;
+    gfx_shadow(r.x, r.y, r.w, r.h, t->radius_m, 14, 0, 4, (unsigned char)(t->shadow / 2));
+    gfx_fill_round_rect(r.x, r.y, r.w, r.h, t->radius_m, ui_color(t->surface));
+    gfx_round_rect(r.x, r.y, r.w, r.h, t->radius_m, 1, ui_color(t->border));
+}
+
+UiRect ui_window(UiRect r, const char *title, int active)
+{
+    const UiTheme *t = THEME;
+    int tb = t->titlebar_h;
+    gfx_shadow(r.x, r.y, r.w, r.h, t->radius_l, active ? 28 : 18, 0, active ? 12 : 6,
+               (unsigned char)(active ? t->shadow : t->shadow * 2 / 3));
+    gfx_fill_round_rect(r.x, r.y, r.w, r.h, t->radius_l, ui_color(t->surface));
+
+    /* title bar: draw a taller rounded rectangle but clip it, so only the top corners are round */
+    GfxClip saved = gfx_get_clip();
+    gfx_clip_intersect(r.x, r.y, r.w, tb);
+    gfx_fill_round_rect(r.x, r.y, r.w, tb + t->radius_l * 2, t->radius_l, ui_color(t->titlebar));
+    gfx_restore_clip(saved);
+    gfx_hline(r.x, r.y + tb, r.w, ui_color(t->border));
+    gfx_round_rect(r.x, r.y, r.w, r.h, t->radius_l, 1, ui_color(t->border));
+
+    /* window buttons (close / minimize / maximize) */
+    int cy = r.y + tb / 2;
+    gfx_fill_circle_q((r.x + 22) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(t->danger), 255);
+    gfx_fill_circle_q((r.x + 42) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(t->warning), 255);
+    gfx_fill_circle_q((r.x + 62) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(t->success), 255);
+    if (!active)
+    {
+        UiRgb grey = ui_rgb_mix(t->titlebar, t->text_dim, 90);
+        for (int i = 0; i < 3; i++)
+            gfx_fill_circle_q((r.x + 22 + 20 * i) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(grey), 255);
+    }
+
+    UiRect tr = ui_rect(r.x + 80, r.y, r.w - 160 > 0 ? r.w - 160 : 0, tb);
+    ui_text_in_color(tr, title, UI_TEXT_LABEL, UI_ALIGN_CENTER, active ? t->text : t->text_dim);
+
+    return ui_rect(r.x + 1, r.y + tb + 1, r.w - 2, r.h - tb - 2);
+}
+
+void ui_separator(int x, int y, int w)
+{
+    gfx_hline(x, y, w, ui_color(THEME->border));
+}
+
+/* ---- controls ------------------------------------------------ */
+static UiRgb lighten(UiRgb c, int amount) { return ui_rgb_mix(c, ui_rgb(255, 255, 255), (unsigned char)amount); }
+static UiRgb darken(UiRgb c, int amount) { return ui_rgb_mix(c, ui_rgb(0, 0, 0), (unsigned char)amount); }
+
+void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state)
+{
+    const UiTheme *t = THEME;
+    int rad = t->radius_m;
+    if (rad > r.h / 2)
+        rad = r.h / 2;
+    int disabled = state == UI_STATE_DISABLED;
+    UiRgb top, bottom, text;
+
+    switch (kind)
+    {
+    case UI_BTN_PRIMARY:
+        top = t->accent_hi;
+        bottom = t->accent;
+        text = t->text_on_accent;
+        break;
+    case UI_BTN_DANGER:
+        top = lighten(t->danger, 40);
+        bottom = t->danger;
+        text = t->text_on_accent;
+        break;
+    case UI_BTN_SECONDARY:
+        top = lighten(t->surface_alt, 14);
+        bottom = t->surface_alt;
+        text = t->text;
+        break;
+    default: /* ghost: only visible when hovered or pressed */
+        top = bottom = t->surface_alt;
+        text = t->text;
+        break;
+    }
+    if (state == UI_STATE_HOVER)
+    {
+        top = lighten(top, 22);
+        bottom = lighten(bottom, 22);
+    }
+    else if (state == UI_STATE_PRESSED)
+    {
+        top = darken(top, 22);
+        bottom = darken(bottom, 22);
+    }
+    else if (disabled)
+    {
+        top = bottom = ui_rgb_mix(t->surface, t->surface_alt, 160);
+        text = t->text_dim;
+    }
+
+    if ((kind == UI_BTN_PRIMARY || kind == UI_BTN_DANGER) && !disabled && state != UI_STATE_PRESSED)
+        gfx_shadow(r.x, r.y, r.w, r.h, rad, 8, 0, 3, 70);
+    if (kind == UI_BTN_GHOST && (state == UI_STATE_NORMAL || disabled))
+    {
+        /* nothing behind the label */
+    }
+    else
+        gfx_fill_round_rect_gradient(r.x, r.y, r.w, r.h, rad, ui_color(top), ui_color(bottom));
+    if (kind == UI_BTN_SECONDARY && !disabled)
+        gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
+    ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 20, r.h), label, UI_TEXT_LABEL, UI_ALIGN_CENTER, text);
+}
+
+void ui_progress(UiRect r, int percent)
+{
+    const UiTheme *t = THEME;
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+    int rad = r.h / 2;
+    gfx_fill_round_rect(r.x, r.y, r.w, r.h, rad, ui_color(t->surface_alt));
+    int fw = r.w * percent / 100;
+    if (percent > 0 && fw < r.h)
+        fw = r.h; /* keep the rounded end visible */
+    if (percent > 0)
+        gfx_fill_round_rect_gradient(r.x, r.y, fw, r.h, rad, ui_color(t->accent_hi), ui_color(t->accent));
+}
+
+void ui_toggle(UiRect r, int on)
+{
+    const UiTheme *t = THEME;
+    int rad = r.h / 2;
+    if (on)
+        gfx_fill_round_rect_gradient(r.x, r.y, r.w, r.h, rad, ui_color(t->accent_hi), ui_color(t->accent));
+    else
+    {
+        gfx_fill_round_rect(r.x, r.y, r.w, r.h, rad, ui_color(t->surface_alt));
+        gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
+    }
+    int kr = rad - 3;
+    int kx = on ? r.x + r.w - rad : r.x + rad;
+    gfx_fill_circle_q(kx * 16, (r.y + rad) * 16, kr * 16, gfx_rgb(255, 255, 255), 255);
+}
+
+int ui_badge(int x, int y, const char *s, UiRgb color)
+{
+    const UiTheme *t = THEME;
+    const Font *f = t->font_small;
+    int w = gfx_text_w(f, s) + 20, h = font_line_height(f) + 6;
+    gfx_fill_round_rect_alpha(x, y, w, h, h / 2, ui_color(color), 46);
+    gfx_round_rect_alpha(x, y, w, h, h / 2, 1, ui_color(color), 110);
+    gfx_fill_circle_q((x + 9) * 16, (y + h / 2) * 16, 3 * 16, ui_color(color), 255);
+    gfx_text(f, x + 16, y + 3, s, ui_color(color));
+    return w;
+}
+
+void ui_text_field(UiRect r, const char *text, const char *placeholder, int focused)
+{
+    const UiTheme *t = THEME;
+    gfx_fill_round_rect(r.x, r.y, r.w, r.h, t->radius_m, ui_color(t->surface_alt));
+    gfx_round_rect(r.x, r.y, r.w, r.h, t->radius_m, focused ? 2 : 1, ui_color(focused ? t->accent : t->border));
+    UiRect in = ui_rect(r.x + 12, r.y, r.w - 24, r.h);
+    if (text && *text)
+        ui_text_in_color(in, text, UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
+    else if (placeholder)
+        ui_text_in_color(in, placeholder, UI_TEXT_BODY, UI_ALIGN_LEFT, t->text_dim);
 }

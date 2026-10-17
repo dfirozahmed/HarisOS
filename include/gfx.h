@@ -8,6 +8,7 @@
  *   gfx_init(...)            once, with the framebuffer from the bootloader
  *   gfx_fill_rect(...) ...   drawing primitives
  *   font.h                   smooth text (gfx_text)
+ *   ui.h                     ready-made widgets built on top of this layer
  *
  * Everything curved (rounded rectangles, circles, lines, rings) is
  * ANTI-ALIASED: edges are blended with the background so they look smooth
@@ -61,7 +62,6 @@ int gfx_double_buffered(void);
 GfxColor gfx_rgb(unsigned char r, unsigned char g, unsigned char b);
 void gfx_unpack(GfxColor c, unsigned char *r, unsigned char *g, unsigned char *b);
 GfxColor gfx_mix(GfxColor a, GfxColor b, unsigned char t); /* t: 0 = a, 255 = b */
-
 
 /* ---- clipping ----------------------------------------------- */
 /* Restrict all drawing to a rectangle (e.g. the inside of a window). */
@@ -133,13 +133,5 @@ void gfx_gradient_h(int x, int y, int w, int h,
 /* Vertical gradient inside a rounded rectangle (buttons, bars). */
 void gfx_fill_round_rect_gradient(int x, int y, int w, int h, int radius,
                                   GfxColor top, GfxColor bottom);
-
-/* ---- text (5x7 font; A-Z, 0-9 and . : - / _ ! +; lowercase is drawn uppercase) */
-#define GFX_FONT_W 5
-#define GFX_FONT_H 7
-void gfx_draw_char(int x, int y, char ch, GfxColor c, int scale);
-void gfx_draw_text(int x, int y, const char *s, GfxColor c, int scale); /* '\n' starts a new line */
-int gfx_text_width(const char *s, int scale);                           /* width of the longest line, in pixels */
-int gfx_text_height(const char *s, int scale);                          /* height of all lines, in pixels */
 
 #endif

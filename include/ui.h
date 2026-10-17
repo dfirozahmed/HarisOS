@@ -12,11 +12,14 @@
 #include "gfx.h"
 
 /* ---- colors -------------------------------------------------- */
-typedef struct { unsigned char r, g, b; } UiRgb;
+typedef struct
+{
+    unsigned char r, g, b;
+} UiRgb;
 
 UiRgb ui_rgb(unsigned char r, unsigned char g, unsigned char b);
 UiRgb ui_rgb_mix(UiRgb a, UiRgb b, unsigned char t); /* t: 0 = a, 255 = b */
-GfxColor ui_color(UiRgb c);                           /* to the framebuffer format */
+GfxColor ui_color(UiRgb c);                          /* to the framebuffer format */
 
 /* ---- theme --------------------------------------------------- */
 typedef struct
@@ -47,22 +50,39 @@ const UiTheme *ui_theme(void);
 void ui_set_theme(const UiTheme *t); /* NULL = default (dark) */
 
 /* ---- layout -------------------------------------------------- */
-typedef struct { int x, y, w, h; } UiRect;
+typedef struct
+{
+    int x, y, w, h;
+} UiRect;
 
 UiRect ui_rect(int x, int y, int w, int h);
+UiRect ui_inset(UiRect r, int amount);
+UiRect ui_center(UiRect outer, int w, int h);
+/* Cut a strip off one side: returns the strip and shrinks *r. */
+UiRect ui_cut_top(UiRect *r, int h);
+UiRect ui_cut_bottom(UiRect *r, int h);
+UiRect ui_cut_left(UiRect *r, int w);
+UiRect ui_cut_right(UiRect *r, int w);
+int ui_contains(UiRect r, int x, int y); /* hit testing for mouse input */
+void ui_clip(UiRect r);                  /* restrict drawing to r (gfx_reset_clip() to undo) */
 
 /* ---- text ---------------------------------------------------- */
 typedef enum
 {
-    UI_TEXT_SMALL,   /* captions, hints */
-    UI_TEXT_BODY,    /* normal text */
-    UI_TEXT_DIM,     /* body size, secondary color */
-    UI_TEXT_LABEL,   /* medium weight: buttons, field labels */
-    UI_TEXT_TITLE,   /* section titles */
-    UI_TEXT_HEADING  /* large heading */
+    UI_TEXT_SMALL,  /* captions, hints */
+    UI_TEXT_BODY,   /* normal text */
+    UI_TEXT_DIM,    /* body size, secondary color */
+    UI_TEXT_LABEL,  /* medium weight: buttons, field labels */
+    UI_TEXT_TITLE,  /* section titles */
+    UI_TEXT_HEADING /* large heading */
 } UiTextStyle;
 
-typedef enum { UI_ALIGN_LEFT, UI_ALIGN_CENTER, UI_ALIGN_RIGHT } UiAlign;
+typedef enum
+{
+    UI_ALIGN_LEFT,
+    UI_ALIGN_CENTER,
+    UI_ALIGN_RIGHT
+} UiAlign;
 
 const Font *ui_font(UiTextStyle style);
 int ui_text_width(const char *s, UiTextStyle style);
@@ -75,14 +95,40 @@ void ui_text_color(int x, int y, const char *s, UiTextStyle style, UiRgb color);
 void ui_text_in(UiRect r, const char *s, UiTextStyle style, UiAlign align);
 void ui_text_in_color(UiRect r, const char *s, UiTextStyle style, UiAlign align, UiRgb color);
 
+/* ---- surfaces ------------------------------------------------ */
+void ui_background(void); /* full-screen wallpaper from the theme */
+void ui_background1(void);
+void ui_card(UiRect r); /* rounded panel with soft shadow and border */
+/* Window with title bar. Returns the content area below the title bar. */
+UiRect ui_window(UiRect r, const char *title, int active);
+void ui_separator(int x, int y, int w);
+
 /* ---- controls ------------------------------------------------ */
-typedef enum { UI_STATE_NORMAL, UI_STATE_HOVER, UI_STATE_PRESSED, UI_STATE_DISABLED } UiState;
-typedef enum { UI_BTN_PRIMARY, UI_BTN_SECONDARY, UI_BTN_DANGER, UI_BTN_GHOST } UiButtonKind;
+typedef enum
+{
+    UI_STATE_NORMAL,
+    UI_STATE_HOVER,
+    UI_STATE_PRESSED,
+    UI_STATE_DISABLED
+} UiState;
+typedef enum
+{
+    UI_BTN_PRIMARY,
+    UI_BTN_SECONDARY,
+    UI_BTN_DANGER,
+    UI_BTN_GHOST
+} UiButtonKind;
+
+void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state);
+void ui_progress(UiRect r, int percent);                /* 0..100 */
+void ui_toggle(UiRect r, int on);                       /* switch; 40x22 looks best */
+int ui_badge(int x, int y, const char *s, UiRgb color); /* small pill; returns its width */
+void ui_text_field(UiRect r, const char *text, const char *placeholder, int focused);
 
 /* ---- icons --------------------------------------------------- */
 typedef enum
 {
-    UI_ICON_LOGO,     /* HarisOS "H" */
+    UI_ICON_LOGO, /* HarisOS "H" */
     UI_ICON_FILES,
     UI_ICON_TERMINAL,
     UI_ICON_SETTINGS,

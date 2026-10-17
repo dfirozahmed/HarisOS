@@ -4,9 +4,7 @@
  * integer "signed distance" math. For every edge pixel we measure how far its
  * center is from the shape's border (in 1/16 pixel units, "Q4") and turn that
  * into a 0..255 coverage value; the pixel is then blended with the background.
- *
- * Row writes go through volatile pointers; this stops the compiler from
- * turning fill loops into calls to memset(). */
+*/
 #include "gfx.h"
 
 static volatile unsigned int *FB;   /* the real screen */
@@ -772,99 +770,4 @@ void gfx_fill_poly_q(const int *pts, int n, GfxColor c, unsigned char alpha)
         }
     }
     mark_dirty(x0, y0, x1, y1);
-}
-
-/* ---- text -------------------------------------------------- */
-/* Compact 5x7 font. Each glyph is 7 rows; bit 4 is the leftmost pixel. */
-static const unsigned char *glyph(char c)
-{
-    static const unsigned char blank[7] = {0, 0, 0, 0, 0, 0, 0};
-    static const unsigned char font[][7] = {
-        {14, 17, 17, 31, 17, 17, 17}, {30, 17, 17, 30, 17, 17, 30}, {14, 17, 16, 16, 16, 17, 14}, {30, 17, 17, 17, 17, 17, 30}, {31, 16, 16, 30, 16, 16, 31}, {31, 16, 16, 30, 16, 16, 16}, {14, 17, 16, 23, 17, 17, 15}, {17, 17, 17, 31, 17, 17, 17}, {14, 4, 4, 4, 4, 4, 14}, {7, 2, 2, 2, 18, 18, 12}, {17, 18, 20, 24, 20, 18, 17}, {16, 16, 16, 16, 16, 16, 31}, {17, 27, 21, 21, 17, 17, 17}, {17, 25, 21, 19, 17, 17, 17}, {14, 17, 17, 17, 17, 17, 14}, {30, 17, 17, 30, 16, 16, 16}, {14, 17, 17, 17, 21, 18, 13}, {30, 17, 17, 30, 20, 18, 17}, {15, 16, 16, 14, 1, 1, 30}, {31, 4, 4, 4, 4, 4, 4}, {17, 17, 17, 17, 17, 17, 14}, {17, 17, 17, 17, 17, 10, 4}, {17, 17, 17, 21, 21, 21, 10}, {17, 17, 10, 4, 10, 17, 17}, {17, 17, 10, 4, 4, 4, 4}, {31, 1, 2, 4, 8, 16, 31}, {14, 17, 19, 21, 25, 17, 14}, {4, 12, 4, 4, 4, 4, 14}, {14, 17, 1, 2, 4, 8, 31}, {30, 1, 1, 14, 1, 1, 30}, {2, 6, 10, 18, 31, 2, 2}, {31, 16, 16, 30, 1, 1, 30}, {14, 16, 16, 30, 17, 17, 14}, {31, 1, 2, 4, 8, 8, 8}, {14, 17, 17, 14, 17, 17, 14}, {14, 17, 17, 15, 1, 1, 14}};
-    if (c >= 'a' && c <= 'z')
-        c = (char)(c - 'a' + 'A');
-    if (c >= 'A' && c <= 'Z')
-        return font[c - 'A'];
-    if (c >= '0' && c <= '9')
-        return font[26 + c - '0'];
-    static const struct
-    {
-        char ch;
-        unsigned char rows[7];
-    } extra[] = {
-        {'.', {0, 0, 0, 0, 0, 12, 12}},
-        {':', {0, 12, 12, 0, 12, 12, 0}},
-        {'-', {0, 0, 0, 31, 0, 0, 0}},
-        {'/', {1, 1, 2, 4, 8, 16, 16}},
-        {'_', {0, 0, 0, 0, 0, 0, 31}},
-        {'!', {4, 4, 4, 4, 4, 0, 4}},
-        {'+', {0, 4, 4, 31, 4, 4, 0}},
-    };
-    for (unsigned int i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)
-        if (extra[i].ch == c)
-            return extra[i].rows;
-    return blank;
-}
-
-void gfx_draw_char(int x, int y, char ch, GfxColor c, int scale)
-{
-    if (scale < 1)
-        scale = 1;
-    const unsigned char *g = glyph(ch);
-    for (int yy = 0; yy < GFX_FONT_H; yy++)
-        for (int xx = 0; xx < GFX_FONT_W; xx++)
-            if (g[yy] & (1 << (GFX_FONT_W - 1 - xx)))
-                gfx_fill_rect(x + xx * scale, y + yy * scale, scale, scale, c);
-}
-
-void gfx_draw_text(int x, int y, const char *s, GfxColor c, int scale)
-{
-    if (!s)
-        return;
-    if (scale < 1)
-        scale = 1;
-    int cx = x;
-    for (; *s; s++)
-    {
-        if (*s == '\n')
-        {
-            cx = x;
-            y += (GFX_FONT_H + 2) * scale;
-            continue;
-        }
-        gfx_draw_char(cx, y, *s, c, scale);
-        cx += (GFX_FONT_W + 1) * scale;
-    }
-}
-
-int gfx_text_width(const char *s, int scale)
-{
-    int best = 0, cur = 0;
-    if (!s)
-        return 0;
-    if (scale < 1)
-        scale = 1;
-    for (; *s; s++)
-    {
-        if (*s == '\n')
-            cur = 0;
-        else
-            cur++;
-        if (cur > best)
-            best = cur;
-    }
-    return best ? best * (GFX_FONT_W + 1) * scale - scale : 0;
-}
-
-int gfx_text_height(const char *s, int scale)
-{
-    int lines = 1;
-    if (!s || !*s)
-        return 0;
-    if (scale < 1)
-        scale = 1;
-    for (; *s; s++)
-        if (*s == '\n')
-            lines++;
-    return lines * (GFX_FONT_H + 2) * scale - 2 * scale;
 }
