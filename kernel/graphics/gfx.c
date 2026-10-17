@@ -15,6 +15,11 @@ static int DX0, DY0, DX1, DY1;      /* dirty rectangle (back buffer areas not ye
 static int RED_FIRST;               /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
 static int CX0, CY0, CX1, CY1;      /* active clip rectangle, CX1/CY1 exclusive */
 
+/* mouse pointer state (see the pointer section below) */
+static int CUR_ON, CUR_DRAWN, CUR_X, CUR_Y;
+static void cursor_restore(void);
+static void cursor_paint(void);
+
 void gfx_init(void *framebuffer, unsigned int width, unsigned int height,
               unsigned int pitch, unsigned int red_mask_mode)
 {
@@ -27,6 +32,7 @@ void gfx_init(void *framebuffer, unsigned int width, unsigned int height,
     DPITCH = PITCH;
     BACK = 0;
     DX0 = DY0 = DX1 = DY1 = 0;
+    CUR_ON = CUR_DRAWN = 0;
     gfx_reset_clip();
 }
 
@@ -211,6 +217,7 @@ void gfx_present(void)
 {
     if (!BACK || DX1 <= DX0 || DY1 <= DY0)
         return;
+    cursor_restore(); /* take the pointer off the screen while we copy... */
     for (int y = DY0; y < DY1; y++)
     {
         volatile unsigned int *src = DRAW + (long long)y * DPITCH;
@@ -219,6 +226,7 @@ void gfx_present(void)
             dst[x] = src[x];
     }
     DX0 = DY0 = DX1 = DY1 = 0;
+    cursor_paint(); /* ...and put it back on top */
 }
 
 void gfx_disable_backbuffer(void)
@@ -770,4 +778,79 @@ void gfx_fill_poly_q(const int *pts, int n, GfxColor c, unsigned char alpha)
         }
     }
     mark_dirty(x0, y0, x1, y1);
+}
+
+/* ---- mouse pointer ------------------------------------------ */
+extern const int gfx_cursor_w, gfx_cursor_h, gfx_cursor_hot;
+extern const unsigned char gfx_cursor_pixels[]; /* per pixel: shade, alpha */
+
+#define CUR_MAX_W 64
+#define CUR_MAX_H 64
+static unsigned int CUR_SAVE[CUR_MAX_W * CUR_MAX_H]; /* screen pixels under the pointer */
+
+static void cursor_restore(void)
+{
+    if (!CUR_DRAWN || !FB)
+        return;
+    int ox = CUR_X - gfx_cursor_hot, oy = CUR_Y - gfx_cursor_hot;
+    for (int y = 0; y < gfx_cursor_h; y++)
+        for (int x = 0; x < gfx_cursor_w; x++)
+        {
+            int sx = ox + x, sy = oy + y;
+            if (sx >= 0 && sx < W && sy >= 0 && sy < H)
+                FB[(long long)sy * PITCH + sx] = CUR_SAVE[y * gfx_cursor_w + x];
+        }
+    CUR_DRAWN = 0;
+}
+
+static void cursor_paint(void)
+{
+    if (!CUR_ON || CUR_DRAWN || !FB)
+        return;
+    int ox = CUR_X - gfx_cursor_hot, oy = CUR_Y - gfx_cursor_hot;
+    for (int y = 0; y < gfx_cursor_h; y++)
+        for (int x = 0; x < gfx_cursor_w; x++)
+        {
+            int sx = ox + x, sy = oy + y;
+            if (sx < 0 || sx >= W || sy < 0 || sy >= H)
+                continue;
+            volatile unsigned int *p = FB + (long long)sy * PITCH + sx;
+            CUR_SAVE[y * gfx_cursor_w + x] = *p;
+            int shade = gfx_cursor_pixels[2 * (y * gfx_cursor_w + x)];
+            int alpha = gfx_cursor_pixels[2 * (y * gfx_cursor_w + x) + 1];
+            blend_ptr(p, shade, shade, shade, alpha);
+        }
+    CUR_DRAWN = 1;
+}
+
+void gfx_cursor_show(int on)
+{
+    if (on)
+    {
+        CUR_ON = 1;
+        cursor_paint();
+    }
+    else
+    {
+        cursor_restore();
+        CUR_ON = 0;
+    }
+}
+
+void gfx_cursor_move(int x, int y)
+{
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    if (x >= W)
+        x = W - 1;
+    if (y >= H)
+        y = H - 1;
+    if (x == CUR_X && y == CUR_Y && CUR_DRAWN)
+        return;
+    cursor_restore();
+    CUR_X = x;
+    CUR_Y = y;
+    cursor_paint();
 }

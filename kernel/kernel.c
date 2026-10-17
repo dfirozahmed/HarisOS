@@ -2,6 +2,7 @@
 #include "bootinfo.h"
 #include "desktop.h"
 #include "gfx.h"
+#include "mouse.h"
 #include "pmm.h"
 #include "rtc.h"
 #include "taskbar.h"
@@ -34,6 +35,10 @@ void kernel_main(const BootInfo *info)
         desktop_set_memory(0, 0);
     desktop_set_double_buffered(double_buffered);
 
+    /* mouse: if there is none, the desktop simply stays non-interactive */
+    int have_mouse = gfx_ready() && mouse_init((int)info->width, (int)info->height) == 0;
+    desktop_set_mouse(have_mouse);
+
     RtcTime now;
     if (rtc_read(&now) == 0)
         taskbar_set_time(now.hour, now.minute, now.day, now.month, now.year);
@@ -41,10 +46,22 @@ void kernel_main(const BootInfo *info)
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
 
+    MouseState m;
+    if (have_mouse)
+    {
+        mouse_poll(&m);
+        gfx_cursor_move(m.x, m.y);
+        gfx_cursor_show(1);
+    }
+
     for (;;)
     {
+        if (have_mouse && mouse_poll(&m))
+        {
+            gfx_cursor_move(m.x, m.y);
+        }
 #if defined(__x86_64__) || defined(__i386__)
-        __asm__ volatile("hlt");
+        __asm__ volatile("pause");
 #endif
     }
 }

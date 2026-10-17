@@ -58,6 +58,14 @@ void gfx_present(void);                       /* copy changed area to the screen
 void gfx_disable_backbuffer(void);            /* present, then draw directly again */
 int gfx_double_buffered(void);
 
+/* ---- mouse pointer ------------------------------------------
+ * A smooth arrow drawn on top of everything, directly on the screen (never in
+ * the back buffer), so moving it does not need a redraw of the scene.
+ * gfx_present() keeps it on top automatically. When NOT double buffering,
+ * wrap scene drawing in gfx_cursor_show(0) ... gfx_cursor_show(1). */
+void gfx_cursor_show(int on);
+void gfx_cursor_move(int x, int y); /* x,y = position of the arrow tip */
+
 /* ---- colors ------------------------------------------------- */
 GfxColor gfx_rgb(unsigned char r, unsigned char g, unsigned char b);
 void gfx_unpack(GfxColor c, unsigned char *r, unsigned char *g, unsigned char *b);

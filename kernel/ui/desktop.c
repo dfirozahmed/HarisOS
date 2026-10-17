@@ -7,6 +7,7 @@
 static const char *STATUS_LINE;
 static unsigned long long MEM_FREE_MB, MEM_TOTAL_MB;
 static int DOUBLE_BUFFERED;
+static int MOUSE_PRESENT;
 
 void desktop_set_status(const char *line) { STATUS_LINE = line; }
 
@@ -17,6 +18,7 @@ void desktop_set_memory(unsigned long long free_mb, unsigned long long total_mb)
 }
 
 void desktop_set_double_buffered(int on) { DOUBLE_BUFFERED = on; }
+void desktop_set_mouse(int present) { MOUSE_PRESENT = present; }
 
 static char *put_str(char *o, const char *s)
 {
@@ -116,10 +118,15 @@ void desktop_draw(void)
     o = put_num(o, (unsigned long long)H);
     *o = 0;
     ui_text_in(ui_rect(in.x, in.y + 18, in.w, 24), buf, UI_TEXT_LABEL, UI_ALIGN_LEFT);
+    int bx = in.x;
     if (DOUBLE_BUFFERED)
-        ui_badge(in.x, in.y + in.h - 22, "Double buffered", t->success);
+        bx += ui_badge(bx, in.y + in.h - 22, "Double buffered", t->success) + 6;
     else
-        ui_badge(in.x, in.y + in.h - 22, "Direct drawing", t->warning);
+        bx += ui_badge(bx, in.y + in.h - 22, "Direct drawing", t->warning) + 6;
+    if (MOUSE_PRESENT)
+        ui_badge(bx, in.y + in.h - 22, "Mouse", t->accent_hi);
+    else
+        ui_badge(bx, in.y + in.h - 22, "No mouse", t->text_dim);
 
     if (STATUS_LINE)
     {

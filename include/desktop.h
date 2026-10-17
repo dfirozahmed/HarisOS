@@ -7,6 +7,7 @@
 void desktop_set_memory(unsigned long long free_mb, unsigned long long total_mb); /* total 0 = failed */
 void desktop_set_double_buffered(int on);
 void desktop_set_status(const char *line); /* optional extra line at the bottom (may be NULL) */
+void desktop_set_mouse(int present); /* shows a "Mouse" badge */
 
 void desktop_draw(void);
 
