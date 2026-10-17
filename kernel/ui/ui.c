@@ -362,6 +362,111 @@ void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state)
     ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 20, r.h), label, UI_TEXT_LABEL, UI_ALIGN_CENTER, text);
 }
 
+/* ---- button widgets with events ------------------------------ */
+void ui_buttons_init(UiButtonSet *s)
+{
+    s->count = 0;
+    s->hover = -1;
+    s->pressed = -1;
+    s->last_buttons = 0;
+}
+
+void ui_buttons_clear(UiButtonSet *s) { ui_buttons_init(s); }
+
+int ui_buttons_add(UiButtonSet *s, UiButton *b)
+{
+    if (!b || s->count >= UI_MAX_BUTTONS)
+        return -1;
+    s->items[s->count++] = b;
+    return 0;
+}
+
+void ui_buttons_draw(const UiButtonSet *s)
+{
+    for (int i = 0; i < s->count; i++)
+    {
+        const UiButton *b = s->items[i];
+        UiState st = UI_STATE_NORMAL;
+        if (!b->enabled)
+            st = UI_STATE_DISABLED;
+        else if (i == s->pressed)
+            st = UI_STATE_PRESSED;
+        else if (i == s->hover && s->pressed < 0)
+            st = UI_STATE_HOVER;
+        ui_button(b->r, b->label, b->kind, st);
+    }
+}
+
+UiRect ui_buttons_bounds(const UiButtonSet *s)
+{
+    if (s->count == 0)
+        return ui_rect(0, 0, 0, 0);
+    int x0 = s->items[0]->r.x, y0 = s->items[0]->r.y;
+    int x1 = x0 + s->items[0]->r.w, y1 = y0 + s->items[0]->r.h;
+    for (int i = 1; i < s->count; i++)
+    {
+        UiRect r = s->items[i]->r;
+        if (r.x < x0)
+            x0 = r.x;
+        if (r.y < y0)
+            y0 = r.y;
+        if (r.x + r.w > x1)
+            x1 = r.x + r.w;
+        if (r.y + r.h > y1)
+            y1 = r.y + r.h;
+    }
+    return ui_rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+static int buttons_hit(const UiButtonSet *s, int x, int y)
+{
+    for (int i = 0; i < s->count; i++)
+        if (s->items[i]->enabled && s->items[i]->r.w && ui_contains(s->items[i]->r, x, y))
+            return i;
+    return -1;
+}
+
+static void buttons_fire(UiButton *b, UiButtonFn fn)
+{
+    if (fn)
+        fn(b, b->user);
+}
+
+int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons)
+{
+    int changed = 0;
+    int over = buttons_hit(s, x, y);
+    int down = (buttons & 1) != 0, was_down = (s->last_buttons & 1) != 0;
+    s->last_buttons = buttons;
+
+    if (over != s->hover)
+    {
+        int old = s->hover;
+        s->hover = over;
+        changed = 1;
+        if (old >= 0 && old < s->count)
+            buttons_fire(s->items[old], s->items[old]->on_leave);
+        if (over >= 0 && s->hover == over) /* a callback may have changed things */
+            buttons_fire(s->items[over], s->items[over]->on_hover);
+    }
+
+    if (down && !was_down && over >= 0)
+    {
+        s->pressed = over;
+        changed = 1;
+        buttons_fire(s->items[over], s->items[over]->on_press);
+    }
+    else if (!down && was_down && s->pressed >= 0)
+    {
+        int p = s->pressed;
+        s->pressed = -1;
+        changed = 1;
+        if (p < s->count && p == over) /* released on the same button = a click */
+            buttons_fire(s->items[p], s->items[p]->on_click);
+    }
+    return changed;
+}
+
 void ui_progress(UiRect r, int percent)
 {
     const UiTheme *t = THEME;

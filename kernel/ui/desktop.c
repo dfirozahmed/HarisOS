@@ -9,6 +9,21 @@ static unsigned long long MEM_FREE_MB, MEM_TOTAL_MB;
 static int DOUBLE_BUFFERED;
 static int MOUSE_PRESENT;
 
+/* ---- buttons: each one has an onClick handler (see ui.h) ---------------- */
+static void on_get_started(UiButton *b, void *user);
+static void on_settings(UiButton *b, void *user);
+
+static UiButton BTN_START = UI_BUTTON("Get started", UI_BTN_PRIMARY, on_get_started, 0);
+static UiButton BTN_SETTINGS = UI_BUTTON("Settings", UI_BTN_SECONDARY, on_settings, 0);
+static UiButtonSet BUTTONS;
+static int BUTTONS_READY;
+static UiRect BTN_ROW; /* band behind the buttons, cleared before they are redrawn */
+static UiRgb BTN_BG;
+static int DARK = 1;
+static int FULL_REDRAW; /* set by a handler when the whole desktop must be redrawn */
+static int CLICKS;
+static char CLICK_MSG[48];
+
 void desktop_set_status(const char *line) { STATUS_LINE = line; }
 
 void desktop_set_memory(unsigned long long free_mb, unsigned long long total_mb)
@@ -47,6 +62,30 @@ static void caption(UiRect r, const char *s)
     ui_text(r.x, r.y, s, UI_TEXT_SMALL);
 }
 
+static void on_get_started(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    char *o = CLICK_MSG;
+    CLICKS++;
+    o = put_str(o, "\"Get started\" clicked ");
+    o = put_num(o, (unsigned long long)CLICKS);
+    o = put_str(o, CLICKS == 1 ? " time" : " times");
+    *o = 0;
+    STATUS_LINE = CLICK_MSG;
+    FULL_REDRAW = 1; /* the status line changes the window layout */
+}
+
+/* "Settings": switch between the dark and light theme */
+static void on_settings(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    DARK = !DARK;
+    ui_set_theme(DARK ? &ui_theme_dark : &ui_theme_light);
+    FULL_REDRAW = 1;
+}
+
 void desktop_draw(void)
 {
     if (!gfx_ready())
@@ -58,7 +97,7 @@ void desktop_draw(void)
     ui_background();
 
     /* ---- welcome window ---- */
-    int ww = W * 56 / 100, wh = 336;
+    int ww = W * 56 / 100, wh = STATUS_LINE ? 372 : 336;
     if (ww > 720)
         ww = 720;
     if (ww < 420)
@@ -136,10 +175,51 @@ void desktop_draw(void)
 
     /* buttons at the bottom right */
     UiRect btns = ui_cut_bottom(&body, 38);
-    ui_button(ui_cut_right(&btns, 130), "Get started", UI_BTN_PRIMARY, UI_STATE_NORMAL);
+    BTN_BG = t->surface;
+    BTN_START.r = ui_cut_right(&btns, 130);
     ui_cut_right(&btns, t->gap);
-    ui_button(ui_cut_right(&btns, 100), "Settings", UI_BTN_SECONDARY, UI_STATE_NORMAL);
+    BTN_SETTINGS.r = ui_cut_right(&btns, 100);
+    if (!BUTTONS_READY)
+    {
+        ui_buttons_init(&BUTTONS);
+        ui_buttons_add(&BUTTONS, &BTN_SETTINGS);
+        ui_buttons_add(&BUTTONS, &BTN_START);
+        BUTTONS_READY = 1;
+    }
+    /* the area behind the buttons (incl. their shadow); stays inside the window's straight edges */
+    BTN_ROW = ui_rect(BTN_SETTINGS.r.x - 10, BTN_SETTINGS.r.y - 10,
+                      BTN_START.r.x + BTN_START.r.w - BTN_SETTINGS.r.x + 20, BTN_START.r.h + 24);
+    ui_buttons_draw(&BUTTONS);
 
     gfx_reset_clip();
     taskbar_draw();
+}
+
+int desktop_pointer(int x, int y, unsigned buttons)
+{
+    if (!BUTTONS_READY)
+        return 0;
+
+    /* hover/press/click events are dispatched here; handlers run inside */
+    int changed = ui_buttons_pointer(&BUTTONS, x, y, buttons);
+
+    if (FULL_REDRAW)
+    {
+        FULL_REDRAW = 0;
+        gfx_cursor_show(0); /* keeps the pointer correct even without a back buffer */
+        desktop_draw();
+        gfx_present();
+        gfx_cursor_show(1);
+        return 1;
+    }
+    if (changed)
+    {
+        gfx_cursor_show(0);
+        gfx_fill_rect(BTN_ROW.x, BTN_ROW.y, BTN_ROW.w, BTN_ROW.h, ui_color(BTN_BG));
+        ui_buttons_draw(&BUTTONS);
+        gfx_present();
+        gfx_cursor_show(1);
+        return 1;
+    }
+    return 0;
 }

@@ -120,6 +120,47 @@ typedef enum
 } UiButtonKind;
 
 void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state);
+
+struct UiButton;
+typedef void (*UiButtonFn)(struct UiButton *btn, void *user);
+
+typedef struct UiButton
+{
+    UiRect r;
+    const char *label;
+    UiButtonKind kind;
+    int enabled;         /* 0 = greyed out, no events */
+    UiButtonFn on_click; /* mouse released on the button (press + release both inside) */
+    UiButtonFn on_press; /* mouse went down on the button   (may be NULL) */
+    UiButtonFn on_hover; /* pointer entered the button      (may be NULL) */
+    UiButtonFn on_leave; /* pointer left the button         (may be NULL) */
+    void *user;          /* your own data, passed to every callback */
+} UiButton;
+
+/* Static initializer: UiButton b = UI_BUTTON("Save", UI_BTN_PRIMARY, on_save, my_data); */
+#define UI_BUTTON(label_, kind_, click_, user_) \
+    {{0, 0, 0, 0}, (label_), (kind_), 1, (click_), 0, 0, 0, (user_)}
+
+#define UI_MAX_BUTTONS 16
+typedef struct
+{
+    UiButton *items[UI_MAX_BUTTONS];
+    int count;
+    int hover;   /* index under the pointer, -1 = none */
+    int pressed; /* index being held down, -1 = none */
+    unsigned last_buttons;
+} UiButtonSet;
+
+void ui_buttons_init(UiButtonSet *s);
+int ui_buttons_add(UiButtonSet *s, UiButton *b); /* 0 = ok, -1 = set is full */
+void ui_buttons_clear(UiButtonSet *s);           /* remove all (call before re-layout) */
+void ui_buttons_draw(const UiButtonSet *s);
+/* Feed the mouse state. Fires on_hover / on_leave / on_press / on_click.
+ * Returns 1 if a button's look changed (hover/press), so you should redraw. */
+int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons);
+/* Union of all button rectangles (to clear before a partial redraw). */
+UiRect ui_buttons_bounds(const UiButtonSet *s);
+
 void ui_progress(UiRect r, int percent);                /* 0..100 */
 void ui_toggle(UiRect r, int on);                       /* switch; 40x22 looks best */
 int ui_badge(int x, int y, const char *s, UiRgb color); /* small pill; returns its width */

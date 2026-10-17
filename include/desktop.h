@@ -11,4 +11,9 @@ void desktop_set_mouse(int present); /* shows a "Mouse" badge */
 
 void desktop_draw(void);
 
+/* Mouse input. Call whenever the pointer moved or a button changed.
+ * Hover and press effects are redrawn here (only the small area that changed).
+ * Returns 1 if something was drawn, so the caller should gfx_present(). */
+int desktop_pointer(int x, int y, unsigned buttons);
+
 #endif

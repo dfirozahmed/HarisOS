@@ -59,6 +59,7 @@ void kernel_main(const BootInfo *info)
         if (have_mouse && mouse_poll(&m))
         {
             gfx_cursor_move(m.x, m.y);
+            desktop_pointer(m.x, m.y, m.buttons);
         }
 #if defined(__x86_64__) || defined(__i386__)
         __asm__ volatile("pause");
