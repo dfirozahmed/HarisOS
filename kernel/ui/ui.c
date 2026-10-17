@@ -259,21 +259,24 @@ void ui_card(UiRect r)
     gfx_round_rect(r.x, r.y, r.w, r.h, t->radius_m, 1, ui_color(t->border));
 }
 
-UiRect ui_window(UiRect r, const char *title, int active)
+/* flat = 1: square corners and no shadow (a maximized window that touches the screen edges) */
+static UiRect window_impl(UiRect r, const char *title, int active, int flat)
 {
     const UiTheme *t = THEME;
     int tb = t->titlebar_h;
-    gfx_shadow(r.x, r.y, r.w, r.h, t->radius_l, active ? 28 : 18, 0, active ? 12 : 6,
-               (unsigned char)(active ? t->shadow : t->shadow * 2 / 3));
-    gfx_fill_round_rect(r.x, r.y, r.w, r.h, t->radius_l, ui_color(t->surface));
+    int rad = flat ? 0 : t->radius_l;
+    if (!flat)
+        gfx_shadow(r.x, r.y, r.w, r.h, rad, active ? 28 : 18, 0, active ? 12 : 6,
+                   (unsigned char)(active ? t->shadow : t->shadow * 2 / 3));
+    gfx_fill_round_rect(r.x, r.y, r.w, r.h, rad, ui_color(t->surface));
 
     /* title bar: draw a taller rounded rectangle but clip it, so only the top corners are round */
     GfxClip saved = gfx_get_clip();
     gfx_clip_intersect(r.x, r.y, r.w, tb);
-    gfx_fill_round_rect(r.x, r.y, r.w, tb + t->radius_l * 2, t->radius_l, ui_color(t->titlebar));
+    gfx_fill_round_rect(r.x, r.y, r.w, tb + rad * 2 + (flat ? 1 : 0), rad, ui_color(t->titlebar));
     gfx_restore_clip(saved);
     gfx_hline(r.x, r.y + tb, r.w, ui_color(t->border));
-    gfx_round_rect(r.x, r.y, r.w, r.h, t->radius_l, 1, ui_color(t->border));
+    gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
 
     /* window buttons (close / minimize / maximize) */
     int cy = r.y + tb / 2;
@@ -292,6 +295,9 @@ UiRect ui_window(UiRect r, const char *title, int active)
 
     return ui_rect(r.x + 1, r.y + tb + 1, r.w - 2, r.h - tb - 2);
 }
+
+UiRect ui_window(UiRect r, const char *title, int active) { return window_impl(r, title, active, 0); }
+UiRect ui_window_flat(UiRect r, const char *title, int active) { return window_impl(r, title, active, 1); }
 
 void ui_separator(int x, int y, int w)
 {

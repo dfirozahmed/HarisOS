@@ -101,6 +101,8 @@ void ui_background1(void);
 void ui_card(UiRect r); /* rounded panel with soft shadow and border */
 /* Window with title bar. Returns the content area below the title bar. */
 UiRect ui_window(UiRect r, const char *title, int active);
+/* Same, with square corners and no shadow: for a window that fills the screen. */
+UiRect ui_window_flat(UiRect r, const char *title, int active);
 void ui_separator(int x, int y, int w);
 
 /* ---- controls ------------------------------------------------ */

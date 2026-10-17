@@ -344,7 +344,8 @@ void wm_draw(void)
         if (w->r.x - SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + SHADOW_MARGIN <= saved.x0 ||
             w->r.y - SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + SHADOW_MARGIN <= saved.y0)
             continue;
-        UiRect body = ui_window(w->r, w->title, i == top);
+        UiRect body = w->maximized ? ui_window_flat(w->r, w->title, i == top)
+                                   : ui_window(w->r, w->title, i == top);
         layout(w);
         gfx_clip_intersect(body.x, body.y, body.w, body.h); /* nothing can spill out of the window */
         if (w->on_draw)
