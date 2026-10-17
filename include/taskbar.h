@@ -10,7 +10,8 @@ typedef enum
     TASKBAR_ICON_FILES,
     TASKBAR_ICON_TERMINAL,
     TASKBAR_ICON_SETTINGS,
-    TASKBAR_ICON_BROWSER
+    TASKBAR_ICON_BROWSER,
+    TASKBAR_ICON_LOGO
 } TaskbarIcon;
 
 typedef struct
@@ -18,9 +19,26 @@ typedef struct
     TaskbarIcon icon;
     int running; /* shows a small dot under the icon */
     int active;  /* focused app: highlighted, wide indicator */
+    int minimized; /* hidden: the icon is dimmed */
 } TaskbarApp;
 
+#define TASKBAR_MAX_APPS 8
+
+/* The app buttons to show (copied; at most TASKBAR_MAX_APPS). */
 void taskbar_set_apps(const TaskbarApp *apps, int count);
+
+/* Click events. start = the "Haris" button, app(i) = the i-th app button. */
+typedef void (*TaskbarStartFn)(void);
+typedef void (*TaskbarAppFn)(int index);
+void taskbar_set_callbacks(TaskbarStartFn on_start, TaskbarAppFn on_app);
+
+/* Mouse input. Returns 1 if a button's hover/press look changed, so the taskbar
+ * should be redrawn. Click callbacks run inside. Pass x = -1 when the pointer
+ * must be ignored (e.g. while a window is being dragged). */
+int taskbar_pointer(int x, int y, unsigned buttons);
+
+/* Where the taskbar is on screen (for partial redraws). */
+void taskbar_bounds(int *x, int *y, int *w, int *h);
 
 void taskbar_set_time(int hour, int minute, int day, int month, int year);
 

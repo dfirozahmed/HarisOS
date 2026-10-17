@@ -6,22 +6,85 @@
 #define GAP 4
 #define MAX_APPS 8
 
-static const TaskbarApp DEFAULT_APPS[] = {
-    {TASKBAR_ICON_FILES, 1, 0},
-    {TASKBAR_ICON_TERMINAL, 1, 1},
-    {TASKBAR_ICON_SETTINGS, 0, 0},
-    {TASKBAR_ICON_BROWSER, 0, 0},
-};
-static const TaskbarApp *APPS = DEFAULT_APPS;
-static int APP_COUNT = (int)(sizeof(DEFAULT_APPS) / sizeof(DEFAULT_APPS[0]));
+static TaskbarApp APPS[MAX_APPS] = {};
+static int APP_COUNT = 4;
 static int HAS_TIME, T_HOUR, T_MIN, T_DAY, T_MON, T_YEAR;
 
 void taskbar_set_apps(const TaskbarApp *apps, int count)
 {
     if (!apps || count < 0)
         return;
-    APPS = apps;
     APP_COUNT = count > MAX_APPS ? MAX_APPS : count;
+    for (int i = 0; i < APP_COUNT; i++)
+        APPS[i] = apps[i];
+}
+
+/* ---- clicks -------------------------------------------------- */
+static UiButton ITEM[1 + MAX_APPS];
+static UiButtonSet SET;
+static int SET_READY;
+static TaskbarStartFn CB_START;
+static TaskbarAppFn CB_APP;
+
+static void item_click(UiButton *b, void *user)
+{
+    (void)b;
+    int i = (int)(unsigned long long)user;
+    if (i == 0)
+    {
+        if (CB_START)
+            CB_START();
+    }
+    else if (CB_APP)
+        CB_APP(i - 1);
+}
+
+static void init_set(void)
+{
+    if (SET_READY)
+        return;
+    SET_READY = 1;
+    ui_buttons_init(&SET);
+    for (int i = 0; i < 1 + MAX_APPS; i++)
+    {
+        ITEM[i].r = ui_rect(0, 0, 0, 0);
+        ITEM[i].label = "";
+        ITEM[i].kind = UI_BTN_GHOST;
+        ITEM[i].enabled = 1;
+        ITEM[i].on_click = item_click;
+        ITEM[i].user = (void *)(unsigned long long)i;
+        ui_buttons_add(&SET, &ITEM[i]);
+    }
+}
+
+void taskbar_set_callbacks(TaskbarStartFn on_start, TaskbarAppFn on_app)
+{
+    CB_START = on_start;
+    CB_APP = on_app;
+}
+
+int taskbar_pointer(int x, int y, unsigned buttons)
+{
+    init_set();
+    return ui_buttons_pointer(&SET, x, y, buttons);
+}
+
+void taskbar_bounds(int *x, int *y, int *w, int *h)
+{
+    *x = 0;
+    *y = (int)gfx_height() - TASKBAR_HEIGHT;
+    *w = (int)gfx_width();
+    *h = TASKBAR_HEIGHT;
+}
+
+/* background color of a button: normal, hover or pressed */
+static UiRgb state_bg(UiRgb base, int idx, int active)
+{
+    if (SET.pressed == idx)
+        return ui_rgb_mix(base, ui_rgb(0, 0, 0), 55);
+    if (SET.hover == idx && SET.pressed < 0)
+        return ui_rgb_mix(base, ui_rgb(255, 255, 255), active ? 22 : 34);
+    return base;
 }
 
 void taskbar_set_time(int hour, int minute, int day, int month, int year)
@@ -57,6 +120,8 @@ static UiIcon app_icon(TaskbarIcon i)
         return UI_ICON_TERMINAL;
     case TASKBAR_ICON_SETTINGS:
         return UI_ICON_SETTINGS;
+    case TASKBAR_ICON_LOGO:
+        return UI_ICON_LOGO;
     default:
         return UI_ICON_BROWSER;
     }
@@ -66,6 +131,7 @@ void taskbar_draw(void)
 {
     if (!gfx_ready())
         return;
+    init_set();
     const UiTheme *t = ui_theme();
     int W = (int)gfx_width(), H = (int)gfx_height();
     int by = H - TASKBAR_HEIGHT;
@@ -81,7 +147,8 @@ void taskbar_draw(void)
     const Font *nf = t->font_title;
     int name_w = gfx_text_w(nf, "Haris");
     int start_w = 8 + 28 + 8 + name_w + 14;
-    gfx_fill_round_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, t->radius_m, ui_color(t->surface_alt));
+    ITEM[0].r = ui_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4);
+    gfx_fill_round_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, t->radius_m, ui_color(state_bg(t->surface_alt, 0, 0)));
     ui_icon(UI_ICON_LOGO, x + 8 + 14, cy, 28, t->text);
     ui_text_in(ui_rect(x + 8 + 28 + 8, cy - 14, name_w + 4, 28), "Haris", UI_TEXT_TITLE, UI_ALIGN_LEFT);
     x += start_w + GAP + 4;
@@ -98,14 +165,20 @@ void taskbar_draw(void)
     }
 
     /* apps */
+    for (int i = 0; i < MAX_APPS; i++)
+        ITEM[1 + i].r = ui_rect(0, 0, 0, 0); /* unused buttons: no hit area */
     for (int i = 0; i < APP_COUNT; i++)
     {
         int icx = x + SLOT / 2;
-        if (APPS[i].active)
+        ITEM[1 + i].r = ui_rect(x, cy - SLOT / 2 + 2, SLOT, SLOT - 4);
+        UiRgb bg = APPS[i].active ? ui_rgb_mix(t->surface_alt, t->accent, 40) : t->surface;
+        if (APPS[i].active || SET.hover == 1 + i || SET.pressed == 1 + i)
         {
-            gfx_fill_round_rect(x, cy - SLOT / 2 + 2, SLOT, SLOT - 4, t->radius_m, ui_color(ui_rgb_mix(t->surface_alt, t->accent, 40)));
+            if (!APPS[i].active)
+                bg = t->surface_alt;
+            gfx_fill_round_rect(x, cy - SLOT / 2 + 2, SLOT, SLOT - 4, t->radius_m, ui_color(state_bg(bg, 1 + i, APPS[i].active)));
         }
-        ui_icon(app_icon(APPS[i].icon), icx, cy - 1, 24, t->text);
+        ui_icon(app_icon(APPS[i].icon), icx, cy - 1, 24, APPS[i].minimized ? t->text_dim : t->text);
         if (APPS[i].active)
             gfx_fill_round_rect(icx - 8, by + TASKBAR_HEIGHT - 6, 16, 3, 1, ui_color(t->accent_hi));
         else if (APPS[i].running)

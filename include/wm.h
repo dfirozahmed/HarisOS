@@ -18,12 +18,14 @@ typedef void (*WmDrawFn)(struct Window *w, UiRect body);
 typedef struct Window
 {
     int used;
-    int id;                    /* unique, increasing: 1, 2, 3 ... */
-    UiRect r;                  /* outer rectangle on screen */
+    int id;        /* unique, increasing: 1, 2, 3 ... */
+    int minimized; /* hidden, but still open (shown in the taskbar) */
+    int icon;      /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
+    UiRect r;      /* outer rectangle on screen */
     char title[WM_TITLE_MAX];
-    WmDrawFn on_draw;          /* may be NULL */
+    WmDrawFn on_draw;                   /* may be NULL */
     void (*on_close)(struct Window *w); /* called just before the window is closed (may be NULL) */
-    void *user;                /* your own data */
+    void *user;                         /* your own data */
 
     UiButton btn[WM_MAX_BUTTONS];
     UiRect btn_rel[WM_MAX_BUTTONS]; /* position inside the content area */
@@ -40,9 +42,20 @@ void wm_raise(Window *w);
 int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
                   UiButtonFn on_click, void *user);
 
-UiRect wm_content(const Window *w);   /* the content area, in screen coordinates */
-int wm_count(void);                   /* open windows */
-Window *wm_top(void);                 /* focused window, or NULL */
+UiRect wm_content(const Window *w); /* the content area, in screen coordinates */
+int wm_count(void);                 /* open windows */
+Window *wm_top(void);               /* focused window (topmost visible one), or NULL */
+
+/* Minimize / restore. wm_activate() restores a minimized window and brings it to the front. */
+void wm_minimize(Window *w);
+void wm_activate(Window *w);
+int wm_is_open(const Window *w);
+/* Open windows (visible or minimized) in the order they were created, for the taskbar.
+ * Returns how many were stored in out[] (at most max). */
+int wm_list(Window **out, int max);
+int wm_dragging(void); /* 1 while a window is being dragged */
+/* Mark a screen rectangle as needing a redraw (e.g. the taskbar). */
+void wm_add_damage(UiRect r);
 
 /* Mark the whole screen as needing a redraw (e.g. after a theme change). */
 void wm_invalidate(void);

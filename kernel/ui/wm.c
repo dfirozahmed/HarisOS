@@ -61,7 +61,7 @@ int wm_take_damage(UiRect *out)
 /* drag / close-button state */
 static Window *DRAG;
 static int DRAG_DX, DRAG_DY;
-static Window *CLOSE_PRESSED;
+static Window *CLOSE_PRESSED, *MIN_PRESSED;
 static unsigned LAST_BUTTONS;
 
 /* ---- helpers ------------------------------------------------- */
@@ -100,6 +100,22 @@ static int close_hit(const Window *w, int x, int y)
     return dx * dx + dy * dy <= 8 * 8;
 }
 
+static int min_hit(const Window *w, int x, int y)
+{
+    int cx = w->r.x + 42, cy = w->r.y + ui_theme()->titlebar_h / 2;
+    int dx = x - cx, dy = y - cy;
+    return dx * dx + dy * dy <= 8 * 8;
+}
+
+/* index in Z of the topmost visible (not minimized) window, or -1 */
+static int top_index(void)
+{
+    for (int i = ZN - 1; i >= 0; i--)
+        if (!Z[i]->minimized)
+            return i;
+    return -1;
+}
+
 static int in_titlebar(const Window *w, int x, int y)
 {
     return ui_contains(ui_rect(w->r.x, w->r.y, w->r.w, ui_theme()->titlebar_h), x, y);
@@ -109,7 +125,7 @@ static int in_titlebar(const Window *w, int x, int y)
 static Window *window_at(int x, int y)
 {
     for (int i = ZN - 1; i >= 0; i--)
-        if (ui_contains(Z[i]->r, x, y))
+        if (!Z[i]->minimized && ui_contains(Z[i]->r, x, y))
             return Z[i];
     return 0;
 }
@@ -147,6 +163,9 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
     win->user = user;
     ui_buttons_init(&win->set);
 
+    int old = top_index();
+    if (old >= 0)
+        damage_window(Z[old]); /* it stops being the focused window */
     Z[ZN++] = win;
     damage_window(win);
     return win;
@@ -167,7 +186,12 @@ void wm_close(Window *w)
         DRAG = 0;
     if (CLOSE_PRESSED == w)
         CLOSE_PRESSED = 0;
+    if (MIN_PRESSED == w)
+        MIN_PRESSED = 0;
     damage_window(w);
+    int t = top_index();
+    if (t >= 0)
+        damage_window(Z[t]); /* the next window becomes focused */
 }
 
 void wm_raise(Window *w)
@@ -175,10 +199,64 @@ void wm_raise(Window *w)
     int zi = w ? z_index(w) : -1;
     if (zi < 0 || zi == ZN - 1)
         return;
+    int old = top_index();
+    if (old >= 0)
+        damage_window(Z[old]); /* focus look changes */
     for (int i = zi; i < ZN - 1; i++)
         Z[i] = Z[i + 1];
     Z[ZN - 1] = w;
     damage_window(w);
+}
+
+void wm_minimize(Window *w)
+{
+    if (!w || z_index(w) < 0 || w->minimized)
+        return;
+    w->minimized = 1;
+    if (DRAG == w)
+        DRAG = 0;
+    damage_window(w);
+    int t = top_index();
+    if (t >= 0)
+        damage_window(Z[t]); /* the next window becomes focused */
+}
+
+void wm_activate(Window *w)
+{
+    if (!w || z_index(w) < 0)
+        return;
+    if (w->minimized)
+    {
+        int old = top_index();
+        if (old >= 0)
+            damage_window(Z[old]);
+        w->minimized = 0;
+        damage_window(w);
+    }
+    wm_raise(w);
+}
+
+int wm_is_open(const Window *w) { return w && z_index(w) >= 0; }
+int wm_dragging(void) { return DRAG != 0; }
+void wm_add_damage(UiRect r) { damage(r.x, r.y, r.x + r.w, r.y + r.h); }
+
+int wm_list(Window **out, int max)
+{
+    int n = 0;
+    for (int i = 0; i < ZN && n < max; i++)
+        out[n++] = Z[i];
+    for (int i = 1; i < n; i++) /* oldest first (insertion sort by id) */
+    {
+        Window *k = out[i];
+        int j = i - 1;
+        while (j >= 0 && out[j]->id > k->id)
+        {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = k;
+    }
+    return n;
 }
 
 int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
@@ -204,20 +282,27 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
 }
 
 int wm_count(void) { return ZN; }
-Window *wm_top(void) { return ZN ? Z[ZN - 1] : 0; }
+Window *wm_top(void)
+{
+    int t = top_index();
+    return t >= 0 ? Z[t] : 0;
+}
 
 /* ---- drawing ------------------------------------------------- */
 void wm_draw(void)
 {
+    int top = top_index();
     for (int i = 0; i < ZN; i++)
     {
         Window *w = Z[i];
+        if (w->minimized)
+            continue;
         GfxClip saved = gfx_get_clip();
         /* partial redraw: skip windows (and shadows) that are outside the clip */
         if (w->r.x - SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + SHADOW_MARGIN <= saved.x0 ||
             w->r.y - SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + SHADOW_MARGIN <= saved.y0)
             continue;
-        UiRect body = ui_window(w->r, w->title, i == ZN - 1);
+        UiRect body = ui_window(w->r, w->title, i == top);
         layout(w);
         gfx_clip_intersect(body.x, body.y, body.w, body.h); /* nothing can spill out of the window */
         if (w->on_draw)
@@ -257,6 +342,8 @@ int wm_pointer(int x, int y, unsigned buttons)
             wm_raise(w);
             if (close_hit(w, x, y))
                 CLOSE_PRESSED = w;
+            else if (min_hit(w, x, y))
+                MIN_PRESSED = w;
             else if (in_titlebar(w, x, y))
             {
                 DRAG = w;
@@ -282,10 +369,16 @@ int wm_pointer(int x, int y, unsigned buttons)
     }
 
     /* 3) release: finish a drag, or a click on the close button */
-    Window *to_close = 0;
+    Window *to_close = 0, *to_min = 0;
     if (!down && was_down)
     {
         DRAG = 0;
+        if (MIN_PRESSED)
+        {
+            if (z_index(MIN_PRESSED) >= 0 && min_hit(MIN_PRESSED, x, y))
+                to_min = MIN_PRESSED;
+            MIN_PRESSED = 0;
+        }
         if (CLOSE_PRESSED)
         {
             if (z_index(CLOSE_PRESSED) >= 0 && close_hit(CLOSE_PRESSED, x, y))
@@ -297,7 +390,7 @@ int wm_pointer(int x, int y, unsigned buttons)
     /* 4) buttons: only the window under the pointer gets real coordinates,
      *    the others get "far away" so their hover/press state is cleared. */
     Window *target = DRAG ? 0 : window_at(x, y);
-    if (target && (CLOSE_PRESSED || to_close))
+    if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min))
         target = 0;
     for (int i = 0; i < ZN; i++)
     {
@@ -311,6 +404,8 @@ int wm_pointer(int x, int y, unsigned buttons)
 
     if (to_close)
         wm_close(to_close);
+    else if (to_min)
+        wm_minimize(to_min);
 
     return HAS_DMG;
 }

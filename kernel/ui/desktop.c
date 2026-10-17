@@ -99,6 +99,7 @@ static void open_hello_window(void)
         wm_invalidate();
         return;
     }
+    win->icon = TASKBAR_ICON_TERMINAL;
     STATUS_LINE = 0;
     int tb = ui_theme()->titlebar_h;
     int cw = w - 2, ch = h - tb - 2;
@@ -222,6 +223,7 @@ static void welcome_create(void)
     if (!WELCOME)
         return;
     WELCOME->on_close = on_welcome_close;
+    WELCOME->icon = TASKBAR_ICON_LOGO;
 
     /* buttons at the bottom right of the content area */
     int cw = ww - 2, ch = wh - t->titlebar_h - 2;
@@ -230,6 +232,66 @@ static void welcome_create(void)
     UiRect sett = ui_rect(start.x - t->gap - 100, by, 100, 38);
     wm_add_button(WELCOME, "Settings", UI_BTN_SECONDARY, sett, on_settings, 0);
     wm_add_button(WELCOME, "Get started", UI_BTN_PRIMARY, start, on_get_started, 0);
+}
+
+/* ---- taskbar: one button per open window ---------------------------- */
+static Window *TB_WIN[TASKBAR_MAX_APPS];
+static int TB_N;
+static unsigned TB_SIG[TASKBAR_MAX_APPS]; /* what the taskbar shows now, to spot changes */
+
+/* Rebuild the taskbar's app list from the open windows.
+ * Returns 1 if what the taskbar shows has changed (it must be redrawn). */
+static int refresh_taskbar(void)
+{
+    Window *list[TASKBAR_MAX_APPS];
+    TaskbarApp apps[TASKBAR_MAX_APPS];
+    unsigned sig[TASKBAR_MAX_APPS];
+    int n = wm_list(list, TASKBAR_MAX_APPS);
+    Window *top = wm_top();
+    for (int i = 0; i < n; i++)
+    {
+        apps[i].icon = (TaskbarIcon)list[i]->icon;
+        apps[i].running = 1;
+        apps[i].active = (list[i] == top);
+        apps[i].minimized = list[i]->minimized;
+        sig[i] = (unsigned)list[i]->id * 8u + (unsigned)apps[i].icon + (apps[i].active ? 64u : 0u) +
+                 (apps[i].minimized ? 128u : 0u);
+    }
+    int changed = (n != TB_N);
+    for (int i = 0; i < n && !changed; i++)
+        if (sig[i] != TB_SIG[i])
+            changed = 1;
+    for (int i = 0; i < n; i++)
+    {
+        TB_WIN[i] = list[i];
+        TB_SIG[i] = sig[i];
+    }
+    TB_N = n;
+    taskbar_set_apps(apps, n);
+    return changed;
+}
+
+/* Start button: open the welcome window again (or bring it to the front). */
+static void on_taskbar_start(void)
+{
+    if (!WELCOME)
+        welcome_create();
+    else
+        wm_activate(WELCOME);
+}
+
+/* App button: restore a minimized window, minimize the focused one, or focus another. */
+static void on_taskbar_app(int i)
+{
+    if (i < 0 || i >= TB_N || !wm_is_open(TB_WIN[i]))
+        return;
+    Window *w = TB_WIN[i];
+    if (w->minimized)
+        wm_activate(w);
+    else if (w == wm_top())
+        wm_minimize(w);
+    else
+        wm_raise(w);
 }
 
 static int FIRST = 1;
@@ -243,6 +305,7 @@ void desktop_draw(void)
     if (FIRST)
     {
         FIRST = 0;
+        taskbar_set_callbacks(on_taskbar_start, on_taskbar_app);
         welcome_create();
     }
     gfx_reset_clip();
@@ -251,6 +314,7 @@ void desktop_draw(void)
     WALL_VALID = gfx_cache_valid();
     wm_draw();
     gfx_reset_clip();
+    refresh_taskbar();
     taskbar_draw();
 }
 
@@ -261,15 +325,31 @@ static void desktop_draw_region(UiRect r)
     gfx_set_clip(r.x, r.y, r.w, r.h);
     gfx_cache_restore(r.x, r.y, r.w, r.h);
     wm_draw();
+    refresh_taskbar();
     taskbar_draw();
     gfx_reset_clip();
 }
 
 int desktop_pointer(int x, int y, unsigned buttons)
 {
-    /* focus, dragging, close buttons and button events are handled by the window manager */
-    if (!wm_pointer(x, y, buttons))
-        return 0;
+    int H = (int)gfx_height();
+    int on_bar = y >= H - TASKBAR_HEIGHT;
+
+    /* The taskbar is on top of the windows: while the pointer is over it (and no
+     * window is being dragged) the windows must not see the mouse. */
+    int to_windows = !(on_bar && !wm_dragging());
+    wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
+
+    /* The taskbar only sees the mouse when no window is being dragged. */
+    int bar_dirty = refresh_taskbar(); /* a window may have opened/closed/changed focus */
+    int bar_changed = taskbar_pointer(wm_dragging() ? -1 : x, wm_dragging() ? -1 : y, buttons);
+    bar_dirty |= refresh_taskbar();    /* a taskbar click may have changed windows */
+    if (bar_dirty || bar_changed)
+    {
+        int bx, by, bw, bh;
+        taskbar_bounds(&bx, &by, &bw, &bh);
+        wm_add_damage(ui_rect(bx, by, bw, bh));
+    }
 
     UiRect area;
     if (!wm_take_damage(&area))
