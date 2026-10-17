@@ -44,13 +44,19 @@ UiRect wm_content(const Window *w);   /* the content area, in screen coordinates
 int wm_count(void);                   /* open windows */
 Window *wm_top(void);                 /* focused window, or NULL */
 
-/* Ask for a redraw on the next wm_pointer() (e.g. after a theme change). */
+/* Mark the whole screen as needing a redraw (e.g. after a theme change). */
 void wm_invalidate(void);
+
+/* The screen area that changed since the last call (windows moved, closed,
+ * raised, button hover...). Returns 0 if nothing changed. After a change,
+ * redraw only that rectangle: restore the wallpaper there, then wm_draw()
+ * with the clip set to it. */
+int wm_take_damage(UiRect *out);
 
 /* Draw every window, back to front. Draw the wallpaper first. */
 void wm_draw(void);
 
-/* Feed the mouse state. Returns 1 when anything changed and the desktop must be redrawn. */
+/* Feed the mouse state. Returns 1 when something changed (then call wm_take_damage()). */
 int wm_pointer(int x, int y, unsigned buttons);
 
 #endif

@@ -11,6 +11,8 @@ static volatile unsigned int *FB;   /* the real screen */
 static volatile unsigned int *DRAW; /* where primitives draw: FB, or the back buffer */
 static int W, H, PITCH, DPITCH;     /* PITCH: screen scanline, DPITCH: draw target scanline */
 static int BACK;                    /* 1 while double buffering is on */
+static volatile unsigned int *CACHE; /* optional copy of the finished wallpaper (see gfx_cache_*) */
+static int CACHE_OK;                /* 1 once gfx_cache_save() filled it */
 static int DX0, DY0, DX1, DY1;      /* dirty rectangle (back buffer areas not yet shown) */
 static int RED_FIRST;               /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
 static int CX0, CY0, CX1, CY1;      /* active clip rectangle, CX1/CY1 exclusive */
@@ -31,6 +33,8 @@ void gfx_init(void *framebuffer, unsigned int width, unsigned int height,
     DRAW = FB;
     DPITCH = PITCH;
     BACK = 0;
+    CACHE = 0;
+    CACHE_OK = 0;
     DX0 = DY0 = DX1 = DY1 = 0;
     CUR_ON = CUR_DRAWN = 0;
     gfx_reset_clip();
@@ -242,9 +246,55 @@ void gfx_disable_backbuffer(void)
     DRAW = FB;
     DPITCH = PITCH;
     BACK = 0;
+    CACHE = 0;
+    CACHE_OK = 0;
 }
 
 int gfx_double_buffered(void) { return BACK; }
+
+/* ---- background cache ---------------------------------------- */
+int gfx_cache_enable(void *memory)
+{
+    if (!BACK || !memory)
+        return -1;
+    CACHE = (volatile unsigned int *)memory;
+    CACHE_OK = 0;
+    return 0;
+}
+
+int gfx_cache_valid(void) { return CACHE != 0 && CACHE_OK; }
+void gfx_cache_invalidate(void) { CACHE_OK = 0; }
+
+void gfx_cache_save(void)
+{
+    if (!CACHE || !BACK)
+        return;
+    for (int y = 0; y < H; y++)
+    {
+        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
+        volatile unsigned int *dst = CACHE + (long long)y * W;
+        for (int x = 0; x < W; x++)
+            dst[x] = src[x];
+    }
+    CACHE_OK = 1;
+}
+
+void gfx_cache_restore(int x, int y, int w, int h)
+{
+    if (!gfx_cache_valid())
+        return;
+    int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+    if (!clip_box(&x0, &y0, &x1, &y1))
+        return;
+    for (int yy = y0; yy < y1; yy++)
+    {
+        volatile unsigned int *src = CACHE + (long long)yy * W;
+        volatile unsigned int *dst = DRAW + (long long)yy * DPITCH;
+        for (int xx = x0; xx < x1; xx++)
+            dst[xx] = src[xx];
+    }
+    mark_dirty(x0, y0, x1, y1);
+}
 
 /* ---- plain primitives -------------------------------------- */
 #define ROW(y) (DRAW + (long long)(y) * DPITCH)

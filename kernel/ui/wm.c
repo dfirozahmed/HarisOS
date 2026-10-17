@@ -6,7 +6,57 @@ static Window POOL[WM_MAX_WINDOWS];
 static Window *Z[WM_MAX_WINDOWS]; /* open windows, Z[0] = back, Z[ZN-1] = top (focused) */
 static int ZN;
 static int NEXT_ID = 1;
-static int DIRTY;
+
+/* Damage: the screen area that must be redrawn (union of everything that changed). */
+#define SHADOW_MARGIN 48 /* window shadows reach this far beyond the window */
+static int HAS_DMG, DMG_X0, DMG_Y0, DMG_X1, DMG_Y1;
+
+static void damage(int x0, int y0, int x1, int y1)
+{
+    if (!HAS_DMG)
+    {
+        DMG_X0 = x0;
+        DMG_Y0 = y0;
+        DMG_X1 = x1;
+        DMG_Y1 = y1;
+        HAS_DMG = 1;
+        return;
+    }
+    if (x0 < DMG_X0)
+        DMG_X0 = x0;
+    if (y0 < DMG_Y0)
+        DMG_Y0 = y0;
+    if (x1 > DMG_X1)
+        DMG_X1 = x1;
+    if (y1 > DMG_Y1)
+        DMG_Y1 = y1;
+}
+
+/* a window plus its shadow */
+static void damage_window(const Window *w)
+{
+    damage(w->r.x - SHADOW_MARGIN, w->r.y - SHADOW_MARGIN,
+           w->r.x + w->r.w + SHADOW_MARGIN, w->r.y + w->r.h + SHADOW_MARGIN);
+}
+
+void wm_invalidate(void)
+{
+    damage(0, 0, (int)gfx_width(), (int)gfx_height());
+}
+
+int wm_take_damage(UiRect *out)
+{
+    if (!HAS_DMG)
+        return 0;
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int x0 = DMG_X0 < 0 ? 0 : DMG_X0, y0 = DMG_Y0 < 0 ? 0 : DMG_Y0;
+    int x1 = DMG_X1 > W ? W : DMG_X1, y1 = DMG_Y1 > H ? H : DMG_Y1;
+    HAS_DMG = 0;
+    if (x1 <= x0 || y1 <= y0)
+        return 0;
+    *out = ui_rect(x0, y0, x1 - x0, y1 - y0);
+    return 1;
+}
 
 /* drag / close-button state */
 static Window *DRAG;
@@ -98,7 +148,7 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
     ui_buttons_init(&win->set);
 
     Z[ZN++] = win;
-    DIRTY = 1;
+    damage_window(win);
     return win;
 }
 
@@ -117,7 +167,7 @@ void wm_close(Window *w)
         DRAG = 0;
     if (CLOSE_PRESSED == w)
         CLOSE_PRESSED = 0;
-    DIRTY = 1;
+    damage_window(w);
 }
 
 void wm_raise(Window *w)
@@ -128,7 +178,7 @@ void wm_raise(Window *w)
     for (int i = zi; i < ZN - 1; i++)
         Z[i] = Z[i + 1];
     Z[ZN - 1] = w;
-    DIRTY = 1;
+    damage_window(w);
 }
 
 int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
@@ -155,7 +205,6 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
 
 int wm_count(void) { return ZN; }
 Window *wm_top(void) { return ZN ? Z[ZN - 1] : 0; }
-void wm_invalidate(void) { DIRTY = 1; }
 
 /* ---- drawing ------------------------------------------------- */
 void wm_draw(void)
@@ -163,10 +212,14 @@ void wm_draw(void)
     for (int i = 0; i < ZN; i++)
     {
         Window *w = Z[i];
+        GfxClip saved = gfx_get_clip();
+        /* partial redraw: skip windows (and shadows) that are outside the clip */
+        if (w->r.x - SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + SHADOW_MARGIN <= saved.x0 ||
+            w->r.y - SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + SHADOW_MARGIN <= saved.y0)
+            continue;
         UiRect body = ui_window(w->r, w->title, i == ZN - 1);
         layout(w);
-        GfxClip saved = gfx_get_clip();
-        ui_clip(body); /* nothing can spill out of the window */
+        gfx_clip_intersect(body.x, body.y, body.w, body.h); /* nothing can spill out of the window */
         if (w->on_draw)
             w->on_draw(w, body);
         ui_buttons_draw(&w->set);
@@ -192,7 +245,6 @@ static void clamp_to_screen(Window *w)
 
 int wm_pointer(int x, int y, unsigned buttons)
 {
-    int changed = 0;
     int down = (buttons & 1) != 0, was_down = (LAST_BUTTONS & 1) != 0;
     LAST_BUTTONS = buttons;
 
@@ -220,11 +272,12 @@ int wm_pointer(int x, int y, unsigned buttons)
         int nx = x - DRAG_DX, ny = y - DRAG_DY;
         if (nx != DRAG->r.x || ny != DRAG->r.y)
         {
+            damage_window(DRAG); /* where it was */
             DRAG->r.x = nx;
             DRAG->r.y = ny;
             clamp_to_screen(DRAG);
             layout(DRAG);
-            changed = 1;
+            damage_window(DRAG); /* where it is now */
         }
     }
 
@@ -251,7 +304,7 @@ int wm_pointer(int x, int y, unsigned buttons)
         Window *w = Z[i];
         int hit = (w == target);
         if (ui_buttons_pointer(&w->set, hit ? x : -1, hit ? y : -1, buttons))
-            changed = 1;
+            damage_window(w);
         if (ZN == 0 || z_index(w) < 0) /* a click handler closed it */
             break;
     }
@@ -259,10 +312,5 @@ int wm_pointer(int x, int y, unsigned buttons)
     if (to_close)
         wm_close(to_close);
 
-    if (DIRTY)
-    {
-        DIRTY = 0;
-        changed = 1;
-    }
-    return changed;
+    return HAS_DMG;
 }

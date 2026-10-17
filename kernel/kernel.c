@@ -27,6 +27,16 @@ void kernel_main(const BootInfo *info)
             pmm_free_contiguous(mem, pages);
     }
 
+    /* Wallpaper cache: a second buffer of the same size. With it, moving a window only
+     * redraws the small area that changed. Optional: without it everything still works. */
+    if (double_buffered)
+    {
+        unsigned long long pages = (gfx_backbuffer_size() + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+        unsigned long long mem = pmm_alloc_contiguous(pages);
+        if (mem && gfx_cache_enable((void *)mem) != 0)
+            pmm_free_contiguous(mem, pages);
+    }
+
     /* Tell the desktop what to show (after the allocation above, so the free-memory figure includes it). */
     if (pmm_ok)
         desktop_set_memory(pmm_free_pages() * PMM_PAGE_SIZE / (1024 * 1024),

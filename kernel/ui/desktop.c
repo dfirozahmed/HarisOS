@@ -12,6 +12,7 @@ static int MOUSE_PRESENT;
 
 static Window *WELCOME; /* the welcome window (NULL once the user closes it) */
 static int DARK = 1;
+static int WALL_VALID; /* 1 = the wallpaper is in gfx's cache and matches the current theme */
 
 void desktop_set_status(const char *line) { STATUS_LINE = line; }
 
@@ -120,6 +121,7 @@ static void on_settings(UiButton *b, void *user)
     (void)user;
     DARK = !DARK;
     ui_set_theme(DARK ? &ui_theme_dark : &ui_theme_light);
+    WALL_VALID = 0; /* the wallpaper colors changed: draw it again */
     wm_invalidate();
 }
 
@@ -232,6 +234,8 @@ static void welcome_create(void)
 
 static int FIRST = 1;
 
+/* Full redraw: wallpaper, windows, taskbar. The finished wallpaper is saved in
+ * gfx's cache (if there is one) so later redraws can be partial. */
 void desktop_draw(void)
 {
     if (!gfx_ready())
@@ -241,10 +245,24 @@ void desktop_draw(void)
         FIRST = 0;
         welcome_create();
     }
+    gfx_reset_clip();
     ui_background();
+    gfx_cache_save(); /* does nothing without a cache */
+    WALL_VALID = gfx_cache_valid();
     wm_draw();
     gfx_reset_clip();
     taskbar_draw();
+}
+
+/* Partial redraw of one rectangle: put the saved wallpaper back, then draw the
+ * windows and taskbar on top, all clipped to that rectangle. */
+static void desktop_draw_region(UiRect r)
+{
+    gfx_set_clip(r.x, r.y, r.w, r.h);
+    gfx_cache_restore(r.x, r.y, r.w, r.h);
+    wm_draw();
+    taskbar_draw();
+    gfx_reset_clip();
 }
 
 int desktop_pointer(int x, int y, unsigned buttons)
@@ -252,8 +270,16 @@ int desktop_pointer(int x, int y, unsigned buttons)
     /* focus, dragging, close buttons and button events are handled by the window manager */
     if (!wm_pointer(x, y, buttons))
         return 0;
+
+    UiRect area;
+    if (!wm_take_damage(&area))
+        return 0;
+
     gfx_cursor_show(0); /* keeps the pointer correct even without a back buffer */
-    desktop_draw();
+    if (WALL_VALID && gfx_cache_valid())
+        desktop_draw_region(area); /* fast: only what changed */
+    else
+        desktop_draw();            /* first frame, new theme, or no cache */
     gfx_present();
     gfx_cursor_show(1);
     return 1;

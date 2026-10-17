@@ -58,6 +58,14 @@ void gfx_present(void);                       /* copy changed area to the screen
 void gfx_disable_backbuffer(void);            /* present, then draw directly again */
 int gfx_double_buffered(void);
 
+/* ---- background cache ---------------------------------------
+ */
+int gfx_cache_enable(void *memory); /* 0 = ok, -1 = no back buffer */
+int gfx_cache_valid(void);          /* 1 = saved and usable */
+void gfx_cache_invalidate(void);
+void gfx_cache_save(void); /* copy the whole back buffer into the cache */
+void gfx_cache_restore(int x, int y, int w, int h);
+
 /* ---- mouse pointer ------------------------------------------
  * A smooth arrow drawn on top of everything, directly on the screen (never in
  * the back buffer), so moving it does not need a redraw of the scene.
@@ -78,7 +86,10 @@ void gfx_reset_clip(void);
 /* Shrink the clip to the overlap of the current clip and this rectangle. */
 void gfx_clip_intersect(int x, int y, int w, int h);
 /* Remember / restore the current clip (use around nested widgets). */
-typedef struct { int x0, y0, x1, y1; } GfxClip;
+typedef struct
+{
+    int x0, y0, x1, y1;
+} GfxClip;
 GfxClip gfx_get_clip(void);
 void gfx_restore_clip(GfxClip c);
 
