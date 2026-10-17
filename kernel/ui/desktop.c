@@ -103,8 +103,8 @@ static void open_hello_window(void)
     STATUS_LINE = 0;
     int tb = ui_theme()->titlebar_h;
     int cw = w - 2, ch = h - tb - 2;
-    wm_add_button(win, "Close", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34),
-                  on_hello_close, win);
+    wm_add_button_ex(win, "Close", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34),
+                     WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_hello_close, win);
 }
 
 /* ---- the welcome window ---- */
@@ -202,7 +202,6 @@ static void welcome_draw(Window *w, UiRect body)
         ui_cut_top(&body, t->gap);
         ui_text_in(ui_cut_top(&body, 22), STATUS_LINE, UI_TEXT_SMALL, UI_ALIGN_LEFT);
     }
-
 }
 
 static void welcome_create(void)
@@ -230,8 +229,9 @@ static void welcome_create(void)
     int by = ch - t->pad - 38;
     UiRect start = ui_rect(cw - t->pad - 130, by, 130, 38);
     UiRect sett = ui_rect(start.x - t->gap - 100, by, 100, 38);
-    wm_add_button(WELCOME, "Settings", UI_BTN_SECONDARY, sett, on_settings, 0);
-    wm_add_button(WELCOME, "Get started", UI_BTN_PRIMARY, start, on_get_started, 0);
+    int corner = WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM; /* stay in the corner when maximized */
+    wm_add_button_ex(WELCOME, "Settings", UI_BTN_SECONDARY, sett, corner, on_settings, 0);
+    wm_add_button_ex(WELCOME, "Get started", UI_BTN_PRIMARY, start, corner, on_get_started, 0);
 }
 
 /* ---- taskbar: one button per open window ---------------------------- */
@@ -343,7 +343,7 @@ int desktop_pointer(int x, int y, unsigned buttons)
     /* The taskbar only sees the mouse when no window is being dragged. */
     int bar_dirty = refresh_taskbar(); /* a window may have opened/closed/changed focus */
     int bar_changed = taskbar_pointer(wm_dragging() ? -1 : x, wm_dragging() ? -1 : y, buttons);
-    bar_dirty |= refresh_taskbar();    /* a taskbar click may have changed windows */
+    bar_dirty |= refresh_taskbar(); /* a taskbar click may have changed windows */
     if (bar_dirty || bar_changed)
     {
         int bx, by, bw, bh;
@@ -361,7 +361,7 @@ int desktop_pointer(int x, int y, unsigned buttons)
     if (WALL_VALID && gfx_cache_valid())
         desktop_draw_region(area); /* fast: only what changed */
     else
-        desktop_draw();            /* first frame, new theme, or no cache */
+        desktop_draw(); /* first frame, new theme, or no cache */
     gfx_present();
     if (direct)
         gfx_cursor_show(1);

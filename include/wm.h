@@ -1,6 +1,19 @@
 /* ============================================================
- * HarisOS window manager
+ * HarisOS window manager (small, no malloc)
  *
+ * Keeps a fixed pool of windows with a z-order (back to front), and handles
+ * focus (click raises), dragging by the title bar, the red close button, and
+ * routing mouse events to the buttons of the window under the pointer.
+ *
+ *   Window *w = wm_create("Hello", 100, 80, 360, 200, my_draw, my_data);
+ *   wm_add_button(w, "Close", UI_BTN_DANGER, ui_rect(240, 140, 100, 34), on_close, w);
+ *
+ *   wm_draw();                              // draws all windows, back to front
+ *   if (wm_pointer(x, y, buttons))          // on every mouse update
+ *       { redraw the desktop; wm_draw(); }
+ *
+ * Button rectangles are relative to the window's content area, so they follow
+ * the window when it is dragged.
  * ============================================================ */
 #ifndef HARIS_WM_H
 #define HARIS_WM_H
@@ -18,17 +31,21 @@ typedef void (*WmDrawFn)(struct Window *w, UiRect body);
 typedef struct Window
 {
     int used;
-    int id;        /* unique, increasing: 1, 2, 3 ... */
-    int minimized; /* hidden, but still open (shown in the taskbar) */
-    int icon;      /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
-    UiRect r;      /* outer rectangle on screen */
+    int id;                    /* unique, increasing: 1, 2, 3 ... */
+    int minimized;             /* hidden, but still open (shown in the taskbar) */
+    int maximized;             /* fills the screen above the taskbar */
+    UiRect normal;             /* size and place to go back to when un-maximized */
+    int base_w, base_h;        /* outer size at creation: reference for button anchors */
+    int icon;                  /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
+    UiRect r;                  /* outer rectangle on screen */
     char title[WM_TITLE_MAX];
-    WmDrawFn on_draw;                   /* may be NULL */
+    WmDrawFn on_draw;          /* may be NULL */
     void (*on_close)(struct Window *w); /* called just before the window is closed (may be NULL) */
-    void *user;                         /* your own data */
+    void *user;                /* your own data */
 
     UiButton btn[WM_MAX_BUTTONS];
-    UiRect btn_rel[WM_MAX_BUTTONS]; /* position inside the content area */
+    UiRect btn_rel[WM_MAX_BUTTONS]; /* position inside the content area (at the creation size) */
+    int btn_anchor[WM_MAX_BUTTONS]; /* WM_ANCHOR_* flags */
     int btn_count;
     UiButtonSet set;
 } Window;
@@ -42,9 +59,19 @@ void wm_raise(Window *w);
 int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
                   UiButtonFn on_click, void *user);
 
-UiRect wm_content(const Window *w); /* the content area, in screen coordinates */
-int wm_count(void);                 /* open windows */
-Window *wm_top(void);               /* focused window (topmost visible one), or NULL */
+/* Same, with an anchor. When the window grows (maximize), a button anchored to
+ * the right / bottom keeps its distance from that edge instead of the left / top. */
+#define WM_ANCHOR_RIGHT 1
+#define WM_ANCHOR_BOTTOM 2
+int wm_add_button_ex(Window *w, const char *label, UiButtonKind kind, UiRect rel, int anchor,
+                     UiButtonFn on_click, void *user);
+
+/* Maximize: fill the screen above the taskbar; un-maximize: go back to the old size. */
+void wm_set_maximized(Window *w, int on);
+
+UiRect wm_content(const Window *w);   /* the content area, in screen coordinates */
+int wm_count(void);                   /* open windows */
+Window *wm_top(void);                 /* focused window (topmost visible one), or NULL */
 
 /* Minimize / restore. wm_activate() restores a minimized window and brings it to the front. */
 void wm_minimize(Window *w);
@@ -53,7 +80,7 @@ int wm_is_open(const Window *w);
 /* Open windows (visible or minimized) in the order they were created, for the taskbar.
  * Returns how many were stored in out[] (at most max). */
 int wm_list(Window **out, int max);
-int wm_dragging(void); /* 1 while a window is being dragged */
+int wm_dragging(void);                /* 1 while a window is being dragged */
 /* Mark a screen rectangle as needing a redraw (e.g. the taskbar). */
 void wm_add_damage(UiRect r);
 

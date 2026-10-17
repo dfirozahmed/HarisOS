@@ -61,7 +61,8 @@ int wm_take_damage(UiRect *out)
 /* drag / close-button state */
 static Window *DRAG;
 static int DRAG_DX, DRAG_DY;
-static Window *CLOSE_PRESSED, *MIN_PRESSED;
+static Window *CLOSE_PRESSED, *MIN_PRESSED, *MAX_PRESSED;
+static int DRAG_PX, DRAG_PY; /* where the drag started (to tell a click from a drag) */
 static unsigned LAST_BUTTONS;
 
 /* ---- helpers ------------------------------------------------- */
@@ -86,9 +87,13 @@ UiRect wm_content(const Window *w)
 static void layout(Window *w)
 {
     UiRect c = wm_content(w);
+    int tb = ui_theme()->titlebar_h;
+    int base_cw = w->base_w - 2, base_ch = w->base_h - tb - 2; /* content size the buttons were placed for */
     for (int i = 0; i < w->btn_count; i++)
     {
-        w->btn[i].r = ui_rect(c.x + w->btn_rel[i].x, c.y + w->btn_rel[i].y,
+        int dx = (w->btn_anchor[i] & WM_ANCHOR_RIGHT) ? c.w - base_cw : 0;
+        int dy = (w->btn_anchor[i] & WM_ANCHOR_BOTTOM) ? c.h - base_ch : 0;
+        w->btn[i].r = ui_rect(c.x + w->btn_rel[i].x + dx, c.y + w->btn_rel[i].y + dy,
                               w->btn_rel[i].w, w->btn_rel[i].h);
     }
 }
@@ -103,6 +108,13 @@ static int close_hit(const Window *w, int x, int y)
 static int min_hit(const Window *w, int x, int y)
 {
     int cx = w->r.x + 42, cy = w->r.y + ui_theme()->titlebar_h / 2;
+    int dx = x - cx, dy = y - cy;
+    return dx * dx + dy * dy <= 8 * 8;
+}
+
+static int max_hit(const Window *w, int x, int y)
+{
+    int cx = w->r.x + 62, cy = w->r.y + ui_theme()->titlebar_h / 2;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 8 * 8;
 }
@@ -158,6 +170,9 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
     win->used = 1;
     win->id = NEXT_ID++;
     win->r = ui_rect(x, y, w, h);
+    win->normal = win->r;
+    win->base_w = w;
+    win->base_h = h;
     copy_title(win->title, title);
     win->on_draw = draw;
     win->user = user;
@@ -188,6 +203,8 @@ void wm_close(Window *w)
         CLOSE_PRESSED = 0;
     if (MIN_PRESSED == w)
         MIN_PRESSED = 0;
+    if (MAX_PRESSED == w)
+        MAX_PRESSED = 0;
     damage_window(w);
     int t = top_index();
     if (t >= 0)
@@ -262,6 +279,30 @@ int wm_list(Window **out, int max)
 int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
                   UiButtonFn on_click, void *user)
 {
+    return wm_add_button_ex(w, label, kind, rel, 0, on_click, user);
+}
+
+void wm_set_maximized(Window *w, int on)
+{
+    on = on != 0;
+    if (!w || z_index(w) < 0 || w->maximized == on)
+        return;
+    damage_window(w); /* where it was */
+    if (on)
+    {
+        w->normal = w->r;
+        w->r = ui_rect(0, 0, (int)gfx_width(), (int)gfx_height() - TASKBAR_HEIGHT);
+    }
+    else
+        w->r = w->normal;
+    w->maximized = on;
+    layout(w);
+    damage_window(w); /* where it is now */
+}
+
+int wm_add_button_ex(Window *w, const char *label, UiButtonKind kind, UiRect rel, int anchor,
+                     UiButtonFn on_click, void *user)
+{
     if (!w || w->btn_count >= WM_MAX_BUTTONS)
         return -1;
     int i = w->btn_count++;
@@ -276,6 +317,7 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
     b->on_leave = 0;
     b->user = user;
     w->btn_rel[i] = rel;
+    w->btn_anchor[i] = anchor;
     ui_buttons_add(&w->set, b);
     layout(w);
     return 0;
@@ -315,6 +357,8 @@ void wm_draw(void)
 /* ---- mouse --------------------------------------------------- */
 static void clamp_to_screen(Window *w)
 {
+    if (w->maximized)
+        return;
     int W = (int)gfx_width(), H = (int)gfx_height();
     int tb = ui_theme()->titlebar_h;
     int keep = 120; /* at least this much of the title bar stays on screen */
@@ -344,17 +388,36 @@ int wm_pointer(int x, int y, unsigned buttons)
                 CLOSE_PRESSED = w;
             else if (min_hit(w, x, y))
                 MIN_PRESSED = w;
+            else if (max_hit(w, x, y))
+                MAX_PRESSED = w;
             else if (in_titlebar(w, x, y))
             {
                 DRAG = w;
+                DRAG_PX = x;
+                DRAG_PY = y;
                 DRAG_DX = x - w->r.x;
                 DRAG_DY = y - w->r.y;
             }
         }
     }
 
-    /* 2) move: drag the window */
-    if (DRAG && down)
+    /* 2) move: drag the window. A maximized window first goes back to its normal
+     *    size once the pointer has really moved, keeping the pointer at the same relative spot. */
+    if (DRAG && down && DRAG->maximized)
+    {
+        int mx = x - DRAG_PX, my = y - DRAG_PY;
+        if (mx < 0)
+            mx = -mx;
+        if (my < 0)
+            my = -my;
+        if (mx > 4 || my > 4)
+        {
+            Window *d = DRAG;
+            DRAG_DX = DRAG_DX * d->normal.w / d->r.w;
+            wm_set_maximized(d, 0);
+        }
+    }
+    if (DRAG && down && !DRAG->maximized)
     {
         int nx = x - DRAG_DX, ny = y - DRAG_DY;
         if (nx != DRAG->r.x || ny != DRAG->r.y)
@@ -369,10 +432,16 @@ int wm_pointer(int x, int y, unsigned buttons)
     }
 
     /* 3) release: finish a drag, or a click on the close button */
-    Window *to_close = 0, *to_min = 0;
+    Window *to_close = 0, *to_min = 0, *to_max = 0;
     if (!down && was_down)
     {
         DRAG = 0;
+        if (MAX_PRESSED)
+        {
+            if (z_index(MAX_PRESSED) >= 0 && max_hit(MAX_PRESSED, x, y))
+                to_max = MAX_PRESSED;
+            MAX_PRESSED = 0;
+        }
         if (MIN_PRESSED)
         {
             if (z_index(MIN_PRESSED) >= 0 && min_hit(MIN_PRESSED, x, y))
@@ -390,7 +459,7 @@ int wm_pointer(int x, int y, unsigned buttons)
     /* 4) buttons: only the window under the pointer gets real coordinates,
      *    the others get "far away" so their hover/press state is cleared. */
     Window *target = DRAG ? 0 : window_at(x, y);
-    if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min))
+    if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min || MAX_PRESSED || to_max))
         target = 0;
     for (int i = 0; i < ZN; i++)
     {
@@ -406,6 +475,8 @@ int wm_pointer(int x, int y, unsigned buttons)
         wm_close(to_close);
     else if (to_min)
         wm_minimize(to_min);
+    else if (to_max)
+        wm_set_maximized(to_max, !to_max->maximized);
 
     return HAS_DMG;
 }
