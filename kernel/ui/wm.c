@@ -1,6 +1,7 @@
 /* HarisOS window manager. See include/wm.h. */
 #include "wm.h"
 #include "taskbar.h"
+#include "timer.h"
 
 static Window POOL[WM_MAX_WINDOWS];
 static Window *Z[WM_MAX_WINDOWS]; /* open windows, Z[0] = back, Z[ZN-1] = top (focused) */
@@ -62,7 +63,11 @@ int wm_take_damage(UiRect *out)
 static Window *DRAG;
 static int DRAG_DX, DRAG_DY;
 static Window *CLOSE_PRESSED, *MIN_PRESSED, *MAX_PRESSED;
-static int DRAG_PX, DRAG_PY; /* where the drag started (to tell a click from a drag) */
+#define DOUBLE_CLICK_MS 450     /* two clicks on a title bar within this time = double-click */
+static Window *LC_WIN;          /* window of the last title-bar click */
+static unsigned long long LC_T; /* ... and when it happened */
+static int LC_X, LC_Y;          /* ... and where */
+static int DRAG_PX, DRAG_PY;    /* where the drag started (to tell a click from a drag) */
 static unsigned LAST_BUTTONS;
 
 /* ---- helpers ------------------------------------------------- */
@@ -205,6 +210,8 @@ void wm_close(Window *w)
         MIN_PRESSED = 0;
     if (MAX_PRESSED == w)
         MAX_PRESSED = 0;
+    if (LC_WIN == w)
+        LC_WIN = 0;
     damage_window(w);
     int t = top_index();
     if (t >= 0)
@@ -433,10 +440,42 @@ int wm_pointer(int x, int y, unsigned buttons)
     }
 
     /* 3) release: finish a drag, or a click on the close button */
-    Window *to_close = 0, *to_min = 0, *to_max = 0;
+    Window *to_close = 0, *to_min = 0, *to_max = 0, *to_toggle = 0;
     if (!down && was_down)
     {
+        Window *pressed = DRAG; /* title bar pressed and released without moving = a click */
         DRAG = 0;
+        if (pressed)
+        {
+            int mx = x - DRAG_PX, my = y - DRAG_PY;
+            if (mx < 0)
+                mx = -mx;
+            if (my < 0)
+                my = -my;
+            if (mx <= 4 && my <= 4 && timer_ready())
+            {
+                unsigned long long now = timer_ms();
+                int gx = x - LC_X, gy = y - LC_Y;
+                if (gx < 0)
+                    gx = -gx;
+                if (gy < 0)
+                    gy = -gy;
+                if (LC_WIN == pressed && now - LC_T <= DOUBLE_CLICK_MS && gx <= 8 && gy <= 8)
+                {
+                    to_toggle = pressed; /* double-click: maximize / restore */
+                    LC_WIN = 0;
+                }
+                else
+                {
+                    LC_WIN = pressed;
+                    LC_T = now;
+                    LC_X = x;
+                    LC_Y = y;
+                }
+            }
+            else
+                LC_WIN = 0;
+        }
         if (MAX_PRESSED)
         {
             if (z_index(MAX_PRESSED) >= 0 && max_hit(MAX_PRESSED, x, y))
@@ -460,7 +499,7 @@ int wm_pointer(int x, int y, unsigned buttons)
     /* 4) buttons: only the window under the pointer gets real coordinates,
      *    the others get "far away" so their hover/press state is cleared. */
     Window *target = DRAG ? 0 : window_at(x, y);
-    if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min || MAX_PRESSED || to_max))
+    if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min || MAX_PRESSED || to_max || to_toggle))
         target = 0;
     for (int i = 0; i < ZN; i++)
     {
@@ -478,6 +517,8 @@ int wm_pointer(int x, int y, unsigned buttons)
         wm_minimize(to_min);
     else if (to_max)
         wm_set_maximized(to_max, !to_max->maximized);
+    else if (to_toggle)
+        wm_set_maximized(to_toggle, !to_toggle->maximized);
 
     return HAS_DMG;
 }

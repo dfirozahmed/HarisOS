@@ -6,6 +6,7 @@
 #include "pmm.h"
 #include "rtc.h"
 #include "taskbar.h"
+#include "timer.h"
 
 void kernel_main(const BootInfo *info)
 {
@@ -48,6 +49,8 @@ void kernel_main(const BootInfo *info)
     /* mouse: if there is none, the desktop simply stays non-interactive */
     int have_mouse = gfx_ready() && mouse_init((int)info->width, (int)info->height) == 0;
     desktop_set_mouse(have_mouse);
+
+    timer_init(); /* needed for double-click */
 
     RtcTime now;
     if (rtc_read(&now) == 0)

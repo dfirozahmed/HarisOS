@@ -60,6 +60,7 @@ set(KERNEL_SOURCES
     kernel/kernel.c
     kernel/memory/pmm.c
     kernel/rtc.c
+    kernel/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
     kernel/graphics/gfx.c       # drawing: anti-aliased shapes, alpha, gradients, double buffer
     kernel/graphics/font.c      # smooth text rendering
     kernel/graphics/font_data.c # Poppins
