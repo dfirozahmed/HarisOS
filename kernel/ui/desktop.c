@@ -3,26 +3,15 @@
 #include "desktop.h"
 #include "taskbar.h"
 #include "ui.h"
+#include "wm.h"
 
 static const char *STATUS_LINE;
 static unsigned long long MEM_FREE_MB, MEM_TOTAL_MB;
 static int DOUBLE_BUFFERED;
 static int MOUSE_PRESENT;
 
-/* ---- buttons: each one has an onClick handler (see ui.h) ---------------- */
-static void on_get_started(UiButton *b, void *user);
-static void on_settings(UiButton *b, void *user);
-
-static UiButton BTN_START = UI_BUTTON("Get started", UI_BTN_PRIMARY, on_get_started, 0);
-static UiButton BTN_SETTINGS = UI_BUTTON("Settings", UI_BTN_SECONDARY, on_settings, 0);
-static UiButtonSet BUTTONS;
-static int BUTTONS_READY;
-static UiRect BTN_ROW; /* band behind the buttons, cleared before they are redrawn */
-static UiRgb BTN_BG;
+static Window *WELCOME; /* the welcome window (NULL once the user closes it) */
 static int DARK = 1;
-static int FULL_REDRAW; /* set by a handler when the whole desktop must be redrawn */
-static int CLICKS;
-static char CLICK_MSG[48];
 
 void desktop_set_status(const char *line) { STATUS_LINE = line; }
 
@@ -62,18 +51,66 @@ static void caption(UiRect r, const char *s)
     ui_text(r.x, r.y, s, UI_TEXT_SMALL);
 }
 
+/* ---- the "Hello" windows opened by "Get started" ---- */
+static void hello_draw(Window *w, UiRect body)
+{
+    const UiTheme *t = ui_theme();
+    body = ui_inset(body, t->pad);
+    char buf[48], *o = buf;
+    o = put_str(o, "Window #");
+    o = put_num(o, (unsigned long long)w->id);
+    *o = 0;
+    ui_text(body.x, body.y, buf, UI_TEXT_HEADING);
+    ui_text(body.x, body.y + 34, "Drag the title bar to move me.", UI_TEXT_DIM);
+    ui_text(body.x, body.y + 54, "Click a window to bring it to the front.", UI_TEXT_DIM);
+    o = buf;
+    o = put_num(o, (unsigned long long)wm_count());
+    o = put_str(o, " window(s) open");
+    *o = 0;
+    ui_text(body.x, body.y + 80, buf, UI_TEXT_SMALL);
+}
+
+static void on_hello_close(UiButton *b, void *user)
+{
+    (void)b;
+    wm_close((Window *)user);
+}
+
+static void open_hello_window(void)
+{
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int k = wm_count();
+    int w = 340, h = 200;
+    int x = 60 + 32 * (k % 8), y = 40 + 32 * (k % 8);
+    if (x + w > W)
+        x = W - w;
+    if (y + h > H - TASKBAR_HEIGHT)
+        y = H - TASKBAR_HEIGHT - h;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+
+    Window *win = wm_create("Hello", x, y, w, h, hello_draw, 0);
+    if (!win)
+    {
+        STATUS_LINE = "Window limit reached - close one first.";
+        wm_invalidate();
+        return;
+    }
+    STATUS_LINE = 0;
+    int tb = ui_theme()->titlebar_h;
+    int cw = w - 2, ch = h - tb - 2;
+    wm_add_button(win, "Close", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34),
+                  on_hello_close, win);
+}
+
+/* ---- the welcome window ---- */
 static void on_get_started(UiButton *b, void *user)
 {
     (void)b;
     (void)user;
-    char *o = CLICK_MSG;
-    CLICKS++;
-    o = put_str(o, "\"Get started\" clicked ");
-    o = put_num(o, (unsigned long long)CLICKS);
-    o = put_str(o, CLICKS == 1 ? " time" : " times");
-    *o = 0;
-    STATUS_LINE = CLICK_MSG;
-    FULL_REDRAW = 1; /* the status line changes the window layout */
+    open_hello_window();
 }
 
 /* "Settings": switch between the dark and light theme */
@@ -83,30 +120,20 @@ static void on_settings(UiButton *b, void *user)
     (void)user;
     DARK = !DARK;
     ui_set_theme(DARK ? &ui_theme_dark : &ui_theme_light);
-    FULL_REDRAW = 1;
+    wm_invalidate();
 }
 
-void desktop_draw(void)
+static void on_welcome_close(Window *w)
 {
-    if (!gfx_ready())
-        return;
+    (void)w;
+    WELCOME = 0;
+}
+
+static void welcome_draw(Window *w, UiRect body)
+{
+    (void)w;
     const UiTheme *t = ui_theme();
     int W = (int)gfx_width(), H = (int)gfx_height();
-    int area_h = H - TASKBAR_HEIGHT;
-
-    ui_background();
-
-    /* ---- welcome window ---- */
-    int ww = W * 56 / 100, wh = STATUS_LINE ? 372 : 336;
-    if (ww > 720)
-        ww = 720;
-    if (ww < 420)
-        ww = W < 420 ? W - 20 : 420;
-    if (wh > area_h - 24)
-        wh = area_h - 24;
-    UiRect win = ui_center(ui_rect(0, 0, W, area_h), ww, wh);
-    UiRect body = ui_window(win, "Welcome to HarisOS", 1);
-    ui_clip(body); /* nothing can spill out of the window */
     body = ui_inset(body, t->pad);
 
     /* header: icon + heading + subtitle */
@@ -173,53 +200,61 @@ void desktop_draw(void)
         ui_text_in(ui_cut_top(&body, 22), STATUS_LINE, UI_TEXT_SMALL, UI_ALIGN_LEFT);
     }
 
-    /* buttons at the bottom right */
-    UiRect btns = ui_cut_bottom(&body, 38);
-    BTN_BG = t->surface;
-    BTN_START.r = ui_cut_right(&btns, 130);
-    ui_cut_right(&btns, t->gap);
-    BTN_SETTINGS.r = ui_cut_right(&btns, 100);
-    if (!BUTTONS_READY)
-    {
-        ui_buttons_init(&BUTTONS);
-        ui_buttons_add(&BUTTONS, &BTN_SETTINGS);
-        ui_buttons_add(&BUTTONS, &BTN_START);
-        BUTTONS_READY = 1;
-    }
-    /* the area behind the buttons (incl. their shadow); stays inside the window's straight edges */
-    BTN_ROW = ui_rect(BTN_SETTINGS.r.x - 10, BTN_SETTINGS.r.y - 10,
-                      BTN_START.r.x + BTN_START.r.w - BTN_SETTINGS.r.x + 20, BTN_START.r.h + 24);
-    ui_buttons_draw(&BUTTONS);
+}
 
+static void welcome_create(void)
+{
+    const UiTheme *t = ui_theme();
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int area_h = H - TASKBAR_HEIGHT;
+    int ww = W * 56 / 100, wh = 372;
+    if (ww > 720)
+        ww = 720;
+    if (ww < 420)
+        ww = W < 420 ? W - 20 : 420;
+    if (wh > area_h - 24)
+        wh = area_h - 24;
+    UiRect win = ui_center(ui_rect(0, 0, W, area_h), ww, wh);
+
+    WELCOME = wm_create("Welcome to HarisOS", win.x, win.y, win.w, win.h, welcome_draw, 0);
+    if (!WELCOME)
+        return;
+    WELCOME->on_close = on_welcome_close;
+
+    /* buttons at the bottom right of the content area */
+    int cw = ww - 2, ch = wh - t->titlebar_h - 2;
+    int by = ch - t->pad - 38;
+    UiRect start = ui_rect(cw - t->pad - 130, by, 130, 38);
+    UiRect sett = ui_rect(start.x - t->gap - 100, by, 100, 38);
+    wm_add_button(WELCOME, "Settings", UI_BTN_SECONDARY, sett, on_settings, 0);
+    wm_add_button(WELCOME, "Get started", UI_BTN_PRIMARY, start, on_get_started, 0);
+}
+
+static int FIRST = 1;
+
+void desktop_draw(void)
+{
+    if (!gfx_ready())
+        return;
+    if (FIRST)
+    {
+        FIRST = 0;
+        welcome_create();
+    }
+    ui_background();
+    wm_draw();
     gfx_reset_clip();
     taskbar_draw();
 }
 
 int desktop_pointer(int x, int y, unsigned buttons)
 {
-    if (!BUTTONS_READY)
+    /* focus, dragging, close buttons and button events are handled by the window manager */
+    if (!wm_pointer(x, y, buttons))
         return 0;
-
-    /* hover/press/click events are dispatched here; handlers run inside */
-    int changed = ui_buttons_pointer(&BUTTONS, x, y, buttons);
-
-    if (FULL_REDRAW)
-    {
-        FULL_REDRAW = 0;
-        gfx_cursor_show(0); /* keeps the pointer correct even without a back buffer */
-        desktop_draw();
-        gfx_present();
-        gfx_cursor_show(1);
-        return 1;
-    }
-    if (changed)
-    {
-        gfx_cursor_show(0);
-        gfx_fill_rect(BTN_ROW.x, BTN_ROW.y, BTN_ROW.w, BTN_ROW.h, ui_color(BTN_BG));
-        ui_buttons_draw(&BUTTONS);
-        gfx_present();
-        gfx_cursor_show(1);
-        return 1;
-    }
-    return 0;
+    gfx_cursor_show(0); /* keeps the pointer correct even without a back buffer */
+    desktop_draw();
+    gfx_present();
+    gfx_cursor_show(1);
+    return 1;
 }

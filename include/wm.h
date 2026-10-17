@@ -1,0 +1,56 @@
+/* ============================================================
+ * HarisOS window manager
+ *
+ * ============================================================ */
+#ifndef HARIS_WM_H
+#define HARIS_WM_H
+
+#include "ui.h"
+
+#define WM_MAX_WINDOWS 8
+#define WM_MAX_BUTTONS 4 /* per window */
+#define WM_TITLE_MAX 32
+
+struct Window;
+/* Draw the window's content. `body` is the content area (already clipped). */
+typedef void (*WmDrawFn)(struct Window *w, UiRect body);
+
+typedef struct Window
+{
+    int used;
+    int id;                    /* unique, increasing: 1, 2, 3 ... */
+    UiRect r;                  /* outer rectangle on screen */
+    char title[WM_TITLE_MAX];
+    WmDrawFn on_draw;          /* may be NULL */
+    void (*on_close)(struct Window *w); /* called just before the window is closed (may be NULL) */
+    void *user;                /* your own data */
+
+    UiButton btn[WM_MAX_BUTTONS];
+    UiRect btn_rel[WM_MAX_BUTTONS]; /* position inside the content area */
+    int btn_count;
+    UiButtonSet set;
+} Window;
+
+/* NULL when all WM_MAX_WINDOWS slots are in use. The new window is on top and focused. */
+Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
+void wm_close(Window *w);
+void wm_raise(Window *w);
+
+/* Add a button; rect is relative to the content area. -1 = window is full. */
+int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
+                  UiButtonFn on_click, void *user);
+
+UiRect wm_content(const Window *w);   /* the content area, in screen coordinates */
+int wm_count(void);                   /* open windows */
+Window *wm_top(void);                 /* focused window, or NULL */
+
+/* Ask for a redraw on the next wm_pointer() (e.g. after a theme change). */
+void wm_invalidate(void);
+
+/* Draw every window, back to front. Draw the wallpaper first. */
+void wm_draw(void);
+
+/* Feed the mouse state. Returns 1 when anything changed and the desktop must be redrawn. */
+int wm_pointer(int x, int y, unsigned buttons);
+
+#endif

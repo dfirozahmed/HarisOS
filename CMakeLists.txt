@@ -67,6 +67,7 @@ set(KERNEL_SOURCES
     kernel/input/mouse.c        # PS/2 mouse driver
     kernel/ui/ui.c             # HarisUI: theme, layout, widgets
     kernel/ui/icons.c          # HarisUI: vector icons
+    kernel/ui/wm.c             # window manager: z-order, focus, drag, close
     kernel/ui/desktop.c
     kernel/ui/taskbar.c)
 
