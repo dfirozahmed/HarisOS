@@ -11,6 +11,37 @@ static const FontGlyph *glyph_for(const Font *f, unsigned char ch)
 
 int font_line_height(const Font *f) { return f ? f->ascent + f->descent : 0; }
 
+/* Keep multiline drawing and measurement on the same baseline grid. */
+static int text_line_step(const Font *f)
+{
+    if (!f)
+        return 0;
+    return font_line_height(f) + (f->size >= 20 ? 4 : 3);
+}
+
+static int text_line_gap(const Font *f)
+{
+    return f && f->size >= 20 ? 4 : 3;
+}
+
+/* Round a 1/16-pixel pen position to the nearest pixel, including negatives. */
+static int round_pen_16(int pen)
+{
+    int pixel = pen / 16;
+    int remainder = pen % 16;
+    if (remainder >= 8)
+        ++pixel;
+    else if (remainder <= -8)
+        --pixel;
+    return pixel;
+}
+
+/* Round coverage multiplication instead of systematically biasing it down. */
+static unsigned char scale_coverage(unsigned char coverage, unsigned char alpha)
+{
+    return (unsigned char)(((unsigned int)coverage * alpha + 127u) / 255u);
+}
+
 static void draw_glyph(const Font *f, const FontGlyph *g, int x, int y, GfxColor c, int alpha)
 {
     const unsigned char *src = f->bitmap + g->offset;
@@ -19,7 +50,8 @@ static void draw_glyph(const Font *f, const FontGlyph *g, int x, int y, GfxColor
         {
             int cov = src[row * g->w + col];
             if (cov)
-                gfx_blend_pixel(x + g->bx + col, y + g->by + row, c, (unsigned char)(cov * alpha / 255));
+                gfx_blend_pixel(x + g->bx + col, y + g->by + row, c,
+                                scale_coverage((unsigned char)cov, (unsigned char)alpha));
         }
 }
 
@@ -28,7 +60,7 @@ void gfx_text_alpha(const Font *f, int x, int y, const char *s, GfxColor c, unsi
     if (!f || !s || alpha == 0)
         return;
     int pen = x * 16; /* pen position in 1/16 px: exact spacing, no rounding drift */
-    int lh = font_line_height(f) + (f->size >= 20 ? 4 : 3);
+    int lh = text_line_step(f);
     for (; *s; s++)
     {
         if (*s == '\n')
@@ -39,7 +71,7 @@ void gfx_text_alpha(const Font *f, int x, int y, const char *s, GfxColor c, unsi
         }
         const FontGlyph *g = glyph_for(f, (unsigned char)*s);
         if (g->w)
-            draw_glyph(f, g, (pen + 8) >> 4, y, c, alpha);
+            draw_glyph(f, g, round_pen_16(pen), y, c, alpha);
         pen += g->advance;
     }
 }
@@ -76,13 +108,12 @@ int gfx_text_h(const Font *f, const char *s)
     for (; *s; s++)
         if (*s == '\n')
             lines++;
-    int lh = font_line_height(f) + (f->size >= 20 ? 4 : 3);
-    return lines * lh - (f->size >= 20 ? 4 : 3);
+    return lines * text_line_step(f) - text_line_gap(f);
 }
 
 int gfx_text_fit(const Font *f, const char *s, int max_w)
 {
-    if (!f || !s)
+    if (!f || !s || max_w <= 0)
         return 0;
     int cur = 0, n = 0;
     for (; *s && *s != '\n'; s++, n++)
