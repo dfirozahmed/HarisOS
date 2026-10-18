@@ -23,6 +23,7 @@
 #define WM_MAX_WINDOWS 8
 #define WM_MAX_BUTTONS 4 /* per window */
 #define WM_TITLE_MAX 32
+#define WM_MAX_EDITS 3 /* text inputs per window */
 
 struct Window;
 /* Draw the window's content. `body` is the content area (already clipped). */
@@ -42,8 +43,11 @@ typedef struct Window
     WmDrawFn on_draw;                                    /* may be NULL */
     void (*on_close)(struct Window *w);                  /* called just before the window is closed (may be NULL) */
     void (*on_key)(struct Window *w, const KeyEvent *k); /* key press / release while focused (may be NULL) */
-    UiEdit edit;                                         /* a ready-made text input for the window to use (starts empty) */
-    int caret;                                           /* 1 = the window shows a blinking caret in `edit` while focused */
+    int (*on_press)(struct Window *w, int x, int y);     /* left press inside the window below the title bar; return 1 if it changed what is shown (may be NULL) */
+    UiEdit edits[WM_MAX_EDITS];                          /* ready-made text inputs for the window to use (start empty) */
+    int edit_count;                                      /* how many of them the window uses (0 = none) */
+    int focus;                                           /* which input has the keyboard (0 .. edit_count-1) */
+    int caret;                                           /* 1 = the window shows a blinking caret in the focused input */
     void *user;                                          /* your own data */
 
     UiButton btn[WM_MAX_BUTTONS];

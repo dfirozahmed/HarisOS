@@ -54,6 +54,10 @@ static void caption(UiRect r, const char *s)
 }
 
 /* ---- the "Hello" windows opened by "Get started" ---- */
+static const char *const HELLO_LABEL[WM_MAX_EDITS] = {"Name", "Email", "Message"};
+#define HELLO_FIELD_Y 78 /* first field, relative to the body */
+#define HELLO_FIELD_STEP 58
+
 static void hello_draw(Window *w, UiRect body)
 {
     const UiTheme *t = ui_theme();
@@ -63,19 +67,55 @@ static void hello_draw(Window *w, UiRect body)
     o = put_num(o, (unsigned long long)w->id);
     *o = 0;
     ui_text(body.x, body.y, buf, UI_TEXT_HEADING);
-    ui_text(body.x, body.y + 34, "Drag the title bar to move me.", UI_TEXT_DIM);
-    ui_text(body.x, body.y + 54, "Type something in the box below:", UI_TEXT_DIM);
-    /* the window's own text input; it has the keyboard because this window is focused */
-    ui_edit_draw(ui_rect(body.x, body.y + 84, body.w, 34), &w->edit, "Type here...", w == wm_top());
+    ui_text(body.x, body.y + 34, "Click a box or press Tab to switch.", UI_TEXT_DIM);
+    /* the window's own text inputs; only the focused one of the top window has the keyboard */
+    for (int i = 0; i < w->edit_count; i++)
+    {
+        int y = body.y + HELLO_FIELD_Y + i * HELLO_FIELD_STEP;
+        ui_text(body.x, y, HELLO_LABEL[i], UI_TEXT_DIM);
+        ui_edit_draw(ui_rect(body.x, y + 20, body.w, 34), &w->edits[i], "Type here...",
+                     w == wm_top() && i == w->focus);
+    }
 }
 
-/* keyboard: the text input gets typing; Escape clears it */
+static void hello_set_focus(Window *w, int i)
+{
+    w->focus = (i % w->edit_count + w->edit_count) % w->edit_count;
+    ui_caret_restart();
+}
+
+/* clicking a box gives it the keyboard */
+static int hello_press(Window *w, int x, int y)
+{
+    for (int i = 0; i < w->edit_count; i++)
+    {
+        UiRect f = w->edits[i].field;
+        if (f.w > 0 && x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h)
+        {
+            if (i == w->focus)
+                return 0;
+            hello_set_focus(w, i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* keyboard: typing goes to the focused box; Tab / Shift+Tab / Up / Down move between boxes;
+ * Escape clears the focused box */
 static void hello_key(Window *w, const KeyEvent *k)
 {
-    if (k->pressed && k->key == KEY_ESC)
-        ui_edit_clear(&w->edit);
+    UiEdit *e = &w->edits[w->focus];
+    if (k->pressed && k->key == KEY_TAB)
+        hello_set_focus(w, w->focus + ((k->mods & KMOD_SHIFT) ? -1 : 1));
+    else if (k->pressed && k->key == KEY_DOWN)
+        hello_set_focus(w, w->focus + 1);
+    else if (k->pressed && k->key == KEY_UP)
+        hello_set_focus(w, w->focus - 1);
+    else if (k->pressed && k->key == KEY_ESC)
+        ui_edit_clear(e);
     else
-        ui_edit_key(&w->edit, k);
+        ui_edit_key(e, k);
 }
 
 static void on_hello_close(UiButton *b, void *user)
@@ -88,7 +128,7 @@ static void open_hello_window(void)
 {
     int W = (int)gfx_width(), H = (int)gfx_height();
     int k = wm_count();
-    int w = 340, h = 240;
+    int w = 340, h = 360;
     int x = 60 + 32 * (k % 8), y = 40 + 32 * (k % 8);
     if (x + w > W)
         x = W - w;
@@ -103,6 +143,8 @@ static void open_hello_window(void)
     if (win)
     {
         win->on_key = hello_key;
+        win->on_press = hello_press;
+        win->edit_count = 3;
         win->caret = 1; /* its text field has a blinking caret */
     }
     if (!win)
@@ -441,8 +483,11 @@ int desktop_tick(void)
 {
     int flipped = ui_caret_update();
     Window *top = wm_top();
-    if (!flipped || !top || !top->caret || top->edit.field.w == 0)
+    if (!flipped || !top || !top->caret || top->edit_count == 0)
         return 0;
-    wm_add_damage(top->edit.field);
+    UiRect f = top->edits[top->focus].field;
+    if (f.w == 0)
+        return 0;
+    wm_add_damage(f);
     return finish_input(0);
 }

@@ -398,7 +398,12 @@ int wm_pointer(int x, int y, unsigned buttons)
                 MIN_PRESSED = w;
             else if (max_hit(w, x, y))
                 MAX_PRESSED = w;
-            else if (in_titlebar(w, x, y))
+            else if (!in_titlebar(w, x, y))
+            {
+                if (w->on_press && w->on_press(w, x, y))
+                    damage_window(w);
+            }
+            if (!CLOSE_PRESSED && !MIN_PRESSED && !MAX_PRESSED && in_titlebar(w, x, y))
             {
                 DRAG = w;
                 DRAG_PX = x;
