@@ -118,6 +118,89 @@ static void hello_key(Window *w, const KeyEvent *k)
         ui_edit_key(e, k);
 }
 
+/* ---- message box: shows what was typed in a Hello window ---- */
+#define MSG_LINE (UI_EDIT_MAX + 12)
+typedef struct
+{
+    int used;
+    char line[WM_MAX_EDITS][MSG_LINE];
+} MsgData;
+static MsgData MSGS[WM_MAX_WINDOWS];
+
+static void msg_close(Window *w)
+{
+    if (w->user)
+        ((MsgData *)w->user)->used = 0;
+}
+
+static void msg_draw(Window *w, UiRect body)
+{
+    const UiTheme *t = ui_theme();
+    MsgData *m = (MsgData *)w->user;
+    body = ui_inset(body, t->pad);
+    ui_text(body.x, body.y, "You typed", UI_TEXT_HEADING);
+    for (int i = 0; m && i < WM_MAX_EDITS; i++)
+        ui_text_in(ui_rect(body.x, body.y + 40 + i * 30, body.w, 26), m->line[i], UI_TEXT_BODY, UI_ALIGN_LEFT);
+}
+
+static void msg_key(Window *w, const KeyEvent *k)
+{
+    if (k->pressed && (k->key == KEY_ENTER || k->key == KEY_ESC))
+        wm_close(w);
+}
+
+static void on_msg_ok(UiButton *b, void *user)
+{
+    (void)b;
+    wm_close((Window *)user);
+}
+
+static void show_message(const Window *src)
+{
+    MsgData *m = 0;
+    for (int i = 0; i < WM_MAX_WINDOWS && !m; i++)
+        if (!MSGS[i].used)
+            m = &MSGS[i];
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int w = 380, h = 230;
+    Window *win = m ? wm_create("Message", (W - w) / 2, (H - TASKBAR_HEIGHT - h) / 2, w, h, msg_draw, m) : 0;
+    if (!win)
+    {
+        STATUS_LINE = "Window limit reached - close one first.";
+        wm_invalidate();
+        return;
+    }
+    m->used = 1;
+    for (int i = 0; i < WM_MAX_EDITS; i++)
+    {
+        char *o = put_str(m->line[i], HELLO_LABEL[i]);
+        o = put_str(o, ": ");
+        const UiEdit *e = &src->edits[i];
+        if (e->len == 0)
+            o = put_str(o, "(empty)");
+        else
+        {
+            for (int j = 0; j < e->len; j++)
+                *o++ = e->text[j];
+        }
+        *o = 0;
+    }
+    win->on_close = msg_close;
+    win->on_key = msg_key;
+    win->icon = TASKBAR_ICON_TERMINAL;
+    STATUS_LINE = 0;
+    int tb = ui_theme()->titlebar_h;
+    int cw = w - 2, ch = h - tb - 2;
+    wm_add_button_ex(win, "OK", UI_BTN_PRIMARY, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34),
+                     WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_msg_ok, win);
+}
+
+static void on_hello_show(UiButton *b, void *user)
+{
+    (void)b;
+    show_message((Window *)user);
+}
+
 static void on_hello_close(UiButton *b, void *user)
 {
     (void)b;
@@ -159,6 +242,8 @@ static void open_hello_window(void)
     int cw = w - 2, ch = h - tb - 2;
     wm_add_button_ex(win, "Close", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34),
                      WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_hello_close, win);
+    wm_add_button_ex(win, "Show", UI_BTN_PRIMARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34),
+                     WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_hello_show, win);
 }
 
 /* ---- the welcome window ---- */
