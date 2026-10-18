@@ -67,8 +67,6 @@ void gfx_internal_blend_ptr(volatile unsigned int *p, int r, int g, int b, int a
     blend_ptr(p, r, g, b, alpha);
 }
 
-/* Blend with a 16-bit alpha (0..65535) plus dithering. */
-
 /* ---- plain primitives -------------------------------------- */
 #define ROW(y) (DRAW + (long long)(y) * DPITCH)
 
@@ -148,6 +146,4 @@ void gfx_fill_rect_alpha(int x, int y, int w, int h,
 
 /* ---- lines and polygons are implemented in gfx_lines.c ---- */
 
-/* ---- shadow and glow ---------------------------------------- */
-
-/* ---- gradients ---------------------------------------------- */
+/* ---- curved shapes, effects and gradients live in dedicated modules. ---- */
