@@ -67,6 +67,7 @@ set(KERNEL_SOURCES
     kernel/graphics/gfx_backend.c # framebuffer initialization and backend properties
     kernel/graphics/gfx_shapes.c  # anti-aliased rounded rectangles and circles
     kernel/graphics/gfx_effects.c # gradients, shadows and glow effects
+    kernel/graphics/gfx_cursor.c # software cursor save/restore and rendering
     kernel/graphics/gfx.c       # drawing primitives, alpha blending and gradients
     kernel/graphics/font.c      # smooth text rendering
     kernel/graphics/font_data.c # Poppins
