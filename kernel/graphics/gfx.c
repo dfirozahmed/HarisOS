@@ -8,36 +8,19 @@
 #include "gfx.h"
 #include "gfx_internal.h"
 
-static volatile unsigned int *FB;    /* the real screen */
-volatile unsigned int *DRAW;         /* internal shared draw target */
-int W, H;                            /* logical screen dimensions, shared with clipping module */
-static int PITCH, DPITCH;            /* PITCH: screen scanline, DPITCH: draw target scanline */
-static int BACK;                     /* 1 while double buffering is on */
-static volatile unsigned int *CACHE; /* optional copy of the finished wallpaper (see gfx_cache_*) */
-static int CACHE_OK;                 /* 1 once gfx_cache_save() filled it */
-static int DX0, DY0, DX1, DY1;       /* dirty rectangle (back buffer areas not yet shown) */
-static int RED_FIRST;                /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
-int CX0, CY0, CX1, CY1;              /* active clip rectangle, CX1/CY1 exclusive */
+int RED_FIRST;          /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
+int CX0, CY0, CX1, CY1; /* active clip rectangle, CX1/CY1 exclusive */
 
-/* mouse pointer state (see the pointer section below) */
-static int CUR_ON, CUR_DRAWN, CUR_X, CUR_Y;
-static void cursor_restore(void);
-static void cursor_paint(void);
+/* Mouse pointer state remains in this rendering module. */
+static int CUR_ON, CUR_X;
+void gfx_internal_cursor_restore(void);
+void gfx_internal_cursor_paint(void);
 
 void gfx_init(void *framebuffer, unsigned int width, unsigned int height,
               unsigned int pitch, unsigned int red_mask_mode)
 {
-    FB = (volatile unsigned int *)framebuffer;
-    W = (int)width;
-    H = (int)height;
-    PITCH = (int)pitch;
+    gfx_internal_buffer_init(framebuffer, (int)width, (int)height, (int)pitch);
     RED_FIRST = red_mask_mode ? 1 : 0;
-    DRAW = FB;
-    DPITCH = PITCH;
-    BACK = 0;
-    CACHE = 0;
-    CACHE_OK = 0;
-    DX0 = DY0 = DX1 = DY1 = 0;
     CUR_ON = CUR_DRAWN = 0;
     gfx_reset_clip();
 }
@@ -112,147 +95,6 @@ static inline void blend_ptr16(volatile unsigned int *p, int x, int y, int r, in
     *p = pack((r * a16 + dr * ia + d) >> 16, (g * a16 + dg * ia + d) >> 16, (b * a16 + db * ia + d) >> 16);
 }
 
-/* ---- double buffering --------------------------------------- */
-/* Remember which part of the back buffer changed, so gfx_present() only copies that. */
-static void mark_dirty(int x0, int y0, int x1, int y1)
-{
-    if (!BACK || x1 <= x0 || y1 <= y0)
-        return;
-    if (DX1 <= DX0 || DY1 <= DY0)
-    {
-        DX0 = x0;
-        DY0 = y0;
-        DX1 = x1;
-        DY1 = y1;
-        return;
-    }
-    if (x0 < DX0)
-        DX0 = x0;
-    if (y0 < DY0)
-        DY0 = y0;
-    if (x1 > DX1)
-        DX1 = x1;
-    if (y1 > DY1)
-        DY1 = y1;
-}
-
-unsigned long long gfx_backbuffer_size(void)
-{
-    return (unsigned long long)W * (unsigned long long)H * 4ULL;
-}
-
-int gfx_enable_backbuffer(void *memory)
-{
-    if (!FB || !memory || BACK)
-        return -1;
-    volatile unsigned int *mem = (volatile unsigned int *)memory;
-    /* Start from what is on screen now, so nothing visible jumps. */
-    for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++)
-            mem[(long long)y * W + x] = FB[(long long)y * PITCH + x];
-    DRAW = mem;
-    DPITCH = W;
-    BACK = 1;
-    DX0 = DY0 = DX1 = DY1 = 0;
-    return 0;
-}
-
-void gfx_present(void)
-{
-    if (!BACK || DX1 <= DX0 || DY1 <= DY0)
-        return;
-
-    extern const int gfx_cursor_h, gfx_cursor_hot;
-    int cy0 = 0, cy1 = 0; /* screen rows covered by the pointer */
-    if (CUR_DRAWN)
-    {
-        cy0 = CUR_Y - gfx_cursor_hot;
-        cy1 = cy0 + gfx_cursor_h;
-    }
-    for (int y = DY0; y < DY1; y++)
-    {
-        if (y >= cy0 && y < cy1)
-            continue;
-        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
-        volatile unsigned int *dst = FB + (long long)y * PITCH;
-        for (int x = DX0; x < DX1; x++)
-            dst[x] = src[x];
-    }
-    cursor_restore();
-    for (int y = DY0 > cy0 ? DY0 : cy0; y < (DY1 < cy1 ? DY1 : cy1); y++)
-    {
-        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
-        volatile unsigned int *dst = FB + (long long)y * PITCH;
-        for (int x = DX0; x < DX1; x++)
-            dst[x] = src[x];
-    }
-    DX0 = DY0 = DX1 = DY1 = 0;
-    cursor_paint();
-}
-
-void gfx_disable_backbuffer(void)
-{
-    if (!BACK)
-        return;
-    /* Show everything pending, then draw straight to the screen again. */
-    DX0 = 0;
-    DY0 = 0;
-    DX1 = W;
-    DY1 = H;
-    gfx_present();
-    DRAW = FB;
-    DPITCH = PITCH;
-    BACK = 0;
-    CACHE = 0;
-    CACHE_OK = 0;
-}
-
-int gfx_double_buffered(void) { return BACK; }
-
-/* ---- background cache ---------------------------------------- */
-int gfx_cache_enable(void *memory)
-{
-    if (!BACK || !memory)
-        return -1;
-    CACHE = (volatile unsigned int *)memory;
-    CACHE_OK = 0;
-    return 0;
-}
-
-int gfx_cache_valid(void) { return CACHE != 0 && CACHE_OK; }
-void gfx_cache_invalidate(void) { CACHE_OK = 0; }
-
-void gfx_cache_save(void)
-{
-    if (!CACHE || !BACK)
-        return;
-    for (int y = 0; y < H; y++)
-    {
-        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
-        volatile unsigned int *dst = CACHE + (long long)y * W;
-        for (int x = 0; x < W; x++)
-            dst[x] = src[x];
-    }
-    CACHE_OK = 1;
-}
-
-void gfx_cache_restore(int x, int y, int w, int h)
-{
-    if (!gfx_cache_valid())
-        return;
-    int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
-        return;
-    for (int yy = y0; yy < y1; yy++)
-    {
-        volatile unsigned int *src = CACHE + (long long)yy * W;
-        volatile unsigned int *dst = DRAW + (long long)yy * DPITCH;
-        for (int xx = x0; xx < x1; xx++)
-            dst[xx] = src[xx];
-    }
-    mark_dirty(x0, y0, x1, y1);
-}
-
 /* ---- plain primitives -------------------------------------- */
 #define ROW(y) (DRAW + (long long)(y) * DPITCH)
 
@@ -261,7 +103,7 @@ void gfx_pixel(int x, int y, GfxColor c)
     if (DRAW && x >= CX0 && x < CX1 && y >= CY0 && y < CY1)
     {
         DRAW[(long long)y * DPITCH + x] = c;
-        mark_dirty(x, y, x + 1, y + 1);
+        gfx_internal_mark_dirty(x, y, x + 1, y + 1);
     }
 }
 
@@ -272,7 +114,7 @@ void gfx_blend_pixel(int x, int y, GfxColor c, unsigned char alpha)
     unsigned char r, g, b;
     gfx_unpack(c, &r, &g, &b);
     blend_ptr(DRAW + (long long)y * DPITCH + x, r, g, b, alpha);
-    mark_dirty(x, y, x + 1, y + 1);
+    gfx_internal_mark_dirty(x, y, x + 1, y + 1);
 }
 
 void gfx_fill_rect(int x, int y, int w, int h, GfxColor c)
@@ -288,7 +130,7 @@ void gfx_fill_rect(int x, int y, int w, int h, GfxColor c)
         for (int xx = x0; xx < x1; xx++)
             row[xx] = c;
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_clear(GfxColor c)
@@ -327,7 +169,7 @@ void gfx_fill_rect_alpha(int x, int y, int w, int h,
         for (int xx = x0; xx < x1; xx++)
             blend_ptr(row + xx, r, g, b, alpha);
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 /* ---- anti-aliasing helpers ---------------------------------- */
@@ -428,7 +270,7 @@ static void rrect_fill(int x, int y, int w, int h, int r, GfxColor top, GfxColor
         for (int xx = sx0; xx < sx1; xx++)
             blend_ptr(row + xx, cr, cg, cb, alpha);
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_fill_round_rect_alpha(int x, int y, int w, int h, int radius, GfxColor c, unsigned char alpha)
@@ -480,7 +322,7 @@ void gfx_round_rect_alpha(int x, int y, int w, int h, int radius, int thick, Gfx
             blend_ptr(row + xx, r, g, b, cov * alpha / 255);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_round_rect(int x, int y, int w, int h, int radius, int thick, GfxColor c)
@@ -515,7 +357,7 @@ void gfx_fill_circle_q(int cx_q, int cy_q, int r_q, GfxColor c, unsigned char al
             blend_ptr(row + xx, r, g, b, cov * alpha / 255);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_ring_q(int cx_q, int cy_q, int r_q, int thick_q, GfxColor c, unsigned char alpha)
@@ -546,7 +388,7 @@ void gfx_ring_q(int cx_q, int cy_q, int r_q, int thick_q, GfxColor c, unsigned c
             blend_ptr(row + xx, r, g, b, cov * alpha / 255);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_fill_circle(int cx, int cy, int radius, GfxColor c)
@@ -606,7 +448,7 @@ void gfx_line_q(int ax, int ay, int bx, int by, int width_q, GfxColor c, unsigne
             blend_ptr(row + xx, r, g, b, cov * alpha / 255);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_line(int x0, int y0, int x1, int y1, GfxColor c)
@@ -648,7 +490,7 @@ void gfx_shadow(int x, int y, int w, int h, int radius, int blur, int dx, int dy
             blend_ptr16(row + xx, xx, yy, 0, 0, 0, a16 > 65535 ? 65535 : a16);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_glow(int cx, int cy, int radius, GfxColor c, unsigned char alpha)
@@ -676,7 +518,7 @@ void gfx_glow(int cx, int cy, int radius, GfxColor c, unsigned char alpha)
             blend_ptr16(row + xx, xx, yy, r, g, b, a16);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 /* ---- gradients ---------------------------------------------- */
@@ -704,7 +546,7 @@ void gfx_gradient_v(int x, int y, int w, int h,
             row[xx] = pack(pr > 255 ? 255 : pr, pg > 255 ? 255 : pg, pb > 255 ? 255 : pb);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 void gfx_gradient_h(int x, int y, int w, int h,
@@ -730,7 +572,7 @@ void gfx_gradient_h(int x, int y, int w, int h,
             row[xx] = pack(pr > 255 ? 255 : pr, pg > 255 ? 255 : pg, pb > 255 ? 255 : pb);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 /* ---- convex polygons ---------------------------------------- */
@@ -784,7 +626,7 @@ void gfx_fill_poly_q(const int *pts, int n, GfxColor c, unsigned char alpha)
             blend_ptr(row + xx, r, g, b, cov * alpha / 255);
         }
     }
-    mark_dirty(x0, y0, x1, y1);
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
 /* ---- mouse pointer ------------------------------------------ */
@@ -795,11 +637,11 @@ extern const unsigned char gfx_cursor_pixels[]; /* per pixel: shade, alpha */
 #define CUR_MAX_H 64
 static unsigned int CUR_SAVE[CUR_MAX_W * CUR_MAX_H]; /* screen pixels under the pointer */
 
-static void cursor_restore(void)
+void gfx_internal_cursor_restore(void)
 {
     if (!CUR_DRAWN || !FB)
         return;
-    int ox = CUR_X - gfx_cursor_hot, oy = CUR_Y - gfx_cursor_hot;
+    int ox = CUR_X - gfx_cursor_hot, oy = CUR_Y_SHARED - gfx_cursor_hot;
     for (int y = 0; y < gfx_cursor_h; y++)
         for (int x = 0; x < gfx_cursor_w; x++)
         {
@@ -810,11 +652,11 @@ static void cursor_restore(void)
     CUR_DRAWN = 0;
 }
 
-static void cursor_paint(void)
+void gfx_internal_cursor_paint(void)
 {
     if (!CUR_ON || CUR_DRAWN || !FB)
         return;
-    int ox = CUR_X - gfx_cursor_hot, oy = CUR_Y - gfx_cursor_hot;
+    int ox = CUR_X - gfx_cursor_hot, oy = CUR_Y_SHARED - gfx_cursor_hot;
     for (int y = 0; y < gfx_cursor_h; y++)
         for (int x = 0; x < gfx_cursor_w; x++)
         {
@@ -835,11 +677,11 @@ void gfx_cursor_show(int on)
     if (on)
     {
         CUR_ON = 1;
-        cursor_paint();
+        gfx_internal_cursor_paint();
     }
     else
     {
-        cursor_restore();
+        gfx_internal_cursor_restore();
         CUR_ON = 0;
     }
 }
@@ -854,10 +696,10 @@ void gfx_cursor_move(int x, int y)
         x = W - 1;
     if (y >= H)
         y = H - 1;
-    if (x == CUR_X && y == CUR_Y && CUR_DRAWN)
+    if (x == CUR_X && y == CUR_Y_SHARED && CUR_DRAWN)
         return;
-    cursor_restore();
+    gfx_internal_cursor_restore();
     CUR_X = x;
-    CUR_Y = y;
-    cursor_paint();
+    CUR_Y_SHARED = y;
+    gfx_internal_cursor_paint();
 }
