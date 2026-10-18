@@ -1,5 +1,6 @@
 /* HarisUI: theme, layout, text and widgets. See include/ui.h. */
 #include "ui.h"
+#include "timer.h"
 
 /* ---- colors -------------------------------------------------- */
 UiRgb ui_rgb(unsigned char r, unsigned char g, unsigned char b)
@@ -282,8 +283,8 @@ static void wb_glyph(int kind, int cxq, int cyq, UiRgb color)
         L(36, 36, -36, 36);
         L(-36, 36, -36, -36);
         break;
-    default: /* restore: a small square in front of a second one (kept apart so it stays readable) */
-        L(-44, -2, 2, -2);   /* front square */
+    default:               /* restore: a small square in front of a second one (kept apart so it stays readable) */
+        L(-44, -2, 2, -2); /* front square */
         L(2, -2, 2, 44);
         L(2, 44, -44, 44);
         L(-44, 44, -44, -2);
@@ -325,7 +326,9 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
             col = ui_rgb_mix(t->titlebar, t->text_dim, 90);
         gfx_fill_circle_q(cxq, cyq, 8 * 16, ui_color(col), 255);
         if (active)
-            wb_glyph(i == 0 ? 0 : i == 1 ? 1 : (flat ? 3 : 2), cxq, cyq, ui_rgb_mix(col, ui_rgb(0, 0, 0), 175));
+            wb_glyph(i == 0 ? 0 : i == 1 ? 1
+                                         : (flat ? 3 : 2),
+                     cxq, cyq, ui_rgb_mix(col, ui_rgb(0, 0, 0), 175));
     }
 
     UiRect tr = ui_rect(r.x + 80, r.y, r.w - 160 > 0 ? r.w - 160 : 0, tb);
@@ -632,6 +635,30 @@ int ui_edit_key(UiEdit *e, const KeyEvent *k)
     return 0;
 }
 
+/* ---- blinking caret ---- */
+#define CARET_BLINK_MS 530
+static int CARET_ON = 1;
+static unsigned long long CARET_EPOCH;
+
+void ui_caret_restart(void)
+{
+    CARET_ON = 1;
+    CARET_EPOCH = timer_ms();
+}
+
+int ui_caret_visible(void) { return CARET_ON; }
+
+int ui_caret_update(void)
+{
+    if (!timer_ready())
+        return 0; /* no clock: the caret just stays visible */
+    int on = ((timer_ms() - CARET_EPOCH) / CARET_BLINK_MS) % 2 == 0;
+    if (on == CARET_ON)
+        return 0;
+    CARET_ON = on;
+    return 1;
+}
+
 /* pixel width of text[from .. to) */
 static int edit_width(const UiEdit *e, int from, int to)
 {
@@ -643,8 +670,9 @@ static int edit_width(const UiEdit *e, int from, int to)
     return gfx_text_w(THEME->font_body, tmp);
 }
 
-void ui_edit_draw(UiRect r, const UiEdit *e, const char *placeholder, int focused)
+void ui_edit_draw(UiRect r, UiEdit *e, const char *placeholder, int focused)
 {
+    e->field = r;
     const UiTheme *t = THEME;
     ui_text_field(r, "", e->len ? 0 : placeholder, focused);
     UiRect in = ui_rect(r.x + 12, r.y, r.w - 24, r.h);
@@ -665,7 +693,7 @@ void ui_edit_draw(UiRect r, const UiEdit *e, const char *placeholder, int focuse
         ui_text_color(x, r.y + (r.h - ui_text_height(UI_TEXT_BODY)) / 2, e->text + start, UI_TEXT_BODY, t->text);
         gfx_restore_clip(saved);
     }
-    if (focused)
+    if (focused && CARET_ON)
     {
         int cx = x + edit_width(e, start, cur);
         if (cx > in.x + in.w - 2)

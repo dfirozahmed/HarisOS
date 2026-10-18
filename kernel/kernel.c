@@ -81,6 +81,8 @@ void kernel_main(const BootInfo *info)
         KeyEvent ke;
         while (gfx_ready() && keyboard_poll(&ke))
             desktop_key(&ke);
+        if (gfx_ready())
+            desktop_tick(); /* blinking text caret */
 #if defined(__x86_64__) || defined(__i386__)
         __asm__ volatile("pause");
 #endif

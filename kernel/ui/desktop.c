@@ -3,6 +3,7 @@
 #include "desktop.h"
 #include "taskbar.h"
 #include "ui.h"
+#include "timer.h"
 #include "wm.h"
 
 static const char *STATUS_LINE;
@@ -100,7 +101,10 @@ static void open_hello_window(void)
 
     Window *win = wm_create("Hello", x, y, w, h, hello_draw, 0);
     if (win)
+    {
         win->on_key = hello_key;
+        win->caret = 1; /* its text field has a blinking caret */
+    }
     if (!win)
     {
         STATUS_LINE = "Window limit reached - close one first.";
@@ -410,6 +414,7 @@ static void cycle_windows(int backwards)
 
 int desktop_key(const KeyEvent *k)
 {
+    ui_caret_restart(); /* typing: the caret is shown and its blink starts over */
     if (k->pressed)
     {
         if ((k->mods & KMOD_ALT) && k->key == KEY_F4)
@@ -427,5 +432,17 @@ int desktop_key(const KeyEvent *k)
     }
     else
         wm_key(k);
+    return finish_input(0);
+}
+
+/* Called on every main-loop pass: makes the text caret blink. Only the small text
+ * field is redrawn, and only when the caret really flips (about twice a second). */
+int desktop_tick(void)
+{
+    int flipped = ui_caret_update();
+    Window *top = wm_top();
+    if (!flipped || !top || !top->caret || top->edit.field.w == 0)
+        return 0;
+    wm_add_damage(top->edit.field);
     return finish_input(0);
 }

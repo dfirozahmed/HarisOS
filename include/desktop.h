@@ -20,4 +20,8 @@ int desktop_pointer(int x, int y, unsigned buttons);
 
 int desktop_key(const KeyEvent *k);
 
+/* Call on every main-loop pass (cheap): makes the text caret blink.
+ * Returns 1 if something was drawn. */
+int desktop_tick(void);
+
 #endif

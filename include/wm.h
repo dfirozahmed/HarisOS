@@ -43,6 +43,7 @@ typedef struct Window
     void (*on_close)(struct Window *w);                  /* called just before the window is closed (may be NULL) */
     void (*on_key)(struct Window *w, const KeyEvent *k); /* key press / release while focused (may be NULL) */
     UiEdit edit;                                         /* a ready-made text input for the window to use (starts empty) */
+    int caret;                                           /* 1 = the window shows a blinking caret in `edit` while focused */
     void *user;                                          /* your own data */
 
     UiButton btn[WM_MAX_BUTTONS];

@@ -182,12 +182,24 @@ typedef struct
 {
     char text[UI_EDIT_MAX + 1];
     int len;
-    int cursor; /* 0..len */
+    int cursor;   /* 0..len */
+    UiRect field; /* where it was last drawn (so only the caret area can be redrawn) */
 } UiEdit;
 
 void ui_edit_clear(UiEdit *e);
 int ui_edit_key(UiEdit *e, const KeyEvent *k);
-void ui_edit_draw(UiRect r, const UiEdit *e, const char *placeholder, int focused);
+void ui_edit_draw(UiRect r, UiEdit *e, const char *placeholder, int focused);
+
+/* ---- blinking caret ----------------------------------------------
+ * The caret of a focused UiEdit blinks (visible 530 ms, hidden 530 ms). ui_edit_draw()
+ * only reads a flag, so drawing never depends on the clock. Something must flip that flag:
+ *   ui_caret_restart()   caret visible right now and the blink starts over (call on every key press)
+ *   ui_caret_update()    look at the clock; returns 1 if the caret just appeared or disappeared,
+ *                        so the field has to be redrawn. Call it often (every main-loop pass).
+ * Needs timer_init(); without a working timer the caret simply stays visible. */
+void ui_caret_restart(void);
+int ui_caret_update(void);
+int ui_caret_visible(void);
 
 /* ---- icons --------------------------------------------------- */
 typedef enum
