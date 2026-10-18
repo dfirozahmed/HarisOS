@@ -9,16 +9,6 @@ Window *WM_Z[WM_MAX_WINDOWS]; /* open windows, WM_Z[0] = back, WM_Z[WM_ZN-1] = t
 int WM_ZN;
 static int NEXT_ID = 1;
 
-/* drag / close-button state */
-static Window *DRAG;
-static int DRAG_DX, DRAG_DY;
-static Window *CLOSE_PRESSED, *MIN_PRESSED, *MAX_PRESSED;
-#define DOUBLE_CLICK_MS 450     /* two clicks on a title bar within this time = double-click */
-static Window *LC_WIN;          /* window of the last title-bar click */
-static unsigned long long LC_T; /* ... and when it happened */
-static int LC_X, LC_Y;          /* ... and where */
-static int DRAG_PX, DRAG_PY;    /* where the drag started (to tell a click from a drag) */
-static unsigned LAST_BUTTONS;
 
 /* ---- helpers ------------------------------------------------- */
 static void copy_title(char *dst, const char *src)
@@ -53,31 +43,6 @@ void wm_layout_internal(Window *w)
     }
 }
 
-static int close_hit(const Window *w, int x, int y)
-{
-    int cx = w->r.x + 22, cy = w->r.y + ui_theme()->titlebar_h / 2;
-    int dx = x - cx, dy = y - cy;
-    return dx * dx + dy * dy <= 8 * 8;
-}
-
-static int min_hit(const Window *w, int x, int y)
-{
-    if (w->dialog)
-        return 0;
-    int cx = w->r.x + 42, cy = w->r.y + ui_theme()->titlebar_h / 2;
-    int dx = x - cx, dy = y - cy;
-    return dx * dx + dy * dy <= 8 * 8;
-}
-
-static int max_hit(const Window *w, int x, int y)
-{
-    if (w->dialog)
-        return 0;
-    int cx = w->r.x + 62, cy = w->r.y + ui_theme()->titlebar_h / 2;
-    int dx = x - cx, dy = y - cy;
-    return dx * dx + dy * dy <= 8 * 8;
-}
-
 /* index in WM_Z of the topmost visible (not minimized) window, or -1 */
 int wm_top_index_internal(void)
 {
@@ -87,13 +52,8 @@ int wm_top_index_internal(void)
     return -1;
 }
 
-static int in_titlebar(const Window *w, int x, int y)
-{
-    return ui_contains(ui_rect(w->r.x, w->r.y, w->r.w, ui_theme()->titlebar_h), x, y);
-}
-
 /* the open dialog that blocks `w` (its owner), or NULL */
-static Window *blocker(const Window *w)
+Window *wm_blocker_internal(const Window *w)
 {
     for (int i = WM_ZN - 1; i >= 0; i--)
         if (WM_Z[i]->dialog && WM_Z[i]->owner == w)
@@ -102,7 +62,7 @@ static Window *blocker(const Window *w)
 }
 
 /* topmost window under the point, or NULL */
-static Window *window_at(int x, int y)
+Window *wm_window_at_internal(int x, int y)
 {
     for (int i = WM_ZN - 1; i >= 0; i--)
         if (!WM_Z[i]->minimized && ui_contains(WM_Z[i]->r, x, y))
@@ -110,7 +70,7 @@ static Window *window_at(int x, int y)
     return 0;
 }
 
-static int z_index(const Window *w)
+int wm_z_index_internal(const Window *w)
 {
     for (int i = 0; i < WM_ZN; i++)
         if (WM_Z[i] == w)
@@ -167,28 +127,19 @@ Window *wm_create_dialog(Window *owner, const char *title, int x, int y, int w, 
 
 void wm_close(Window *w)
 {
-    int zi = w ? z_index(w) : -1;
+    int zi = w ? wm_z_index_internal(w) : -1;
     if (zi < 0)
         return;
-    for (Window *d = blocker(w); d; d = blocker(w)) /* its dialogs close with it */
+    for (Window *d = wm_blocker_internal(w); d; d = wm_blocker_internal(w)) /* its dialogs close with it */
         wm_close(d);
-    zi = z_index(w);
+    zi = wm_z_index_internal(w);
     if (w->on_close)
         w->on_close(w);
     for (int i = zi; i < WM_ZN - 1; i++)
         WM_Z[i] = WM_Z[i + 1];
     WM_ZN--;
     w->used = 0;
-    if (DRAG == w)
-        DRAG = 0;
-    if (CLOSE_PRESSED == w)
-        CLOSE_PRESSED = 0;
-    if (MIN_PRESSED == w)
-        MIN_PRESSED = 0;
-    if (MAX_PRESSED == w)
-        MAX_PRESSED = 0;
-    if (LC_WIN == w)
-        LC_WIN = 0;
+    wm_input_forget_window(w);
     wm_damage_window_internal(w);
     int t = wm_top_index_internal();
     if (t >= 0)
@@ -197,7 +148,7 @@ void wm_close(Window *w)
 
 static void raise_z(Window *w)
 {
-    int zi = w ? z_index(w) : -1;
+    int zi = w ? wm_z_index_internal(w) : -1;
     if (zi < 0 || zi == WM_ZN - 1)
         return;
     int old = wm_top_index_internal();
@@ -213,18 +164,17 @@ static void raise_z(Window *w)
 void wm_raise(Window *w)
 {
     raise_z(w);
-    Window *d = w ? blocker(w) : 0;
+    Window *d = w ? wm_blocker_internal(w) : 0;
     if (d)
         raise_z(d);
 }
 
 void wm_minimize(Window *w)
 {
-    if (!w || z_index(w) < 0 || w->minimized || w->dialog || blocker(w))
+    if (!w || wm_z_index_internal(w) < 0 || w->minimized || w->dialog || wm_blocker_internal(w))
         return;
     w->minimized = 1;
-    if (DRAG == w)
-        DRAG = 0;
+    wm_input_forget_window(w);
     wm_damage_window_internal(w);
     int t = wm_top_index_internal();
     if (t >= 0)
@@ -233,7 +183,7 @@ void wm_minimize(Window *w)
 
 void wm_activate(Window *w)
 {
-    if (!w || z_index(w) < 0)
+    if (!w || wm_z_index_internal(w) < 0)
         return;
     if (w->minimized)
     {
@@ -246,8 +196,7 @@ void wm_activate(Window *w)
     wm_raise(w);
 }
 
-int wm_is_open(const Window *w) { return w && z_index(w) >= 0; }
-int wm_dragging(void) { return DRAG != 0; }
+int wm_is_open(const Window *w) { return w && wm_z_index_internal(w) >= 0; }
 
 int wm_list(Window **out, int max)
 {
@@ -278,7 +227,7 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
 void wm_set_maximized(Window *w, int on)
 {
     on = on != 0;
-    if (!w || z_index(w) < 0 || w->maximized == on || w->dialog || blocker(w))
+    if (!w || wm_z_index_internal(w) < 0 || w->maximized == on || w->dialog || wm_blocker_internal(w))
         return;
     wm_damage_window_internal(w); /* where it was */
     if (on)
@@ -323,185 +272,4 @@ Window *wm_top(void)
     return t >= 0 ? WM_Z[t] : 0;
 }
 
-/* ---- mouse --------------------------------------------------- */
-static void clamp_to_screen(Window *w)
-{
-    if (w->maximized)
-        return;
-    int W = (int)gfx_width(), H = (int)gfx_height();
-    int tb = ui_theme()->titlebar_h;
-    int keep = 120; /* at least this much of the title bar stays on screen */
-    if (w->r.x > W - keep)
-        w->r.x = W - keep;
-    if (w->r.x < keep - w->r.w)
-        w->r.x = keep - w->r.w;
-    if (w->r.y < 0)
-        w->r.y = 0;
-    if (w->r.y > H - TASKBAR_HEIGHT - tb)
-        w->r.y = H - TASKBAR_HEIGHT - tb;
-}
 
-int wm_pointer(int x, int y, unsigned buttons)
-{
-    int down = (buttons & 1) != 0, was_down = (LAST_BUTTONS & 1) != 0;
-    LAST_BUTTONS = buttons;
-
-    /* 1) press: focus, start dragging, or arm the close button */
-    if (down && !was_down)
-    {
-        Window *w = window_at(x, y);
-        if (w)
-        {
-            wm_raise(w);
-            if (blocker(w))
-                w = 0; /* the owner is blocked: the click only brings its dialog to the front */
-        }
-        if (w)
-        {
-            if (close_hit(w, x, y))
-                CLOSE_PRESSED = w;
-            else if (min_hit(w, x, y))
-                MIN_PRESSED = w;
-            else if (max_hit(w, x, y))
-                MAX_PRESSED = w;
-            else if (!in_titlebar(w, x, y))
-            {
-                if (w->on_press && w->on_press(w, x, y))
-                    wm_damage_window_internal(w);
-            }
-            if (!CLOSE_PRESSED && !MIN_PRESSED && !MAX_PRESSED && in_titlebar(w, x, y))
-            {
-                DRAG = w;
-                DRAG_PX = x;
-                DRAG_PY = y;
-                DRAG_DX = x - w->r.x;
-                DRAG_DY = y - w->r.y;
-            }
-        }
-    }
-
-    /* 2) move: drag the window. A maximized window first goes back to its normal
-     *    size once the pointer has really moved, keeping the pointer at the same relative spot. */
-    if (DRAG && down && DRAG->maximized)
-    {
-        int mx = x - DRAG_PX, my = y - DRAG_PY;
-        if (mx < 0)
-            mx = -mx;
-        if (my < 0)
-            my = -my;
-        if (mx > 4 || my > 4)
-        {
-            Window *d = DRAG;
-            DRAG_DX = DRAG_DX * d->normal.w / d->r.w;
-            wm_set_maximized(d, 0);
-        }
-    }
-    if (DRAG && down && !DRAG->maximized)
-    {
-        int nx = x - DRAG_DX, ny = y - DRAG_DY;
-        if (nx != DRAG->r.x || ny != DRAG->r.y)
-        {
-            wm_damage_window_internal(DRAG); /* where it was */
-            DRAG->r.x = nx;
-            DRAG->r.y = ny;
-            clamp_to_screen(DRAG);
-            wm_layout_internal(DRAG);
-            wm_damage_window_internal(DRAG); /* where it is now */
-        }
-    }
-
-    /* 3) release: finish a drag, or a click on the close button */
-    Window *to_close = 0, *to_min = 0, *to_max = 0, *to_toggle = 0;
-    if (!down && was_down)
-    {
-        Window *pressed = DRAG; /* title bar pressed and released without moving = a click */
-        DRAG = 0;
-        if (pressed)
-        {
-            int mx = x - DRAG_PX, my = y - DRAG_PY;
-            if (mx < 0)
-                mx = -mx;
-            if (my < 0)
-                my = -my;
-            if (mx <= 4 && my <= 4 && timer_ready())
-            {
-                unsigned long long now = timer_ms();
-                int gx = x - LC_X, gy = y - LC_Y;
-                if (gx < 0)
-                    gx = -gx;
-                if (gy < 0)
-                    gy = -gy;
-                if (LC_WIN == pressed && now - LC_T <= DOUBLE_CLICK_MS && gx <= 8 && gy <= 8)
-                {
-                    to_toggle = pressed; /* double-click: maximize / restore */
-                    LC_WIN = 0;
-                }
-                else
-                {
-                    LC_WIN = pressed;
-                    LC_T = now;
-                    LC_X = x;
-                    LC_Y = y;
-                }
-            }
-            else
-                LC_WIN = 0;
-        }
-        if (MAX_PRESSED)
-        {
-            if (z_index(MAX_PRESSED) >= 0 && max_hit(MAX_PRESSED, x, y))
-                to_max = MAX_PRESSED;
-            MAX_PRESSED = 0;
-        }
-        if (MIN_PRESSED)
-        {
-            if (z_index(MIN_PRESSED) >= 0 && min_hit(MIN_PRESSED, x, y))
-                to_min = MIN_PRESSED;
-            MIN_PRESSED = 0;
-        }
-        if (CLOSE_PRESSED)
-        {
-            if (z_index(CLOSE_PRESSED) >= 0 && close_hit(CLOSE_PRESSED, x, y))
-                to_close = CLOSE_PRESSED;
-            CLOSE_PRESSED = 0;
-        }
-    }
-
-    /* 4) buttons: only the window under the pointer gets real coordinates,
-     *    the others get "far away" so their hover/press state is cleared. */
-    Window *target = DRAG ? 0 : window_at(x, y);
-    if (target && blocker(target))
-        target = 0;
-    if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min || MAX_PRESSED || to_max || to_toggle))
-        target = 0;
-    for (int i = 0; i < WM_ZN; i++)
-    {
-        Window *w = WM_Z[i];
-        int hit = (w == target);
-        if (ui_buttons_pointer(&w->set, hit ? x : -1, hit ? y : -1, buttons))
-            wm_damage_window_internal(w);
-        if (WM_ZN == 0 || z_index(w) < 0) /* a click handler closed it */
-            break;
-    }
-
-    if (to_close)
-        wm_close(to_close);
-    else if (to_min)
-        wm_minimize(to_min);
-    else if (to_max)
-        wm_set_maximized(to_max, !to_max->maximized);
-    else if (to_toggle)
-        wm_set_maximized(to_toggle, !to_toggle->maximized);
-
-    return WM_HAS_DMG;
-}
-
-int wm_key(const KeyEvent *k)
-{
-    Window *w = wm_top();
-    if (!w || !w->on_key)
-        return 0;
-    w->on_key(w, k);
-    wm_damage_window_internal(w); /* the handler probably changed what the window shows */
-    return 1;
-}

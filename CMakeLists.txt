@@ -83,7 +83,8 @@ set(KERNEL_SOURCES
     kernel/ui/ui_controls.c    # buttons and common controls
     kernel/ui/ui_edit.c        # text input and blinking caret
     kernel/ui/icons.c          # HarisUI: vector icons
-    kernel/window/wm.c             # window manager: state, z-order and input
+    kernel/window/wm.c             # window manager: lifecycle and state
+    kernel/window/wm_input.c       # window-manager mouse and keyboard input
     kernel/window/wm_damage.c      # window-manager damage tracking
     kernel/window/wm_render.c      # window rendering and clipping
     kernel/desktop/desktop.c
