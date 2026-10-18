@@ -259,6 +259,41 @@ void ui_card(UiRect r)
     gfx_round_rect(r.x, r.y, r.w, r.h, t->radius_m, 1, ui_color(t->border));
 }
 
+/* A small glyph inside a window button, drawn with smooth lines. (cxq, cyq) = center in
+ * Q4 (1/16 pixel). kind: 0 = close (x), 1 = minimize (-), 2 = maximize (square),
+ * 3 = restore (two squares, shown while the window is maximized). */
+static void wb_glyph(int kind, int cxq, int cyq, UiRgb color)
+{
+    GfxColor c = ui_color(color);
+    const int w = 24; /* line width, 1.5 px */
+#define L(x0, y0, x1, y1) gfx_line_q(cxq + (x0), cyq + (y0), cxq + (x1), cyq + (y1), w, c, 255)
+    switch (kind)
+    {
+    case 0: /* x */
+        L(-36, -36, 36, 36);
+        L(-36, 36, 36, -36);
+        break;
+    case 1: /* - */
+        L(-40, 0, 40, 0);
+        break;
+    case 2: /* square */
+        L(-36, -36, 36, -36);
+        L(36, -36, 36, 36);
+        L(36, 36, -36, 36);
+        L(-36, 36, -36, -36);
+        break;
+    default: /* restore: a small square in front of a second one (kept apart so it stays readable) */
+        L(-44, -2, 2, -2);   /* front square */
+        L(2, -2, 2, 44);
+        L(2, 44, -44, 44);
+        L(-44, 44, -44, -2);
+        L(-14, -44, 44, -44); /* the square behind: only its top and right edges show */
+        L(44, -44, 44, 14);
+        break;
+    }
+#undef L
+}
+
 /* flat = 1: square corners and no shadow (a maximized window that touches the screen edges) */
 static UiRect window_impl(UiRect r, const char *title, int active, int flat)
 {
@@ -278,16 +313,19 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
     gfx_hline(r.x, r.y + tb, r.w, ui_color(t->border));
     gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
 
-    /* window buttons (close / minimize / maximize) */
+    /* window buttons (close / minimize / maximize); the symbols show on the focused window */
     int cy = r.y + tb / 2;
-    gfx_fill_circle_q((r.x + 22) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(t->danger), 255);
-    gfx_fill_circle_q((r.x + 42) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(t->warning), 255);
-    gfx_fill_circle_q((r.x + 62) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(t->success), 255);
-    if (!active)
+    int cyq = cy * 16 + 8;
+    UiRgb dots[3] = {t->danger, t->warning, t->success};
+    for (int i = 0; i < 3; i++)
     {
-        UiRgb grey = ui_rgb_mix(t->titlebar, t->text_dim, 90);
-        for (int i = 0; i < 3; i++)
-            gfx_fill_circle_q((r.x + 22 + 20 * i) * 16 + 8, cy * 16 + 8, 6 * 16, ui_color(grey), 255);
+        int cxq = (r.x + 22 + 20 * i) * 16 + 8;
+        UiRgb col = dots[i];
+        if (!active)
+            col = ui_rgb_mix(t->titlebar, t->text_dim, 90);
+        gfx_fill_circle_q(cxq, cyq, 8 * 16, ui_color(col), 255);
+        if (active)
+            wb_glyph(i == 0 ? 0 : i == 1 ? 1 : (flat ? 3 : 2), cxq, cyq, ui_rgb_mix(col, ui_rgb(0, 0, 0), 175));
     }
 
     UiRect tr = ui_rect(r.x + 80, r.y, r.w - 160 > 0 ? r.w - 160 : 0, tb);

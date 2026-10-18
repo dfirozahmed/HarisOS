@@ -143,7 +143,7 @@ static void welcome_draw(Window *w, UiRect body)
     UiRect head = ui_cut_top(&body, 56);
     ui_icon(UI_ICON_LOGO, head.x + 24, head.y + 28, 48, t->text);
     ui_text(head.x + 64, head.y + 4, "HarisOS", UI_TEXT_HEADING);
-    ui_text(head.x + 64, head.y + 32, "Your smooth UEFI desktop is ready.", UI_TEXT_DIM);
+    ui_text(head.x + 64, head.y + 32, "Your smooth desktop is ready.", UI_TEXT_DIM);
     ui_cut_top(&body, t->gap + 4);
     ui_separator(body.x, body.y, body.w);
     ui_cut_top(&body, t->gap + 8);
