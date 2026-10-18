@@ -295,6 +295,28 @@ static void welcome_draw(Window *w, UiRect body)
     int W = (int)gfx_width(), H = (int)gfx_height();
     body = ui_inset(body, t->pad);
 
+    /* Keep the welcome content readable on narrow or short GOP modes. The
+     * window manager clips to the client area, but a full two-card layout
+     * would otherwise force its labels and buttons to overlap. */
+    if (body.w < 340 || body.h < 250)
+    {
+        ui_text(body.x, body.y, "HarisOS is ready", UI_TEXT_HEADING);
+        if (body.h >= 76)
+        {
+            char compact[48], *o = compact;
+            o = put_str(o, "Display: ");
+            o = put_num(o, (unsigned long long)W);
+            o = put_str(o, " x ");
+            o = put_num(o, (unsigned long long)H);
+            *o = 0;
+            ui_text(body.x, body.y + 26, compact, UI_TEXT_BODY);
+        }
+        if (STATUS_LINE && body.h >= 104)
+            ui_text_in(ui_rect(body.x, body.y + 52, body.w, 22), STATUS_LINE,
+                       UI_TEXT_SMALL, UI_ALIGN_LEFT);
+        return;
+    }
+
     /* header: icon + heading + subtitle */
     UiRect head = ui_cut_top(&body, 56);
     ui_icon(UI_ICON_LOGO, head.x + 24, head.y + 28, 48, t->text);
@@ -364,14 +386,29 @@ static void welcome_create(void)
 {
     const UiTheme *t = ui_theme();
     int W = (int)gfx_width(), H = (int)gfx_height();
+    if (W <= 0 || H <= TASKBAR_HEIGHT + 64)
+        return;
+
     int area_h = H - TASKBAR_HEIGHT;
+    int max_w = W - 20;
+    if (max_w < 1)
+        max_w = W;
+    int max_h = area_h - 8;
+    if (max_h < 1)
+        max_h = area_h;
+
     int ww = W * 56 / 100, wh = 372;
     if (ww > 720)
         ww = 720;
     if (ww < 420)
-        ww = W < 420 ? W - 20 : 420;
-    if (wh > area_h - 24)
-        wh = area_h - 24;
+        ww = W < 420 ? max_w : 420;
+    if (ww > max_w)
+        ww = max_w;
+    if (wh > max_h)
+        wh = max_h;
+    if (ww < 1 || wh < 64)
+        return;
+
     UiRect win = ui_center(ui_rect(0, 0, W, area_h), ww, wh);
 
     WELCOME = wm_create("Welcome to HarisOS", win.x, win.y, win.w, win.h, welcome_draw, 0);
