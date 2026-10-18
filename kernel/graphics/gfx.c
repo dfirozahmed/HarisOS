@@ -4,18 +4,20 @@
  * integer "signed distance" math. For every edge pixel we measure how far its
  * center is from the shape's border (in 1/16 pixel units, "Q4") and turn that
  * into a 0..255 coverage value; the pixel is then blended with the background.
-*/
+ */
 #include "gfx.h"
+#include "gfx_internal.h"
 
-static volatile unsigned int *FB;   /* the real screen */
-static volatile unsigned int *DRAW; /* where primitives draw: FB, or the back buffer */
-static int W, H, PITCH, DPITCH;     /* PITCH: screen scanline, DPITCH: draw target scanline */
-static int BACK;                    /* 1 while double buffering is on */
+static volatile unsigned int *FB;    /* the real screen */
+volatile unsigned int *DRAW;         /* internal shared draw target */
+int W, H;                            /* logical screen dimensions, shared with clipping module */
+static int PITCH, DPITCH;            /* PITCH: screen scanline, DPITCH: draw target scanline */
+static int BACK;                     /* 1 while double buffering is on */
 static volatile unsigned int *CACHE; /* optional copy of the finished wallpaper (see gfx_cache_*) */
-static int CACHE_OK;                /* 1 once gfx_cache_save() filled it */
-static int DX0, DY0, DX1, DY1;      /* dirty rectangle (back buffer areas not yet shown) */
-static int RED_FIRST;               /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
-static int CX0, CY0, CX1, CY1;      /* active clip rectangle, CX1/CY1 exclusive */
+static int CACHE_OK;                 /* 1 once gfx_cache_save() filled it */
+static int DX0, DY0, DX1, DY1;       /* dirty rectangle (back buffer areas not yet shown) */
+static int RED_FIRST;                /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
+int CX0, CY0, CX1, CY1;              /* active clip rectangle, CX1/CY1 exclusive */
 
 /* mouse pointer state (see the pointer section below) */
 static int CUR_ON, CUR_DRAWN, CUR_X, CUR_Y;
@@ -108,68 +110,6 @@ static inline void blend_ptr16(volatile unsigned int *p, int x, int y, int r, in
     gfx_unpack(*p, &dr, &dg, &db);
     int d = dither(x, y), ia = 65536 - a16;
     *p = pack((r * a16 + dr * ia + d) >> 16, (g * a16 + dg * ia + d) >> 16, (b * a16 + db * ia + d) >> 16);
-}
-
-/* ---- clipping ---------------------------------------------- */
-void gfx_reset_clip(void)
-{
-    CX0 = 0;
-    CY0 = 0;
-    CX1 = W;
-    CY1 = H;
-}
-
-void gfx_set_clip(int x, int y, int w, int h)
-{
-    CX0 = x < 0 ? 0 : x;
-    CY0 = y < 0 ? 0 : y;
-    CX1 = (w <= 0 || x + w > W) ? (w <= 0 ? CX0 : W) : x + w;
-    CY1 = (h <= 0 || y + h > H) ? (h <= 0 ? CY0 : H) : y + h;
-}
-
-void gfx_clip_intersect(int x, int y, int w, int h)
-{
-    int x1 = x + w, y1 = y + h;
-    if (x > CX0)
-        CX0 = x;
-    if (y > CY0)
-        CY0 = y;
-    if (x1 < CX1)
-        CX1 = x1;
-    if (y1 < CY1)
-        CY1 = y1;
-    if (CX1 < CX0)
-        CX1 = CX0;
-    if (CY1 < CY0)
-        CY1 = CY0;
-}
-
-GfxClip gfx_get_clip(void)
-{
-    GfxClip c = {CX0, CY0, CX1, CY1};
-    return c;
-}
-
-void gfx_restore_clip(GfxClip c)
-{
-    CX0 = c.x0;
-    CY0 = c.y0;
-    CX1 = c.x1;
-    CY1 = c.y1;
-}
-
-/* Clip the box [x0,x1) x [y0,y1) to the active clip rectangle. 0 = nothing left. */
-static int clip_box(int *x0, int *y0, int *x1, int *y1)
-{
-    if (*x0 < CX0)
-        *x0 = CX0;
-    if (*y0 < CY0)
-        *y0 = CY0;
-    if (*x1 > CX1)
-        *x1 = CX1;
-    if (*y1 > CY1)
-        *y1 = CY1;
-    return DRAW && *x1 > *x0 && *y1 > *y0;
 }
 
 /* ---- double buffering --------------------------------------- */
@@ -301,7 +241,7 @@ void gfx_cache_restore(int x, int y, int w, int h)
     if (!gfx_cache_valid())
         return;
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     for (int yy = y0; yy < y1; yy++)
     {
@@ -340,7 +280,7 @@ void gfx_fill_rect(int x, int y, int w, int h, GfxColor c)
     if (w <= 0 || h <= 0)
         return;
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     for (int yy = y0; yy < y1; yy++)
     {
@@ -379,7 +319,7 @@ void gfx_fill_rect_alpha(int x, int y, int w, int h,
     if (w <= 0 || h <= 0)
         return;
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     for (int yy = y0; yy < y1; yy++)
     {
@@ -457,7 +397,7 @@ static void rrect_fill(int x, int y, int w, int h, int r, GfxColor top, GfxColor
         return;
     r = clamp_radius(w, h, r);
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     unsigned char tr, tg, tb, br, bg, bb;
     gfx_unpack(top, &tr, &tg, &tb);
@@ -515,7 +455,7 @@ void gfx_round_rect_alpha(int x, int y, int w, int h, int radius, int thick, Gfx
         thick = (w < h ? w : h) / 2 ? (w < h ? w : h) / 2 : 1;
     int ir = radius > thick ? radius - thick : 0;
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     unsigned char r, g, b;
     gfx_unpack(c, &r, &g, &b);
@@ -555,7 +495,7 @@ void gfx_fill_circle_q(int cx_q, int cy_q, int r_q, GfxColor c, unsigned char al
         return;
     int x0 = (cx_q - r_q) / 16 - 1, y0 = (cy_q - r_q) / 16 - 1;
     int x1 = (cx_q + r_q) / 16 + 2, y1 = (cy_q + r_q) / 16 + 2;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     unsigned char r, g, b;
     gfx_unpack(c, &r, &g, &b);
@@ -585,7 +525,7 @@ void gfx_ring_q(int cx_q, int cy_q, int r_q, int thick_q, GfxColor c, unsigned c
     int ro = r_q + thick_q / 2, ri = r_q - thick_q / 2;
     int x0 = (cx_q - ro) / 16 - 1, y0 = (cy_q - ro) / 16 - 1;
     int x1 = (cx_q + ro) / 16 + 2, y1 = (cy_q + ro) / 16 + 2;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     unsigned char r, g, b;
     gfx_unpack(c, &r, &g, &b);
@@ -628,7 +568,7 @@ void gfx_line_q(int ax, int ay, int bx, int by, int width_q, GfxColor c, unsigne
     int minx = (ax < bx ? ax : bx) - hw, maxx = (ax > bx ? ax : bx) + hw;
     int miny = (ay < by ? ay : by) - hw, maxy = (ay > by ? ay : by) + hw;
     int x0 = minx / 16 - 1, y0 = miny / 16 - 1, x1 = maxx / 16 + 2, y1 = maxy / 16 + 2;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     unsigned char r, g, b;
     gfx_unpack(c, &r, &g, &b);
@@ -682,7 +622,7 @@ void gfx_shadow(int x, int y, int w, int h, int radius, int blur, int dx, int dy
     radius = clamp_radius(w, h, radius);
     int sx = x + dx, sy = y + dy;
     int x0 = sx - blur, y0 = sy - blur, x1 = sx + w + blur, y1 = sy + h + blur;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     int B = blur * 16;
     /* the shape itself will cover this inner rectangle, so skip it */
@@ -704,7 +644,7 @@ void gfx_shadow(int x, int y, int w, int h, int radius, int blur, int dx, int dy
             if (u > 256)
                 u = 256;
             int f = u * u / 256 * (768 - 2 * u) / 256; /* smoothstep: u^2 (3 - 2u) */
-            int a16 = f * strength * 256 / 255; /* 0..65536 */
+            int a16 = f * strength * 256 / 255;        /* 0..65536 */
             blend_ptr16(row + xx, xx, yy, 0, 0, 0, a16 > 65535 ? 65535 : a16);
         }
     }
@@ -716,7 +656,7 @@ void gfx_glow(int cx, int cy, int radius, GfxColor c, unsigned char alpha)
     if (radius <= 0 || alpha == 0)
         return;
     int x0 = cx - radius, y0 = cy - radius, x1 = cx + radius + 1, y1 = cy + radius + 1;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     unsigned char r, g, b;
     gfx_unpack(c, &r, &g, &b);
@@ -731,7 +671,7 @@ void gfx_glow(int cx, int cy, int radius, GfxColor c, unsigned char alpha)
             long long d2 = dx * dx + dy * dy;
             if (d2 >= r2)
                 continue;
-            int t = (int)((r2 - d2) * 256 / r2);       /* 256 at the center, 0 at the edge */
+            int t = (int)((r2 - d2) * 256 / r2);              /* 256 at the center, 0 at the edge */
             int a16 = (int)(((long long)t * t * alpha) >> 8); /* smooth falloff, 16-bit alpha */
             blend_ptr16(row + xx, xx, yy, r, g, b, a16);
         }
@@ -747,7 +687,7 @@ void gfx_gradient_v(int x, int y, int w, int h,
     if (w <= 0 || h <= 0)
         return;
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     int span = h > 1 ? h - 1 : 1;
     for (int yy = y0; yy < y1; yy++)
@@ -774,7 +714,7 @@ void gfx_gradient_h(int x, int y, int w, int h,
     if (w <= 0 || h <= 0)
         return;
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     int span = w > 1 ? w - 1 : 1;
     for (int yy = y0; yy < y1; yy++)
@@ -821,7 +761,7 @@ void gfx_fill_poly_q(const int *pts, int n, GfxColor c, unsigned char alpha)
     }
     long long sign = area2 >= 0 ? 1 : -1; /* make "inside" the positive side of every edge */
     int x0 = minx / 16 - 1, y0 = miny / 16 - 1, x1 = maxx / 16 + 2, y1 = maxy / 16 + 2;
-    if (!clip_box(&x0, &y0, &x1, &y1))
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
         return;
     unsigned char r, g, b;
     gfx_unpack(c, &r, &g, &b);
