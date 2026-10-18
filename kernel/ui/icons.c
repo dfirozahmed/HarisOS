@@ -134,7 +134,18 @@ static void icon_check(const Frame *f, GfxColor c)
 
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
+    /* A zero/negative size has no drawable area. Reject it before deriving
+     * coordinates so small or invalid layout values cannot create odd shapes. */
+    if (size <= 0 || !gfx_ready())
+        return;
+
     Frame f = {cx - size / 2, cy - size / 2, size};
+
+    /* Keep anti-aliased edges inside this icon's allocation. Without a local
+     * clip, a thick line or ring can paint into a neighboring taskbar icon. */
+    GfxClip previous_clip = gfx_get_clip();
+    gfx_clip_intersect(f.ox, f.oy, size, size);
+
     GfxColor t = ui_color(tint);
     switch (icon)
     {
@@ -171,5 +182,10 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
     case UI_ICON_CHECK:
         icon_check(&f, t);
         break;
+    default:
+        break;
     }
+
+    /* ui_icon() is nestable: restore the caller's clip exactly as received. */
+    gfx_restore_clip(previous_clip);
 }
