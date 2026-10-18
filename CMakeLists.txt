@@ -59,8 +59,8 @@ set(KERNEL_SOURCES
     boot/efi_entry.c            # UEFI entry: collects BootInfo, calls kernel_main
     kernel/kernel.c
     kernel/memory/pmm.c
-    kernel/rtc.c
-    kernel/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
+    kernel/time/rtc.c
+    kernel/time/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
     kernel/graphics/gfx_clip.c  # clipping state and safe clip-box intersection
     kernel/graphics/gfx_buffer.c # backbuffer, presentation and background cache
     kernel/graphics/gfx_dirty.c  # dirty-region tracking
@@ -83,9 +83,9 @@ set(KERNEL_SOURCES
     kernel/ui/ui_controls.c    # buttons and common controls
     kernel/ui/ui_edit.c        # text input and blinking caret
     kernel/ui/icons.c          # HarisUI: vector icons
-    kernel/ui/wm.c             # window manager: state, z-order and input
-    kernel/ui/wm_damage.c      # window-manager damage tracking
-    kernel/ui/wm_render.c      # window rendering and clipping
+    kernel/window/wm.c             # window manager: state, z-order and input
+    kernel/window/wm_damage.c      # window-manager damage tracking
+    kernel/window/wm_render.c      # window rendering and clipping
     kernel/ui/desktop.c
     kernel/ui/taskbar.c)
 
