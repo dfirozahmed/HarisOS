@@ -104,6 +104,8 @@ void ui_card(UiRect r); /* rounded panel with soft shadow and border */
 UiRect ui_window(UiRect r, const char *title, int active);
 /* Same, with square corners and no shadow: for a window that fills the screen. */
 UiRect ui_window_flat(UiRect r, const char *title, int active);
+/* Dialog frame: only a close button (no minimize / maximize). */
+UiRect ui_dialog(UiRect r, const char *title, int active);
 void ui_separator(int x, int y, int w);
 
 /* ---- controls ------------------------------------------------ */

@@ -33,6 +33,7 @@ typedef struct Window
 {
     int used;
     int id;             /* unique, increasing: 1, 2, 3 ... */
+    int dialog;         /* 1 = modal dialog: only a close button, not in the taskbar, other windows are blocked while it is open */
     int minimized;      /* hidden, but still open (shown in the taskbar) */
     int maximized;      /* fills the screen above the taskbar */
     UiRect normal;      /* size and place to go back to when un-maximized */
@@ -59,6 +60,9 @@ typedef struct Window
 
 /* NULL when all WM_MAX_WINDOWS slots are in use. The new window is on top and focused. */
 Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
+/* Like wm_create, but a modal dialog (message box): it stays on top, the other windows ignore
+ * the mouse and keyboard until it is closed, and it does not appear in the taskbar. */
+Window *wm_create_dialog(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
 void wm_close(Window *w);
 void wm_raise(Window *w);
 

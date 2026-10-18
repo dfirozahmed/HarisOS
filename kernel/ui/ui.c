@@ -300,6 +300,9 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
 {
     const UiTheme *t = THEME;
     int tb = t->titlebar_h;
+    int dialog = (flat == 2); /* 2 = dialog frame: only the close button */
+    if (dialog)
+        flat = 0;
     int rad = flat ? 0 : t->radius_l;
     if (!flat)
         gfx_shadow(r.x, r.y, r.w, r.h, rad, active ? 28 : 18, 0, active ? 12 : 6,
@@ -318,7 +321,7 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
     int cy = r.y + tb / 2;
     int cyq = cy * 16 + 8;
     UiRgb dots[3] = {t->danger, t->warning, t->success};
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < (dialog ? 1 : 3); i++)
     {
         int cxq = (r.x + 22 + 20 * i) * 16 + 8;
         UiRgb col = dots[i];
@@ -339,6 +342,7 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
 
 UiRect ui_window(UiRect r, const char *title, int active) { return window_impl(r, title, active, 0); }
 UiRect ui_window_flat(UiRect r, const char *title, int active) { return window_impl(r, title, active, 1); }
+UiRect ui_dialog(UiRect r, const char *title, int active) { return window_impl(r, title, active, 2); }
 
 void ui_separator(int x, int y, int w)
 {

@@ -112,6 +112,8 @@ static int close_hit(const Window *w, int x, int y)
 
 static int min_hit(const Window *w, int x, int y)
 {
+    if (w->dialog)
+        return 0;
     int cx = w->r.x + 42, cy = w->r.y + ui_theme()->titlebar_h / 2;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 8 * 8;
@@ -119,6 +121,8 @@ static int min_hit(const Window *w, int x, int y)
 
 static int max_hit(const Window *w, int x, int y)
 {
+    if (w->dialog)
+        return 0;
     int cx = w->r.x + 62, cy = w->r.y + ui_theme()->titlebar_h / 2;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 8 * 8;
@@ -138,9 +142,21 @@ static int in_titlebar(const Window *w, int x, int y)
     return ui_contains(ui_rect(w->r.x, w->r.y, w->r.w, ui_theme()->titlebar_h), x, y);
 }
 
-/* topmost window under the point, or NULL */
+/* the open modal dialog (topmost one), or NULL */
+static Window *modal(void)
+{
+    for (int i = ZN - 1; i >= 0; i--)
+        if (Z[i]->dialog)
+            return Z[i];
+    return 0;
+}
+
+/* topmost window under the point, or NULL. While a dialog is open only the dialog counts. */
 static Window *window_at(int x, int y)
 {
+    Window *m = modal();
+    if (m)
+        return ui_contains(m->r, x, y) ? m : 0;
     for (int i = ZN - 1; i >= 0; i--)
         if (!Z[i]->minimized && ui_contains(Z[i]->r, x, y))
             return Z[i];
@@ -191,6 +207,14 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
     return win;
 }
 
+Window *wm_create_dialog(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user)
+{
+    Window *win = wm_create(title, x, y, w, h, draw, user);
+    if (win)
+        win->dialog = 1;
+    return win;
+}
+
 void wm_close(Window *w)
 {
     int zi = w ? z_index(w) : -1;
@@ -223,6 +247,8 @@ void wm_raise(Window *w)
     int zi = w ? z_index(w) : -1;
     if (zi < 0 || zi == ZN - 1)
         return;
+    if (modal() && !w->dialog)
+        return; /* a dialog stays on top */
     int old = top_index();
     if (old >= 0)
         damage_window(Z[old]); /* focus look changes */
@@ -234,7 +260,7 @@ void wm_raise(Window *w)
 
 void wm_minimize(Window *w)
 {
-    if (!w || z_index(w) < 0 || w->minimized)
+    if (!w || z_index(w) < 0 || w->minimized || w->dialog || modal())
         return;
     w->minimized = 1;
     if (DRAG == w)
@@ -247,7 +273,7 @@ void wm_minimize(Window *w)
 
 void wm_activate(Window *w)
 {
-    if (!w || z_index(w) < 0)
+    if (!w || z_index(w) < 0 || (modal() && !w->dialog))
         return;
     if (w->minimized)
     {
@@ -268,7 +294,8 @@ int wm_list(Window **out, int max)
 {
     int n = 0;
     for (int i = 0; i < ZN && n < max; i++)
-        out[n++] = Z[i];
+        if (!Z[i]->dialog) /* dialogs are not listed in the taskbar */
+            out[n++] = Z[i];
     for (int i = 1; i < n; i++) /* oldest first (insertion sort by id) */
     {
         Window *k = out[i];
@@ -292,7 +319,7 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
 void wm_set_maximized(Window *w, int on)
 {
     on = on != 0;
-    if (!w || z_index(w) < 0 || w->maximized == on)
+    if (!w || z_index(w) < 0 || w->maximized == on || w->dialog)
         return;
     damage_window(w); /* where it was */
     if (on)
@@ -351,8 +378,9 @@ void wm_draw(void)
         if (w->r.x - SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + SHADOW_MARGIN <= saved.x0 ||
             w->r.y - SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + SHADOW_MARGIN <= saved.y0)
             continue;
-        UiRect body = w->maximized ? ui_window_flat(w->r, w->title, i == top)
-                                   : ui_window(w->r, w->title, i == top);
+        UiRect body = w->dialog      ? ui_dialog(w->r, w->title, i == top)
+                      : w->maximized ? ui_window_flat(w->r, w->title, i == top)
+                                     : ui_window(w->r, w->title, i == top);
         layout(w);
         gfx_clip_intersect(body.x, body.y, body.w, body.h); /* nothing can spill out of the window */
         if (w->on_draw)

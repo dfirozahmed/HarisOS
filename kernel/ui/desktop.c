@@ -118,7 +118,7 @@ static void hello_key(Window *w, const KeyEvent *k)
         ui_edit_key(e, k);
 }
 
-/* ---- message box: shows what was typed in a Hello window ---- */
+/* ---- message box: a modal dialog showing what was typed in a Hello window ---- */
 #define MSG_LINE (UI_EDIT_MAX + 12)
 typedef struct
 {
@@ -162,8 +162,17 @@ static void show_message(const Window *src)
         if (!MSGS[i].used)
             m = &MSGS[i];
     int W = (int)gfx_width(), H = (int)gfx_height();
-    int w = 380, h = 230;
-    Window *win = m ? wm_create("Message", (W - w) / 2, (H - TASKBAR_HEIGHT - h) / 2, w, h, msg_draw, m) : 0;
+    int w = 340, h = 210;
+    int x = src->r.x + (src->r.w - w) / 2, y = src->r.y + (src->r.h - h) / 2; /* centered over its window */
+    if (x + w > W)
+        x = W - w;
+    if (y + h > H - TASKBAR_HEIGHT)
+        y = H - TASKBAR_HEIGHT - h;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    Window *win = m ? wm_create_dialog("Message", x, y, w, h, msg_draw, m) : 0;
     if (!win)
     {
         STATUS_LINE = "Window limit reached - close one first.";
@@ -187,7 +196,6 @@ static void show_message(const Window *src)
     }
     win->on_close = msg_close;
     win->on_key = msg_key;
-    win->icon = TASKBAR_ICON_TERMINAL;
     STATUS_LINE = 0;
     int tb = ui_theme()->titlebar_h;
     int cw = w - 2, ch = h - tb - 2;
@@ -494,6 +502,9 @@ static int finish_input(int bar_changed)
     if (!wm_take_damage(&area))
         return 0;
 
+    /* With a back buffer the scene is drawn in RAM and gfx_present() handles the
+     * pointer, so it stays visible the whole time (no flicker). Without one we
+     * draw straight to the screen and must hide the pointer meanwhile. */
     int direct = !gfx_double_buffered();
     if (direct)
         gfx_cursor_show(0);
