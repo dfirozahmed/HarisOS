@@ -76,7 +76,12 @@ set(KERNEL_SOURCES
     kernel/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
     kernel/input/mouse.c        # PS/2 mouse driver (polled)
     kernel/input/keyboard.c     # PS/2 keyboard driver (polled)
-    kernel/ui/ui.c             # HarisUI: theme, layout, widgets
+    kernel/ui/ui_theme.c       # theme colors and active theme
+    kernel/ui/ui_layout.c      # rectangle layout and clipping helpers
+    kernel/ui/ui_text.c        # text styles and alignment
+    kernel/ui/ui_surfaces.c    # wallpaper, cards and window surfaces
+    kernel/ui/ui_controls.c    # buttons and common controls
+    kernel/ui/ui_edit.c        # text input and blinking caret
     kernel/ui/icons.c          # HarisUI: vector icons
     kernel/ui/wm.c             # window manager: z-order, focus, drag, close
     kernel/ui/desktop.c
