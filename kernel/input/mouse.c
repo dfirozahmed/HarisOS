@@ -1,6 +1,7 @@
 /* PS/2 mouse through the i8042 keyboard controller (ports 0x60 / 0x64).
  * Everything is polled: the kernel runs with interrupts off. */
 #include "mouse.h"
+#include "ps2.h"
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -166,15 +167,10 @@ int mouse_poll(MouseState *out)
 
     if (PRESENT)
     {
-        for (int n = 0; n < 64; n++) /* never spend long here */
+        ps2_poll(); /* sorts keyboard and mouse bytes into their own queues */
+        unsigned char b;
+        for (int n = 0; n < 64 && ps2_mouse_pop(&b); n++) /* never spend long here */
         {
-            unsigned char st = inb(PS2_STATUS);
-            if (!(st & ST_OUT_FULL))
-                break;
-            unsigned char b = inb(PS2_DATA);
-            if (!(st & ST_AUX))
-                continue; /* a keyboard byte: must be read so the mouse is not blocked */
-
             /* byte 0 of every packet has bit 3 set: use it to re-synchronize */
             if (PKT_LEN == 0 && !(b & 0x08))
                 continue;

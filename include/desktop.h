@@ -3,6 +3,8 @@
 #ifndef HARIS_DESKTOP_H
 #define HARIS_DESKTOP_H
 
+#include "keyboard.h"
+
 /* System info shown in the welcome window. */
 void desktop_set_memory(unsigned long long free_mb, unsigned long long total_mb); /* total 0 = failed */
 void desktop_set_double_buffered(int on);
@@ -15,5 +17,7 @@ void desktop_draw(void);
  * Hover and press effects are redrawn here (only the small area that changed).
  * Returns 1 if something was drawn, so the caller should gfx_present(). */
 int desktop_pointer(int x, int y, unsigned buttons);
+
+int desktop_key(const KeyEvent *k);
 
 #endif

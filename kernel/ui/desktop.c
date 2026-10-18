@@ -63,12 +63,18 @@ static void hello_draw(Window *w, UiRect body)
     *o = 0;
     ui_text(body.x, body.y, buf, UI_TEXT_HEADING);
     ui_text(body.x, body.y + 34, "Drag the title bar to move me.", UI_TEXT_DIM);
-    ui_text(body.x, body.y + 54, "Click a window to bring it to the front.", UI_TEXT_DIM);
-    o = buf;
-    o = put_num(o, (unsigned long long)wm_count());
-    o = put_str(o, " window(s) open");
-    *o = 0;
-    ui_text(body.x, body.y + 80, buf, UI_TEXT_SMALL);
+    ui_text(body.x, body.y + 54, "Type something in the box below:", UI_TEXT_DIM);
+    /* the window's own text input; it has the keyboard because this window is focused */
+    ui_edit_draw(ui_rect(body.x, body.y + 84, body.w, 34), &w->edit, "Type here...", w == wm_top());
+}
+
+/* keyboard: the text input gets typing; Escape clears it */
+static void hello_key(Window *w, const KeyEvent *k)
+{
+    if (k->pressed && k->key == KEY_ESC)
+        ui_edit_clear(&w->edit);
+    else
+        ui_edit_key(&w->edit, k);
 }
 
 static void on_hello_close(UiButton *b, void *user)
@@ -81,7 +87,7 @@ static void open_hello_window(void)
 {
     int W = (int)gfx_width(), H = (int)gfx_height();
     int k = wm_count();
-    int w = 340, h = 200;
+    int w = 340, h = 240;
     int x = 60 + 32 * (k % 8), y = 40 + 32 * (k % 8);
     if (x + w > W)
         x = W - w;
@@ -93,6 +99,8 @@ static void open_hello_window(void)
         y = 0;
 
     Window *win = wm_create("Hello", x, y, w, h, hello_draw, 0);
+    if (win)
+        win->on_key = hello_key;
     if (!win)
     {
         STATUS_LINE = "Window limit reached - close one first.";
@@ -126,6 +134,14 @@ static void on_settings(UiButton *b, void *user)
     wm_invalidate();
 }
 
+/* keyboard: Enter does the same as "Get started" */
+static void welcome_key(Window *w, const KeyEvent *k)
+{
+    (void)w;
+    if (k->pressed && k->key == KEY_ENTER)
+        open_hello_window();
+}
+
 static void on_welcome_close(Window *w)
 {
     (void)w;
@@ -143,7 +159,7 @@ static void welcome_draw(Window *w, UiRect body)
     UiRect head = ui_cut_top(&body, 56);
     ui_icon(UI_ICON_LOGO, head.x + 24, head.y + 28, 48, t->text);
     ui_text(head.x + 64, head.y + 4, "HarisOS", UI_TEXT_HEADING);
-    ui_text(head.x + 64, head.y + 32, "Your smooth desktop is ready.", UI_TEXT_DIM);
+    ui_text(head.x + 64, head.y + 32, "Your smooth UEFI desktop is ready.", UI_TEXT_DIM);
     ui_cut_top(&body, t->gap + 4);
     ui_separator(body.x, body.y, body.w);
     ui_cut_top(&body, t->gap + 8);
@@ -222,6 +238,7 @@ static void welcome_create(void)
     if (!WELCOME)
         return;
     WELCOME->on_close = on_welcome_close;
+    WELCOME->on_key = welcome_key;
     WELCOME->icon = TASKBAR_ICON_LOGO;
 
     /* buttons at the bottom right of the content area */
@@ -330,21 +347,12 @@ static void desktop_draw_region(UiRect r)
     gfx_reset_clip();
 }
 
-int desktop_pointer(int x, int y, unsigned buttons)
+/* After any input: refresh the taskbar, then redraw whatever changed. Returns 1 if something was drawn. */
+static int finish_input(int bar_changed)
 {
-    int H = (int)gfx_height();
-    int on_bar = y >= H - TASKBAR_HEIGHT;
-
-    /* The taskbar is on top of the windows: while the pointer is over it (and no
-     * window is being dragged) the windows must not see the mouse. */
-    int to_windows = !(on_bar && !wm_dragging());
-    wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
-
-    /* The taskbar only sees the mouse when no window is being dragged. */
     int bar_dirty = refresh_taskbar(); /* a window may have opened/closed/changed focus */
-    int bar_changed = taskbar_pointer(wm_dragging() ? -1 : x, wm_dragging() ? -1 : y, buttons);
-    bar_dirty |= refresh_taskbar(); /* a taskbar click may have changed windows */
-    if (bar_dirty || bar_changed)
+    bar_dirty |= bar_changed;
+    if (bar_dirty)
     {
         int bx, by, bw, bh;
         taskbar_bounds(&bx, &by, &bw, &bh);
@@ -366,4 +374,58 @@ int desktop_pointer(int x, int y, unsigned buttons)
     if (direct)
         gfx_cursor_show(1);
     return 1;
+}
+
+int desktop_pointer(int x, int y, unsigned buttons)
+{
+    int H = (int)gfx_height();
+    int on_bar = y >= H - TASKBAR_HEIGHT;
+
+    /* The taskbar is on top of the windows: while the pointer is over it (and no
+     * window is being dragged) the windows must not see the mouse. */
+    int to_windows = !(on_bar && !wm_dragging());
+    wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
+
+    /* The taskbar only sees the mouse when no window is being dragged. */
+    int bar_changed = refresh_taskbar(); /* its buttons must match the windows before a click is handled */
+    bar_changed |= taskbar_pointer(wm_dragging() ? -1 : x, wm_dragging() ? -1 : y, buttons);
+    return finish_input(bar_changed);
+}
+
+/* Alt+Tab: focus the next window (a minimized one is restored). shift = go backwards. */
+static void cycle_windows(int backwards)
+{
+    Window *list[TASKBAR_MAX_APPS];
+    int n = wm_list(list, TASKBAR_MAX_APPS);
+    if (n == 0)
+        return;
+    Window *top = wm_top();
+    int cur = -1;
+    for (int i = 0; i < n; i++)
+        if (list[i] == top)
+            cur = i;
+    int next = cur < 0 ? 0 : (backwards ? (cur + n - 1) % n : (cur + 1) % n);
+    wm_activate(list[next]);
+}
+
+int desktop_key(const KeyEvent *k)
+{
+    if (k->pressed)
+    {
+        if ((k->mods & KMOD_ALT) && k->key == KEY_F4)
+            wm_close(wm_top()); /* Alt+F4: close the focused window */
+        else if ((k->mods & KMOD_ALT) && k->key == KEY_TAB)
+            cycle_windows((k->mods & KMOD_SHIFT) != 0);
+        else if (k->key == KEY_F11)
+        {
+            Window *w = wm_top(); /* F11: maximize / restore */
+            if (w)
+                wm_set_maximized(w, !w->maximized);
+        }
+        else
+            wm_key(k);
+    }
+    else
+        wm_key(k);
+    return finish_input(0);
 }

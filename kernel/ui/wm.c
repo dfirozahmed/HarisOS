@@ -522,3 +522,13 @@ int wm_pointer(int x, int y, unsigned buttons)
 
     return HAS_DMG;
 }
+
+int wm_key(const KeyEvent *k)
+{
+    Window *w = wm_top();
+    if (!w || !w->on_key)
+        return 0;
+    w->on_key(w, k);
+    damage_window(w); /* the handler probably changed what the window shows */
+    return 1;
+}

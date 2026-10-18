@@ -2,6 +2,7 @@
 #include "bootinfo.h"
 #include "desktop.h"
 #include "gfx.h"
+#include "keyboard.h"
 #include "mouse.h"
 #include "pmm.h"
 #include "rtc.h"
@@ -46,6 +47,9 @@ void kernel_main(const BootInfo *info)
         desktop_set_memory(0, 0);
     desktop_set_double_buffered(double_buffered);
 
+    /* keyboard: initialised before the mouse; if it does not answer we still poll it */
+    keyboard_init();
+
     /* mouse: if there is none, the desktop simply stays non-interactive */
     int have_mouse = gfx_ready() && mouse_init((int)info->width, (int)info->height) == 0;
     desktop_set_mouse(have_mouse);
@@ -74,6 +78,9 @@ void kernel_main(const BootInfo *info)
             gfx_cursor_move(m.x, m.y);
             desktop_pointer(m.x, m.y, m.buttons);
         }
+        KeyEvent ke;
+        while (gfx_ready() && keyboard_poll(&ke))
+            desktop_key(&ke);
 #if defined(__x86_64__) || defined(__i386__)
         __asm__ volatile("pause");
 #endif

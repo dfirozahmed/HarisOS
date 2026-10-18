@@ -10,6 +10,7 @@
 
 #include "font.h"
 #include "gfx.h"
+#include "keyboard.h"
 
 /* ---- colors -------------------------------------------------- */
 typedef struct
@@ -167,6 +168,26 @@ void ui_progress(UiRect r, int percent);                /* 0..100 */
 void ui_toggle(UiRect r, int on);                       /* switch; 40x22 looks best */
 int ui_badge(int x, int y, const char *s, UiRgb color); /* small pill; returns its width */
 void ui_text_field(UiRect r, const char *text, const char *placeholder, int focused);
+
+/* ---- single-line text input ----------------------------------
+ *
+ *   UiEdit e = {0};                       // empty
+ *   if (ui_edit_key(&e, &key_event)) ...  // feed key events; 1 = text or cursor changed
+ *   ui_edit_draw(rect, &e, "Type here...", focused);
+ *
+ * Supports typing, Backspace, Delete, Left/Right, Home/End. Enter, Tab and
+ * shortcuts are NOT handled: they are left for your code. */
+#define UI_EDIT_MAX 120
+typedef struct
+{
+    char text[UI_EDIT_MAX + 1];
+    int len;
+    int cursor; /* 0..len */
+} UiEdit;
+
+void ui_edit_clear(UiEdit *e);
+int ui_edit_key(UiEdit *e, const KeyEvent *k);
+void ui_edit_draw(UiRect r, const UiEdit *e, const char *placeholder, int focused);
 
 /* ---- icons --------------------------------------------------- */
 typedef enum

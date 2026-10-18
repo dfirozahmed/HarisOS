@@ -31,17 +31,19 @@ typedef void (*WmDrawFn)(struct Window *w, UiRect body);
 typedef struct Window
 {
     int used;
-    int id;                    /* unique, increasing: 1, 2, 3 ... */
-    int minimized;             /* hidden, but still open (shown in the taskbar) */
-    int maximized;             /* fills the screen above the taskbar */
-    UiRect normal;             /* size and place to go back to when un-maximized */
-    int base_w, base_h;        /* outer size at creation: reference for button anchors */
-    int icon;                  /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
-    UiRect r;                  /* outer rectangle on screen */
+    int id;             /* unique, increasing: 1, 2, 3 ... */
+    int minimized;      /* hidden, but still open (shown in the taskbar) */
+    int maximized;      /* fills the screen above the taskbar */
+    UiRect normal;      /* size and place to go back to when un-maximized */
+    int base_w, base_h; /* outer size at creation: reference for button anchors */
+    int icon;           /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
+    UiRect r;           /* outer rectangle on screen */
     char title[WM_TITLE_MAX];
-    WmDrawFn on_draw;          /* may be NULL */
-    void (*on_close)(struct Window *w); /* called just before the window is closed (may be NULL) */
-    void *user;                /* your own data */
+    WmDrawFn on_draw;                                    /* may be NULL */
+    void (*on_close)(struct Window *w);                  /* called just before the window is closed (may be NULL) */
+    void (*on_key)(struct Window *w, const KeyEvent *k); /* key press / release while focused (may be NULL) */
+    UiEdit edit;                                         /* a ready-made text input for the window to use (starts empty) */
+    void *user;                                          /* your own data */
 
     UiButton btn[WM_MAX_BUTTONS];
     UiRect btn_rel[WM_MAX_BUTTONS]; /* position inside the content area (at the creation size) */
@@ -69,9 +71,9 @@ int wm_add_button_ex(Window *w, const char *label, UiButtonKind kind, UiRect rel
 /* Maximize: fill the screen above the taskbar; un-maximize: go back to the old size. */
 void wm_set_maximized(Window *w, int on);
 
-UiRect wm_content(const Window *w);   /* the content area, in screen coordinates */
-int wm_count(void);                   /* open windows */
-Window *wm_top(void);                 /* focused window (topmost visible one), or NULL */
+UiRect wm_content(const Window *w); /* the content area, in screen coordinates */
+int wm_count(void);                 /* open windows */
+Window *wm_top(void);               /* focused window (topmost visible one), or NULL */
 
 /* Minimize / restore. wm_activate() restores a minimized window and brings it to the front. */
 void wm_minimize(Window *w);
@@ -80,7 +82,7 @@ int wm_is_open(const Window *w);
 /* Open windows (visible or minimized) in the order they were created, for the taskbar.
  * Returns how many were stored in out[] (at most max). */
 int wm_list(Window **out, int max);
-int wm_dragging(void);                /* 1 while a window is being dragged */
+int wm_dragging(void); /* 1 while a window is being dragged */
 /* Mark a screen rectangle as needing a redraw (e.g. the taskbar). */
 void wm_add_damage(UiRect r);
 
@@ -95,6 +97,10 @@ int wm_take_damage(UiRect *out);
 
 /* Draw every window, back to front. Draw the wallpaper first. */
 void wm_draw(void);
+
+/* Send a key event to the focused window (its on_key). Returns 1 if a window got it;
+ * that window is then marked for redraw. */
+int wm_key(const KeyEvent *k);
 
 /* Feed the mouse state. Returns 1 when something changed (then call wm_take_damage()). */
 int wm_pointer(int x, int y, unsigned buttons);

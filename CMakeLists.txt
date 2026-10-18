@@ -65,7 +65,9 @@ set(KERNEL_SOURCES
     kernel/graphics/font.c      # smooth text rendering
     kernel/graphics/font_data.c # Poppins
     kernel/graphics/cursor_data.c # mouse arrow
-    kernel/input/mouse.c        # PS/2 mouse driver
+    kernel/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
+    kernel/input/mouse.c        # PS/2 mouse driver (polled)
+    kernel/input/keyboard.c     # PS/2 keyboard driver (polled)
     kernel/ui/ui.c             # HarisUI: theme, layout, widgets
     kernel/ui/icons.c          # HarisUI: vector icons
     kernel/ui/wm.c             # window manager: z-order, focus, drag, close
