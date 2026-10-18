@@ -64,7 +64,8 @@ set(KERNEL_SOURCES
     kernel/graphics/gfx_clip.c  # clipping state and safe clip-box intersection
     kernel/graphics/gfx_buffer.c # backbuffer, presentation and background cache
     kernel/graphics/gfx_dirty.c  # dirty-region tracking
-    kernel/graphics/gfx.c       # drawing: anti-aliased shapes, alpha, gradients, double buffer
+    kernel/graphics/gfx_backend.c # framebuffer initialization and backend properties
+    kernel/graphics/gfx.c       # drawing primitives, alpha blending and gradients
     kernel/graphics/font.c      # smooth text rendering
     kernel/graphics/font_data.c # Poppins
     kernel/graphics/cursor_data.c # mouse arrow

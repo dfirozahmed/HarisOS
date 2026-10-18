@@ -8,7 +8,6 @@
 #include "gfx.h"
 #include "gfx_internal.h"
 
-int RED_FIRST;          /* 1: 0x00RRGGBB, 0: 0x00BBGGRR */
 int CX0, CY0, CX1, CY1; /* active clip rectangle, CX1/CY1 exclusive */
 
 /* Mouse pointer state remains in this rendering module. */
@@ -16,18 +15,11 @@ static int CUR_ON, CUR_X;
 void gfx_internal_cursor_restore(void);
 void gfx_internal_cursor_paint(void);
 
-void gfx_init(void *framebuffer, unsigned int width, unsigned int height,
-              unsigned int pitch, unsigned int red_mask_mode)
+void gfx_internal_cursor_reset_state(void)
 {
-    gfx_internal_buffer_init(framebuffer, (int)width, (int)height, (int)pitch);
-    RED_FIRST = red_mask_mode ? 1 : 0;
-    CUR_ON = CUR_DRAWN = 0;
-    gfx_reset_clip();
+    CUR_ON = 0;
+    CUR_X = 0;
 }
-
-int gfx_ready(void) { return FB != 0 && W > 0 && H > 0; }
-unsigned int gfx_width(void) { return (unsigned int)W; }
-unsigned int gfx_height(void) { return (unsigned int)H; }
 
 /* ---- colors ------------------------------------------------- */
 static inline unsigned int pack(int r, int g, int b)
