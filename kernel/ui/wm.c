@@ -142,21 +142,18 @@ static int in_titlebar(const Window *w, int x, int y)
     return ui_contains(ui_rect(w->r.x, w->r.y, w->r.w, ui_theme()->titlebar_h), x, y);
 }
 
-/* the open modal dialog (topmost one), or NULL */
-static Window *modal(void)
+/* the open dialog that blocks `w` (its owner), or NULL */
+static Window *blocker(const Window *w)
 {
     for (int i = ZN - 1; i >= 0; i--)
-        if (Z[i]->dialog)
+        if (Z[i]->dialog && Z[i]->owner == w)
             return Z[i];
     return 0;
 }
 
-/* topmost window under the point, or NULL. While a dialog is open only the dialog counts. */
+/* topmost window under the point, or NULL */
 static Window *window_at(int x, int y)
 {
-    Window *m = modal();
-    if (m)
-        return ui_contains(m->r, x, y) ? m : 0;
     for (int i = ZN - 1; i >= 0; i--)
         if (!Z[i]->minimized && ui_contains(Z[i]->r, x, y))
             return Z[i];
@@ -207,11 +204,14 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
     return win;
 }
 
-Window *wm_create_dialog(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user)
+Window *wm_create_dialog(Window *owner, const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user)
 {
     Window *win = wm_create(title, x, y, w, h, draw, user);
     if (win)
+    {
         win->dialog = 1;
+        win->owner = owner;
+    }
     return win;
 }
 
@@ -220,6 +220,9 @@ void wm_close(Window *w)
     int zi = w ? z_index(w) : -1;
     if (zi < 0)
         return;
+    for (Window *d = blocker(w); d; d = blocker(w)) /* its dialogs close with it */
+        wm_close(d);
+    zi = z_index(w);
     if (w->on_close)
         w->on_close(w);
     for (int i = zi; i < ZN - 1; i++)
@@ -242,13 +245,11 @@ void wm_close(Window *w)
         damage_window(Z[t]); /* the next window becomes focused */
 }
 
-void wm_raise(Window *w)
+static void raise_z(Window *w)
 {
     int zi = w ? z_index(w) : -1;
     if (zi < 0 || zi == ZN - 1)
         return;
-    if (modal() && !w->dialog)
-        return; /* a dialog stays on top */
     int old = top_index();
     if (old >= 0)
         damage_window(Z[old]); /* focus look changes */
@@ -258,9 +259,18 @@ void wm_raise(Window *w)
     damage_window(w);
 }
 
+/* raising a window with an open dialog brings the dialog up with it */
+void wm_raise(Window *w)
+{
+    raise_z(w);
+    Window *d = w ? blocker(w) : 0;
+    if (d)
+        raise_z(d);
+}
+
 void wm_minimize(Window *w)
 {
-    if (!w || z_index(w) < 0 || w->minimized || w->dialog || modal())
+    if (!w || z_index(w) < 0 || w->minimized || w->dialog || blocker(w))
         return;
     w->minimized = 1;
     if (DRAG == w)
@@ -273,7 +283,7 @@ void wm_minimize(Window *w)
 
 void wm_activate(Window *w)
 {
-    if (!w || z_index(w) < 0 || (modal() && !w->dialog))
+    if (!w || z_index(w) < 0)
         return;
     if (w->minimized)
     {
@@ -319,7 +329,7 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
 void wm_set_maximized(Window *w, int on)
 {
     on = on != 0;
-    if (!w || z_index(w) < 0 || w->maximized == on || w->dialog)
+    if (!w || z_index(w) < 0 || w->maximized == on || w->dialog || blocker(w))
         return;
     damage_window(w); /* where it was */
     if (on)
@@ -420,6 +430,11 @@ int wm_pointer(int x, int y, unsigned buttons)
         if (w)
         {
             wm_raise(w);
+            if (blocker(w))
+                w = 0; /* the owner is blocked: the click only brings its dialog to the front */
+        }
+        if (w)
+        {
             if (close_hit(w, x, y))
                 CLOSE_PRESSED = w;
             else if (min_hit(w, x, y))
@@ -532,6 +547,8 @@ int wm_pointer(int x, int y, unsigned buttons)
     /* 4) buttons: only the window under the pointer gets real coordinates,
      *    the others get "far away" so their hover/press state is cleared. */
     Window *target = DRAG ? 0 : window_at(x, y);
+    if (target && blocker(target))
+        target = 0;
     if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min || MAX_PRESSED || to_max || to_toggle))
         target = 0;
     for (int i = 0; i < ZN; i++)

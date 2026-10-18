@@ -32,14 +32,15 @@ typedef void (*WmDrawFn)(struct Window *w, UiRect body);
 typedef struct Window
 {
     int used;
-    int id;             /* unique, increasing: 1, 2, 3 ... */
-    int dialog;         /* 1 = modal dialog: only a close button, not in the taskbar, other windows are blocked while it is open */
-    int minimized;      /* hidden, but still open (shown in the taskbar) */
-    int maximized;      /* fills the screen above the taskbar */
-    UiRect normal;      /* size and place to go back to when un-maximized */
-    int base_w, base_h; /* outer size at creation: reference for button anchors */
-    int icon;           /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
-    UiRect r;           /* outer rectangle on screen */
+    int id;               /* unique, increasing: 1, 2, 3 ... */
+    int dialog;           /* 1 = modal dialog: only a close button, not in the taskbar */
+    struct Window *owner; /* a dialog blocks only this window (its parent) */
+    int minimized;        /* hidden, but still open (shown in the taskbar) */
+    int maximized;        /* fills the screen above the taskbar */
+    UiRect normal;        /* size and place to go back to when un-maximized */
+    int base_w, base_h;   /* outer size at creation: reference for button anchors */
+    int icon;             /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
+    UiRect r;             /* outer rectangle on screen */
     char title[WM_TITLE_MAX];
     WmDrawFn on_draw;                                    /* may be NULL */
     void (*on_close)(struct Window *w);                  /* called just before the window is closed (may be NULL) */
@@ -60,9 +61,10 @@ typedef struct Window
 
 /* NULL when all WM_MAX_WINDOWS slots are in use. The new window is on top and focused. */
 Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
-/* Like wm_create, but a modal dialog (message box): it stays on top, the other windows ignore
- * the mouse and keyboard until it is closed, and it does not appear in the taskbar. */
-Window *wm_create_dialog(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
+/* Like wm_create, but a modal dialog (message box) of `owner`: while it is open the owner
+ * cannot be used (clicking the owner brings the dialog to the front); every other window
+ * keeps working normally. The dialog is not in the taskbar and closes with its owner. */
+Window *wm_create_dialog(Window *owner, const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
 void wm_close(Window *w);
 void wm_raise(Window *w);
 

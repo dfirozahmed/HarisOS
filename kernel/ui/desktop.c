@@ -155,7 +155,7 @@ static void on_msg_ok(UiButton *b, void *user)
     wm_close((Window *)user);
 }
 
-static void show_message(const Window *src)
+static void show_message(Window *src)
 {
     MsgData *m = 0;
     for (int i = 0; i < WM_MAX_WINDOWS && !m; i++)
@@ -172,7 +172,7 @@ static void show_message(const Window *src)
         x = 0;
     if (y < 0)
         y = 0;
-    Window *win = m ? wm_create_dialog("Message", x, y, w, h, msg_draw, m) : 0;
+    Window *win = m ? wm_create_dialog((Window *)src, "Message", x, y, w, h, msg_draw, m) : 0;
     if (!win)
     {
         STATUS_LINE = "Window limit reached - close one first.";
@@ -404,6 +404,8 @@ static int refresh_taskbar(void)
     unsigned sig[TASKBAR_MAX_APPS];
     int n = wm_list(list, TASKBAR_MAX_APPS);
     Window *top = wm_top();
+    if (top && top->dialog)
+        top = top->owner; /* a dialog counts as its owner */
     for (int i = 0; i < n; i++)
     {
         apps[i].icon = (TaskbarIcon)list[i]->icon;
@@ -542,6 +544,8 @@ static void cycle_windows(int backwards)
     if (n == 0)
         return;
     Window *top = wm_top();
+    if (top && top->dialog)
+        top = top->owner;
     int cur = -1;
     for (int i = 0; i < n; i++)
         if (list[i] == top)
