@@ -46,6 +46,7 @@ typedef struct Window
     void (*on_close)(struct Window *w);                  /* called just before the window is closed (may be NULL) */
     void (*on_key)(struct Window *w, const KeyEvent *k); /* key press / release while focused (may be NULL) */
     int (*on_press)(struct Window *w, int x, int y);     /* left press inside the window below the title bar; return 1 if it changed what is shown (may be NULL) */
+    int (*on_drag)(struct Window *w, int x, int y, unsigned buttons); /* called while the left button stays down after an on_press (and once when it is released, buttons & 1 == 0); return 1 if it changed what is shown (may be NULL) */
     UiEdit edits[WM_MAX_EDITS];                          /* ready-made text inputs for the window to use (start empty) */
     int edit_count;                                      /* how many of them the window uses (0 = none) */
     int focus;                                           /* which input has the keyboard (0 .. edit_count-1) */

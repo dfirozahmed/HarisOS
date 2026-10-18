@@ -42,10 +42,12 @@ static void hello_draw(Window *w, UiRect body)
 static void hello_set_focus(Window *w, int i)
 {
     w->focus = (i % w->edit_count + w->edit_count) % w->edit_count;
+    ui_edit_select_all(&w->edits[w->focus]); /* arriving with Tab / arrows selects the box's text, like a normal form */
     ui_caret_restart();
 }
 
-/* clicking a box gives it the keyboard */
+/* clicking a box gives it the keyboard and puts the caret where you clicked
+ * (double-click selects a word, triple-click everything) */
 static int hello_press(Window *w, int x, int y)
 {
     for (int i = 0; i < w->edit_count; i++)
@@ -53,13 +55,25 @@ static int hello_press(Window *w, int x, int y)
         UiRect f = w->edits[i].field;
         if (f.w > 0 && x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h)
         {
-            if (i == w->focus)
-                return 0;
-            hello_set_focus(w, i);
+            if (i != w->focus)
+                hello_set_focus(w, i);
+            ui_edit_mouse(&w->edits[i], x, y, 1);
+            ui_caret_restart();
             return 1;
         }
     }
     return 0;
+}
+
+/* holding the button after the press selects text; the release ends it */
+static int hello_drag(Window *w, int x, int y, unsigned buttons)
+{
+    if (!w->edits[w->focus].dragging)
+        return 0; /* the press was not on a box: nothing to select */
+    int changed = ui_edit_mouse(&w->edits[w->focus], x, y, buttons);
+    if (changed)
+        ui_caret_restart();
+    return changed;
 }
 
 /* keyboard: typing goes to the focused box; Tab / Shift+Tab / Up / Down move between boxes;
@@ -196,6 +210,7 @@ void open_hello_window(void)
     {
         win->on_key = hello_key;
         win->on_press = hello_press;
+        win->on_drag = hello_drag;
         win->edit_count = 3;
         win->caret = 1; /* its text field has a blinking caret */
     }

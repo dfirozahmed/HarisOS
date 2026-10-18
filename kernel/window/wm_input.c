@@ -9,6 +9,7 @@ static Window *DRAG;
 static int DRAG_DX, DRAG_DY;
 static Window *CLOSE_PRESSED, *MIN_PRESSED, *MAX_PRESSED;
 static Window *LC_WIN;
+static Window *PRESS_WIN; /* window whose on_press started a drag (text selection): it gets on_drag */
 static unsigned long long LC_T;
 static int LC_X, LC_Y;
 static int DRAG_PX, DRAG_PY;
@@ -63,6 +64,7 @@ void wm_input_forget_window(Window *w)
     if (MIN_PRESSED == w) MIN_PRESSED = 0;
     if (MAX_PRESSED == w) MAX_PRESSED = 0;
     if (LC_WIN == w) LC_WIN = 0;
+    if (PRESS_WIN == w) PRESS_WIN = 0;
 }
 
 /* ---- mouse --------------------------------------------------- */
@@ -93,6 +95,8 @@ int wm_pointer(int x, int y, unsigned buttons)
             {
                 if (w->on_press && w->on_press(w, x, y))
                     wm_damage_window_internal(w);
+                if (w->on_drag)
+                    PRESS_WIN = w;
             }
             if (!CLOSE_PRESSED && !MIN_PRESSED && !MAX_PRESSED && in_titlebar(w, x, y))
             {
@@ -103,6 +107,19 @@ int wm_pointer(int x, int y, unsigned buttons)
                 DRAG_DY = y - w->r.y;
             }
         }
+    }
+
+    /* 1b) the button stays down after a press inside a window: text selection by dragging.
+     *     Also called once on release, so the window can end the drag. */
+    if (PRESS_WIN && wm_z_index_internal(PRESS_WIN) < 0)
+        PRESS_WIN = 0;
+    if (PRESS_WIN && !(down && !was_down))
+    {
+        Window *pw = PRESS_WIN;
+        if (!down)
+            PRESS_WIN = 0;
+        if (pw->on_drag && pw->on_drag(pw, x, y, buttons))
+            wm_damage_window_internal(pw);
     }
 
     /* 2) move: drag the window. A maximized window first goes back to its normal

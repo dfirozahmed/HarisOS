@@ -174,23 +174,74 @@ void ui_text_field(UiRect r, const char *text, const char *placeholder, int focu
 /* ---- single-line text input ----------------------------------
  *
  *   UiEdit e = {0};                       // empty
- *   if (ui_edit_key(&e, &key_event)) ...  // feed key events; 1 = text or cursor changed
+ *   if (ui_edit_key(&e, &key_event)) ...  // feed key events; 1 = text, cursor or selection changed
  *   ui_edit_draw(rect, &e, "Type here...", focused);
+ *   ui_edit_mouse(&e, x, y, buttons);     // click / drag / double-click (after a press inside the field)
  *
- * Supports typing, Backspace, Delete, Left/Right, Home/End. Enter, Tab and
- * shortcuts are NOT handled: they are left for your code. */
+ * Keys handled:
+ *   typing, Backspace, Delete, Left/Right, Home/End
+ *   Shift+Left/Right/Home/End   extend the selection
+ *   Ctrl+Left/Right             jump a word        (with Shift: select a word)
+ *   Ctrl+Backspace/Delete       delete the previous / next word
+ *   Ctrl+A                      select all
+ *   Ctrl+C / Ctrl+X / Ctrl+V    copy / cut / paste (one shared clipboard; Ctrl+Insert, Shift+Delete,
+ *                               Shift+Insert work too)
+ *   Ctrl+Z / Ctrl+Y             undo / redo (Ctrl+Shift+Z = redo)
+ *   Typing or pasting over a selection replaces it.
+ * Enter, Tab, Escape and other shortcuts are NOT handled: they are left for your code.
+ *
+ * Mouse (ui_edit_mouse): press places the caret, dragging selects, double-click selects a
+ * word, triple-click selects everything.
+ *
+ * Options (set e.flags, e.max): UI_EDIT_PASSWORD shows '*' and blocks copy / cut;
+ * UI_EDIT_READONLY allows moving, selecting and copying but no changes;
+ * UI_EDIT_NUMERIC accepts only the digits 0-9. e.max = 0 means UI_EDIT_MAX. */
 #define UI_EDIT_MAX 120
+#define UI_EDIT_PASSWORD 1
+#define UI_EDIT_READONLY 2
+#define UI_EDIT_NUMERIC 4
 typedef struct
 {
     char text[UI_EDIT_MAX + 1];
     int len;
-    int cursor;   /* 0..len */
+    int cursor;   /* 0..len: where typing goes */
+    int anchor;   /* the other end of the selection; anchor == cursor means no selection */
+    int flags;    /* UI_EDIT_* options */
+    int max;      /* longest text allowed; 0 = UI_EDIT_MAX */
     UiRect field; /* where it was last drawn (so only the caret area can be redrawn) */
+
+    /* ---- internal state: leave alone ---- */
+    int scroll;   /* first visible character */
+    int dragging; /* left mouse button went down on this field */
+    int clicks;   /* 1, 2, 3: consecutive clicks (double / triple click) */
+    int click_x;
+    unsigned long long click_t;
+    int group;    /* 1 while consecutive typing is one undo step */
+    char undo_text[UI_EDIT_MAX + 1], redo_text[UI_EDIT_MAX + 1];
+    int undo_len, undo_cur, undo_valid;
+    int redo_len, redo_cur, redo_valid;
 } UiEdit;
 
 void ui_edit_clear(UiEdit *e);
 int ui_edit_key(UiEdit *e, const KeyEvent *k);
 void ui_edit_draw(UiRect r, UiEdit *e, const char *placeholder, int focused);
+
+/* Mouse: call with the pointer position and button state. The first call with the left button
+ * down must be a press inside e->field (decide that yourself, e.g. in a window's on_press);
+ * keep calling while the button is held (to select by dragging) and once more when it is released.
+ * Returns 1 if the caret or selection changed. */
+int ui_edit_mouse(UiEdit *e, int x, int y, unsigned buttons);
+
+/* Helpers */
+void ui_edit_set_text(UiEdit *e, const char *s);    /* replace the text (cursor at the end, undo cleared) */
+void ui_edit_select_all(UiEdit *e);
+int ui_edit_has_selection(const UiEdit *e);
+int ui_edit_selection(const UiEdit *e, int *from, int *to); /* returns 1 and the range [from,to) if any */
+int ui_edit_insert(UiEdit *e, const char *s);        /* type a string at the cursor; returns how many characters went in */
+
+/* Shared clipboard (plain text) */
+void ui_clipboard_set(const char *s, int len);
+int ui_clipboard_get(char *out, int cap);            /* copies up to cap-1 chars, returns the length */
 
 /* ---- blinking caret ----------------------------------------------
  * The caret of a focused UiEdit blinks (visible 530 ms, hidden 530 ms). ui_edit_draw()
