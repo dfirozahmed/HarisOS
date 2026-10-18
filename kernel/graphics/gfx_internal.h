@@ -1,5 +1,4 @@
 /* Internal shared state for HarisOS graphics modules.
- * Not a public application API; include/gfx.h remains the public interface.
  */
 #ifndef HARIS_GFX_INTERNAL_H
 #define HARIS_GFX_INTERNAL_H
@@ -14,6 +13,7 @@ extern int BACK;
 extern volatile unsigned int *CACHE;
 extern int CACHE_OK;
 extern int DX0, DY0, DX1, DY1;
+void gfx_internal_dirty_reset(void);
 extern int CUR_DRAWN, CUR_Y_SHARED;
 extern int RED_FIRST;
 void gfx_internal_buffer_init(void *framebuffer, int width, int height, int pitch);
