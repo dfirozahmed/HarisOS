@@ -20,6 +20,7 @@ extern int RED_FIRST;
 void gfx_internal_cursor_reset_state(void);
 void gfx_internal_buffer_init(void *framebuffer, int width, int height, int pitch);
 void gfx_internal_mark_dirty(int x0, int y0, int x1, int y1);
+void gfx_internal_blend_ptr(volatile unsigned int *p, int r, int g, int b, int alpha);
 void gfx_internal_cursor_restore(void);
 void gfx_internal_cursor_paint(void);
 

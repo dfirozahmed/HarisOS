@@ -65,6 +65,7 @@ set(KERNEL_SOURCES
     kernel/graphics/gfx_buffer.c # backbuffer, presentation and background cache
     kernel/graphics/gfx_dirty.c  # dirty-region tracking
     kernel/graphics/gfx_backend.c # framebuffer initialization and backend properties
+    kernel/graphics/gfx_shapes.c  # anti-aliased rounded rectangles and circles
     kernel/graphics/gfx.c       # drawing primitives, alpha blending and gradients
     kernel/graphics/font.c      # smooth text rendering
     kernel/graphics/font_data.c # Poppins
