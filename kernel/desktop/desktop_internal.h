@@ -10,4 +10,7 @@ char *desktop_put_str(char *out, const char *s);
 char *desktop_put_num(char *out, unsigned long long value);
 void welcome_create(void);
 void open_hello_window(void);
+int desktop_refresh_taskbar(void);
+int desktop_finish_input(int bar_changed);
+
 #endif

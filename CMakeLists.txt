@@ -87,6 +87,9 @@ set(KERNEL_SOURCES
     kernel/window/wm_damage.c      # window-manager damage tracking
     kernel/window/wm_render.c      # window rendering and clipping
     kernel/desktop/desktop.c
+    kernel/desktop/desktop_input.c
+    kernel/desktop/desktop_render.c
+    kernel/desktop/desktop_clock.c
     kernel/desktop/desktop_windows.c
     kernel/desktop/taskbar.c)
 
