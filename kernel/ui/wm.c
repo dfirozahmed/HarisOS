@@ -2,62 +2,12 @@
 #include "wm.h"
 #include "taskbar.h"
 #include "timer.h"
+#include "wm_internal.h"
 
 static Window POOL[WM_MAX_WINDOWS];
-static Window *Z[WM_MAX_WINDOWS]; /* open windows, Z[0] = back, Z[ZN-1] = top (focused) */
-static int ZN;
+Window *WM_Z[WM_MAX_WINDOWS]; /* open windows, WM_Z[0] = back, WM_Z[WM_ZN-1] = top (focused) */
+int WM_ZN;
 static int NEXT_ID = 1;
-
-/* Damage: the screen area that must be redrawn (union of everything that changed). */
-#define SHADOW_MARGIN 48 /* window shadows reach this far beyond the window */
-static int HAS_DMG, DMG_X0, DMG_Y0, DMG_X1, DMG_Y1;
-
-static void damage(int x0, int y0, int x1, int y1)
-{
-    if (!HAS_DMG)
-    {
-        DMG_X0 = x0;
-        DMG_Y0 = y0;
-        DMG_X1 = x1;
-        DMG_Y1 = y1;
-        HAS_DMG = 1;
-        return;
-    }
-    if (x0 < DMG_X0)
-        DMG_X0 = x0;
-    if (y0 < DMG_Y0)
-        DMG_Y0 = y0;
-    if (x1 > DMG_X1)
-        DMG_X1 = x1;
-    if (y1 > DMG_Y1)
-        DMG_Y1 = y1;
-}
-
-/* a window plus its shadow */
-static void damage_window(const Window *w)
-{
-    damage(w->r.x - SHADOW_MARGIN, w->r.y - SHADOW_MARGIN,
-           w->r.x + w->r.w + SHADOW_MARGIN, w->r.y + w->r.h + SHADOW_MARGIN);
-}
-
-void wm_invalidate(void)
-{
-    damage(0, 0, (int)gfx_width(), (int)gfx_height());
-}
-
-int wm_take_damage(UiRect *out)
-{
-    if (!HAS_DMG)
-        return 0;
-    int W = (int)gfx_width(), H = (int)gfx_height();
-    int x0 = DMG_X0 < 0 ? 0 : DMG_X0, y0 = DMG_Y0 < 0 ? 0 : DMG_Y0;
-    int x1 = DMG_X1 > W ? W : DMG_X1, y1 = DMG_Y1 > H ? H : DMG_Y1;
-    HAS_DMG = 0;
-    if (x1 <= x0 || y1 <= y0)
-        return 0;
-    *out = ui_rect(x0, y0, x1 - x0, y1 - y0);
-    return 1;
-}
 
 /* drag / close-button state */
 static Window *DRAG;
@@ -89,7 +39,7 @@ UiRect wm_content(const Window *w)
 }
 
 /* put the buttons at their real screen position */
-static void layout(Window *w)
+void wm_layout_internal(Window *w)
 {
     UiRect c = wm_content(w);
     int tb = ui_theme()->titlebar_h;
@@ -128,11 +78,11 @@ static int max_hit(const Window *w, int x, int y)
     return dx * dx + dy * dy <= 8 * 8;
 }
 
-/* index in Z of the topmost visible (not minimized) window, or -1 */
-static int top_index(void)
+/* index in WM_Z of the topmost visible (not minimized) window, or -1 */
+int wm_top_index_internal(void)
 {
-    for (int i = ZN - 1; i >= 0; i--)
-        if (!Z[i]->minimized)
+    for (int i = WM_ZN - 1; i >= 0; i--)
+        if (!WM_Z[i]->minimized)
             return i;
     return -1;
 }
@@ -145,25 +95,25 @@ static int in_titlebar(const Window *w, int x, int y)
 /* the open dialog that blocks `w` (its owner), or NULL */
 static Window *blocker(const Window *w)
 {
-    for (int i = ZN - 1; i >= 0; i--)
-        if (Z[i]->dialog && Z[i]->owner == w)
-            return Z[i];
+    for (int i = WM_ZN - 1; i >= 0; i--)
+        if (WM_Z[i]->dialog && WM_Z[i]->owner == w)
+            return WM_Z[i];
     return 0;
 }
 
 /* topmost window under the point, or NULL */
 static Window *window_at(int x, int y)
 {
-    for (int i = ZN - 1; i >= 0; i--)
-        if (!Z[i]->minimized && ui_contains(Z[i]->r, x, y))
-            return Z[i];
+    for (int i = WM_ZN - 1; i >= 0; i--)
+        if (!WM_Z[i]->minimized && ui_contains(WM_Z[i]->r, x, y))
+            return WM_Z[i];
     return 0;
 }
 
 static int z_index(const Window *w)
 {
-    for (int i = 0; i < ZN; i++)
-        if (Z[i] == w)
+    for (int i = 0; i < WM_ZN; i++)
+        if (WM_Z[i] == w)
             return i;
     return -1;
 }
@@ -196,11 +146,11 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
     win->user = user;
     ui_buttons_init(&win->set);
 
-    int old = top_index();
+    int old = wm_top_index_internal();
     if (old >= 0)
-        damage_window(Z[old]); /* it stops being the focused window */
-    Z[ZN++] = win;
-    damage_window(win);
+        wm_damage_window_internal(WM_Z[old]); /* it stops being the focused window */
+    WM_Z[WM_ZN++] = win;
+    wm_damage_window_internal(win);
     return win;
 }
 
@@ -225,9 +175,9 @@ void wm_close(Window *w)
     zi = z_index(w);
     if (w->on_close)
         w->on_close(w);
-    for (int i = zi; i < ZN - 1; i++)
-        Z[i] = Z[i + 1];
-    ZN--;
+    for (int i = zi; i < WM_ZN - 1; i++)
+        WM_Z[i] = WM_Z[i + 1];
+    WM_ZN--;
     w->used = 0;
     if (DRAG == w)
         DRAG = 0;
@@ -239,24 +189,24 @@ void wm_close(Window *w)
         MAX_PRESSED = 0;
     if (LC_WIN == w)
         LC_WIN = 0;
-    damage_window(w);
-    int t = top_index();
+    wm_damage_window_internal(w);
+    int t = wm_top_index_internal();
     if (t >= 0)
-        damage_window(Z[t]); /* the next window becomes focused */
+        wm_damage_window_internal(WM_Z[t]); /* the next window becomes focused */
 }
 
 static void raise_z(Window *w)
 {
     int zi = w ? z_index(w) : -1;
-    if (zi < 0 || zi == ZN - 1)
+    if (zi < 0 || zi == WM_ZN - 1)
         return;
-    int old = top_index();
+    int old = wm_top_index_internal();
     if (old >= 0)
-        damage_window(Z[old]); /* focus look changes */
-    for (int i = zi; i < ZN - 1; i++)
-        Z[i] = Z[i + 1];
-    Z[ZN - 1] = w;
-    damage_window(w);
+        wm_damage_window_internal(WM_Z[old]); /* focus look changes */
+    for (int i = zi; i < WM_ZN - 1; i++)
+        WM_Z[i] = WM_Z[i + 1];
+    WM_Z[WM_ZN - 1] = w;
+    wm_damage_window_internal(w);
 }
 
 /* raising a window with an open dialog brings the dialog up with it */
@@ -275,10 +225,10 @@ void wm_minimize(Window *w)
     w->minimized = 1;
     if (DRAG == w)
         DRAG = 0;
-    damage_window(w);
-    int t = top_index();
+    wm_damage_window_internal(w);
+    int t = wm_top_index_internal();
     if (t >= 0)
-        damage_window(Z[t]); /* the next window becomes focused */
+        wm_damage_window_internal(WM_Z[t]); /* the next window becomes focused */
 }
 
 void wm_activate(Window *w)
@@ -287,25 +237,24 @@ void wm_activate(Window *w)
         return;
     if (w->minimized)
     {
-        int old = top_index();
+        int old = wm_top_index_internal();
         if (old >= 0)
-            damage_window(Z[old]);
+            wm_damage_window_internal(WM_Z[old]);
         w->minimized = 0;
-        damage_window(w);
+        wm_damage_window_internal(w);
     }
     wm_raise(w);
 }
 
 int wm_is_open(const Window *w) { return w && z_index(w) >= 0; }
 int wm_dragging(void) { return DRAG != 0; }
-void wm_add_damage(UiRect r) { damage(r.x, r.y, r.x + r.w, r.y + r.h); }
 
 int wm_list(Window **out, int max)
 {
     int n = 0;
-    for (int i = 0; i < ZN && n < max; i++)
-        if (!Z[i]->dialog) /* dialogs are not listed in the taskbar */
-            out[n++] = Z[i];
+    for (int i = 0; i < WM_ZN && n < max; i++)
+        if (!WM_Z[i]->dialog) /* dialogs are not listed in the taskbar */
+            out[n++] = WM_Z[i];
     for (int i = 1; i < n; i++) /* oldest first (insertion sort by id) */
     {
         Window *k = out[i];
@@ -331,7 +280,7 @@ void wm_set_maximized(Window *w, int on)
     on = on != 0;
     if (!w || z_index(w) < 0 || w->maximized == on || w->dialog || blocker(w))
         return;
-    damage_window(w); /* where it was */
+    wm_damage_window_internal(w); /* where it was */
     if (on)
     {
         w->normal = w->r;
@@ -340,8 +289,8 @@ void wm_set_maximized(Window *w, int on)
     else
         w->r = w->normal;
     w->maximized = on;
-    layout(w);
-    damage_window(w); /* where it is now */
+    wm_layout_internal(w);
+    wm_damage_window_internal(w); /* where it is now */
 }
 
 int wm_add_button_ex(Window *w, const char *label, UiButtonKind kind, UiRect rel, int anchor,
@@ -363,41 +312,15 @@ int wm_add_button_ex(Window *w, const char *label, UiButtonKind kind, UiRect rel
     w->btn_rel[i] = rel;
     w->btn_anchor[i] = anchor;
     ui_buttons_add(&w->set, b);
-    layout(w);
+    wm_layout_internal(w);
     return 0;
 }
 
-int wm_count(void) { return ZN; }
+int wm_count(void) { return WM_ZN; }
 Window *wm_top(void)
 {
-    int t = top_index();
-    return t >= 0 ? Z[t] : 0;
-}
-
-/* ---- drawing ------------------------------------------------- */
-void wm_draw(void)
-{
-    int top = top_index();
-    for (int i = 0; i < ZN; i++)
-    {
-        Window *w = Z[i];
-        if (w->minimized)
-            continue;
-        GfxClip saved = gfx_get_clip();
-        /* partial redraw: skip windows (and shadows) that are outside the clip */
-        if (w->r.x - SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + SHADOW_MARGIN <= saved.x0 ||
-            w->r.y - SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + SHADOW_MARGIN <= saved.y0)
-            continue;
-        UiRect body = w->dialog      ? ui_dialog(w->r, w->title, i == top)
-                      : w->maximized ? ui_window_flat(w->r, w->title, i == top)
-                                     : ui_window(w->r, w->title, i == top);
-        layout(w);
-        gfx_clip_intersect(body.x, body.y, body.w, body.h); /* nothing can spill out of the window */
-        if (w->on_draw)
-            w->on_draw(w, body);
-        ui_buttons_draw(&w->set);
-        gfx_restore_clip(saved);
-    }
+    int t = wm_top_index_internal();
+    return t >= 0 ? WM_Z[t] : 0;
 }
 
 /* ---- mouse --------------------------------------------------- */
@@ -444,7 +367,7 @@ int wm_pointer(int x, int y, unsigned buttons)
             else if (!in_titlebar(w, x, y))
             {
                 if (w->on_press && w->on_press(w, x, y))
-                    damage_window(w);
+                    wm_damage_window_internal(w);
             }
             if (!CLOSE_PRESSED && !MIN_PRESSED && !MAX_PRESSED && in_titlebar(w, x, y))
             {
@@ -478,12 +401,12 @@ int wm_pointer(int x, int y, unsigned buttons)
         int nx = x - DRAG_DX, ny = y - DRAG_DY;
         if (nx != DRAG->r.x || ny != DRAG->r.y)
         {
-            damage_window(DRAG); /* where it was */
+            wm_damage_window_internal(DRAG); /* where it was */
             DRAG->r.x = nx;
             DRAG->r.y = ny;
             clamp_to_screen(DRAG);
-            layout(DRAG);
-            damage_window(DRAG); /* where it is now */
+            wm_layout_internal(DRAG);
+            wm_damage_window_internal(DRAG); /* where it is now */
         }
     }
 
@@ -551,13 +474,13 @@ int wm_pointer(int x, int y, unsigned buttons)
         target = 0;
     if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min || MAX_PRESSED || to_max || to_toggle))
         target = 0;
-    for (int i = 0; i < ZN; i++)
+    for (int i = 0; i < WM_ZN; i++)
     {
-        Window *w = Z[i];
+        Window *w = WM_Z[i];
         int hit = (w == target);
         if (ui_buttons_pointer(&w->set, hit ? x : -1, hit ? y : -1, buttons))
-            damage_window(w);
-        if (ZN == 0 || z_index(w) < 0) /* a click handler closed it */
+            wm_damage_window_internal(w);
+        if (WM_ZN == 0 || z_index(w) < 0) /* a click handler closed it */
             break;
     }
 
@@ -570,7 +493,7 @@ int wm_pointer(int x, int y, unsigned buttons)
     else if (to_toggle)
         wm_set_maximized(to_toggle, !to_toggle->maximized);
 
-    return HAS_DMG;
+    return WM_HAS_DMG;
 }
 
 int wm_key(const KeyEvent *k)
@@ -579,6 +502,6 @@ int wm_key(const KeyEvent *k)
     if (!w || !w->on_key)
         return 0;
     w->on_key(w, k);
-    damage_window(w); /* the handler probably changed what the window shows */
+    wm_damage_window_internal(w); /* the handler probably changed what the window shows */
     return 1;
 }
