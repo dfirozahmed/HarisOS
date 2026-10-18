@@ -86,8 +86,8 @@ set(KERNEL_SOURCES
     kernel/window/wm.c             # window manager: state, z-order and input
     kernel/window/wm_damage.c      # window-manager damage tracking
     kernel/window/wm_render.c      # window rendering and clipping
-    kernel/ui/desktop.c
-    kernel/ui/taskbar.c)
+    kernel/desktop/desktop.c
+    kernel/desktop/taskbar.c)
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
