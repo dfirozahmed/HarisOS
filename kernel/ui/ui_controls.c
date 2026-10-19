@@ -53,13 +53,15 @@ void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state)
     }
 
     if ((kind == UI_BTN_PRIMARY || kind == UI_BTN_DANGER) && !disabled && state != UI_STATE_PRESSED)
-        gfx_shadow(r.x, r.y, r.w, r.h, rad, 8, 0, 3, 70);
+        gfx_shadow(r.x, r.y, r.w, r.h, rad, 4, 0, 2, 30);
     if (kind == UI_BTN_GHOST && (state == UI_STATE_NORMAL || disabled))
     {
         /* nothing behind the label */
     }
     else
-        gfx_fill_round_rect_gradient(r.x, r.y, r.w, r.h, rad, ui_color(top), ui_color(bottom));
+        gfx_fill_round_rect(r.x, r.y, r.w, r.h, rad, ui_color(bottom));
+    // for a gradient, use the line below instead of the one above:
+    // gfx_fill_round_rect_gradient(r.x, r.y, r.w, r.h, rad, ui_color(top), ui_color(bottom));
     if (kind == UI_BTN_SECONDARY && !disabled)
         gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
     ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 20, r.h), label, UI_TEXT_LABEL, UI_ALIGN_CENTER, text);
@@ -225,4 +227,3 @@ void ui_text_field(UiRect r, const char *text, const char *placeholder, int focu
     else if (placeholder)
         ui_text_in_color(in, placeholder, UI_TEXT_BODY, UI_ALIGN_LEFT, t->text_dim);
 }
-
