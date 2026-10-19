@@ -59,6 +59,7 @@ set(KERNEL_SOURCES
     boot/efi_entry.c            # UEFI entry: collects BootInfo, calls kernel_main
     kernel/kernel.c
     kernel/memory/pmm.c
+    kernel/core/power.c              # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/time/rtc.c
     kernel/time/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
     kernel/graphics/gfx_clip.c  # clipping state and safe clip-box intersection
@@ -92,6 +93,7 @@ set(KERNEL_SOURCES
     kernel/desktop/desktop_render.c
     kernel/desktop/desktop_clock.c
     kernel/desktop/desktop_windows.c
+    kernel/desktop/desktop_power.c  # shut down / restart screen
     kernel/desktop/appmenu.c        # taskbar app right-click menu
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c)

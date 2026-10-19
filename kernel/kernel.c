@@ -5,6 +5,7 @@
 #include "keyboard.h"
 #include "mouse.h"
 #include "pmm.h"
+#include "power.h"
 #include "rtc.h"
 #include "taskbar.h"
 #include "timer.h"
@@ -13,6 +14,8 @@ void kernel_main(const BootInfo *info)
 {
     gfx_init(info->framebuffer, info->width, info->height,
              info->pitch, info->red_mask_mode);
+
+    power_init(info); /* shut down / restart, used by the start menu */
 
     int pmm_ok = (pmm_init(info) == 0);
 

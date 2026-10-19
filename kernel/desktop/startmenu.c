@@ -90,7 +90,7 @@ static int VIS[MAX_ITEMS]; /* indexes into ITEMS that match the search */
 static int VN;
 static int SEL;        /* highlighted row (index into VIS), -1 = none */
 static int PRESS = -1; /* row held down with the mouse */
-static int FOOT_HOVER, FOOT_PRESS;
+static int FOOT_HOVER, FOOT_PRESS; /* footer power buttons: 0 = none, 1 = Restart, 2 = Shut down */
 static unsigned LAST_DOWN;
 static unsigned FILTER_SIG;
 
@@ -131,10 +131,27 @@ static UiRect row_rect(int i)
 
 static int foot_y(void) { return rows_y() + MAX_ITEMS * ROW_H + 8; }
 
-static UiRect close_btn_rect(void)
+/* the two power buttons in the footer: i = 0 Restart, i = 1 Shut down (the right-most) */
+#define PBTN_W 40
+#define PBTN_H 36
+static UiRect power_btn_rect(int i)
 {
     UiRect m = menu_rect();
-    return ui_rect(m.x + m.w - PAD - 92, foot_y() + 1 + (FOOT_H - 34) / 2, 92, 34);
+    int x = m.x + m.w - PAD - PBTN_W - (1 - i) * (PBTN_W + 6);
+    return ui_rect(x, foot_y() + 1 + (FOOT_H - PBTN_H) / 2, PBTN_W, PBTN_H);
+}
+
+static const char *power_label(int hover) { return hover == 1 ? "Restart" : "Shut down"; }
+
+/* the little label above a hovered power button */
+static UiRect power_tip_rect(int hover)
+{
+    UiRect m = menu_rect(), b = power_btn_rect(hover - 1);
+    int w = gfx_text_w(MENU_THEME.font_small, power_label(hover)) + 22;
+    int x = b.x + b.w / 2 - w / 2;
+    if (x > m.x + m.w - 8 - w)
+        x = m.x + m.w - 8 - w;
+    return ui_rect(x, b.y - 34, w, 26);
 }
 
 /* ---- damage ---- */
@@ -148,6 +165,15 @@ static void dmg_row(int i)
 {
     if (i >= 0 && i < VN)
         wm_add_damage(row_rect(i));
+}
+
+static void dmg_power(int hover)
+{
+    if (hover <= 0)
+        return;
+    wm_add_damage(power_btn_rect(hover - 1));
+    UiRect t = power_tip_rect(hover);
+    wm_add_damage(ui_rect(t.x - 2, t.y - 2, t.w + 4, t.h + 4));
 }
 
 static void dmg_search(void)
@@ -229,20 +255,6 @@ void startmenu_toggle(void)
         startmenu_close();
     else
         startmenu_open();
-}
-
-static void close_all_windows(void)
-{
-    for (int guard = 0; guard < 8; guard++)
-    {
-        Window *list[TASKBAR_MAX_APPS];
-        int n = wm_list(list, TASKBAR_MAX_APPS);
-        if (n == 0)
-            break;
-        for (int i = 0; i < n; i++)
-            if (wm_is_open(list[i]))
-                wm_close(list[i]);
-    }
 }
 
 static void activate(int item)
@@ -350,7 +362,11 @@ int startmenu_pointer(int x, int y, unsigned buttons)
         for (int i = 0; i < VN; i++)
             if (ui_contains(row_rect(i), x, y))
                 hit = i;
-    int foot = over && ui_contains(close_btn_rect(), x, y);
+    int foot = 0; /* which power button the pointer is on */
+    if (over)
+        for (int i = 0; i < 2; i++)
+            if (ui_contains(power_btn_rect(i), x, y))
+                foot = i + 1;
 
     /* hover: the row under the pointer becomes the highlighted one */
     if (hit >= 0 && hit != SEL && PRESS < 0)
@@ -361,8 +377,9 @@ int startmenu_pointer(int x, int y, unsigned buttons)
     }
     if (foot != FOOT_HOVER)
     {
+        dmg_power(FOOT_HOVER);
         FOOT_HOVER = foot;
-        wm_add_damage(close_btn_rect());
+        dmg_power(foot);
     }
 
     if (edge)
@@ -370,22 +387,21 @@ int startmenu_pointer(int x, int y, unsigned buttons)
         PRESS = hit;
         FOOT_PRESS = foot;
         dmg_row(hit);
-        if (foot)
-            wm_add_damage(close_btn_rect());
+        dmg_power(foot);
     }
     if (release)
     {
         int act = (PRESS >= 0 && hit == PRESS) ? VIS[PRESS] : -1;
-        int do_close = FOOT_PRESS && foot;
+        int power = (FOOT_PRESS && foot == FOOT_PRESS) ? FOOT_PRESS : 0; /* released on the same button */
         int old = PRESS;
         PRESS = -1;
         FOOT_PRESS = 0;
         dmg_row(old);
-        wm_add_damage(close_btn_rect());
-        if (do_close)
+        dmg_power(foot);
+        if (power)
         {
             startmenu_close();
-            close_all_windows();
+            desktop_power_action(power == 1); /* does not come back when it works */
         }
         else if (act >= 0)
             activate(act);
@@ -400,6 +416,49 @@ void startmenu_tick(int caret_flipped)
 }
 
 /* ---- drawing ---- */
+/* sin / cos of 15 degree steps (x 1024). A step k points k * 15 degrees clockwise from the top. */
+static const short SIN15[24] = {0, 265, 512, 724, 887, 989, 1024, 989, 887, 724, 512, 265,
+                                0, -265, -512, -724, -887, -989, -1024, -989, -887, -724, -512, -265};
+static const short COS15[24] = {1024, 989, 887, 724, 512, 265, 0, -265, -512, -724, -887, -989,
+                                -1024, -989, -887, -724, -512, -265, 0, 265, 512, 724, 887, 989};
+
+/* point k (0..23) on a circle of radius r pixels around (cx, cy), in Q4 */
+static void circle_pt(int cx, int cy, int r, int k, int *xq, int *yq)
+{
+    *xq = cx * 16 + r * 16 * SIN15[k % 24] / 1024;
+    *yq = cy * 16 - r * 16 * COS15[k % 24] / 1024;
+}
+
+static void arc(int cx, int cy, int r, int k0, int k1, GfxColor c)
+{
+    for (int k = k0; k < k1; k++)
+    {
+        int x0, y0, x1, y1;
+        circle_pt(cx, cy, r, k, &x0, &y0);
+        circle_pt(cx, cy, r, k + 1, &x1, &y1);
+        gfx_line_q(x0, y0, x1, y1, 34, c, 255);
+    }
+}
+
+/* the power symbol: a ring open at the top with a short bar */
+static void icon_power(int cx, int cy, GfxColor c)
+{
+    arc(cx, cy, 7, 3, 21, c);
+    gfx_line_q(cx * 16, (cy - 9) * 16, cx * 16, (cy - 1) * 16, 34, c, 255);
+}
+
+/* restart: an almost closed ring with an arrow head at its end */
+static void icon_restart(int cx, int cy, GfxColor c)
+{
+    arc(cx, cy, 7, 4, 23, c);
+    int px, py, k = 23;
+    circle_pt(cx, cy, 7, k, &px, &py);
+    int tx = COS15[k] * 80 / 1024, ty = SIN15[k] * 80 / 1024;   /* along the travel direction, 5 px */
+    int rx = SIN15[k] * 64 / 1024, ry = -COS15[k] * 64 / 1024;  /* across it (outwards), 4 px */
+    int pts[6] = {px + tx, py + ty, px + rx - tx / 5, py + ry - ty / 5, px - rx - tx / 5, py - ry - ty / 5};
+    gfx_fill_poly_q(pts, 3, c, 255);
+}
+
 void startmenu_draw(void)
 {
     if (!OPEN || !gfx_ready())
@@ -448,8 +507,25 @@ void startmenu_draw(void)
     ui_text_in_color(ui_rect(ax - 17, cy - 17, 34, 34), "H", UI_TEXT_LABEL, UI_ALIGN_CENTER, t->text_on_accent);
     ui_text_in(ui_rect(ax + 26, cy - 19, 120, 20), "Haris", UI_TEXT_LABEL, UI_ALIGN_LEFT);
     ui_text_in(ui_rect(ax + 26, cy + 1, 120, 18), "HarisOS", UI_TEXT_SMALL, UI_ALIGN_LEFT);
-    ui_button(close_btn_rect(), "Close all", UI_BTN_GHOST,
-              FOOT_PRESS ? UI_STATE_PRESSED : (FOOT_HOVER ? UI_STATE_HOVER : UI_STATE_NORMAL));
+    for (int i = 0; i < 2; i++)
+    {
+        UiRect b = power_btn_rect(i);
+        int hot = FOOT_HOVER == i + 1;
+        UiRgb tint = i == 1 ? t->danger : t->accent; /* Shut down turns red */
+        if (hot)
+            gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, ui_color(tint), FOOT_PRESS == i + 1 ? 60 : 34);
+        GfxColor ic = ui_color(hot && i == 1 ? t->danger : t->text);
+        if (i == 0)
+            icon_restart(b.x + b.w / 2, b.y + b.h / 2, ic);
+        else
+            icon_power(b.x + b.w / 2, b.y + b.h / 2, ic);
+    }
+    if (FOOT_HOVER > 0) /* what the hovered button does */
+    {
+        UiRect tp = power_tip_rect(FOOT_HOVER);
+        gfx_fill_round_rect_alpha(tp.x, tp.y, tp.w, tp.h, 9, gfx_rgb(24, 32, 54), 232);
+        ui_text_in_color(tp, power_label(FOOT_HOVER), UI_TEXT_SMALL, UI_ALIGN_CENTER, ui_rgb(255, 255, 255));
+    }
 
     ui_set_theme(prev);
 }

@@ -28,6 +28,9 @@ typedef struct
 #define BOOT_MEM_BS_DATA 4
 #define BOOT_MEM_CONVENTIONAL 7
 
+#define BOOT_RESET_COLD 0     /* restart */
+#define BOOT_RESET_SHUTDOWN 2 /* power off */
+
 typedef struct
 {
     /* Memory map. Walk it with: (const char *)memmap + i * desc_size.
@@ -43,6 +46,10 @@ typedef struct
     unsigned int height;
     unsigned int pitch; /* in pixels */
     unsigned int red_mask_mode;
+
+    /* The firmware's reset service (UEFI ResetSystem). Works after boot services are gone.
+     * type: BOOT_RESET_COLD (restart) or BOOT_RESET_SHUTDOWN. May be NULL; does not return when it works. */
+    void (*reset_system)(unsigned type);
 } BootInfo;
 
 #endif

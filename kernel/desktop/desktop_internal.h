@@ -11,7 +11,8 @@ char *desktop_put_num(char *out, unsigned long long value);
 void welcome_create(void);
 void open_hello_window(void);
 Window *desktop_taskbar_window(int i);
-void desktop_toggle_theme(void); /* dark <-> light */
+void desktop_toggle_theme(void);
+void desktop_power_action(int restart); /* full-screen message, then shut down (0) or restart (1); returns only if that failed (then halts) */ /* dark <-> light */
 int desktop_refresh_taskbar(void);
 int desktop_finish_input(int bar_changed);
 

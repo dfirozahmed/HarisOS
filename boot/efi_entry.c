@@ -6,6 +6,17 @@ static EFI_GUID GopGuid = {0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 
 
 void kernel_main(const BootInfo *info);
 
+/* The firmware's runtime services stay usable after ExitBootServices, so the kernel can ask the
+ * firmware to power off or reboot. This small wrapper hides the UEFI calling convention. */
+static EFI_SYSTEM_TABLE *g_system_table;
+
+static void efi_reset(unsigned type)
+{
+    EFI_SYSTEM_TABLE *st = g_system_table;
+    if (st && st->RuntimeServices && st->RuntimeServices->ResetSystem)
+        st->RuntimeServices->ResetSystem(type, EFI_SUCCESS, 0, NULL); /* EfiResetCold = 0, EfiResetShutdown = 2 */
+}
+
 /* Lives in the kernel image (EfiLoaderData), which stays valid after ExitBootServices. */
 static BootInfo boot_info;
 
@@ -97,6 +108,8 @@ EFI_STATUS EFIAPI efi_kernel_entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sys
     boot_info.height = height;
     boot_info.pitch = pitch;
     boot_info.red_mask_mode = red_mask_mode;
+    g_system_table = SystemTable;
+    boot_info.reset_system = efi_reset;
 
     status = leave_boot_services(ImageHandle, SystemTable, &boot_info);
     if (EFI_ERROR(status))
