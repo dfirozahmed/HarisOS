@@ -59,9 +59,12 @@ void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state)
         /* nothing behind the label */
     }
     else
-        gfx_fill_round_rect(r.x, r.y, r.w, r.h, rad, ui_color(bottom));
-    // for a gradient, use the line below instead of the one above:
-    // gfx_fill_round_rect_gradient(r.x, r.y, r.w, r.h, rad, ui_color(top), ui_color(bottom));
+    {
+        //for a solid color, use the line below:
+        //gfx_fill_round_rect(r.x, r.y, r.w, r.h, rad, ui_color(bottom));
+        //for a gradient, use the line below instead of the one above:
+        gfx_fill_round_rect_gradient(r.x, r.y, r.w, r.h, rad, ui_color(top), ui_color(bottom));
+    }
     if (kind == UI_BTN_SECONDARY && !disabled)
         gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
     ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 20, r.h), label, UI_TEXT_LABEL, UI_ALIGN_CENTER, text);
