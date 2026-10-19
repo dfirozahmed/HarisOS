@@ -2,6 +2,7 @@
  * restyling the whole desktop is a theme change: ui_set_theme(&ui_theme_light). */
 #include "desktop.h"
 #include "taskbar.h"
+#include "startmenu.h"
 #include "ui.h"
 #include "timer.h"
 #include "wm.h"
@@ -88,18 +89,16 @@ int desktop_refresh_taskbar(void)
     return changed;
 }
 
-/* Start button: open the welcome window again (or bring it to the front). */
+/* Start button: show / hide the start menu. */
 static void on_taskbar_start(void)
 {
-    if (!WELCOME)
-        welcome_create();
-    else
-        wm_activate(WELCOME);
+    startmenu_toggle();
 }
 
 /* App button: restore a minimized window, minimize the focused one, or focus another. */
 static void on_taskbar_app(int i)
 {
+    startmenu_close();
     if (i < 0 || i >= TB_N || !wm_is_open(TB_WIN[i]))
         return;
     Window *w = TB_WIN[i];
@@ -132,5 +131,6 @@ void desktop_draw(void)
     wm_draw();
     gfx_reset_clip();
     desktop_refresh_taskbar();
+    startmenu_draw();
     taskbar_draw();
 }

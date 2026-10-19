@@ -1,6 +1,7 @@
 /* Desktop keyboard and pointer event routing. */
 #include "desktop.h"
 #include "taskbar.h"
+#include "startmenu.h"
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
@@ -13,6 +14,9 @@ int desktop_pointer(int x, int y, unsigned buttons)
     /* The taskbar is on top of the windows: while the pointer is over it (and no
      * window is being dragged) the windows must not see the mouse. */
     int to_windows = !(on_bar && !wm_dragging());
+    /* The start menu is above the windows: while the pointer is over it the windows must not see the mouse. */
+    if (startmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
+        to_windows = 0;
     wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
 
     /* The taskbar only sees the mouse when no window is being dragged. */
@@ -39,12 +43,23 @@ static void cycle_windows(int backwards)
     wm_activate(list[next]);
 }
 
+static int SUPER_DOWN; /* the Windows key repeats while held: toggle once per press */
+
 int desktop_key(const KeyEvent *k)
 {
     ui_caret_restart(); /* typing: the caret is shown and its blink starts over */
+    if (k->key == KEY_SUPER && !k->pressed)
+        SUPER_DOWN = 0;
     if (k->pressed)
     {
-        if ((k->mods & KMOD_ALT) && k->key == KEY_F4)
+        if (k->key == KEY_SUPER || ((k->mods & KMOD_CTRL) && k->key == KEY_ESC))
+        {
+            if (k->key != KEY_SUPER || !SUPER_DOWN)
+                startmenu_toggle();
+            if (k->key == KEY_SUPER)
+                SUPER_DOWN = 1;
+        }
+        else if ((k->mods & KMOD_ALT) && k->key == KEY_F4)
             wm_close(wm_top()); /* Alt+F4: close the focused window */
         else if ((k->mods & KMOD_ALT) && k->key == KEY_TAB)
             cycle_windows((k->mods & KMOD_SHIFT) != 0);
@@ -54,10 +69,12 @@ int desktop_key(const KeyEvent *k)
             if (w)
                 wm_set_maximized(w, !w->maximized);
         }
+        else if (startmenu_is_open())
+            startmenu_key(k); /* the open menu has the keyboard */
         else
             wm_key(k);
     }
-    else
+    else if (!startmenu_is_open())
         wm_key(k);
     return desktop_finish_input(0);
 }

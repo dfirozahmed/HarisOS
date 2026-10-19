@@ -1,6 +1,7 @@
 /* Partial redraw and damage-region presentation. */
 #include "desktop.h"
 #include "taskbar.h"
+#include "startmenu.h"
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
@@ -15,6 +16,7 @@ static void desktop_draw_region(UiRect r)
     gfx_cache_restore(r.x, r.y, r.w, r.h);
     wm_draw();
     desktop_refresh_taskbar();
+    startmenu_draw();
     taskbar_draw();
     gfx_reset_clip();
 }

@@ -1,6 +1,7 @@
 /* Taskbar clock polling and caret blink updates. */
 #include "desktop.h"
 #include "taskbar.h"
+#include "startmenu.h"
 #include "ui.h"
 #include "timer.h"
 #include "wm.h"
@@ -58,6 +59,7 @@ int desktop_tick(void)
     int clock_changed = refresh_taskbar_clock();
     int flipped = ui_caret_update();
     Window *top = wm_top();
+    startmenu_tick(flipped);
 
     if (clock_changed)
     {

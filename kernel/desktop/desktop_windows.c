@@ -239,14 +239,19 @@ static void on_get_started(UiButton *b, void *user)
 }
 
 /* "Settings": switch between the dark and light theme */
-static void on_settings(UiButton *b, void *user)
+void desktop_toggle_theme(void)
 {
-    (void)b;
-    (void)user;
     DARK = !DARK;
     ui_set_theme(DARK ? &ui_theme_dark : &ui_theme_light);
     WALL_VALID = 0; /* the wallpaper colors changed: draw it again */
     wm_invalidate();
+}
+
+static void on_settings(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    desktop_toggle_theme();
 }
 
 /* keyboard: Enter does the same as "Get started" */
