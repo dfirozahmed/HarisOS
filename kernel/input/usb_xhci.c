@@ -117,15 +117,43 @@ typedef struct
 static Xhci CTRL[MAX_CTRL];
 static int NCTRL;
 
+/* Where a device sits in the USB tree. */
+typedef struct
+{
+    int root;          /* root port, 0-based */
+    u32 route;         /* route string: 4 bits per hub tier, the port number on that hub */
+    int depth;         /* number of hubs between the device and the root port */
+    int speed;         /* 1 full, 2 low, 3 high, 4 super */
+    int parent;        /* DEV index of the hub it hangs on, -1 for a root port */
+    int pport;         /* port on that hub (1-based), or the root port (0-based) */
+    int tt_slot, tt_port; /* low/full speed device behind a high speed hub: its transaction translator */
+} Loc;
+
+/* A device we keep running: a hub, or something with a HID interface we use. */
+#define MAX_DEV 24
+#define HUB_PORTS 15
+typedef struct
+{
+    int used, gone; /* gone: unplugged or broken, to be removed from usb_poll() */
+    Xhci *x;
+    int slot;
+    Loc loc;
+    Ring ep0;
+    int is_hub, nports;
+    u8 handled[HUB_PORTS + 1], tries[HUB_PORTS + 1]; /* per hub port, index = port number */
+} Dev;
+
+static Dev DEV[MAX_DEV];
+
 /* One interrupt-IN endpoint of a HID boot device (mouse or keyboard). */
 #define MAX_HID 4
 #define KIND_KBD 1
 #define KIND_MOUSE 2
 typedef struct
 {
-    int active, drop, kind;
+    int active, kind;
     Xhci *x;
-    int slot, dci, port, rlen, errs;
+    int slot, dci, dev, rlen, errs;
     Ring ring;
     volatile u8 *buf;
     u64 buf_phys;
@@ -357,7 +385,7 @@ static void hid_event(Xhci *x, const Trb *e)
             if (++h->errs > 16) /* unplugged or broken: give up on it */
             {
                 h->active = 0;
-                h->drop = 1;
+                DEV[h->dev].gone = 1;
                 return;
             }
             if (code == 6)
@@ -379,18 +407,9 @@ static void port_event(Xhci *x, const Trb *e)
     if (!(v & PORT_CCS))
     {
         x->handled[p] = 0;
-        for (int i = 0; i < MAX_HID; i++)
-        {
-            Hid *h = &HID[i];
-            if (!h->active || h->x != x || h->port != p)
-                continue;
-            h->active = 0;
-            h->drop = 1;
-            if (h->kind == KIND_MOUSE)
-                MS.buttons = 0;
-            else
-                kq_push_empty(); /* release whatever was held */
-        }
+        for (int i = 0; i < MAX_DEV; i++) /* removed later, from usb_poll(): we may be inside a command here */
+            if (DEV[i].used && DEV[i].x == x && DEV[i].loc.parent < 0 && DEV[i].loc.pport == p)
+                DEV[i].gone = 1;
     }
 }
 
@@ -418,74 +437,281 @@ static void drop_slot(Xhci *x, u32 slot)
     x->dcbaa[slot] = 0;
 }
 
-/* Brings up the device on root port p. Returns 0 if it failed in a way worth retrying,
- * 1 when the device was handled (HID device started, or something we do not use). */
-static int enum_port(Xhci *x, int p)
+static int dev_alloc(void)
 {
-    volatile u8 *pr = x->ports + 0x10 * p;
-    u32 v = rd32(pr, 0);
-    if (!(v & PORT_CCS))
-        return 1;
+    for (int i = 0; i < MAX_DEV; i++)
+        if (!DEV[i].used)
+        {
+            Dev *d = &DEV[i];
+            d->gone = 0;
+            d->is_hub = 0;
+            d->nports = 0;
+            for (int k = 0; k <= HUB_PORTS; k++)
+                d->handled[k] = d->tries[k] = 0;
+            return i;
+        }
+    return -1;
+}
 
-    /* A USB 2 port must be reset to become enabled; a USB 3 port is usually enabled already. */
-    if (!(v & PORT_PED))
+/* Stop a device and everything plugged into it, and give its slot back.
+ * Never call this from inside an event handler: it sends commands. */
+static void dev_remove(int di)
+{
+    Dev *d = &DEV[di];
+    if (!d->used)
+        return;
+    for (int k = 0; k < MAX_DEV; k++)
+        if (DEV[k].used && DEV[k].loc.parent == di)
+            dev_remove(k);
+    for (int i = 0; i < MAX_HID; i++)
     {
-        wr32(pr, 0, (v & PORT_KEEP) | PORT_PR);
-        if (!WAIT_MS(rd32(pr, 0) & PORT_PRC, 500))
-            return 0;
-        v = rd32(pr, 0);
-        wr32(pr, 0, (v & PORT_KEEP) | (v & PORT_CHG));
-        delay_ms(20);
+        Hid *h = &HID[i];
+        if (!h->active || h->dev != di)
+            continue;
+        h->active = 0;
+        if (h->kind == KIND_MOUSE)
+            MS.buttons = 0;
+        else
+            kq_push_empty(); /* release whatever was held */
     }
-    v = rd32(pr, 0);
-    if (!(v & PORT_CCS) || !(v & PORT_PED))
+    drop_slot(d->x, (u32)d->slot);
+    d->used = 0;
+}
+
+/* The slot context both Address Device and Configure Endpoint need. */
+static void fill_slot(volatile u32 *c, const Loc *L, int entries, int hub_ports, int think_time)
+{
+    c[0] = L->route | ((u32)L->speed << 20) | (hub_ports ? (1u << 26) : 0) | ((u32)entries << 27);
+    c[1] = ((u32)(L->root + 1) << 16) | ((u32)hub_ports << 24);
+    c[2] = (u32)L->tt_slot | ((u32)L->tt_port << 8) | ((u32)think_time << 16);
+}
+
+static int bring_up(Xhci *x, const Loc *L);
+static void hub_scan(Xhci *x, int di);
+
+/* ---------- hubs ---------- */
+
+static int port_status(Xhci *x, Dev *d, int port, u32 *st, u32 *ch)
+{
+    int code = control(x, d->slot, &d->ep0, 0xA3, 0, 0, (u16)port, 4, 1); /* GET_STATUS, class, other */
+    if (code == 6)
+        ep_recover(x, d->slot, 1, &d->ep0);
+    if (!ctrl_ok(code))
         return 0;
-    int speed = (int)((v >> 10) & 15);
-    if (speed < 1)
+    *st = x->dma[0] | ((u32)x->dma[1] << 8);
+    *ch = x->dma[2] | ((u32)x->dma[3] << 8);
+    return 1;
+}
+
+static void port_feature(Xhci *x, Dev *d, int set, int feature, int port)
+{
+    int code = control(x, d->slot, &d->ep0, 0x23, set ? 3 : 1, (u16)feature, (u16)port, 0, 0);
+    if (code == 6)
+        ep_recover(x, d->slot, 1, &d->ep0);
+}
+
+#define HUB_PORT_RESET 4
+#define HUB_PORT_POWER 8
+#define HUB_C_CONNECTION 16
+#define HUB_C_RESET 20
+
+/* Reset a hub port and bring up what is on it. 0 = failed, worth another try. */
+static int hub_enum_child(Xhci *x, int di, int port)
+{
+    Dev *d = &DEV[di];
+    u32 st = 0, ch = 0;
+    port_feature(x, d, 1, HUB_PORT_RESET, port);
+    int done = 0;
+    for (int i = 0; i < 60 && !done; i++)
+    {
+        delay_ms(10);
+        if (port_status(x, d, port, &st, &ch) && (ch & (1u << 4)))
+            done = 1;
+    }
+    if (!done)
         return 0;
-    if (speed > 4)
-        speed = 4; /* SuperSpeed+ behaves like SuperSpeed for what we do */
+    port_feature(x, d, 0, HUB_C_RESET, port);
+    port_feature(x, d, 0, HUB_C_CONNECTION, port);
+    if (!port_status(x, d, port, &st, &ch) || !(st & 1) || !(st & 2)) /* connected and enabled */
+        return 0;
+    delay_ms(20);
+
+    Loc L;
+    L.root = d->loc.root;
+    L.route = d->loc.route | ((u32)port << (4 * d->loc.depth));
+    L.depth = d->loc.depth + 1;
+    L.speed = d->loc.speed == 4 ? 4 : ((st & (1u << 9)) ? 2 : ((st & (1u << 10)) ? 3 : 1));
+    L.parent = di;
+    L.pport = port;
+    L.tt_slot = L.tt_port = 0;
+    if (L.speed <= 2) /* low / full speed: needs the transaction translator of the nearest high speed hub */
+    {
+        if (d->loc.speed == 3)
+        {
+            L.tt_slot = d->slot;
+            L.tt_port = port;
+        }
+        else
+        {
+            L.tt_slot = d->loc.tt_slot;
+            L.tt_port = d->loc.tt_port;
+        }
+    }
+    return bring_up(x, &L);
+}
+
+static void hub_remove_children(int di, int port)
+{
+    for (int k = 0; k < MAX_DEV; k++)
+        if (DEV[k].used && DEV[k].loc.parent == di && DEV[k].loc.pport == port)
+            dev_remove(k);
+}
+
+/* Look at every port of a hub: new devices get brought up, vanished ones removed. */
+static void hub_scan(Xhci *x, int di)
+{
+    for (int port = 1; port <= DEV[di].nports; port++)
+    {
+        Dev *d = &DEV[di];
+        if (!d->used || d->gone)
+            return;
+        u32 st, ch;
+        if (!port_status(x, d, port, &st, &ch))
+            continue;
+        if (ch & 1) /* connection changed: whatever was there is gone */
+        {
+            port_feature(x, d, 0, HUB_C_CONNECTION, port);
+            if (d->handled[port])
+            {
+                hub_remove_children(di, port);
+                d->handled[port] = 0;
+            }
+        }
+        if (!(st & 1))
+        {
+            if (d->handled[port])
+            {
+                hub_remove_children(di, port);
+                d->handled[port] = 0;
+            }
+            d->tries[port] = 0;
+            continue;
+        }
+        if (d->handled[port])
+            continue;
+        d->handled[port] = 1;
+        if (!hub_enum_child(x, di, port) && ++d->tries[port] < 3)
+            d->handled[port] = 0; /* try again at the next scan */
+    }
+}
+
+/* The device in DEV[di] is a hub: configure it, switch its ports on and look at them. */
+static int hub_setup(Xhci *x, int di, u32 cfg_value)
+{
+    Dev *d = &DEV[di];
+    int slot = d->slot, ss = d->loc.speed == 4;
+    if (d->loc.depth >= 5) /* a route string has room for five tiers only */
+    {
+        d->used = 0;
+        drop_slot(x, (u32)slot);
+        return 1;
+    }
+    int ok = ctrl_ok(control(x, slot, &d->ep0, 0x00, 9, (u16)cfg_value, 0, 0, 0)); /* SET_CONFIGURATION */
+    if (ok && ss)
+        control(x, slot, &d->ep0, 0x20, 12, (u16)d->loc.depth, 0, 0, 0); /* SET_HUB_DEPTH */
+    if (ok)
+        ok = ctrl_ok(control(x, slot, &d->ep0, 0xA0, 6, ss ? 0x2A00 : 0x2900, 0, 8, 1)); /* hub descriptor */
+    if (!ok)
+    {
+        d->used = 0;
+        drop_slot(x, (u32)slot);
+        return 0;
+    }
+    int n = x->dma[2];
+    u32 chars = x->dma[3] | ((u32)x->dma[4] << 8);
+    u32 power_good = x->dma[5]; /* in units of 2 ms */
+    if (n < 1)
+    {
+        d->used = 0;
+        drop_slot(x, (u32)slot);
+        return 1;
+    }
+    if (n > HUB_PORTS)
+        n = HUB_PORTS;
+
+    /* Tell the controller it is a hub (so it knows the ports and the transaction translator). */
+    inctx_clear(x);
+    volatile u32 *c = ctx_at(x, 0);
+    c[1] = 1; /* add: slot context only */
+    fill_slot(ctx_at(x, 1), &d->loc, 1, n, (int)((chars >> 5) & 3));
+    if (command(x, x->inctx_phys, (12u << 10) | ((u32)slot << 24), 0) != 1)
+        command(x, x->inctx_phys, (13u << 10) | ((u32)slot << 24), 0);
+
+    d->is_hub = 1;
+    d->nports = n;
+    for (int p = 1; p <= n; p++)
+        port_feature(x, d, 1, HUB_PORT_POWER, p);
+    delay_ms(power_good * 2 > 100 ? power_good * 2 : 100);
+    hub_scan(x, di);
+    return 1;
+}
+
+/* ---------- devices ---------- */
+
+/* Brings up a device (already reset and enabled on its port) and, if it is a hub or has a
+ * HID boot interface, keeps it. Returns 0 if it failed in a way worth retrying, 1 when the
+ * device was handled (kept, or something we do not use). */
+static int bring_up(Xhci *x, const Loc *L)
+{
+    int speed = L->speed;
     u32 mps = speed == 4 ? 512 : (speed == 3 ? 64 : 8);
 
     u32 slot = 0;
     if (command(x, 0, 9u << 10, &slot) != 1 || slot == 0 || (int)slot > x->nslots) /* Enable Slot */
         return 0;
+    int di = dev_alloc();
+    if (di < 0)
+    {
+        drop_slot(x, slot);
+        return 1;
+    }
+    Dev *d = &DEV[di];
+    d->used = 1;
+    d->x = x;
+    d->slot = (int)slot;
+    d->loc = *L;
+#define FAIL           \
+    do                 \
+    {                  \
+        d->used = 0;   \
+        drop_slot(x, slot); \
+        return 0;      \
+    } while (0)
 
     u64 dev_phys;
     volatile u8 *dev = dma_page(x, &dev_phys);
-    Ring ep0;
-    if (!dev || ring_init(x, &ep0))
-    {
-        drop_slot(x, slot);
-        return 0;
-    }
+    if (!dev || ring_init(x, &d->ep0))
+        FAIL;
     x->dcbaa[slot] = dev_phys;
 
     /* Address Device: slot context + endpoint 0 */
     inctx_clear(x);
     volatile u32 *c = ctx_at(x, 0);
     c[1] = 3; /* add: slot context, endpoint 0 */
-    c = ctx_at(x, 1);
-    c[0] = (1u << 27) | ((u32)speed << 20);
-    c[1] = (u32)(p + 1) << 16;
+    fill_slot(ctx_at(x, 1), L, 1, 0, 0);
     c = ctx_at(x, 2);
     c[1] = (3u << 1) | (4u << 3) | (mps << 16); /* error count 3, type control */
-    c[2] = (u32)ep0.phys | 1;
-    c[3] = (u32)(ep0.phys >> 32);
+    c[2] = (u32)d->ep0.phys | 1;
+    c[3] = (u32)(d->ep0.phys >> 32);
     c[4] = 8;
     if (command(x, x->inctx_phys, (11u << 10) | (slot << 24), 0) != 1)
-    {
-        drop_slot(x, slot);
-        return 0;
-    }
+        FAIL;
     delay_ms(10);
 
     /* First 8 bytes of the device descriptor tell the real packet size of endpoint 0. */
-    if (!ctrl_ok(control(x, (int)slot, &ep0, 0x80, 6, 0x0100, 0, 8, 1)))
-    {
-        drop_slot(x, slot);
-        return 0;
-    }
+    if (!ctrl_ok(control(x, (int)slot, &d->ep0, 0x80, 6, 0x0100, 0, 8, 1)))
+        FAIL;
+    u32 dclass = x->dma[4];
     u32 real = x->dma[7];
     if (speed == 4)
         real = (real >= 9 && real <= 10) ? (1u << real) : 0;
@@ -501,22 +727,19 @@ static int enum_port(Xhci *x, int p)
     }
 
     /* Configuration descriptor: first its length, then all of it. */
-    if (!ctrl_ok(control(x, (int)slot, &ep0, 0x80, 6, 0x0200, 0, 9, 1)))
-    {
-        drop_slot(x, slot);
-        return 0;
-    }
+    if (!ctrl_ok(control(x, (int)slot, &d->ep0, 0x80, 6, 0x0200, 0, 9, 1)))
+        FAIL;
     u32 total = x->dma[2] | ((u32)x->dma[3] << 8);
     if (total > 2048)
         total = 2048;
-    if (total < 9 || !ctrl_ok(control(x, (int)slot, &ep0, 0x80, 6, 0x0200, 0, (u16)total, 1)))
-    {
-        drop_slot(x, slot);
-        return 0;
-    }
+    if (total < 9 || !ctrl_ok(control(x, (int)slot, &d->ep0, 0x80, 6, 0x0200, 0, (u16)total, 1)))
+        FAIL;
+    u32 cfg_value = x->dma[5];
+
+    if (dclass == 9)
+        return hub_setup(x, di, cfg_value);
 
     /* Look for boot-protocol keyboard / mouse interfaces (at most one of each kind). */
-    u32 cfg_value = x->dma[5];
     struct
     {
         int kind, iface, addr, mps, interval;
@@ -560,7 +783,7 @@ static int enum_port(Xhci *x, int p)
     {
         Hid *h = 0;
         for (int k = 0; k < MAX_HID && !h; k++)
-            if (!HID[k].active && !HID[k].drop && HID[k].kind >= 0)
+            if (!HID[k].active && HID[k].kind >= 0)
                 h = &HID[k];
         if (!h)
             break;
@@ -575,7 +798,8 @@ static int enum_port(Xhci *x, int p)
     }
     if (nh == 0)
     {
-        drop_slot(x, slot); /* a hub, storage, ... : not ours */
+        d->used = 0;
+        drop_slot(x, slot); /* storage, a webcam, ... : not ours */
         return 1;
     }
 
@@ -591,9 +815,7 @@ static int enum_port(Xhci *x, int p)
             maxdci = dci;
         c[1] |= 1u << dci;
     }
-    c = ctx_at(x, 1);
-    c[0] = ((u32)maxdci << 27) | ((u32)speed << 20);
-    c[1] = (u32)(p + 1) << 16;
+    fill_slot(ctx_at(x, 1), L, maxdci, 0, 0);
     for (int i = 0; i < nh; i++)
     {
         int dci = F[i].addr * 2 + 1;
@@ -605,17 +827,16 @@ static int enum_port(Xhci *x, int p)
         c[4] = (u32)F[i].mps | ((u32)F[i].mps << 16);
     }
     int ok = command(x, x->inctx_phys, (12u << 10) | (slot << 24), 0) == 1 &&
-             ctrl_ok(control(x, (int)slot, &ep0, 0x00, 9, (u16)cfg_value, 0, 0, 0)); /* SET_CONFIGURATION */
+             ctrl_ok(control(x, (int)slot, &d->ep0, 0x00, 9, (u16)cfg_value, 0, 0, 0)); /* SET_CONFIGURATION */
     if (!ok)
     {
         for (int i = 0; i < nh; i++)
             hid[i]->kind = 0;
-        drop_slot(x, slot);
-        return 0;
+        FAIL;
     }
     for (int i = 0; i < nh; i++)
-        if (control(x, (int)slot, &ep0, 0x21, 0x0B, 0, (u16)F[i].iface, 0, 0) == 6) /* SET_PROTOCOL: boot */
-            ep_recover(x, (int)slot, 1, &ep0);
+        if (control(x, (int)slot, &d->ep0, 0x21, 0x0B, 0, (u16)F[i].iface, 0, 0) == 6) /* SET_PROTOCOL: boot */
+            ep_recover(x, (int)slot, 1, &d->ep0);
 
     for (int i = 0; i < nh; i++)
     {
@@ -623,10 +844,9 @@ static int enum_port(Xhci *x, int p)
         h->x = x;
         h->slot = (int)slot;
         h->dci = F[i].addr * 2 + 1;
-        h->port = p;
+        h->dev = di;
         h->rlen = F[i].mps > 64 ? 64 : F[i].mps;
         h->errs = 0;
-        h->drop = 0;
         h->kind = F[i].kind;
         if (h->kind == KIND_MOUSE)
             MS.buttons = 0;
@@ -634,6 +854,43 @@ static int enum_port(Xhci *x, int p)
         hid_queue(h);
     }
     return 1;
+#undef FAIL
+}
+
+/* Brings up the device on root port p. 0 = failed, worth another try. */
+static int enum_port(Xhci *x, int p)
+{
+    volatile u8 *pr = x->ports + 0x10 * p;
+    u32 v = rd32(pr, 0);
+    if (!(v & PORT_CCS))
+        return 1;
+
+    /* A USB 2 port must be reset to become enabled; a USB 3 port is usually enabled already. */
+    if (!(v & PORT_PED))
+    {
+        wr32(pr, 0, (v & PORT_KEEP) | PORT_PR);
+        if (!WAIT_MS(rd32(pr, 0) & PORT_PRC, 500))
+            return 0;
+        v = rd32(pr, 0);
+        wr32(pr, 0, (v & PORT_KEEP) | (v & PORT_CHG));
+        delay_ms(20);
+    }
+    v = rd32(pr, 0);
+    if (!(v & PORT_CCS) || !(v & PORT_PED))
+        return 0;
+    int speed = (int)((v >> 10) & 15);
+    if (speed < 1)
+        return 0;
+
+    Loc L;
+    L.root = p;
+    L.route = 0;
+    L.depth = 0;
+    L.speed = speed > 4 ? 4 : speed; /* SuperSpeed+ behaves like SuperSpeed for what we do */
+    L.parent = -1;
+    L.pport = p;
+    L.tt_slot = L.tt_port = 0;
+    return bring_up(x, &L);
 }
 
 static void rescan(Xhci *x)
@@ -646,6 +903,9 @@ static void rescan(Xhci *x)
             wr32(pr, 0, (v & PORT_KEEP) | (v & PORT_CHG));
         if (!(v & PORT_CCS))
         {
+            for (int k = 0; k < MAX_DEV; k++)
+                if (DEV[k].used && DEV[k].x == x && DEV[k].loc.parent < 0 && DEV[k].loc.pport == p)
+                    dev_remove(k);
             x->handled[p] = 0;
             x->tries[p] = 0;
             continue;
@@ -868,23 +1128,10 @@ int usb_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
     }
     pump();
 
-    /* devices that went away: give their slot back (unless another interface of it still runs) */
-    for (int i = 0; i < MAX_HID; i++)
-    {
-        Hid *h = &HID[i];
-        if (!h->drop)
-            continue;
-        h->drop = 0;
-        int shared = 0;
-        for (int k = 0; k < MAX_HID; k++)
-            if (k != i && HID[k].kind > 0 && HID[k].x == h->x && HID[k].slot == h->slot && (HID[k].active || HID[k].drop))
-                shared = 1;
-        if (!shared)
-        {
-            drop_slot(h->x, (u32)h->slot);
-            h->x->handled[h->port] = 0;
-        }
-    }
+    /* devices that went away or broke: stop them and give their slot back */
+    for (int i = 0; i < MAX_DEV; i++)
+        if (DEV[i].used && DEV[i].gone)
+            dev_remove(i);
 
     /* look for newly plugged devices about once a second */
     int due;
@@ -898,8 +1145,13 @@ int usb_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
     else
         due = (++spin % 200000) == 0;
     if (due)
+    {
         for (int i = 0; i < NCTRL; i++)
             rescan(&CTRL[i]);
+        for (int i = 0; i < MAX_DEV; i++) /* hubs: a hub's ports are polled, there is no interrupt endpoint */
+            if (DEV[i].used && DEV[i].is_hub && !DEV[i].gone)
+                hub_scan(DEV[i].x, i);
+    }
 
     int mouse = 0;
     for (int i = 0; i < MAX_HID; i++)
