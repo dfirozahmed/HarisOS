@@ -149,7 +149,30 @@ add_custom_command(
     VERBATIM
 )
 
-add_custom_target(haris ALL DEPENDS ${ESP_LOADER} ${ESP_KERNEL})
+# ------------------------------------------------------------
+# Bootable disk image for a USB stick / virtual machine: build/haris.img
+# (GPT + FAT32 EFI System Partition). tools/mkimg.c is a small host program,
+# ------------------------------------------------------------
+set(MKIMG_EXE ${CMAKE_BINARY_DIR}/mkimg${CMAKE_HOST_EXECUTABLE_SUFFIX})
+set(HARIS_IMG ${CMAKE_BINARY_DIR}/haris.img)
+
+add_custom_command(
+    OUTPUT  ${MKIMG_EXE}
+    COMMAND ${CLANG_CC} -O2 -o ${MKIMG_EXE} ${CMAKE_SOURCE_DIR}/tools/mkimg.c
+    DEPENDS ${CMAKE_SOURCE_DIR}/tools/mkimg.c
+    COMMENT "Building mkimg"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT  ${HARIS_IMG}
+    COMMAND ${MKIMG_EXE} ${HARIS_IMG} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${CMAKE_BINARY_DIR}/KERNEL.EFI
+    DEPENDS ${MKIMG_EXE} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${KERNEL_BIN}
+    COMMENT "Creating haris.img"
+    VERBATIM
+)
+
+add_custom_target(haris ALL DEPENDS ${ESP_LOADER} ${ESP_KERNEL} ${HARIS_IMG})
 
 # ------------------------------------------------------------
 # Running needs UEFI firmware for the virtual machine (OVMF / edk2).
