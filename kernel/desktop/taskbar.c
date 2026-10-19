@@ -69,6 +69,28 @@ int taskbar_pointer(int x, int y, unsigned buttons)
     return ui_buttons_pointer(&SET, x, y, buttons);
 }
 
+int taskbar_app_at(int x, int y)
+{
+    init_set();
+    for (int i = 0; i < APP_COUNT; i++)
+        if (ui_contains(ITEM[1 + i].r, x, y))
+            return i;
+    return -1;
+}
+
+int taskbar_app_rect(int index, int *x, int *y, int *w, int *h)
+{
+    init_set();
+    if (index < 0 || index >= APP_COUNT)
+        return 0;
+    UiRect r = ITEM[1 + index].r;
+    *x = r.x;
+    *y = r.y;
+    *w = r.w;
+    *h = r.h;
+    return 1;
+}
+
 void taskbar_bounds(int *x, int *y, int *w, int *h)
 {
     *x = 0;

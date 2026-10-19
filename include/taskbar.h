@@ -37,6 +37,11 @@ void taskbar_set_callbacks(TaskbarStartFn on_start, TaskbarAppFn on_app);
  * must be ignored (e.g. while a window is being dragged). */
 int taskbar_pointer(int x, int y, unsigned buttons);
 
+/* Which app button is at (x, y): its index, or -1. taskbar_app_rect() gives its rectangle
+ * (valid after the taskbar was drawn once); returns 0 if there is no such app. */
+int taskbar_app_at(int x, int y);
+int taskbar_app_rect(int index, int *x, int *y, int *w, int *h);
+
 /* Where the taskbar is on screen (for partial redraws). */
 void taskbar_bounds(int *x, int *y, int *w, int *h);
 

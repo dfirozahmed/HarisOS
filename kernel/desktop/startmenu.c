@@ -1,5 +1,6 @@
 /* HarisOS start menu: light translucent glass panel with search, app list and footer. */
 #include "startmenu.h"
+#include "appmenu.h"
 #include "desktop.h"
 #include "taskbar.h"
 #include "ui.h"
@@ -61,6 +62,26 @@ static const MenuItem ITEMS[MAX_ITEMS] = {
     {"Hello window", "Text boxes and dialogs", UI_ICON_TERMINAL},
     {"Settings", "Switch dark / light theme", UI_ICON_SETTINGS},
 };
+
+const UiTheme *startmenu_theme(void) { return &MENU_THEME; }
+
+void startmenu_glass(UiRect r, int radius)
+{
+    /* The shadow is a set of faint rings OUTSIDE the panel, so nothing dark shows through the
+     * translucent fill (gfx_shadow() would darken the panel's own edges). */
+    enum { RINGS = 14 };
+    for (int k = RINGS; k >= 1; k--)
+    {
+        int left = RINGS - k + 1; /* 14 near the panel ... 1 at the far edge */
+        int a = 44 * left * left / (RINGS * RINGS);
+        if (a < 1)
+            a = 1;
+        gfx_round_rect_alpha(r.x - k, r.y - k, r.w + 2 * k, r.h + 2 * k, radius + k, 1, gfx_rgb(10, 20, 50),
+                             (unsigned char)a);
+    }
+    gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, radius, ui_color(MENU_THEME.surface), PANEL_ALPHA);
+    gfx_round_rect_alpha(r.x, r.y, r.w, r.h, radius, 1, gfx_rgb(255, 255, 255), 235);
+}
 
 /* ---- state ---- */
 static int OPEN;
@@ -191,6 +212,7 @@ static void startmenu_open(void)
 {
     if (OPEN)
         return;
+    appmenu_close(); /* only one menu at a time */
     OPEN = 1;
     ui_edit_set_text(&SEARCH, "");
     FILTER_SIG = text_sig("");
@@ -388,9 +410,7 @@ void startmenu_draw(void)
     UiRect m = menu_rect();
 
     /* glass panel: soft shadow, translucent light fill, bright edge */
-    gfx_shadow(m.x, m.y, m.w, m.h, 18, 30, 0, 10, 90);
-    gfx_fill_round_rect_alpha(m.x, m.y, m.w, m.h, 18, ui_color(t->surface), PANEL_ALPHA);
-    gfx_round_rect_alpha(m.x, m.y, m.w, m.h, 18, 1, gfx_rgb(255, 255, 255), 235);
+    startmenu_glass(m, 18);
 
     /* search */
     UiRect s = search_rect();

@@ -8,6 +8,13 @@
 #define HARIS_STARTMENU_H
 
 #include "keyboard.h"
+#include "ui.h"
+
+/* The light glass theme the menus are drawn with (also used by the taskbar app menu). */
+const UiTheme *startmenu_theme(void);
+
+/* Draw the glass panel itself (soft shadow outside, translucent light fill, bright edge). Used by both menus. */
+void startmenu_glass(UiRect r, int radius);
 
 int startmenu_is_open(void);
 void startmenu_toggle(void);

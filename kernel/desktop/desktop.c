@@ -3,6 +3,7 @@
 #include "desktop.h"
 #include "taskbar.h"
 #include "startmenu.h"
+#include "appmenu.h"
 #include "ui.h"
 #include "timer.h"
 #include "wm.h"
@@ -89,6 +90,12 @@ int desktop_refresh_taskbar(void)
     return changed;
 }
 
+/* The window behind the i-th taskbar button (NULL if there is none). */
+Window *desktop_taskbar_window(int i)
+{
+    return (i >= 0 && i < TB_N && wm_is_open(TB_WIN[i])) ? TB_WIN[i] : 0;
+}
+
 /* Start button: show / hide the start menu. */
 static void on_taskbar_start(void)
 {
@@ -99,6 +106,7 @@ static void on_taskbar_start(void)
 static void on_taskbar_app(int i)
 {
     startmenu_close();
+    appmenu_close();
     if (i < 0 || i >= TB_N || !wm_is_open(TB_WIN[i]))
         return;
     Window *w = TB_WIN[i];
@@ -132,5 +140,6 @@ void desktop_draw(void)
     gfx_reset_clip();
     desktop_refresh_taskbar();
     startmenu_draw();
+    appmenu_draw();
     taskbar_draw();
 }

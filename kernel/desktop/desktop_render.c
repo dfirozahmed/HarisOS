@@ -2,6 +2,7 @@
 #include "desktop.h"
 #include "taskbar.h"
 #include "startmenu.h"
+#include "appmenu.h"
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
@@ -17,6 +18,7 @@ static void desktop_draw_region(UiRect r)
     wm_draw();
     desktop_refresh_taskbar();
     startmenu_draw();
+    appmenu_draw();
     taskbar_draw();
     gfx_reset_clip();
 }

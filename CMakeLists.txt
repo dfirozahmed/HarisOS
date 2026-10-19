@@ -92,6 +92,7 @@ set(KERNEL_SOURCES
     kernel/desktop/desktop_render.c
     kernel/desktop/desktop_clock.c
     kernel/desktop/desktop_windows.c
+    kernel/desktop/appmenu.c        # taskbar app right-click menu
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c)
 
