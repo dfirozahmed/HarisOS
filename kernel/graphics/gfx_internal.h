@@ -22,6 +22,7 @@ void gfx_internal_buffer_init(void *framebuffer, int width, int height, int pitc
 void gfx_internal_mark_dirty(int x0, int y0, int x1, int y1);
 void gfx_internal_blend_ptr(volatile unsigned int *p, int r, int g, int b, int alpha);
 void gfx_internal_cursor_restore(void);
+void gfx_internal_cursor_y_range(int *y0, int *y1); /* screen rows covered by the pointer (when drawn) */
 void gfx_internal_cursor_paint(void);
 
 extern int CX0, CY0, CX1, CY1;

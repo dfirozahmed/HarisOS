@@ -56,13 +56,9 @@ void gfx_present(void)
     if (!BACK || DX1 <= DX0 || DY1 <= DY0)
         return;
 
-    extern const int gfx_cursor_h, gfx_cursor_hot;
     int cy0 = 0, cy1 = 0; /* screen rows covered by the pointer */
     if (CUR_DRAWN)
-    {
-        cy0 = CUR_Y_SHARED - gfx_cursor_hot;
-        cy1 = cy0 + gfx_cursor_h;
-    }
+        gfx_internal_cursor_y_range(&cy0, &cy1);
     for (int y = DY0; y < DY1; y++)
     {
         if (y >= cy0 && y < cy1)

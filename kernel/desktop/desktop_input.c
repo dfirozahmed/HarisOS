@@ -37,6 +37,17 @@ int desktop_pointer(int x, int y, unsigned buttons)
     }
     wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
 
+    /* pointer shape: a double arrow on a window edge or corner (and during a resize) */
+    int edge = (to_windows || wm_dragging()) ? wm_resize_hint(x, y) : 0;
+    int shape = GFX_CURSOR_ARROW;
+    if ((edge & (WM_EDGE_LEFT | WM_EDGE_RIGHT)) && (edge & (WM_EDGE_TOP | WM_EDGE_BOTTOM)))
+        shape = ((edge & WM_EDGE_LEFT) != 0) == ((edge & WM_EDGE_TOP) != 0) ? GFX_CURSOR_SIZE_NWSE : GFX_CURSOR_SIZE_NESW;
+    else if (edge & (WM_EDGE_LEFT | WM_EDGE_RIGHT))
+        shape = GFX_CURSOR_SIZE_H;
+    else if (edge)
+        shape = GFX_CURSOR_SIZE_V;
+    gfx_cursor_set_shape(shape);
+
     /* The taskbar only sees the mouse when no window is being dragged. */
     int bar_changed = desktop_refresh_taskbar(); /* its buttons must match the windows before a click is handled */
     bar_changed |= taskbar_pointer(wm_dragging() ? -1 : x, wm_dragging() ? -1 : y, buttons);

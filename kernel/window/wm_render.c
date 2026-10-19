@@ -24,6 +24,17 @@ void wm_draw(void)
             w->on_draw(w, body);
         ui_buttons_draw(&w->set);
         gfx_restore_clip(saved);
+        if (!w->dialog && !w->maximized && !w->fixed_size)
+        {
+            /* size grip: six small dots in the bottom-right corner show that the window can be resized */
+            UiRgb c = ui_theme()->text_dim;
+            gfx_clip_intersect(w->r.x, w->r.y, w->r.w, w->r.h);
+            for (int gy = 0; gy < 3; gy++)
+                for (int gx = 0; gx + gy < 3; gx++)
+                    gfx_fill_rect_alpha(w->r.x + w->r.w - 7 - 4 * gx, w->r.y + w->r.h - 7 - 4 * gy, 2, 2, c.r, c.g, c.b,
+                                        i == top ? 150 : 90);
+            gfx_restore_clip(saved);
+        }
     }
 }
 

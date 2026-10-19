@@ -2,7 +2,8 @@
  * HarisOS window manager (small, no malloc)
  *
  * Keeps a fixed pool of windows with a z-order (back to front), and handles
- * focus (click raises), dragging by the title bar, the red close button, and
+ * focus (click raises), dragging by the title bar, resizing by the edges and corners,
+ * the red close button, and
  * routing mouse events to the buttons of the window under the pointer.
  *
  *   Window *w = wm_create("Hello", 100, 80, 360, 200, my_draw, my_data);
@@ -39,6 +40,8 @@ typedef struct Window
     int maximized;        /* fills the screen above the taskbar */
     UiRect normal;        /* size and place to go back to when un-maximized */
     int base_w, base_h;   /* outer size at creation: reference for button anchors */
+    int fixed_size;       /* 1 = cannot be resized with the mouse (dialogs never can) */
+    int min_w, min_h;     /* smallest outer size when resizing (set by wm_create; see wm_set_min_size) */
     int icon;             /* taskbar icon (a TaskbarIcon value, see taskbar.h) */
     UiRect r;             /* outer rectangle on screen */
     char title[WM_TITLE_MAX];
@@ -80,6 +83,19 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
 int wm_add_button_ex(Window *w, const char *label, UiButtonKind kind, UiRect rel, int anchor,
                      UiButtonFn on_click, void *user);
 
+/* Resizing: drag a window's edge or corner. Windows can be resized by default (not dialogs, not
+ * maximized ones). The smallest size defaults to about 3/4 of the creation size. */
+void wm_set_resizable(Window *w, int on);
+void wm_set_min_size(Window *w, int min_w, int min_h);
+
+/* Which resize edge the point (x, y) is on: 0 = none, otherwise a mix of WM_EDGE_* (for the
+ * pointer shape). While a resize is going on it keeps returning that edge. */
+#define WM_EDGE_LEFT 1
+#define WM_EDGE_RIGHT 2
+#define WM_EDGE_TOP 4
+#define WM_EDGE_BOTTOM 8
+int wm_resize_hint(int x, int y);
+
 /* Maximize: fill the screen above the taskbar; un-maximize: go back to the old size. */
 void wm_set_maximized(Window *w, int on);
 
@@ -94,7 +110,7 @@ int wm_is_open(const Window *w);
 /* Open windows (visible or minimized) in the order they were created, for the taskbar.
  * Returns how many were stored in out[] (at most max). */
 int wm_list(Window **out, int max);
-int wm_dragging(void); /* 1 while a window is being dragged */
+int wm_dragging(void); /* 1 while a window is being dragged or resized */
 /* Mark a screen rectangle as needing a redraw (e.g. the taskbar). */
 void wm_add_damage(UiRect r);
 

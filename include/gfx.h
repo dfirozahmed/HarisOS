@@ -74,6 +74,15 @@ void gfx_cache_restore(int x, int y, int w, int h);
 void gfx_cursor_show(int on);
 void gfx_cursor_move(int x, int y); /* x,y = position of the arrow tip */
 
+/* Pointer shape: the normal arrow, or a double arrow for resizing windows.
+ * For the resize shapes (x, y) is the center of the cursor. */
+#define GFX_CURSOR_ARROW 0
+#define GFX_CURSOR_SIZE_H 1    /* left-right */
+#define GFX_CURSOR_SIZE_V 2    /* up-down */
+#define GFX_CURSOR_SIZE_NWSE 3 /* top-left <-> bottom-right */
+#define GFX_CURSOR_SIZE_NESW 4 /* top-right <-> bottom-left */
+void gfx_cursor_set_shape(int shape);
+
 /* ---- colors ------------------------------------------------- */
 GfxColor gfx_rgb(unsigned char r, unsigned char g, unsigned char b);
 void gfx_unpack(GfxColor c, unsigned char *r, unsigned char *g, unsigned char *b);

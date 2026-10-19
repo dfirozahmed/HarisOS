@@ -15,6 +15,14 @@ static int LC_X, LC_Y;
 static int DRAG_PX, DRAG_PY;
 static unsigned LAST_BUTTONS;
 
+/* resizing by an edge or corner */
+#define RESIZE_GRAB 6   /* pixels inside the window border that grab the edge */
+#define RESIZE_CORNER 14 /* ... and how far along the edge a corner reaches */
+static Window *RESIZE;
+static int RS_EDGE;      /* WM_EDGE_* being dragged */
+static int RS_PX, RS_PY; /* pointer position when the resize started */
+static UiRect RS_START;  /* window rectangle when it started */
+
 static int close_hit(const Window *w, int x, int y)
 {
     int cx = w->r.x + 22, cy = w->r.y + ui_theme()->titlebar_h / 2;
@@ -43,6 +51,104 @@ static int in_titlebar(const Window *w, int x, int y)
     return ui_contains(ui_rect(w->r.x, w->r.y, w->r.w, ui_theme()->titlebar_h), x, y);
 }
 
+/* the resize edge(s) under (x, y) for window w, 0 = none */
+static int resize_edge(const Window *w, int x, int y)
+{
+    if (w->dialog || w->fixed_size || w->maximized || w->minimized)
+        return 0;
+    int e = 0, g = RESIZE_GRAB, c = RESIZE_CORNER;
+    if (x < w->r.x + g)
+        e |= WM_EDGE_LEFT;
+    else if (x >= w->r.x + w->r.w - g)
+        e |= WM_EDGE_RIGHT;
+    if (y < w->r.y + g)
+        e |= WM_EDGE_TOP;
+    else if (y >= w->r.y + w->r.h - g)
+        e |= WM_EDGE_BOTTOM;
+    if (!e)
+        return 0;
+    if (!(e & (WM_EDGE_LEFT | WM_EDGE_RIGHT))) /* on the top / bottom edge, near a corner */
+    {
+        if (x < w->r.x + c)
+            e |= WM_EDGE_LEFT;
+        else if (x >= w->r.x + w->r.w - c)
+            e |= WM_EDGE_RIGHT;
+    }
+    if (!(e & (WM_EDGE_TOP | WM_EDGE_BOTTOM))) /* on the left / right edge, near a corner */
+    {
+        if (y < w->r.y + c)
+            e |= WM_EDGE_TOP;
+        else if (y >= w->r.y + w->r.h - c)
+            e |= WM_EDGE_BOTTOM;
+    }
+    return e;
+}
+
+int wm_resize_hint(int x, int y)
+{
+    if (RESIZE)
+        return RS_EDGE;
+    if (DRAG)
+        return 0;
+    Window *w = wm_window_at_internal(x, y);
+    if (!w || wm_blocker_internal(w))
+        return 0;
+    return resize_edge(w, x, y);
+}
+
+/* move the dragged edges to follow the pointer, within the minimum size and the screen */
+static void apply_resize(int x, int y)
+{
+    Window *w = RESIZE;
+    int W = (int)gfx_width(), H = (int)gfx_height() - TASKBAR_HEIGHT;
+    int l = RS_START.x, t = RS_START.y, r = RS_START.x + RS_START.w, b = RS_START.y + RS_START.h;
+    int dx = x - RS_PX, dy = y - RS_PY;
+    if (RS_EDGE & WM_EDGE_LEFT)
+        l += dx;
+    if (RS_EDGE & WM_EDGE_RIGHT)
+        r += dx;
+    if (RS_EDGE & WM_EDGE_TOP)
+        t += dy;
+    if (RS_EDGE & WM_EDGE_BOTTOM)
+        b += dy;
+
+    /* stay on the screen (a window that already stuck out may keep what it had) */
+    int lmin = RS_START.x < 0 ? RS_START.x : 0, tmin = RS_START.y < 0 ? RS_START.y : 0;
+    int rmax = RS_START.x + RS_START.w > W ? RS_START.x + RS_START.w : W;
+    int bmax = RS_START.y + RS_START.h > H ? RS_START.y + RS_START.h : H;
+    if (l < lmin && (RS_EDGE & WM_EDGE_LEFT))
+        l = lmin;
+    if (t < tmin && (RS_EDGE & WM_EDGE_TOP))
+        t = tmin;
+    if (r > rmax && (RS_EDGE & WM_EDGE_RIGHT))
+        r = rmax;
+    if (b > bmax && (RS_EDGE & WM_EDGE_BOTTOM))
+        b = bmax;
+
+    /* not smaller than the minimum: the edge that is NOT being dragged stays put */
+    if (r - l < w->min_w)
+    {
+        if (RS_EDGE & WM_EDGE_LEFT)
+            l = r - w->min_w;
+        else
+            r = l + w->min_w;
+    }
+    if (b - t < w->min_h)
+    {
+        if (RS_EDGE & WM_EDGE_TOP)
+            t = b - w->min_h;
+        else
+            b = t + w->min_h;
+    }
+
+    if (l == w->r.x && t == w->r.y && r - l == w->r.w && b - t == w->r.h)
+        return;
+    wm_damage_window_internal(w); /* where it was */
+    w->r = ui_rect(l, t, r - l, b - t);
+    wm_layout_internal(w);
+    wm_damage_window_internal(w); /* where it is now */
+}
+
 static void clamp_to_screen(Window *w)
 {
     if (w->maximized) return;
@@ -55,7 +161,7 @@ static void clamp_to_screen(Window *w)
     if (w->r.y > H - TASKBAR_HEIGHT - tb) w->r.y = H - TASKBAR_HEIGHT - tb;
 }
 
-int wm_dragging(void) { return DRAG != 0; }
+int wm_dragging(void) { return DRAG != 0 || RESIZE != 0; }
 
 void wm_input_forget_window(Window *w)
 {
@@ -65,6 +171,7 @@ void wm_input_forget_window(Window *w)
     if (MAX_PRESSED == w) MAX_PRESSED = 0;
     if (LC_WIN == w) LC_WIN = 0;
     if (PRESS_WIN == w) PRESS_WIN = 0;
+    if (RESIZE == w) RESIZE = 0;
 }
 
 /* ---- mouse --------------------------------------------------- */
@@ -85,7 +192,16 @@ int wm_pointer(int x, int y, unsigned buttons)
         }
         if (w)
         {
-            if (close_hit(w, x, y))
+            int edge = resize_edge(w, x, y);
+            if (edge)
+            {
+                RESIZE = w; /* grab an edge or corner */
+                RS_EDGE = edge;
+                RS_PX = x;
+                RS_PY = y;
+                RS_START = w->r;
+            }
+            else if (close_hit(w, x, y))
                 CLOSE_PRESSED = w;
             else if (min_hit(w, x, y))
                 MIN_PRESSED = w;
@@ -98,7 +214,7 @@ int wm_pointer(int x, int y, unsigned buttons)
                 if (w->on_drag)
                     PRESS_WIN = w;
             }
-            if (!CLOSE_PRESSED && !MIN_PRESSED && !MAX_PRESSED && in_titlebar(w, x, y))
+            if (!RESIZE && !CLOSE_PRESSED && !MIN_PRESSED && !MAX_PRESSED && in_titlebar(w, x, y))
             {
                 DRAG = w;
                 DRAG_PX = x;
@@ -121,6 +237,12 @@ int wm_pointer(int x, int y, unsigned buttons)
         if (pw->on_drag && pw->on_drag(pw, x, y, buttons))
             wm_damage_window_internal(pw);
     }
+
+    /* 1c) resize: follow the pointer while the button is held */
+    if (RESIZE && wm_z_index_internal(RESIZE) < 0)
+        RESIZE = 0;
+    if (RESIZE && down)
+        apply_resize(x, y);
 
     /* 2) move: drag the window. A maximized window first goes back to its normal
      *    size once the pointer has really moved, keeping the pointer at the same relative spot. */
@@ -156,6 +278,7 @@ int wm_pointer(int x, int y, unsigned buttons)
     Window *to_close = 0, *to_min = 0, *to_max = 0, *to_toggle = 0;
     if (!down && was_down)
     {
+        RESIZE = 0;
         Window *pressed = DRAG; /* title bar pressed and released without moving = a click */
         DRAG = 0;
         if (pressed)
@@ -211,7 +334,7 @@ int wm_pointer(int x, int y, unsigned buttons)
 
     /* 4) buttons: only the window under the pointer gets real coordinates,
      *    the others get "far away" so their hover/press state is cleared. */
-    Window *target = DRAG ? 0 : wm_window_at_internal(x, y);
+    Window *target = (DRAG || RESIZE) ? 0 : wm_window_at_internal(x, y);
     if (target && wm_blocker_internal(target))
         target = 0;
     if (target && (CLOSE_PRESSED || to_close || MIN_PRESSED || to_min || MAX_PRESSED || to_max || to_toggle))

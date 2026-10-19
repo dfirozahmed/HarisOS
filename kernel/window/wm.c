@@ -101,6 +101,8 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
     win->normal = win->r;
     win->base_w = w;
     win->base_h = h;
+    win->min_w = w * 3 / 4 < 180 ? (w < 180 ? w : 180) : w * 3 / 4; /* about 3/4 of the size, but not tiny */
+    win->min_h = h * 3 / 4 < 120 ? (h < 120 ? h : 120) : h * 3 / 4;
     copy_title(win->title, title);
     win->on_draw = draw;
     win->user = user;
@@ -222,6 +224,20 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
                   UiButtonFn on_click, void *user)
 {
     return wm_add_button_ex(w, label, kind, rel, 0, on_click, user);
+}
+
+void wm_set_resizable(Window *w, int on)
+{
+    if (w)
+        w->fixed_size = !on;
+}
+
+void wm_set_min_size(Window *w, int min_w, int min_h)
+{
+    if (!w)
+        return;
+    w->min_w = min_w > 60 ? min_w : 60;
+    w->min_h = min_h > ui_theme()->titlebar_h + 40 ? min_h : ui_theme()->titlebar_h + 40;
 }
 
 void wm_set_maximized(Window *w, int on)
