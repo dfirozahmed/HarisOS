@@ -13,8 +13,9 @@
  *   pressed  1 = key went down (also repeats while held), 0 = key released
  *   mods     KMOD_* bits held at that moment
  *
- * Works with real PS/2 keyboards, with USB keyboards when the firmware emulates
- * PS/2, and in QEMU. USB-only keyboards need a USB driver (not part of this module).
+ * Works with PS/2 keyboards and, through the xHCI driver (usb.h), with USB keyboards
+ * (HID boot protocol, plugged straight into the machine, no hub). USB keys repeat in
+ * software (after 500 ms, then about 30 times a second).
  * ============================================================ */
 #ifndef HARIS_KEYBOARD_H
 #define HARIS_KEYBOARD_H

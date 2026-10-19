@@ -2,6 +2,8 @@
 #include "keyboard.h"
 #include "io.h"
 #include "ps2.h"
+#include "timer.h"
+#include "usb.h"
 
 /* ---- key tables (scan code set 1, index = make code) ---------- */
 #define TABLE_SIZE 0x59
@@ -87,8 +89,170 @@ static void set_mod(unsigned bit, int on)
         MODS &= ~bit;
 }
 
+/* ---- USB keyboards: HID boot reports -> KeyEvent ------------- */
+/* Boot report: byte 0 = modifier bits, byte 1 reserved, bytes 2..7 = usage codes of the keys held. */
+
+static unsigned USB_MODS;             /* Ctrl / Shift / Alt held on a USB keyboard */
+static unsigned char USB_PREV[8];     /* the previous report */
+static KeyEvent PEND[64];             /* events made from reports, not handed out yet */
+static unsigned PEND_HEAD, PEND_TAIL;
+static KeyEvent REP;                  /* key that repeats while it is held (USB has no hardware repeat) */
+static int REP_ON;
+static unsigned long long REP_AT;
+
+#define REPEAT_DELAY_MS 500
+#define REPEAT_RATE_MS 33
+
+/* usage 0x04..0x38 (letters, digits, Enter, Esc, Backspace, Tab, Space, punctuation) */
+static const char USB_NORMAL[54] = "abcdefghijklmnopqrstuvwxyz1234567890\n\0\0\t -=[]\\\0;'`,./";
+static const char USB_SHIFTED[54] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()\n\0\0\t _+{}|\0:\"~<>?";
+/* usage 0x54..0x63: keypad / * - + Enter 1..9 0 . */
+static const char USB_KEYPAD[17] = "/*-+\n1234567890.";
+
+/* key for a usage code; *normal / *shifted = the characters it types (0 = none) */
+static int usb_key(int u, int *normal, int *shifted)
+{
+    *normal = *shifted = 0;
+    if (u >= 0x04 && u <= 0x38)
+    {
+        if (u == 0x29)
+            return KEY_ESC;
+        if (u == 0x2A)
+            return KEY_BACKSPACE;
+        char n = USB_NORMAL[u - 4], s = USB_SHIFTED[u - 4];
+        if (!n)
+            return 0;
+        *normal = n;
+        *shifted = s;
+        if (u == 0x28)
+            return KEY_ENTER;
+        if (u == 0x2B)
+            return KEY_TAB;
+        return n;
+    }
+    if (u == 0x39)
+        return KEY_CAPS;
+    if (u >= 0x3A && u <= 0x45)
+        return KEY_F1 + (u - 0x3A);
+    switch (u)
+    {
+    case 0x49: return KEY_INSERT;
+    case 0x4A: return KEY_HOME;
+    case 0x4B: return KEY_PAGEUP;
+    case 0x4C: return KEY_DELETE;
+    case 0x4D: return KEY_END;
+    case 0x4E: return KEY_PAGEDOWN;
+    case 0x4F: return KEY_RIGHT;
+    case 0x50: return KEY_LEFT;
+    case 0x51: return KEY_DOWN;
+    case 0x52: return KEY_UP;
+    }
+    if (u >= 0x54 && u <= 0x63)
+    {
+        char k = USB_KEYPAD[u - 0x54];
+        *normal = *shifted = k;
+        return k == '\n' ? KEY_ENTER : k;
+    }
+    return 0;
+}
+
+static void pend_push(int key, int ch, int pressed)
+{
+    if (PEND_TAIL - PEND_HEAD >= 64)
+        return;
+    KeyEvent *e = &PEND[PEND_TAIL++ % 64];
+    e->key = key;
+    e->ch = ch;
+    e->pressed = pressed;
+    e->mods = MODS | USB_MODS;
+}
+
+static int in_report(const unsigned char *r, int usage)
+{
+    for (int i = 2; i < 8; i++)
+        if (r[i] == usage)
+            return 1;
+    return 0;
+}
+
+static void usb_process(const unsigned char *r)
+{
+    static const int MODKEY[8] = {KEY_CTRL, KEY_SHIFT, KEY_ALT, KEY_SUPER, KEY_CTRL, KEY_SHIFT, KEY_ALT, KEY_SUPER};
+    if (r[2] == 1) /* too many keys at once: the report is meaningless */
+        return;
+
+    unsigned m = r[0], old = USB_PREV[0];
+    USB_MODS = ((m & 0x11) ? KMOD_CTRL : 0) | ((m & 0x22) ? KMOD_SHIFT : 0) | ((m & 0x44) ? KMOD_ALT : 0);
+    for (int i = 0; i < 8; i++)
+        if (((m ^ old) >> i) & 1)
+            pend_push(MODKEY[i], 0, (int)((m >> i) & 1));
+
+    for (int j = 2; j < 8; j++) /* released */
+    {
+        int u = USB_PREV[j], n, s;
+        if (u < 4 || in_report(r, u))
+            continue;
+        int key = usb_key(u, &n, &s);
+        if (!key)
+            continue;
+        pend_push(key, 0, 0);
+        if (REP_ON && REP.key == key)
+            REP_ON = 0;
+    }
+
+    for (int j = 2; j < 8; j++) /* pressed */
+    {
+        int u = r[j], n, s;
+        if (u < 4 || in_report(USB_PREV, u))
+            continue;
+        int key = usb_key(u, &n, &s);
+        if (!key)
+            continue;
+        if (key == KEY_CAPS)
+            MODS ^= KMOD_CAPS;
+        int ch = 0;
+        if (n)
+        {
+            int shift = ((MODS | USB_MODS) & KMOD_SHIFT) != 0;
+            if (is_letter(n) && (MODS & KMOD_CAPS))
+                shift = !shift;
+            ch = shift ? s : n;
+        }
+        if ((MODS | USB_MODS) & (KMOD_CTRL | KMOD_ALT))
+            ch = 0; /* shortcuts, not typing */
+        pend_push(key, ch, 1);
+        if (key != KEY_CAPS && timer_ready())
+        {
+            REP.key = key;
+            REP.ch = ch;
+            REP.pressed = 1;
+            REP_ON = 1;
+            REP_AT = timer_ms() + REPEAT_DELAY_MS;
+        }
+    }
+
+    for (int i = 0; i < 8; i++)
+        USB_PREV[i] = r[i];
+}
+
 int keyboard_poll(KeyEvent *out)
 {
+    unsigned char rep[8];
+    while (PEND_TAIL - PEND_HEAD <= 40 && usb_kbd_pop(rep))
+        usb_process(rep);
+    if (PEND_HEAD != PEND_TAIL)
+    {
+        *out = PEND[PEND_HEAD++ % 64];
+        return 1;
+    }
+    if (REP_ON && timer_ready() && timer_ms() >= REP_AT)
+    {
+        REP_AT = timer_ms() + REPEAT_RATE_MS;
+        *out = REP;
+        out->mods = MODS | USB_MODS;
+        return 1;
+    }
+
     ps2_poll();
     unsigned char b;
     while (ps2_kbd_pop(&b))
@@ -150,7 +314,7 @@ int keyboard_poll(KeyEvent *out)
         int ch = 0;
         if (!ext && code < TABLE_SIZE && NORMAL[code])
         {
-            int shift = (MODS & KMOD_SHIFT) != 0;
+            int shift = ((MODS | USB_MODS) & KMOD_SHIFT) != 0;
             if (is_letter(NORMAL[code]) && (MODS & KMOD_CAPS))
                 shift = !shift;
             ch = shift ? SHIFTED[code] : NORMAL[code];
@@ -159,13 +323,13 @@ int keyboard_poll(KeyEvent *out)
             ch = '/';
         else if (ext && key == KEY_ENTER)
             ch = '\n';
-        if (MODS & (KMOD_CTRL | KMOD_ALT))
+        if ((MODS | USB_MODS) & (KMOD_CTRL | KMOD_ALT))
             ch = 0; /* shortcuts, not typing */
 
         out->key = key;
         out->ch = ch;
         out->pressed = pressed;
-        out->mods = MODS;
+        out->mods = MODS | USB_MODS;
         return 1;
     }
     return 0;

@@ -111,22 +111,53 @@ typedef struct
     volatile u8 *inctx; /* input context page */
     u64 inctx_phys;
     u8 handled[256]; /* port already looked at while it stays connected */
+    u8 tries[256];   /* failed attempts to bring up the device on that port */
 } Xhci;
 
 static Xhci CTRL[MAX_CTRL];
 static int NCTRL;
 
-static struct
+/* One interrupt-IN endpoint of a HID boot device (mouse or keyboard). */
+#define MAX_HID 4
+#define KIND_KBD 1
+#define KIND_MOUSE 2
+typedef struct
 {
+    int active, drop, kind;
     Xhci *x;
-    int active, drop;
-    int slot, dci, port, rlen;
+    int slot, dci, port, rlen, errs;
     Ring ring;
     volatile u8 *buf;
     u64 buf_phys;
-    int dx, dy, wheel, errs;
+} Hid;
+
+static Hid HID[MAX_HID];
+
+static struct
+{
+    int dx, dy, wheel; /* movement not yet handed out */
     unsigned buttons;
-} M;
+} MS;
+
+/* Keyboard boot reports (8 bytes each) waiting for keyboard.c */
+#define KQ_N 16
+static u8 KQ[KQ_N][8];
+static unsigned KQ_HEAD, KQ_TAIL;
+
+static void kq_push(const volatile u8 *r, int len)
+{
+    if (KQ_TAIL - KQ_HEAD >= KQ_N)
+        return; /* full: the next report carries the full key state anyway */
+    u8 *d = KQ[KQ_TAIL++ % KQ_N];
+    for (int i = 0; i < 8; i++)
+        d[i] = i < len ? r[i] : 0;
+}
+
+static void kq_push_empty(void) /* "all keys released" */
+{
+    static const u8 zero[8] = {0};
+    kq_push(zero, 8);
+}
 
 static volatile u8 *dma_page(Xhci *x, u64 *phys)
 {
@@ -201,14 +232,14 @@ static int ev_next(Xhci *x, Trb *out)
     return 1;
 }
 
-static void mouse_event(Xhci *x, const Trb *e);
+static void hid_event(Xhci *x, const Trb *e);
 static void port_event(Xhci *x, const Trb *e);
 
 static void dispatch(Xhci *x, const Trb *e)
 {
     u32 type = (e->d3 >> 10) & 63;
     if (type == 32)
-        mouse_event(x, e);
+        hid_event(x, e);
     else if (type == 34)
         port_event(x, e);
 }
@@ -290,46 +321,51 @@ static void inctx_clear(Xhci *x)
 
 /* ---------- the mouse ---------- */
 
-static void mouse_queue(void)
+static void hid_queue(Hid *h)
 {
-    ring_put(&M.ring, M.buf_phys, (u32)M.rlen, (1u << 10) | (1u << 5)); /* Normal TRB, interrupt on completion */
+    ring_put(&h->ring, h->buf_phys, (u32)h->rlen, (1u << 10) | (1u << 5)); /* Normal TRB, interrupt on completion */
     mb();
-    wr32(M.x->db, (u32)M.slot * 4, (u32)M.dci);
+    wr32(h->x->db, (u32)h->slot * 4, (u32)h->dci);
 }
 
-static void mouse_event(Xhci *x, const Trb *e)
+static void hid_event(Xhci *x, const Trb *e)
 {
-    if (!M.active || x != M.x)
-        return;
-    if ((int)(e->d3 >> 24) != M.slot || (int)((e->d3 >> 16) & 31) != M.dci)
-        return;
-    int code = (int)(e->d2 >> 24);
-    if (code == 1 || code == 13)
+    for (int i = 0; i < MAX_HID; i++)
     {
-        int resid = (int)(e->d2 & 0xFFFFFF);
-        int len = M.rlen > resid ? M.rlen - resid : 0;
-        if (len >= 3)
+        Hid *h = &HID[i];
+        if (!h->active || h->x != x || (int)(e->d3 >> 24) != h->slot || (int)((e->d3 >> 16) & 31) != h->dci)
+            continue;
+        int code = (int)(e->d2 >> 24);
+        if (code == 1 || code == 13)
         {
-            M.buttons = M.buf[0] & 7u;
-            M.dx += (s8)M.buf[1];
-            M.dy += (s8)M.buf[2]; /* USB: positive = down, same as the screen */
-            if (len >= 4)
-                M.wheel -= (s8)M.buf[3]; /* USB: positive = up; the desktop wants + = down */
+            int resid = (int)(e->d2 & 0xFFFFFF);
+            int len = h->rlen > resid ? h->rlen - resid : 0;
+            if (h->kind == KIND_MOUSE && len >= 3)
+            {
+                MS.buttons = h->buf[0] & 7u;
+                MS.dx += (s8)h->buf[1];
+                MS.dy += (s8)h->buf[2]; /* USB: positive = down, same as the screen */
+                if (len >= 4)
+                    MS.wheel -= (s8)h->buf[3]; /* USB: positive = up; the desktop wants + = down */
+            }
+            else if (h->kind == KIND_KBD && len >= 3)
+                kq_push(h->buf, len);
+            h->errs = 0;
         }
-        M.errs = 0;
-    }
-    else
-    {
-        if (++M.errs > 16) /* unplugged or broken: give up on it */
+        else
         {
-            M.active = 0;
-            M.drop = 1;
-            return;
+            if (++h->errs > 16) /* unplugged or broken: give up on it */
+            {
+                h->active = 0;
+                h->drop = 1;
+                return;
+            }
+            if (code == 6)
+                ep_recover(x, h->slot, h->dci, &h->ring);
         }
-        if (code == 6)
-            ep_recover(x, M.slot, M.dci, &M.ring);
+        hid_queue(h);
+        return;
     }
-    mouse_queue();
 }
 
 static void port_event(Xhci *x, const Trb *e)
@@ -343,11 +379,17 @@ static void port_event(Xhci *x, const Trb *e)
     if (!(v & PORT_CCS))
     {
         x->handled[p] = 0;
-        if (M.active && x == M.x && p == M.port)
+        for (int i = 0; i < MAX_HID; i++)
         {
-            M.active = 0;
-            M.drop = 1;
-            M.buttons = 0;
+            Hid *h = &HID[i];
+            if (!h->active || h->x != x || h->port != p)
+                continue;
+            h->active = 0;
+            h->drop = 1;
+            if (h->kind == KIND_MOUSE)
+                MS.buttons = 0;
+            else
+                kq_push_empty(); /* release whatever was held */
         }
     }
 }
@@ -370,43 +412,53 @@ static u32 ep_interval(int speed, u32 bint)
 
 /* ---------- enumeration ---------- */
 
-static void enum_port(Xhci *x, int p)
+static void drop_slot(Xhci *x, u32 slot)
+{
+    command(x, 0, (10u << 10) | (slot << 24), 0); /* Disable Slot */
+    x->dcbaa[slot] = 0;
+}
+
+/* Brings up the device on root port p. Returns 0 if it failed in a way worth retrying,
+ * 1 when the device was handled (HID device started, or something we do not use). */
+static int enum_port(Xhci *x, int p)
 {
     volatile u8 *pr = x->ports + 0x10 * p;
     u32 v = rd32(pr, 0);
     if (!(v & PORT_CCS))
-        return;
+        return 1;
 
     /* A USB 2 port must be reset to become enabled; a USB 3 port is usually enabled already. */
     if (!(v & PORT_PED))
     {
         wr32(pr, 0, (v & PORT_KEEP) | PORT_PR);
         if (!WAIT_MS(rd32(pr, 0) & PORT_PRC, 500))
-            return;
+            return 0;
         v = rd32(pr, 0);
         wr32(pr, 0, (v & PORT_KEEP) | (v & PORT_CHG));
         delay_ms(20);
     }
     v = rd32(pr, 0);
     if (!(v & PORT_CCS) || !(v & PORT_PED))
-        return;
+        return 0;
     int speed = (int)((v >> 10) & 15);
     if (speed < 1)
-        return;
+        return 0;
     if (speed > 4)
         speed = 4; /* SuperSpeed+ behaves like SuperSpeed for what we do */
     u32 mps = speed == 4 ? 512 : (speed == 3 ? 64 : 8);
 
     u32 slot = 0;
     if (command(x, 0, 9u << 10, &slot) != 1 || slot == 0 || (int)slot > x->nslots) /* Enable Slot */
-        return;
+        return 0;
 
-    u64 dev_phys, ep0_phys;
+    u64 dev_phys;
     volatile u8 *dev = dma_page(x, &dev_phys);
     Ring ep0;
     if (!dev || ring_init(x, &ep0))
-        return;
-    ep0_phys = ep0.phys;
+    {
+        drop_slot(x, slot);
+        return 0;
+    }
     x->dcbaa[slot] = dev_phys;
 
     /* Address Device: slot context + endpoint 0 */
@@ -418,18 +470,21 @@ static void enum_port(Xhci *x, int p)
     c[1] = (u32)(p + 1) << 16;
     c = ctx_at(x, 2);
     c[1] = (3u << 1) | (4u << 3) | (mps << 16); /* error count 3, type control */
-    c[2] = (u32)ep0_phys | 1;
-    c[3] = (u32)(ep0_phys >> 32);
+    c[2] = (u32)ep0.phys | 1;
+    c[3] = (u32)(ep0.phys >> 32);
     c[4] = 8;
     if (command(x, x->inctx_phys, (11u << 10) | (slot << 24), 0) != 1)
-        return;
+    {
+        drop_slot(x, slot);
+        return 0;
+    }
     delay_ms(10);
 
     /* First 8 bytes of the device descriptor tell the real packet size of endpoint 0. */
     if (!ctrl_ok(control(x, (int)slot, &ep0, 0x80, 6, 0x0100, 0, 8, 1)))
     {
-        ep_recover(x, (int)slot, 1, &ep0);
-        return;
+        drop_slot(x, slot);
+        return 0;
     }
     u32 real = x->dma[7];
     if (speed == 4)
@@ -447,86 +502,143 @@ static void enum_port(Xhci *x, int p)
 
     /* Configuration descriptor: first its length, then all of it. */
     if (!ctrl_ok(control(x, (int)slot, &ep0, 0x80, 6, 0x0200, 0, 9, 1)))
-        return;
+    {
+        drop_slot(x, slot);
+        return 0;
+    }
     u32 total = x->dma[2] | ((u32)x->dma[3] << 8);
-    if (total < 9)
-        return;
     if (total > 2048)
         total = 2048;
-    if (!ctrl_ok(control(x, (int)slot, &ep0, 0x80, 6, 0x0200, 0, (u16)total, 1)))
-        return;
+    if (total < 9 || !ctrl_ok(control(x, (int)slot, &ep0, 0x80, 6, 0x0200, 0, (u16)total, 1)))
+    {
+        drop_slot(x, slot);
+        return 0;
+    }
 
+    /* Look for boot-protocol keyboard / mouse interfaces (at most one of each kind). */
     u32 cfg_value = x->dma[5];
-    int iface = -1, ep_addr = 0, ep_mps = 0, ep_int = 0;
-    int cur = -1, cur_mouse = 0;
+    struct
+    {
+        int kind, iface, addr, mps, interval;
+    } F[2];
+    int nf = 0, cur = -1, cur_kind = 0;
     for (u32 off = 0; off + 2 <= total && x->dma[off] >= 2; off += x->dma[off])
     {
         u8 len = x->dma[off], type = x->dma[off + 1];
         if (off + len > total)
             break;
-        if (type == 4 && len >= 9) /* interface */
+        if (type == 4 && len >= 9) /* interface: class 3 (HID), subclass 1 (boot), protocol 1 keyboard / 2 mouse */
         {
             cur = x->dma[off + 2];
-            cur_mouse = x->dma[off + 5] == 3 && x->dma[off + 6] == 1 && x->dma[off + 7] == 2;
+            cur_kind = 0;
+            if (x->dma[off + 5] == 3 && x->dma[off + 6] == 1)
+                cur_kind = x->dma[off + 7] == 1 ? KIND_KBD : (x->dma[off + 7] == 2 ? KIND_MOUSE : 0);
+            for (int i = 0; i < nf; i++)
+                if (F[i].kind == cur_kind)
+                    cur_kind = 0;
         }
-        else if (type == 5 && len >= 7 && cur_mouse && iface < 0) /* endpoint of a boot mouse interface */
+        else if (type == 5 && len >= 7 && cur_kind && nf < 2) /* first endpoint of that interface */
         {
-            if ((x->dma[off + 2] & 0x80) && (x->dma[off + 3] & 3) == 3) /* interrupt IN */
+            if ((x->dma[off + 2] & 0x80) && (x->dma[off + 3] & 3) == 3 && (x->dma[off + 2] & 15)) /* interrupt IN */
             {
-                iface = cur;
-                ep_addr = x->dma[off + 2] & 15;
-                ep_mps = (x->dma[off + 4] | (x->dma[off + 5] << 8)) & 0x7FF;
-                ep_int = x->dma[off + 6];
+                F[nf].kind = cur_kind;
+                F[nf].iface = cur;
+                F[nf].addr = x->dma[off + 2] & 15;
+                F[nf].mps = (x->dma[off + 4] | (x->dma[off + 5] << 8)) & 0x7FF;
+                F[nf].interval = x->dma[off + 6];
+                if (F[nf].mps >= 3)
+                    nf++;
+                cur_kind = 0;
             }
         }
     }
-    if (iface < 0 || ep_mps < 3 || ep_addr == 0)
-        return; /* not a mouse (a keyboard, a hub, ...) */
 
-    int dci = ep_addr * 2 + 1;
-    if (ring_init(x, &M.ring))
-        return;
-    M.buf = dma_page(x, &M.buf_phys);
-    if (!M.buf)
-        return;
-    M.rlen = ep_mps > 64 ? 64 : ep_mps;
+    /* Reserve a HID entry for each one found (kind -1 = reserved while we set it up) */
+    Hid *hid[2] = {0, 0};
+    int nh = 0;
+    for (int i = 0; i < nf; i++)
+    {
+        Hid *h = 0;
+        for (int k = 0; k < MAX_HID && !h; k++)
+            if (!HID[k].active && !HID[k].drop && HID[k].kind >= 0)
+                h = &HID[k];
+        if (!h)
+            break;
+        h->kind = -1;
+        h->buf = dma_page(x, &h->buf_phys);
+        if (!h->buf || ring_init(x, &h->ring))
+        {
+            h->kind = 0;
+            break;
+        }
+        hid[nh++] = h;
+    }
+    if (nh == 0)
+    {
+        drop_slot(x, slot); /* a hub, storage, ... : not ours */
+        return 1;
+    }
 
-    /* Configure Endpoint: add the interrupt endpoint */
+    /* Configure Endpoint: add every interrupt endpoint in one go */
+    int maxdci = 1;
     inctx_clear(x);
     c = ctx_at(x, 0);
-    c[1] = 1u | (1u << dci);
+    c[1] = 1;
+    for (int i = 0; i < nh; i++)
+    {
+        int dci = F[i].addr * 2 + 1;
+        if (dci > maxdci)
+            maxdci = dci;
+        c[1] |= 1u << dci;
+    }
     c = ctx_at(x, 1);
-    c[0] = ((u32)dci << 27) | ((u32)speed << 20);
+    c[0] = ((u32)maxdci << 27) | ((u32)speed << 20);
     c[1] = (u32)(p + 1) << 16;
-    c = ctx_at(x, dci + 1);
-    c[0] = ep_interval(speed, (u32)ep_int) << 16;
-    c[1] = (3u << 1) | (7u << 3) | ((u32)ep_mps << 16); /* type interrupt IN */
-    c[2] = (u32)M.ring.phys | 1;
-    c[3] = (u32)(M.ring.phys >> 32);
-    c[4] = (u32)ep_mps | ((u32)ep_mps << 16);
-    if (command(x, x->inctx_phys, (12u << 10) | (slot << 24), 0) != 1)
-        return;
+    for (int i = 0; i < nh; i++)
+    {
+        int dci = F[i].addr * 2 + 1;
+        c = ctx_at(x, dci + 1);
+        c[0] = ep_interval(speed, (u32)F[i].interval) << 16;
+        c[1] = (3u << 1) | (7u << 3) | ((u32)F[i].mps << 16); /* type interrupt IN */
+        c[2] = (u32)hid[i]->ring.phys | 1;
+        c[3] = (u32)(hid[i]->ring.phys >> 32);
+        c[4] = (u32)F[i].mps | ((u32)F[i].mps << 16);
+    }
+    int ok = command(x, x->inctx_phys, (12u << 10) | (slot << 24), 0) == 1 &&
+             ctrl_ok(control(x, (int)slot, &ep0, 0x00, 9, (u16)cfg_value, 0, 0, 0)); /* SET_CONFIGURATION */
+    if (!ok)
+    {
+        for (int i = 0; i < nh; i++)
+            hid[i]->kind = 0;
+        drop_slot(x, slot);
+        return 0;
+    }
+    for (int i = 0; i < nh; i++)
+        if (control(x, (int)slot, &ep0, 0x21, 0x0B, 0, (u16)F[i].iface, 0, 0) == 6) /* SET_PROTOCOL: boot */
+            ep_recover(x, (int)slot, 1, &ep0);
 
-    if (!ctrl_ok(control(x, (int)slot, &ep0, 0x00, 9, (u16)cfg_value, 0, 0, 0))) /* SET_CONFIGURATION */
-        return;
-    int pc = control(x, (int)slot, &ep0, 0x21, 0x0B, 0, (u16)iface, 0, 0); /* SET_PROTOCOL: boot */
-    if (pc == 6)
-        ep_recover(x, (int)slot, 1, &ep0);
-
-    M.x = x;
-    M.slot = (int)slot;
-    M.dci = dci;
-    M.port = p;
-    M.dx = M.dy = M.wheel = M.errs = 0;
-    M.buttons = 0;
-    M.drop = 0;
-    M.active = 1;
-    mouse_queue();
+    for (int i = 0; i < nh; i++)
+    {
+        Hid *h = hid[i];
+        h->x = x;
+        h->slot = (int)slot;
+        h->dci = F[i].addr * 2 + 1;
+        h->port = p;
+        h->rlen = F[i].mps > 64 ? 64 : F[i].mps;
+        h->errs = 0;
+        h->drop = 0;
+        h->kind = F[i].kind;
+        if (h->kind == KIND_MOUSE)
+            MS.buttons = 0;
+        h->active = 1;
+        hid_queue(h);
+    }
+    return 1;
 }
 
 static void rescan(Xhci *x)
 {
-    for (int p = 0; p < x->nports && !M.active; p++)
+    for (int p = 0; p < x->nports; p++)
     {
         volatile u8 *pr = x->ports + 0x10 * p;
         u32 v = rd32(pr, 0);
@@ -535,12 +647,14 @@ static void rescan(Xhci *x)
         if (!(v & PORT_CCS))
         {
             x->handled[p] = 0;
+            x->tries[p] = 0;
             continue;
         }
         if (x->handled[p])
             continue;
         x->handled[p] = 1;
-        enum_port(x, p);
+        if (!enum_port(x, p) && ++x->tries[p] < 3)
+            x->handled[p] = 0; /* try again at the next scan */
     }
 }
 
@@ -698,7 +812,6 @@ static int xhci_setup(Xhci *x, u32 bus, u32 dev, u32 fn)
 int usb_init(void)
 {
     NCTRL = 0;
-    M.active = 0;
     for (u32 bus = 0; bus < 256 && NCTRL < MAX_CTRL; bus++)
         for (u32 dev = 0; dev < 32 && NCTRL < MAX_CTRL; dev++)
         {
@@ -715,12 +828,33 @@ int usb_init(void)
                 if (xhci_setup(x, bus, dev, fn) == 0)
                 {
                     NCTRL++;
-                    if (!M.active)
-                        rescan(x);
+                    rescan(x);
                 }
             }
         }
     return NCTRL ? 0 : -1;
+}
+
+/* Handle whatever the controllers have reported so far. */
+static void pump(void)
+{
+    for (int i = 0; i < NCTRL; i++)
+    {
+        Trb e;
+        for (int n = 0; n < 32 && ev_next(&CTRL[i], &e); n++)
+            dispatch(&CTRL[i], &e);
+    }
+}
+
+int usb_kbd_pop(unsigned char report[8])
+{
+    pump();
+    if (KQ_HEAD == KQ_TAIL)
+        return 0;
+    const u8 *r = KQ[KQ_HEAD++ % KQ_N];
+    for (int i = 0; i < 8; i++)
+        report[i] = r[i];
+    return 1;
 }
 
 int usb_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
@@ -732,51 +866,61 @@ int usb_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
         *buttons = 0;
         return 0;
     }
+    pump();
 
-    for (int i = 0; i < NCTRL; i++)
+    /* devices that went away: give their slot back (unless another interface of it still runs) */
+    for (int i = 0; i < MAX_HID; i++)
     {
-        Trb e;
-        for (int n = 0; n < 32 && ev_next(&CTRL[i], &e); n++)
-            dispatch(&CTRL[i], &e);
-    }
-
-    if (M.drop) /* mouse gone: free its slot so a new one can take its place */
-    {
-        M.drop = 0;
-        command(M.x, 0, (10u << 10) | ((u32)M.slot << 24), 0);
-        M.x->dcbaa[M.slot] = 0;
-        M.x->handled[M.port] = 0;
-        M.buttons = 0;
-    }
-
-    if (!M.active)
-    {
-        int due;
-        if (timer_ready())
+        Hid *h = &HID[i];
+        if (!h->drop)
+            continue;
+        h->drop = 0;
+        int shared = 0;
+        for (int k = 0; k < MAX_HID; k++)
+            if (k != i && HID[k].kind > 0 && HID[k].x == h->x && HID[k].slot == h->slot && (HID[k].active || HID[k].drop))
+                shared = 1;
+        if (!shared)
         {
-            unsigned long long t = timer_ms();
-            due = t >= next_scan;
-            if (due)
-                next_scan = t + 1000;
+            drop_slot(h->x, (u32)h->slot);
+            h->x->handled[h->port] = 0;
         }
-        else
-            due = (++spin % 200000) == 0;
-        if (due)
-            for (int i = 0; i < NCTRL && !M.active; i++)
-                rescan(&CTRL[i]);
     }
 
-    *dx += M.dx;
-    *dy += M.dy;
-    *wheel += M.wheel;
-    M.dx = M.dy = M.wheel = 0;
-    *buttons = M.active ? M.buttons : 0;
-    return M.active;
+    /* look for newly plugged devices about once a second */
+    int due;
+    if (timer_ready())
+    {
+        unsigned long long t = timer_ms();
+        due = t >= next_scan;
+        if (due)
+            next_scan = t + 1000;
+    }
+    else
+        due = (++spin % 200000) == 0;
+    if (due)
+        for (int i = 0; i < NCTRL; i++)
+            rescan(&CTRL[i]);
+
+    int mouse = 0;
+    for (int i = 0; i < MAX_HID; i++)
+        if (HID[i].active && HID[i].kind == KIND_MOUSE)
+            mouse = 1;
+    *dx += MS.dx;
+    *dy += MS.dy;
+    *wheel += MS.wheel;
+    MS.dx = MS.dy = MS.wheel = 0;
+    *buttons = mouse ? MS.buttons : 0;
+    return mouse;
 }
 
 #else /* not x86-64: no PCI ports */
 
 int usb_init(void) { return -1; }
+int usb_kbd_pop(unsigned char report[8])
+{
+    (void)report;
+    return 0;
+}
 int usb_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
 {
     (void)dx; (void)dy; (void)wheel;

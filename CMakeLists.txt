@@ -230,7 +230,7 @@ if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
                 -drive if=pflash,format=raw,unit=1,file=${CMAKE_BINARY_DIR}/ovmf_vars.fd
                 -drive format=raw,file=fat:rw:esp
                 -nic none
-                -device qemu-xhci -device usb-mouse
+                -device qemu-xhci -device usb-mouse -device usb-kbd
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
@@ -240,7 +240,7 @@ elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
                 -bios ${FW_CODE}
                 -drive format=raw,file=fat:rw:esp
                 -nic none
-                -device qemu-xhci -device usb-mouse
+                -device qemu-xhci -device usb-mouse -device usb-kbd
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
