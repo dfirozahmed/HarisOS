@@ -2,6 +2,7 @@
  * Everything is polled: the kernel runs with interrupts off. */
 #include "mouse.h"
 #include "ps2.h"
+#include "usb.h"
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -24,10 +25,11 @@ static unsigned char inb(unsigned short port)
 #define ST_AUX 0x20      /* the waiting byte comes from the mouse */
 
 static int SW, SH;
-static int PRESENT;
+static int PRESENT; /* a PS/2 mouse answered */
+static int USB_OK;  /* an xHCI controller is running (a USB mouse may come and go) */
 static int HAS_WHEEL;
 static int X, Y;
-static unsigned BUTTONS;
+static unsigned BUTTONS, PS2_BUTTONS;
 static unsigned char PKT[4];
 static int PKT_LEN, PKT_NEED = 3;
 
@@ -56,15 +58,21 @@ static void flush(void)
 /* Send one byte to the mouse (not the keyboard). Returns the mouse's answer or -1. */
 static int mouse_write(unsigned char b)
 {
-    if (wait_write())
-        return -1;
-    outb(PS2_STATUS, 0xD4); /* "next byte goes to the mouse" */
-    if (wait_write())
-        return -1;
-    outb(PS2_DATA, b);
-    if (wait_read(400000))
-        return -1;
-    return inb(PS2_DATA);
+    for (int attempt = 0; attempt < 3; attempt++)
+    {
+        if (wait_write())
+            return -1;
+        outb(PS2_STATUS, 0xD4); /* "next byte goes to the mouse" */
+        if (wait_write())
+            return -1;
+        outb(PS2_DATA, b);
+        if (wait_read(400000))
+            return -1;
+        int r = inb(PS2_DATA);
+        if (r != 0xFE) /* 0xFE = resend; real touchpads do this */
+            return r;
+    }
+    return -1;
 }
 
 static int mouse_cmd(unsigned char b) { return mouse_write(b) == 0xFA ? 0 : -1; } /* 0xFA = ACK */
@@ -76,18 +84,8 @@ static int mouse_cmd_arg(unsigned char b, unsigned char arg)
     return mouse_cmd(arg);
 }
 
-int mouse_init(int w, int h)
+static int ps2_mouse_init(void)
 {
-    SW = w;
-    SH = h;
-    X = w / 2;
-    Y = h / 2;
-    BUTTONS = 0;
-    PKT_LEN = 0;
-    PRESENT = 0;
-    HAS_WHEEL = 0;
-    PKT_NEED = 3;
-
     if (inb(PS2_STATUS) == 0xFF) /* floating bus: no controller at all */
         return -1;
 
@@ -112,17 +110,23 @@ int mouse_init(int w, int h)
     outb(PS2_DATA, cfg);
 
     /* reset: the mouse answers ACK, 0xAA (self test passed), device id */
-    int r = mouse_write(0xFF);
-    if (r == 0xFA)
-    {
-        if (!wait_read(3000000))
-            inb(PS2_DATA); /* 0xAA */
-        if (!wait_read(3000000))
-            inb(PS2_DATA); /* id */
-    }
-    else if (r < 0)
-        return -1; /* nothing connected */
+    mouse_write(0xF5); /* stop any streaming left over from the firmware */
     flush();
+    int r = -1;
+    for (int attempt = 0; attempt < 3 && r != 0xFA; attempt++)
+    {
+        r = mouse_write(0xFF);
+        if (r == 0xFA)
+        {
+            if (!wait_read(3000000))
+                inb(PS2_DATA); /* 0xAA */
+            if (!wait_read(3000000))
+                inb(PS2_DATA); /* id */
+        }
+        flush();
+    }
+    if (r != 0xFA && mouse_write(0xF6) != 0xFA)
+        return -1; /* nothing connected: neither reset nor defaults answered */
 
     mouse_cmd(0xF6); /* defaults */
 
@@ -148,7 +152,25 @@ int mouse_init(int w, int h)
     return 0;
 }
 
-int mouse_present(void) { return PRESENT; }
+int mouse_init(int w, int h)
+{
+    SW = w;
+    SH = h;
+    X = w / 2;
+    Y = h / 2;
+    BUTTONS = PS2_BUTTONS = 0;
+    PKT_LEN = 0;
+    PRESENT = 0;
+    USB_OK = 0;
+    HAS_WHEEL = 0;
+    PKT_NEED = 3;
+
+    ps2_mouse_init();
+    USB_OK = usb_init() == 0;
+    return (PRESENT || USB_OK) ? 0 : -1;
+}
+
+int mouse_present(void) { return PRESENT || USB_OK; }
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -190,9 +212,14 @@ int mouse_poll(MouseState *out)
                 int z = PKT[3] & 0x0F;
                 wheel += z >= 8 ? z - 16 : z;
             }
-            BUTTONS = PKT[0] & 7;
+            PS2_BUTTONS = PKT[0] & 7;
         }
     }
+
+    unsigned usb_buttons = 0;
+    if (USB_OK)
+        usb_poll(&dx, &dy, &wheel, &usb_buttons);
+    BUTTONS = PS2_BUTTONS | usb_buttons;
 
     if (dx || dy)
     {

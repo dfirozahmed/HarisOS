@@ -75,7 +75,8 @@ set(KERNEL_SOURCES
     kernel/graphics/font_data.c # Poppins
     kernel/graphics/cursor_data.c # mouse arrow
     kernel/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
-    kernel/input/mouse.c        # PS/2 mouse driver (polled)
+    kernel/input/usb_xhci.c     # USB 3 (xHCI) controller + HID boot mouse (polled)
+    kernel/input/mouse.c        # mouse driver: PS/2 and USB (polled)
     kernel/input/keyboard.c     # PS/2 keyboard driver (polled)
     kernel/ui/ui_theme.c       # theme colors and active theme
     kernel/ui/ui_layout.c      # rectangle layout and clipping helpers
@@ -229,6 +230,7 @@ if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
                 -drive if=pflash,format=raw,unit=1,file=${CMAKE_BINARY_DIR}/ovmf_vars.fd
                 -drive format=raw,file=fat:rw:esp
                 -nic none
+                -device qemu-xhci -device usb-mouse
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
@@ -238,6 +240,7 @@ elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
                 -bios ${FW_CODE}
                 -drive format=raw,file=fat:rw:esp
                 -nic none
+                -device qemu-xhci -device usb-mouse
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
