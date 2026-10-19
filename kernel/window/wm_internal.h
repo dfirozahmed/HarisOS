@@ -19,5 +19,8 @@ Window *wm_blocker_internal(const Window *w);
 Window *wm_window_at_internal(int x, int y);
 void wm_input_forget_window(Window *w);
 void wm_layout_internal(Window *w);
+/* window-button state for drawing: 0 close, 1 minimize, 2 maximize, -1 none */
+int wm_titlebtn_hover(const Window *w);   /* the pointer is on this button */
+int wm_titlebtn_pressed(const Window *w); /* the button is held down */
 
 #endif

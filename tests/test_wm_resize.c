@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "wm.h"
 #include "taskbar.h"
+#include "wm_internal.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,24 @@ int main(void){
   wm_set_resizable(w,0); assert(wm_resize_hint(w->r.x+w->r.w-2,w->r.y+w->r.h-2)==0); wm_set_resizable(w,1);
   /* maximized: no resize edges */
   wm_set_maximized(w,1); assert(wm_resize_hint(W-2,H-TASKBAR_HEIGHT-2)==0); wm_set_maximized(w,0);
+  /* title-bar buttons: hover and pressed feedback (and nothing is closed when released elsewhere) */
+  {
+    int tb = ui_theme()->titlebar_h, cy = w->r.y + tb / 2;
+    ptr(w->r.x + 22, cy, 0);
+    assert(wm_titlebtn_hover(w) == 0 && wm_titlebtn_pressed(w) == -1);
+    ptr(w->r.x + 42, cy, 0);
+    assert(wm_titlebtn_hover(w) == 1);
+    ptr(w->r.x + 62, cy, 0);
+    assert(wm_titlebtn_hover(w) == 2);
+    ptr(w->r.x + 62, cy, 1);
+    assert(wm_titlebtn_pressed(w) == 2 && wm_titlebtn_hover(w) == 2);
+    ptr(w->r.x + 200, cy + 100, 1); /* dragged away: still held, no longer hovered */
+    assert(wm_titlebtn_hover(w) == -1);
+    ptr(w->r.x + 200, cy + 100, 0);
+    assert(wm_titlebtn_pressed(w) == -1 && !w->maximized);
+    ptr(w->r.x + 120, cy, 0);
+    assert(wm_titlebtn_hover(w) == -1);
+  }
   /* title drag still works when pressing in the middle of the title bar */
   int ox=w->r.x; ptr(w->r.x+200,w->r.y+20,1); ptr(w->r.x+240,w->r.y+20,1); ptr(w->r.x+240,w->r.y+20,0);
   assert(w->r.x==ox+40);

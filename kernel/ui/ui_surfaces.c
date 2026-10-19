@@ -74,6 +74,14 @@ static void wb_glyph(int kind, int cxq, int cyq, UiRgb color)
 #undef L
 }
 
+static int BTN_HOVER = -1, BTN_PRESS = -1; /* for the next window frame, see ui_window_button_state() */
+
+void ui_window_button_state(int hover, int pressed)
+{
+    BTN_HOVER = hover;
+    BTN_PRESS = pressed;
+}
+
 /* flat = 1: square corners and no shadow (a maximized window that touches the screen edges) */
 static UiRect window_impl(UiRect r, const char *title, int active, int flat)
 {
@@ -103,15 +111,22 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
     for (int i = 0; i < (dialog ? 1 : 3); i++)
     {
         int cxq = (r.x + 22 + 20 * i) * 16 + 8;
+        int hot = (i == BTN_HOVER);
+        int down = hot && (i == BTN_PRESS); /* pressed and still on the button */
         UiRgb col = dots[i];
-        if (!active)
-            col = ui_rgb_mix(t->titlebar, t->text_dim, 90);
-        gfx_fill_circle_q(cxq, cyq, 8 * 16, ui_color(col), 255);
-        if (active)
+        if (!active && !hot)
+            col = ui_rgb_mix(t->titlebar, t->text_dim, 90); /* an unfocused window's buttons are grey ... */
+        if (hot)
+            col = ui_rgb_mix(col, ui_rgb(255, 255, 255), 60); /* ... until the pointer is on them */
+        if (down)
+            col = ui_rgb_mix(dots[i], ui_rgb(0, 0, 0), 105); /* pressed: darker */
+        gfx_fill_circle_q(cxq, cyq, down ? 7 * 16 + 6 : 8 * 16, ui_color(col), 255);
+        if (active || hot)
             wb_glyph(i == 0 ? 0 : i == 1 ? 1
                                          : (flat ? 3 : 2),
-                     cxq, cyq, ui_rgb_mix(col, ui_rgb(0, 0, 0), 175));
+                     cxq, cyq, ui_rgb_mix(col, ui_rgb(0, 0, 0), down ? 215 : 175));
     }
+    BTN_HOVER = BTN_PRESS = -1; /* one-shot: the next window starts plain */
 
     UiRect tr = ui_rect(r.x + 80, r.y, r.w - 160 > 0 ? r.w - 160 : 0, tb);
     ui_text_in_color(tr, title, UI_TEXT_LABEL, UI_ALIGN_CENTER, active ? t->text : t->text_dim);

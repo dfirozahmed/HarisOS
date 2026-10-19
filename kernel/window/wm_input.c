@@ -15,6 +15,12 @@ static int LC_X, LC_Y;
 static int DRAG_PX, DRAG_PY;
 static unsigned LAST_BUTTONS;
 
+/* title-bar button feedback: which button of which window the pointer is on, and which is held down */
+static Window *HOVER_WIN;
+static int HOVER_BTN = -1;
+static Window *SIG_HW, *SIG_CP, *SIG_MP, *SIG_XP; /* what was drawn last, to notice changes */
+static int SIG_HB = -1;
+
 /* resizing by an edge or corner */
 #define RESIZE_GRAB 6   /* pixels inside the window border that grab the edge */
 #define RESIZE_CORNER 14 /* ... and how far along the edge a corner reaches */
@@ -49,6 +55,54 @@ static int max_hit(const Window *w, int x, int y)
 static int in_titlebar(const Window *w, int x, int y)
 {
     return ui_contains(ui_rect(w->r.x, w->r.y, w->r.w, ui_theme()->titlebar_h), x, y);
+}
+
+int wm_titlebtn_hover(const Window *w) { return w == HOVER_WIN ? HOVER_BTN : -1; }
+
+int wm_titlebtn_pressed(const Window *w)
+{
+    return CLOSE_PRESSED == w ? 0 : MIN_PRESSED == w ? 1 : MAX_PRESSED == w ? 2 : -1;
+}
+
+static void damage_titlebar(const Window *w)
+{
+    if (w && wm_z_index_internal(w) >= 0)
+        wm_damage_internal(w->r.x, w->r.y, w->r.x + w->r.w, w->r.y + ui_theme()->titlebar_h);
+}
+
+/* find the button under the pointer and redraw the title bars whose buttons changed look */
+static void update_button_feedback(int x, int y)
+{
+    Window *hw = 0;
+    int hb = -1;
+    if (!DRAG && !RESIZE)
+    {
+        Window *t = wm_window_at_internal(x, y);
+        if (t && !wm_blocker_internal(t))
+        {
+            hb = close_hit(t, x, y) ? 0 : min_hit(t, x, y) ? 1 : max_hit(t, x, y) ? 2 : -1;
+            if (hb >= 0)
+                hw = t;
+        }
+    }
+    HOVER_WIN = hw;
+    HOVER_BTN = hb;
+    if (hw != SIG_HW || hb != SIG_HB || CLOSE_PRESSED != SIG_CP || MIN_PRESSED != SIG_MP || MAX_PRESSED != SIG_XP)
+    {
+        damage_titlebar(SIG_HW); /* before ... */
+        damage_titlebar(SIG_CP);
+        damage_titlebar(SIG_MP);
+        damage_titlebar(SIG_XP);
+        damage_titlebar(hw); /* ... and after */
+        damage_titlebar(CLOSE_PRESSED);
+        damage_titlebar(MIN_PRESSED);
+        damage_titlebar(MAX_PRESSED);
+        SIG_HW = hw;
+        SIG_HB = hb;
+        SIG_CP = CLOSE_PRESSED;
+        SIG_MP = MIN_PRESSED;
+        SIG_XP = MAX_PRESSED;
+    }
 }
 
 /* the resize edge(s) under (x, y) for window w, 0 = none */
@@ -172,6 +226,11 @@ void wm_input_forget_window(Window *w)
     if (LC_WIN == w) LC_WIN = 0;
     if (PRESS_WIN == w) PRESS_WIN = 0;
     if (RESIZE == w) RESIZE = 0;
+    if (HOVER_WIN == w) HOVER_WIN = 0, HOVER_BTN = -1;
+    if (SIG_HW == w) SIG_HW = 0;
+    if (SIG_CP == w) SIG_CP = 0;
+    if (SIG_MP == w) SIG_MP = 0;
+    if (SIG_XP == w) SIG_XP = 0;
 }
 
 /* ---- mouse --------------------------------------------------- */
@@ -358,6 +417,7 @@ int wm_pointer(int x, int y, unsigned buttons)
     else if (to_toggle)
         wm_set_maximized(to_toggle, !to_toggle->maximized);
 
+    update_button_feedback(x, y);
     return WM_HAS_DMG;
 }
 

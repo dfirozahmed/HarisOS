@@ -104,6 +104,10 @@ void ui_card(UiRect r); /* rounded panel with soft shadow and border */
 UiRect ui_window(UiRect r, const char *title, int active);
 /* Same, with square corners and no shadow: for a window that fills the screen. */
 UiRect ui_window_flat(UiRect r, const char *title, int active);
+/* Look of the window buttons (close / minimize / maximize = 0 / 1 / 2) in the NEXT ui_window /
+ * ui_window_flat / ui_dialog call: hovered (lighter, symbol shown) and pressed (darker, a bit smaller).
+ * -1 = none. The state is used once and then cleared. */
+void ui_window_button_state(int hover, int pressed);
 /* Dialog frame: only a close button (no minimize / maximize). */
 UiRect ui_dialog(UiRect r, const char *title, int active);
 void ui_separator(int x, int y, int w);

@@ -15,6 +15,7 @@ void wm_draw(void)
         if (w->r.x - WM_SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + WM_SHADOW_MARGIN <= saved.x0 ||
             w->r.y - WM_SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + WM_SHADOW_MARGIN <= saved.y0)
             continue;
+        ui_window_button_state(wm_titlebtn_hover(w), wm_titlebtn_pressed(w));
         UiRect body = w->dialog      ? ui_dialog(w->r, w->title, i == top)
                       : w->maximized ? ui_window_flat(w->r, w->title, i == top)
                                      : ui_window(w->r, w->title, i == top);
