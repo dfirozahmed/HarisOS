@@ -69,7 +69,10 @@ void startmenu_glass(UiRect r, int radius)
 {
     /* The shadow is a set of faint rings OUTSIDE the panel, so nothing dark shows through the
      * translucent fill (gfx_shadow() would darken the panel's own edges). */
-    enum { RINGS = 14 };
+    enum
+    {
+        RINGS = 14
+    };
     for (int k = RINGS; k >= 1; k--)
     {
         int left = RINGS - k + 1; /* 14 near the panel ... 1 at the far edge */
@@ -88,9 +91,10 @@ static int OPEN;
 static UiEdit SEARCH;
 static int VIS[MAX_ITEMS]; /* indexes into ITEMS that match the search */
 static int VN;
-static int SEL;        /* highlighted row (index into VIS), -1 = none */
-static int PRESS = -1; /* row held down with the mouse */
+static int SEL;                    /* highlighted row (index into VIS), -1 = none */
+static int PRESS = -1;             /* row held down with the mouse */
 static int FOOT_HOVER, FOOT_PRESS; /* footer power buttons: 0 = none, 1 = Restart, 2 = Shut down */
+static int FOOT_KEY;               /* footer power button with keyboard focus: 0 = none, 1 = Restart, 2 = Shut down */
 static unsigned LAST_DOWN;
 static unsigned FILTER_SIG;
 
@@ -230,7 +234,7 @@ void startmenu_close(void)
     OPEN = 0;
     SEARCH.dragging = 0;
     PRESS = -1;
-    FOOT_HOVER = FOOT_PRESS = 0;
+    FOOT_HOVER = FOOT_PRESS = FOOT_KEY = 0;
     dmg_all();
 }
 
@@ -244,7 +248,7 @@ static void startmenu_open(void)
     FILTER_SIG = text_sig("");
     refilter(1);
     PRESS = -1;
-    FOOT_HOVER = FOOT_PRESS = 0;
+    FOOT_HOVER = FOOT_PRESS = FOOT_KEY = 0;
     ui_caret_restart();
     dmg_all();
 }
@@ -290,24 +294,57 @@ int startmenu_key(const KeyEvent *k)
         startmenu_close();
         return 1;
     case KEY_ENTER:
-        if (SEL >= 0 && SEL < VN)
+        if (FOOT_KEY)
+        {
+            int power = FOOT_KEY;
+            startmenu_close();
+            desktop_power_action(power == 1); /* does not come back when it works */
+        }
+        else if (SEL >= 0 && SEL < VN)
             activate(VIS[SEL]);
         return 1;
+    case KEY_LEFT:
+    case KEY_RIGHT:
+        if (FOOT_KEY) /* between Restart and Shut down; in the search box the arrows move the caret */
+        {
+            int old = FOOT_KEY;
+            FOOT_KEY = k->key == KEY_LEFT ? 1 : 2;
+            if (old != FOOT_KEY)
+            {
+                dmg_power(old);
+                dmg_power(FOOT_KEY);
+            }
+            return 1;
+        }
+        break;
     case KEY_UP:
     case KEY_DOWN:
     case KEY_TAB:
     {
-        if (VN == 0)
-            return 1;
+        /* one focus ring: the result rows, then Restart, then Shut down */
+        int total = VN + 2;
         int back = k->key == KEY_UP || (k->key == KEY_TAB && (k->mods & KMOD_SHIFT));
-        int old = SEL;
-        SEL = SEL < 0 ? (back ? VN - 1 : 0) : (SEL + (back ? VN - 1 : 1)) % VN;
-        dmg_row(old);
+        int pos = FOOT_KEY ? VN + FOOT_KEY - 1 : (SEL >= 0 ? SEL : (back ? 0 : -1));
+        pos = (pos + (back ? total - 1 : 1)) % total;
+        int oldsel = SEL, oldfoot = FOOT_KEY;
+        FOOT_KEY = pos >= VN ? pos - VN + 1 : 0;
+        if (!FOOT_KEY)
+            SEL = pos;
+        dmg_row(oldsel);
         dmg_row(SEL);
+        dmg_power(oldfoot);
+        dmg_power(FOOT_KEY);
         return 1;
     }
     default:
         break;
+    }
+    if (FOOT_KEY) /* typing goes back to the search box */
+    {
+        int old = FOOT_KEY;
+        FOOT_KEY = 0;
+        dmg_power(old);
+        dmg_row(SEL);
     }
     if (ui_edit_key(&SEARCH, k))
     {
@@ -369,8 +406,10 @@ int startmenu_pointer(int x, int y, unsigned buttons)
                 foot = i + 1;
 
     /* hover: the row under the pointer becomes the highlighted one */
-    if (hit >= 0 && hit != SEL && PRESS < 0)
+    if (hit >= 0 && (hit != SEL || FOOT_KEY) && PRESS < 0)
     {
+        dmg_power(FOOT_KEY);
+        FOOT_KEY = 0;
         dmg_row(SEL);
         SEL = hit;
         dmg_row(SEL);
@@ -453,8 +492,8 @@ static void icon_restart(int cx, int cy, GfxColor c)
     arc(cx, cy, 7, 4, 23, c);
     int px, py, k = 23;
     circle_pt(cx, cy, 7, k, &px, &py);
-    int tx = COS15[k] * 80 / 1024, ty = SIN15[k] * 80 / 1024;   /* along the travel direction, 5 px */
-    int rx = SIN15[k] * 64 / 1024, ry = -COS15[k] * 64 / 1024;  /* across it (outwards), 4 px */
+    int tx = COS15[k] * 80 / 1024, ty = SIN15[k] * 80 / 1024;  /* along the travel direction, 5 px */
+    int rx = SIN15[k] * 64 / 1024, ry = -COS15[k] * 64 / 1024; /* across it (outwards), 4 px */
     int pts[6] = {px + tx, py + ty, px + rx - tx / 5, py + ry - ty / 5, px - rx - tx / 5, py - ry - ty / 5};
     gfx_fill_poly_q(pts, 3, c, 255);
 }
@@ -487,7 +526,7 @@ void startmenu_draw(void)
     {
         const MenuItem *it = &ITEMS[VIS[i]];
         UiRect r = row_rect(i);
-        if (i == SEL)
+        if (i == SEL && !FOOT_KEY)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_m, ui_color(t->accent), PRESS == i ? 56 : 30);
         UiRect tile = ui_rect(r.x + 8, r.y + (r.h - 38) / 2, 38, 38);
         gfx_fill_round_rect_alpha(tile.x, tile.y, tile.w, tile.h, 11, gfx_rgb(255, 255, 255), 215);
@@ -510,7 +549,7 @@ void startmenu_draw(void)
     for (int i = 0; i < 2; i++)
     {
         UiRect b = power_btn_rect(i);
-        int hot = FOOT_HOVER == i + 1;
+        int hot = FOOT_HOVER == i + 1 || FOOT_KEY == i + 1;
         UiRgb tint = i == 1 ? t->danger : t->accent; /* Shut down turns red */
         if (hot)
             gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, ui_color(tint), FOOT_PRESS == i + 1 ? 60 : 34);
@@ -520,11 +559,12 @@ void startmenu_draw(void)
         else
             icon_power(b.x + b.w / 2, b.y + b.h / 2, ic);
     }
-    if (FOOT_HOVER > 0) /* what the hovered button does */
+    int tip = FOOT_HOVER ? FOOT_HOVER : FOOT_KEY;
+    if (tip > 0) /* what the hovered / focused button does */
     {
-        UiRect tp = power_tip_rect(FOOT_HOVER);
+        UiRect tp = power_tip_rect(tip);
         gfx_fill_round_rect_alpha(tp.x, tp.y, tp.w, tp.h, 9, gfx_rgb(24, 32, 54), 232);
-        ui_text_in_color(tp, power_label(FOOT_HOVER), UI_TEXT_SMALL, UI_ALIGN_CENTER, ui_rgb(255, 255, 255));
+        ui_text_in_color(tp, power_label(tip), UI_TEXT_SMALL, UI_ALIGN_CENTER, ui_rgb(255, 255, 255));
     }
 
     ui_set_theme(prev);
