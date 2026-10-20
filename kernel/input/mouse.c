@@ -3,6 +3,7 @@
 #include "mouse.h"
 #include "ps2.h"
 #include "usb.h"
+#include "i2c_hid.h"
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -27,6 +28,7 @@ static unsigned char inb(unsigned short port)
 static int SW, SH;
 static int PRESENT; /* a PS/2 mouse answered */
 static int USB_OK;  /* an xHCI controller is running (a USB mouse may come and go) */
+static int I2C_OK;  /* an I2C-HID touchpad is running */
 static int HAS_WHEEL;
 static int X, Y;
 static unsigned BUTTONS, PS2_BUTTONS;
@@ -161,16 +163,17 @@ int mouse_init(int w, int h)
     BUTTONS = PS2_BUTTONS = 0;
     PKT_LEN = 0;
     PRESENT = 0;
-    USB_OK = 0;
+    USB_OK = I2C_OK = 0;
     HAS_WHEEL = 0;
     PKT_NEED = 3;
 
     ps2_mouse_init();
     USB_OK = usb_init() == 0;
-    return (PRESENT || USB_OK) ? 0 : -1;
+    I2C_OK = i2c_hid_init() == 0;
+    return (PRESENT || USB_OK || I2C_OK) ? 0 : -1;
 }
 
-int mouse_present(void) { return PRESENT || USB_OK; }
+int mouse_present(void) { return PRESENT || USB_OK || I2C_OK; }
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -219,7 +222,10 @@ int mouse_poll(MouseState *out)
     unsigned usb_buttons = 0;
     if (USB_OK)
         usb_poll(&dx, &dy, &wheel, &usb_buttons);
-    BUTTONS = PS2_BUTTONS | usb_buttons;
+    unsigned i2c_buttons = 0;
+    if (I2C_OK)
+        i2c_hid_poll(&dx, &dy, &wheel, &i2c_buttons);
+    BUTTONS = PS2_BUTTONS | usb_buttons | i2c_buttons;
 
     if (dx || dy)
     {

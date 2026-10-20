@@ -50,6 +50,9 @@ typedef struct
     /* The firmware's reset service (UEFI ResetSystem). Works after boot services are gone.
      * type: BOOT_RESET_COLD (restart) or BOOT_RESET_SHUTDOWN. May be NULL; does not return when it works. */
     void (*reset_system)(unsigned type);
+
+    /* Physical address of the ACPI RSDP, 0 if the firmware did not give one. */
+    unsigned long long acpi_rsdp;
 } BootInfo;
 
 #endif

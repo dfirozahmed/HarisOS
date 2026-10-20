@@ -1,6 +1,7 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
 #include "bootinfo.h"
 #include "desktop.h"
+#include "acpi.h"
 #include "gfx.h"
 #include "keyboard.h"
 #include "mouse.h"
@@ -16,6 +17,8 @@ void kernel_main(const BootInfo *info)
              info->pitch, info->red_mask_mode);
 
     power_init(info); /* shut down / restart, used by the start menu */
+
+    acpi_init(info->acpi_rsdp); /* device tables: where the I2C touchpad is described */
 
     int pmm_ok = (pmm_init(info) == 0);
 

@@ -20,6 +20,34 @@ static void efi_reset(unsigned type)
 /* Lives in the kernel image (EfiLoaderData), which stays valid after ExitBootServices. */
 static BootInfo boot_info;
 
+static EFI_GUID Acpi20Guid = {0x8868E871, 0xE4F1, 0x11D3, {0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81}};
+static EFI_GUID Acpi10Guid = {0xEB9D2D30, 0x2D88, 0x11D3, {0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D}};
+
+static int same_guid(const EFI_GUID *a, const EFI_GUID *b)
+{
+    if (a->Data1 != b->Data1 || a->Data2 != b->Data2 || a->Data3 != b->Data3)
+        return 0;
+    for (int i = 0; i < 8; i++)
+        if (a->Data4[i] != b->Data4[i])
+            return 0;
+    return 1;
+}
+
+/* The ACPI RSDP, from the firmware's configuration table (the 2.0 one is preferred). */
+static unsigned long long find_rsdp(EFI_SYSTEM_TABLE *st)
+{
+    EFI_CONFIGURATION_TABLE *t = (EFI_CONFIGURATION_TABLE *)st->ConfigurationTable;
+    unsigned long long v1 = 0;
+    for (UINTN i = 0; t && i < st->NumberOfTableEntries; i++)
+    {
+        if (same_guid(&t[i].VendorGuid, &Acpi20Guid))
+            return (unsigned long long)(UINTN)t[i].VendorTable;
+        if (same_guid(&t[i].VendorGuid, &Acpi10Guid))
+            v1 = (unsigned long long)(UINTN)t[i].VendorTable;
+    }
+    return v1;
+}
+
 /* Leave UEFI Boot Services. After this returns EFI_SUCCESS the firmware no longer
  * owns the machine: no ConOut, no LocateProtocol, no AllocatePool, no Stall.
  * Rules: nothing may touch Boot Services between GetMemoryMap and ExitBootServices,
@@ -110,6 +138,7 @@ EFI_STATUS EFIAPI efi_kernel_entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sys
     boot_info.red_mask_mode = red_mask_mode;
     g_system_table = SystemTable;
     boot_info.reset_system = efi_reset;
+    boot_info.acpi_rsdp = find_rsdp(SystemTable);
 
     status = leave_boot_services(ImageHandle, SystemTable, &boot_info);
     if (EFI_ERROR(status))

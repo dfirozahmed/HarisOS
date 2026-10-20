@@ -60,6 +60,7 @@ set(KERNEL_SOURCES
     kernel/kernel.c
     kernel/memory/pmm.c
     kernel/core/power.c              # shut down / restart (firmware reset service + emulator fallbacks)
+    kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code)
     kernel/time/rtc.c
     kernel/time/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
     kernel/graphics/gfx_clip.c  # clipping state and safe clip-box intersection
@@ -76,6 +77,10 @@ set(KERNEL_SOURCES
     kernel/graphics/cursor_data.c # mouse arrow
     kernel/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
     kernel/input/usb_xhci.c     # USB 3 (xHCI) controller + HID boot mouse (polled)
+    kernel/input/aml_scan.c     # finds I2C-HID devices in ACPI byte code
+    kernel/input/hid_desc.c     # HID report descriptor: where the mouse fields are
+    kernel/input/i2c_dw.c       # DesignWare I2C controller (AMD / Intel)
+    kernel/input/i2c_hid.c      # I2C-HID touchpad (polled)
     kernel/input/mouse.c        # mouse driver: PS/2 and USB (polled)
     kernel/input/keyboard.c     # PS/2 keyboard driver (polled)
     kernel/ui/ui_theme.c       # theme colors and active theme

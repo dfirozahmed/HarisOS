@@ -169,6 +169,13 @@ typedef struct
     void *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
+/* One entry of the configuration table array (ACPI, SMBIOS, ... pointers) */
+typedef struct
+{
+    EFI_GUID VendorGuid;
+    void *VendorTable;
+} EFI_CONFIGURATION_TABLE;
+
 /* --- Graphics Output Protocol (GOP) --- */
 typedef struct
 {

@@ -15,28 +15,33 @@ try {
     $EditTest = Join-Path $Root 'tests/run_edit_tests.sh'
     $WmTest = Join-Path $Root 'tests/run_wm_tests.sh'
     $PowerTest = Join-Path $Root 'tests/run_power_tests.sh'
+    $I2cHidTest = Join-Path $Root 'tests/run_i2chid_tests.sh'
 
-    Write-Host "`n[1/6] Graphics regression tests" -ForegroundColor Yellow
+    Write-Host "`n[1/7] Graphics regression tests" -ForegroundColor Yellow
     & $Bash.Source $GfxTest
     if ($LASTEXITCODE -ne 0) { throw "Graphics regression tests failed (exit $LASTEXITCODE)." }
 
-    Write-Host "`n[2/6] Font regression tests" -ForegroundColor Yellow
+    Write-Host "`n[2/7] Font regression tests" -ForegroundColor Yellow
     & $Bash.Source $FontTest
     if ($LASTEXITCODE -ne 0) { throw "Font regression tests failed (exit $LASTEXITCODE)." }
 
-    Write-Host "`n[3/6] Text input tests" -ForegroundColor Yellow
+    Write-Host "`n[3/7] Text input tests" -ForegroundColor Yellow
     & $Bash.Source $EditTest
     if ($LASTEXITCODE -ne 0) { throw "Text input tests failed (exit $LASTEXITCODE)." }
 
-    Write-Host "`n[4/6] Window resize tests" -ForegroundColor Yellow
+    Write-Host "`n[4/7] Window resize tests" -ForegroundColor Yellow
     & $Bash.Source $WmTest
     if ($LASTEXITCODE -ne 0) { throw "Window resize tests failed (exit $LASTEXITCODE)." }
 
-    Write-Host "`n[5/6] Power tests" -ForegroundColor Yellow
+    Write-Host "`n[5/7] Power tests" -ForegroundColor Yellow
     & $Bash.Source $PowerTest
     if ($LASTEXITCODE -ne 0) { throw "Power tests failed (exit $LASTEXITCODE)." }
 
-    Write-Host "`n[6/6] UEFI build" -ForegroundColor Yellow
+    Write-Host "`n[6/7] I2C-HID discovery tests" -ForegroundColor Yellow
+    & $Bash.Source $I2cHidTest
+    if ($LASTEXITCODE -ne 0) { throw "I2C-HID discovery tests failed (exit $LASTEXITCODE)." }
+
+    Write-Host "`n[7/7] UEFI build" -ForegroundColor Yellow
     $CMake = Get-Command cmake -ErrorAction SilentlyContinue
     if (-not $CMake) { throw 'CMake was not found. Install CMake and add it to PATH.' }
 
