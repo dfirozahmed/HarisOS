@@ -142,7 +142,8 @@ typedef struct
     void *SetWakeupTime;
     void *SetVirtualAddressMap;
     void *ConvertPointer;
-    void *GetVariable;
+    EFI_STATUS(EFIAPI *GetVariable)(CHAR16 *VariableName, EFI_GUID *VendorGuid, UINT32 *Attributes,
+                                    UINTN *DataSize, void *Data);
     void *GetNextVariableName;
     void *SetVariable;
     void *GetNextHighMonotonicCount;

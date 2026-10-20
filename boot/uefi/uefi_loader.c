@@ -52,6 +52,23 @@ static void fail(const CHAR16 *what, EFI_STATUS status)
 }
 
 /* ------------------------------------------------------------
+ * Diagnostic: print Secure Boot state. With Secure Boot on, LoadImage refuses
+ * unsigned images with EFI_ACCESS_DENIED (0x...0F) / EFI_SECURITY_VIOLATION.
+ * ------------------------------------------------------------ */
+static void print_var_u8(const CHAR16 *label, CHAR16 *name)
+{
+    EFI_GUID global = { 0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C } };
+    UINT8 value = 0;
+    UINTN size = 1;
+    EFI_STATUS st = ST->RuntimeServices->GetVariable(name, &global, NULL, &size, &value);
+
+    print(label);
+    if (EFI_ERROR(st)) { print(L"n/a "); print_hex(st); }
+    else               print_hex(value);
+    print(L"\r\n");
+}
+
+/* ------------------------------------------------------------
  * Read a whole file from the disk we booted from into memory.
  * On success *out_buf / *out_size describe the file contents.
  * ------------------------------------------------------------ */
@@ -135,6 +152,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     ST->BootServices->FreePool(kernel_buf);
     if (EFI_ERROR(st)) {
         fail(L"LoadImage (is KERNEL.EFI a valid EFI image?)", st);
+        print_var_u8(L"SecureBoot (1 = on): ", L"SecureBoot");
+        print_var_u8(L"SetupMode  (1 = setup/no keys): ", L"SetupMode");
         goto halt;
     }
 
