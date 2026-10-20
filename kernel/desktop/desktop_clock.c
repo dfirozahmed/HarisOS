@@ -58,6 +58,7 @@ int desktop_tick(void)
 {
     int clock_changed = refresh_taskbar_clock();
     int flipped = ui_caret_update();
+    int ticked = wm_tick(); /* windows that wait for time (tooltips) */
     Window *top = wm_top();
     startmenu_tick(flipped);
 
@@ -73,7 +74,7 @@ int desktop_tick(void)
         if (f.w > 0)
             wm_add_damage(f);
     }
-    if (!clock_changed && !flipped)
+    if (!clock_changed && !flipped && !ticked)
         return 0;
     return desktop_finish_input(clock_changed);
 }

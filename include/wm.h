@@ -22,7 +22,7 @@
 #include "ui.h"
 
 #define WM_MAX_WINDOWS 8
-#define WM_MAX_BUTTONS 12 /* per window */
+#define WM_MAX_BUTTONS 14 /* per window */
 #define WM_TITLE_MAX 32
 #define WM_MAX_EDITS 3 /* text inputs per window */
 
@@ -52,6 +52,7 @@ typedef struct Window
     int (*on_drag)(struct Window *w, int x, int y, unsigned buttons); /* called while the left button stays down after an on_press (and once when it is released, buttons & 1 == 0); return 1 if it changed what is shown (may be NULL) */
     int (*on_wheel)(struct Window *w, int steps);        /* mouse wheel over the window (steps: + = down, like MouseState.wheel); return 1 if it changed what is shown (may be NULL) */
     int (*on_rpress)(struct Window *w, int x, int y);    /* right button went down inside the window below the title bar (the window is raised first); return 1 if it changed what is shown (may be NULL) */
+    int (*on_tick)(struct Window *w);                    /* called on every main-loop pass for open, visible windows (see wm_tick); return 1 if it changed what is shown, e.g. a tooltip that is due (may be NULL) */
     int (*on_hover)(struct Window *w, int x, int y);     /* the pointer moved over the window (x, y on screen, may be on the title bar); called once with x = y = -1 when it leaves. Return 1 only if the look changed (may be NULL) */
     UiEdit edits[WM_MAX_EDITS];                         /* ready-made text inputs for the window to use (start empty) */
     int edit_count;                                      /* how many of them the window uses (0 = none) */
@@ -119,6 +120,10 @@ int wm_list(Window **out, int max);
 int wm_dragging(void); /* 1 while a window is being dragged or resized */
 /* Mark a screen rectangle as needing a redraw (e.g. the taskbar). */
 void wm_add_damage(UiRect r);
+
+/* Call often (every main-loop pass): lets windows react to time passing (on_tick). Returns 1 when some
+ * window changed, then call wm_take_damage() and redraw. */
+int wm_tick(void);
 
 /* Mark the whole screen as needing a redraw (e.g. after a theme change). */
 void wm_invalidate(void);

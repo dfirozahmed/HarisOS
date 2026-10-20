@@ -142,6 +142,29 @@ int main(void)
     CHECK(room == 2 && dd > 0 && vfs_count() == VFS_MAX_NODES - 1);
     CHECK(vfs_copy(bd, dd) == -1 && vfs_count() == VFS_MAX_NODES - 1);
 
+    /* sort orders */
+    vfs_reset();
+    int s_b = vfs_add(VFS_ROOT, "b.txt", 0, 5);
+    int s_a = vfs_add(VFS_ROOT, "a.c", 0, 100);
+    int s_c = vfs_add(VFS_ROOT, "c.png", 0, 50);
+    int s_n = vfs_add(VFS_ROOT, "noext", 0, 5);
+    int s_z = vfs_add(VFS_ROOT, "z", 1, 0);
+    int s_y = vfs_add(VFS_ROOT, "y", 1, 0);
+    int so[16];
+    CHECK(vfs_list_by(VFS_ROOT, so, 16, VFS_SORT_NAME, 1) == 6);
+    CHECK(so[0] == s_z && so[1] == s_y && so[2] == s_n && so[3] == s_c && so[4] == s_b && so[5] == s_a);
+    vfs_list_by(VFS_ROOT, so, 16, VFS_SORT_SIZE, 0);   /* folders first (by name), then small to big; ties by name */
+    CHECK(so[0] == s_y && so[1] == s_z && so[2] == s_b && so[3] == s_n && so[4] == s_c && so[5] == s_a);
+    vfs_list_by(VFS_ROOT, so, 16, VFS_SORT_SIZE, 1);   /* big to small; folders stay by name ascending */
+    CHECK(so[0] == s_y && so[1] == s_z && so[2] == s_a && so[3] == s_c && so[4] == s_b && so[5] == s_n);
+    vfs_list_by(VFS_ROOT, so, 16, VFS_SORT_TYPE, 0);   /* "" < c < png < txt: here "", "c", "png", "txt" */
+    CHECK(so[0] == s_y && so[1] == s_z && so[2] == s_n && so[3] == s_a && so[4] == s_c && so[5] == s_b);
+    vfs_list_by(VFS_ROOT, so, 16, VFS_SORT_TYPE, 1);
+    CHECK(so[2] == s_b && so[3] == s_c && so[4] == s_a && so[5] == s_n);
+    vfs_list(VFS_ROOT, so, 16);                        /* the plain list is name ascending */
+    CHECK(so[0] == s_y && so[1] == s_z && so[2] == s_a && so[5] == s_n);
+    CHECK(vfs_list_by(VFS_ROOT, so, 2, VFS_SORT_SIZE, 1) == 6 && so[0] == s_y && so[1] == s_z);
+
     /* demo content */
     vfs_init();
     CHECK(vfs_lookup("/System/EFI/BOOT/BOOTX64.EFI") > 0);

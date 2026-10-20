@@ -453,6 +453,25 @@ int wm_pointer(int x, int y, unsigned buttons)
     return WM_HAS_DMG;
 }
 
+int wm_tick(void)
+{
+    int changed = 0;
+    for (int i = 0; i < WM_ZN; i++)
+    {
+        Window *w = WM_Z[i];
+        if (w->minimized || !w->on_tick)
+            continue;
+        if (w->on_tick(w))
+        {
+            wm_damage_window_internal(w);
+            changed = 1;
+        }
+        if (i >= WM_ZN || WM_Z[i] != w) /* the handler closed or reordered windows: stop for this pass */
+            break;
+    }
+    return changed;
+}
+
 int wm_wheel(int x, int y, int steps)
 {
     if (steps == 0 || DRAG || RESIZE)

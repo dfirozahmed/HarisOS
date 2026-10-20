@@ -285,7 +285,8 @@ typedef enum
     UI_ICON_RENAME,
     UI_ICON_FILE_PLUS, /* new file */
     UI_ICON_TRASH,     /* delete */
-    UI_ICON_REFRESH
+    UI_ICON_REFRESH,
+    UI_ICON_SORT
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

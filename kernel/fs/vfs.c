@@ -84,18 +84,53 @@ int vfs_add(int parent, const char *name, int is_dir, unsigned size)
     return -1;
 }
 
-/* a sorts before b: folders first, then names ignoring case */
-static int before(int a, int b)
+/* compare two texts ignoring case: <0, 0, >0 */
+static int cmp_text(const char *x, const char *y)
+{
+    while (*x && lower((unsigned char)*x) == lower((unsigned char)*y))
+        x++, y++;
+    return lower((unsigned char)*x) - lower((unsigned char)*y);
+}
+
+/* the part of a file name after its last dot ("" if none; a leading dot is not an extension) */
+static const char *ext_of(const char *name)
+{
+    const char *dot = 0;
+    for (const char *p = name + 1; *name && *p; p++)
+        if (*p == '.')
+            dot = p + 1;
+    return dot ? dot : "";
+}
+
+/* a sorts before b. Folders always come first. Within each group:
+ *   NAME: by name (descending reverses folders too); SIZE / TYPE: files by size / extension
+ *   (descending reverses that), ties and folders by name ascending. */
+static int before_by(int a, int b, int key, int desc)
 {
     if (NODES[a].is_dir != NODES[b].is_dir)
         return NODES[a].is_dir;
-    const char *x = NODES[a].name, *y = NODES[b].name;
-    while (*x && lower((unsigned char)*x) == lower((unsigned char)*y))
-        x++, y++;
-    return lower((unsigned char)*x) < lower((unsigned char)*y);
+    int c = cmp_text(NODES[a].name, NODES[b].name);
+    if (key == VFS_SORT_NAME)
+        return desc ? c > 0 : c < 0;
+    if (!NODES[a].is_dir)
+    {
+        int k = 0;
+        if (key == VFS_SORT_SIZE)
+            k = NODES[a].size < NODES[b].size ? -1 : NODES[a].size > NODES[b].size;
+        else
+            k = cmp_text(ext_of(NODES[a].name), ext_of(NODES[b].name));
+        if (k)
+            return desc ? k > 0 : k < 0;
+    }
+    return c < 0;
 }
 
 int vfs_list(int dir, int *out, int max)
+{
+    return vfs_list_by(dir, out, max, VFS_SORT_NAME, 0);
+}
+
+int vfs_list_by(int dir, int *out, int max, int key, int descending)
 {
     int total = 0;
     if (!vfs_node(dir) || !NODES[dir].is_dir)
@@ -106,7 +141,7 @@ int vfs_list(int dir, int *out, int max)
             continue;
         /* insertion sort into out[] (the pool is small); entries past max only count */
         int pos = total < max ? total : max;
-        while (pos > 0 && before(i, out[pos - 1]))
+        while (pos > 0 && before_by(i, out[pos - 1], key, descending))
             pos--;
         if (pos < max)
         {

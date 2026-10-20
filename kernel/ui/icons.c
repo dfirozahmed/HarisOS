@@ -240,6 +240,17 @@ static void icon_refresh(const Frame *f, GfxColor c)
     gfx_fill_poly_q(head, 3, c, 255);
 }
 
+/* three bars getting shorter and a down arrow: sort */
+static void icon_sort(const Frame *f, GfxColor c)
+{
+    line(f, 6, 12, 26, 12, 5, c);
+    line(f, 6, 24, 20, 24, 5, c);
+    line(f, 6, 36, 14, 36, 5, c);
+    line(f, 37, 8, 37, 38, 5, c);
+    line(f, 29, 30, 37, 39, 5, c);
+    line(f, 45, 30, 37, 39, 5, c);
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -322,6 +333,9 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_REFRESH:
         icon_refresh(&f, t);
+        break;
+    case UI_ICON_SORT:
+        icon_sort(&f, t);
         break;
     default:
         break;

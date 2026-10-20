@@ -39,7 +39,9 @@ enum
     BTN_COPY,
     BTN_PASTE,
     BTN_RENAME,
-    BTN_DELETE
+    BTN_DELETE,
+    BTN_SORT,
+    BTN_COUNT
 };
 #define NAVBTN 36    /* icon-only Back / Forward / Up buttons */
 #define PATH_X (10 + 3 * (NAVBTN + 2) + 6) /* path bar starts after the three navigation buttons */
@@ -47,6 +49,9 @@ enum
 #define NEWBTN_W 118
 #define CMD_X0 (NEWBTN_X + NEWBTN_W + 2 + NAVBTN + 16) /* Cut / Copy / Paste / Rename start here, after a divider */
 #define CMD_Y (NAV_ROW_H + 5)
+#define SORT_X (CMD_X0 + 5 * (NAVBTN + 2) + 14) /* "Sort" after a second divider */
+#define SORT_W 82
+#define TIP_DELAY_MS 500
 
 enum
 {
@@ -94,6 +99,11 @@ static int LAST_ROW = -1;
 static unsigned long long LAST_CLICK_MS;
 static int HOVER_ROW = -1;   /* list row under the pointer, -1 = none */
 static int HOVER_PLACE = -1; /* sidebar entry under the pointer */
+static int SORT_KEY = VFS_SORT_NAME; /* VFS_SORT_* */
+static int SORT_DESC;
+static int TIP_BTN = -1;               /* toolbar button the pointer rests on, -1 = none */
+static unsigned long long TIP_SINCE;   /* when it started resting there */
+static int TIP_SHOWN;                  /* the tooltip is visible */
 static int CLIP_ID = -1;     /* entry on the clipboard (Cut or Copy), -1 = empty */
 static int CLIP_CUT;         /* 1 = it moves on Paste, 0 = a copy is made */
 static int RENAME_ID = -1;   /* node being renamed in its row (win->edits[0] holds the text), -1 = none */
@@ -110,6 +120,11 @@ enum
     M_CUT,
     M_COPY,
     M_PASTE,
+    M_SORT_NAME,
+    M_SORT_SIZE,
+    M_SORT_TYPE,
+    M_SORT_ASC,
+    M_SORT_DESC,
     M_SEP /* a divider line, not selectable */
 };
 #define MENU_W 224
@@ -120,6 +135,7 @@ enum
 typedef struct
 {
     int open;
+    int kind; /* 0 = folder menu, 1 = entry menu, 2 = sort menu (check marks) */
     int x, y;
     int count;
     int items[MENU_MAX];
@@ -275,7 +291,7 @@ static void update_nav_buttons(void)
 
 static void reload(void)
 {
-    int total = vfs_list(CUR, ITEMS, VFS_MAX_NODES);
+    int total = vfs_list_by(CUR, ITEMS, VFS_MAX_NODES, SORT_KEY, SORT_DESC);
     NITEMS = total < VFS_MAX_NODES ? total : VFS_MAX_NODES;
     if (SEL >= NITEMS)
         SEL = NITEMS - 1;
@@ -608,6 +624,29 @@ static void paste(void)
         select_row(wm_content(EX_WIN), row);
 }
 
+/* Change the order of the list; the selected entry stays selected (and in view). */
+static void set_sort(int key, int desc)
+{
+    if (RENAME_ID >= 0 && !end_rename(1))
+        return;
+    int id = (SEL >= 0 && SEL < NITEMS) ? ITEMS[SEL] : -1;
+    SORT_KEY = key;
+    SORT_DESC = desc;
+    reload();
+    int row = row_of(id);
+    if (row >= 0 && EX_WIN)
+        select_row(wm_content(EX_WIN), row);
+    LAST_ROW = -1;
+}
+
+static void menu_open(int x, int y, int kind);
+
+static void on_sort(UiButton *b, void *user)
+{
+    (void)user;
+    menu_open(b->r.x, b->r.y + b->r.h + 2, 2); /* drops down under the button */
+}
+
 static void ask_delete(int row);
 
 static void on_new_file(UiButton *b, void *user)
@@ -786,13 +825,13 @@ static void ask_delete(int row)
 /* ---- right-click menu ------------------------------------------ */
 static const char *menu_label(int item)
 {
-    static const char *const L[] = {"Open", "Rename", "Delete", "New folder", "New text file", "Refresh", "Cut", "Copy", "Paste"};
+    static const char *const L[] = {"Open", "Rename", "Delete", "New folder", "New text file", "Refresh", "Cut", "Copy", "Paste", "Name", "Size", "Type", "Ascending", "Descending"};
     return item < M_SEP ? L[item] : "";
 }
 
 static const char *menu_hint(int item)
 {
-    static const char *const H[] = {"Enter", "F2", "Del", "Ctrl+Shift+N", "", "F5", "Ctrl+X", "Ctrl+C", "Ctrl+V"};
+    static const char *const H[] = {"Enter", "F2", "Del", "Ctrl+Shift+N", "", "F5", "Ctrl+X", "Ctrl+C", "Ctrl+V", "", "", "", "", ""};
     return item < M_SEP ? H[item] : "";
 }
 
@@ -822,10 +861,20 @@ static int menu_hit(int x, int y)
 }
 
 /* Open the menu at (x, y), kept inside the window's content area. */
-static void menu_open(int x, int y, int on_item)
+static void menu_open(int x, int y, int kind)
 {
     MENU.count = 0;
-    if (on_item)
+    MENU.kind = kind;
+    if (kind == 2)
+    {
+        MENU.items[MENU.count++] = M_SORT_NAME;
+        MENU.items[MENU.count++] = M_SORT_SIZE;
+        MENU.items[MENU.count++] = M_SORT_TYPE;
+        MENU.items[MENU.count++] = M_SEP;
+        MENU.items[MENU.count++] = M_SORT_ASC;
+        MENU.items[MENU.count++] = M_SORT_DESC;
+    }
+    else if (kind == 1)
     {
         MENU.items[MENU.count++] = M_OPEN;
         MENU.items[MENU.count++] = M_SEP;
@@ -892,6 +941,21 @@ static void menu_run(int item)
     case M_PASTE:
         paste();
         break;
+    case M_SORT_NAME:
+        set_sort(VFS_SORT_NAME, SORT_DESC);
+        break;
+    case M_SORT_SIZE:
+        set_sort(VFS_SORT_SIZE, SORT_DESC);
+        break;
+    case M_SORT_TYPE:
+        set_sort(VFS_SORT_TYPE, SORT_DESC);
+        break;
+    case M_SORT_ASC:
+        set_sort(SORT_KEY, 0);
+        break;
+    case M_SORT_DESC:
+        set_sort(SORT_KEY, 1);
+        break;
     default:
         break;
     }
@@ -909,6 +973,25 @@ static void menu_step(int dir)
             MENU.hover = i;
             return;
         }
+    }
+}
+
+static int menu_checked(int item)
+{
+    switch (item)
+    {
+    case M_SORT_NAME:
+        return SORT_KEY == VFS_SORT_NAME;
+    case M_SORT_SIZE:
+        return SORT_KEY == VFS_SORT_SIZE;
+    case M_SORT_TYPE:
+        return SORT_KEY == VFS_SORT_TYPE;
+    case M_SORT_ASC:
+        return !SORT_DESC;
+    case M_SORT_DESC:
+        return SORT_DESC;
+    default:
+        return 0;
     }
 }
 
@@ -932,7 +1015,10 @@ static void menu_draw(const UiTheme *t)
         if (i == MENU.hover)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 60);
         UiRgb c = item == M_DELETE ? t->danger : t->text;
-        ui_text_in_color(ui_rect(r.x + 12, r.y, r.w - 24, r.h - 2), menu_label(item), UI_TEXT_BODY, UI_ALIGN_LEFT, c);
+        int tx = MENU.kind == 2 ? 34 : 12; /* the sort menu leaves room for a check mark */
+        if (menu_checked(item))
+            ui_icon(UI_ICON_CHECK, r.x + 18, r.y + (r.h - 2) / 2, 14, t->accent_hi);
+        ui_text_in_color(ui_rect(r.x + tx, r.y, r.w - tx - 12, r.h - 2), menu_label(item), UI_TEXT_BODY, UI_ALIGN_LEFT, c);
         ui_text_in_color(ui_rect(r.x + 12, r.y, r.w - 24, r.h - 2), menu_hint(item), UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                          t->text_dim);
     }
@@ -996,6 +1082,8 @@ static void draw_toolbar(const Layout *l, const UiTheme *t)
     /* command row: a divider between New folder and the clipboard / rename buttons */
     gfx_fill_rect_alpha(tb.x + CMD_X0 - 9, tb.y + CMD_Y + 6, 1, 22, t->border.r, t->border.g, t->border.b, 255);
 
+    gfx_fill_rect_alpha(tb.x + SORT_X - 8, tb.y + CMD_Y + 6, 1, 22, t->border.r, t->border.g, t->border.b, 255);
+
     int px = tb.x + PATH_X;
     UiRect bar = ui_rect(px, tb.y + 9, tb.w - (px - tb.x) - 10 - NAVBTN - 4, 34); /* room for Refresh on the right */
     if (bar.w < 40)
@@ -1055,19 +1143,48 @@ static void draw_sidebar(const Layout *l, const UiTheme *t)
     }
 }
 
+/* where the Type and Size columns are (shared by drawing and header clicks) */
+typedef struct
+{
+    int show_type, type_x, size_x;
+} Cols;
+
+static Cols columns(const Layout *l)
+{
+    Cols c;
+    c.show_type = l->list.w >= 360;
+    int right = l->list.x + l->list.w - 14; /* leave room for the scrollbar */
+    c.size_x = right - SIZE_COL_W;
+    c.type_x = c.show_type ? c.size_x - TYPE_COL_W : c.size_x;
+    return c;
+}
+
+/* a column title; the sorted column is brighter and has a small up / down triangle */
+static void head_cell(UiRect cell, const char *label, UiAlign align, int key, const UiTheme *t)
+{
+    int active = SORT_KEY == key;
+    ui_text_in_color(cell, label, UI_TEXT_SMALL, align, active ? t->text : t->text_dim);
+    if (!active)
+        return;
+    int tw = ui_text_width(label, UI_TEXT_SMALL);
+    int ax = align == UI_ALIGN_RIGHT ? cell.x + cell.w - tw - 10 : cell.x + tw + 9;
+    int ay = cell.y + cell.h / 2;
+    int up[6] = {(ax - 4) * 16, (ay + 2) * 16, (ax + 4) * 16, (ay + 2) * 16, ax * 16, (ay - 3) * 16};
+    int down[6] = {(ax - 4) * 16, (ay - 2) * 16, (ax + 4) * 16, (ay - 2) * 16, ax * 16, (ay + 3) * 16};
+    gfx_fill_poly_q(SORT_DESC ? down : up, 3, ui_color(t->accent_hi), 255);
+}
+
 static void draw_list(const Layout *l, const UiTheme *t)
 {
-    int show_type = l->list.w >= 360;
-    int right = l->list.x + l->list.w - 14; /* leave room for the scrollbar */
-    int size_x = right - SIZE_COL_W;
-    int type_x = show_type ? size_x - TYPE_COL_W : size_x;
+    Cols cols = columns(l);
+    int show_type = cols.show_type, size_x = cols.size_x, type_x = cols.type_x;
 
-    /* column header */
+    /* column header (click a title to sort by it) */
     UiRect h = l->head;
-    ui_text_in_color(ui_rect(h.x + 44, h.y, 200, h.h), "Name", UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
+    head_cell(ui_rect(h.x + 44, h.y, 200, h.h), "Name", UI_ALIGN_LEFT, VFS_SORT_NAME, t);
     if (show_type)
-        ui_text_in_color(ui_rect(type_x, h.y, TYPE_COL_W, h.h), "Type", UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
-    ui_text_in_color(ui_rect(size_x, h.y, SIZE_COL_W - 6, h.h), "Size", UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
+        head_cell(ui_rect(type_x, h.y, TYPE_COL_W, h.h), "Type", UI_ALIGN_LEFT, VFS_SORT_TYPE, t);
+    head_cell(ui_rect(size_x, h.y, SIZE_COL_W - 6, h.h), "Size", UI_ALIGN_RIGHT, VFS_SORT_SIZE, t);
     ui_separator(h.x + 8, h.y + h.h - 1, h.w - 16);
 
     if (NITEMS == 0)
@@ -1183,6 +1300,31 @@ static void draw_status(const Layout *l, const UiTheme *t)
     }
 }
 
+/* tooltip: a small label under the toolbar button the pointer rests on (above it near the bottom) */
+static void tip_draw(const Window *w, UiRect body, const UiTheme *t)
+{
+    static const char *const TIPS[BTN_COUNT] = {"Back (Alt+Left)", "Forward (Alt+Right)", "Up one level (Alt+Up)",
+                                                "Refresh (F5)", "New folder (Ctrl+Shift+N)", "New text file",
+                                                "Cut (Ctrl+X)", "Copy (Ctrl+C)", "Paste (Ctrl+V)", "Rename (F2)",
+                                                "Delete (Del)", "Sort by"};
+    if (TIP_BTN < 0 || TIP_BTN >= BTN_COUNT || TIP_BTN >= w->btn_count)
+        return;
+    const char *s = TIPS[TIP_BTN];
+    UiRect b = w->btn[TIP_BTN].r;
+    int tw = ui_text_width(s, UI_TEXT_SMALL) + 22, th = 26;
+    int x = b.x + b.w / 2 - tw / 2, y = b.y + b.h + 6;
+    if (x + tw > body.x + body.w - 4)
+        x = body.x + body.w - 4 - tw;
+    if (x < body.x + 4)
+        x = body.x + 4;
+    if (y + th > body.y + body.h - 4)
+        y = b.y - th - 6;
+    gfx_shadow(x, y, tw, th, t->radius_s, 8, 0, 3, 110);
+    gfx_fill_round_rect(x, y, tw, th, t->radius_s, ui_color(t->titlebar));
+    gfx_round_rect(x, y, tw, th, t->radius_s, 1, ui_color(t->border));
+    ui_text_in_color(ui_rect(x, y, tw, th), s, UI_TEXT_SMALL, UI_ALIGN_CENTER, t->text);
+}
+
 /* grey out the toolbar buttons that cannot do anything right now */
 static void sync_buttons(void)
 {
@@ -1198,6 +1340,7 @@ static void sync_buttons(void)
     EX_WIN->btn[BTN_PASTE].enabled = idle && vfs_node(CLIP_ID) != 0;
     EX_WIN->btn[BTN_RENAME].enabled = idle && has;
     EX_WIN->btn[BTN_DELETE].enabled = idle && has && !DEL_WIN;
+    EX_WIN->btn[BTN_SORT].enabled = idle;
     update_nav_buttons();
 }
 
@@ -1214,6 +1357,8 @@ static void ex_draw(Window *w, UiRect body)
     if (MENU.open && w != wm_top())
         MENU.open = 0; /* focus moved elsewhere (another window or the delete dialog) */
     menu_draw(t);
+    if (TIP_SHOWN && !MENU.open)
+        tip_draw(w, body, t);
 }
 
 /* ---- input ----------------------------------------------------- */
@@ -1222,6 +1367,8 @@ static int ex_press(Window *w, int x, int y)
     UiRect body = wm_content(w);
     Layout l = layout(body);
 
+    TIP_BTN = -1; /* a click hides the tooltip until the pointer moves again */
+    TIP_SHOWN = 0;
     if (MENU.open) /* a click on an item runs it; a click anywhere else only closes the menu */
     {
         int hit = menu_hit(x, y);
@@ -1254,6 +1401,13 @@ static int ex_press(Window *w, int x, int y)
             return 1;
         }
         return 0;
+    }
+    if (ui_contains(l.head, x, y)) /* a column title: sort by it, again to reverse */
+    {
+        Cols cols = columns(&l);
+        int key = x >= cols.size_x ? VFS_SORT_SIZE : (cols.show_type && x >= cols.type_x) ? VFS_SORT_TYPE : VFS_SORT_NAME;
+        set_sort(key, key == SORT_KEY ? !SORT_DESC : 0);
+        return 1;
     }
     if (!ui_contains(l.list, x, y))
         return 0;
@@ -1321,6 +1475,17 @@ static int ex_rpress(Window *w, int x, int y)
 static int ex_hover(Window *w, int x, int y)
 {
     int old_row = HOVER_ROW, old_place = HOVER_PLACE, old_menu = MENU.hover;
+    int old_tip = TIP_BTN, was_shown = TIP_SHOWN;
+    TIP_BTN = -1;
+    if (x >= 0 && !MENU.open)
+        for (int i = 0; i < w->btn_count; i++)
+            if (ui_contains(w->btn[i].r, x, y))
+                TIP_BTN = i;
+    if (TIP_BTN != old_tip) /* a new button: wait again before showing its tooltip */
+    {
+        TIP_SINCE = timer_ms();
+        TIP_SHOWN = 0;
+    }
     HOVER_ROW = HOVER_PLACE = -1;
     if (MENU.open)
         MENU.hover = x < 0 ? -1 : menu_hit(x, y);
@@ -1338,7 +1503,17 @@ static int ex_hover(Window *w, int x, int y)
             HOVER_PLACE = p < PLACE_N ? p : -1;
         }
     }
-    return old_row != HOVER_ROW || old_place != HOVER_PLACE || old_menu != MENU.hover;
+    return old_row != HOVER_ROW || old_place != HOVER_PLACE || old_menu != MENU.hover || was_shown != TIP_SHOWN;
+}
+
+/* time passes: show the tooltip once the pointer has rested on a button long enough */
+static int ex_tick(Window *w)
+{
+    int want = TIP_BTN >= 0 && !MENU.open && w == wm_top() && timer_ms() - TIP_SINCE >= TIP_DELAY_MS;
+    if (want == TIP_SHOWN)
+        return 0;
+    TIP_SHOWN = want;
+    return 1;
 }
 
 static int ex_wheel(Window *w, int steps)
@@ -1486,6 +1661,8 @@ static void ex_close(Window *w)
     EX_WIN = 0;
     RENAME_ID = -1;
     MENU.open = 0;
+    TIP_BTN = -1;
+    TIP_SHOWN = 0;
 }
 
 static void explorer_app_open(void)
@@ -1520,6 +1697,7 @@ static void explorer_app_open(void)
     win->on_drag = ex_drag;
     win->on_rpress = ex_rpress;
     win->on_hover = ex_hover;
+    win->on_tick = ex_tick;
     win->on_close = ex_close;
     win->icon = TASKBAR_ICON_FILES;
     wm_set_min_size(win, 480, 320);
@@ -1542,6 +1720,7 @@ static void explorer_app_open(void)
     wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0 + 2 * step, CMD_Y, NAVBTN, 34), 0, on_paste, 0);
     wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0 + 3 * step, CMD_Y, NAVBTN, 34), 0, on_rename, 0);
     wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0 + 4 * step, CMD_Y, NAVBTN, 34), 0, on_delete, 0);
+    wm_add_button_ex(win, "Sort", UI_BTN_GHOST, ui_rect(SORT_X, CMD_Y, SORT_W, 34), 0, on_sort, 0);
 
     wm_set_button_icon(win, BTN_BACK, UI_ICON_ARROW_LEFT);
     wm_set_button_icon(win, BTN_FORWARD, UI_ICON_ARROW_RIGHT);
@@ -1554,6 +1733,7 @@ static void explorer_app_open(void)
     wm_set_button_icon(win, BTN_PASTE, UI_ICON_PASTE);
     wm_set_button_icon(win, BTN_RENAME, UI_ICON_RENAME);
     wm_set_button_icon(win, BTN_DELETE, UI_ICON_TRASH);
+    wm_set_button_icon(win, BTN_SORT, UI_ICON_SORT);
 
     CUR = VFS_ROOT;
     HIST_N = 0;

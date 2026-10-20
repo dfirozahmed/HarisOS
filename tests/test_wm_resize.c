@@ -14,6 +14,8 @@ static void ptr(int x,int y,unsigned b){ wm_pointer(x,y,b); }
 static int wheel_steps, wheel_ret;
 static int on_wheel_cb(Window*w,int steps){ (void)w; wheel_steps+=steps; return wheel_ret; }
 static int hov_calls, hov_x, hov_y, rp_calls, rp_x;
+static int tick_calls, tick_ret;
+static int on_tick_cb(Window*w){ (void)w; tick_calls++; return tick_ret; }
 static int on_hover_cb(Window*w,int x,int y){ (void)w; hov_calls++; hov_x=x; hov_y=y; return 0; }
 static int on_rpress_cb(Window*w,int x,int y){ (void)w; (void)y; rp_calls++; rp_x=x; return 0; }
 int main(void){
@@ -111,6 +113,17 @@ int main(void){
     wm_pointer(w->r.x+50,w->r.y+10,0);
     (void)c;
     wm_close(other);
+  }
+  /* tick: windows with on_tick are asked each pass; a change is reported and marked for redraw */
+  {
+    tick_calls=0; tick_ret=0;
+    w->on_tick=on_tick_cb;
+    wm_take_damage(&(UiRect){0});
+    assert(wm_tick()==0 && tick_calls==1 && !WM_HAS_DMG);
+    tick_ret=1;
+    assert(wm_tick()==1 && tick_calls==2 && WM_HAS_DMG);
+    wm_minimize(w); tick_calls=0; wm_tick(); assert(tick_calls==0);   /* minimized windows are skipped */
+    wm_activate(w);
   }
   printf("wm resize tests passed\n");
   return 0;

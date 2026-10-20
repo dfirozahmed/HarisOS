@@ -34,6 +34,14 @@ int vfs_count(void);             /* used nodes, including the root */
  * Returns how many there are in total (may be more than max). */
 int vfs_list(int dir, int *out, int max);
 
+#define VFS_SORT_NAME 0
+#define VFS_SORT_SIZE 1
+#define VFS_SORT_TYPE 2 /* by extension */
+
+/* Same as vfs_list(), in another order. Folders always come first. `descending` reverses the order
+ * inside the folder and file groups; with SIZE or TYPE, entries that tie (and all folders) go by name. */
+int vfs_list_by(int dir, int *out, int max, int key, int descending);
+
 /* "/Documents/readme.txt" for a node ("/" for the root). Always 0-terminated, cut if cap is too small.
  * Returns the length written. */
 int vfs_path(int id, char *out, int cap);
