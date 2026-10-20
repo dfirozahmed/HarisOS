@@ -1,5 +1,6 @@
 /* HarisOS start menu: light translucent glass panel with search, app list and footer. */
 #include "startmenu.h"
+#include "app.h"
 #include "appmenu.h"
 #include "desktop.h"
 #include "taskbar.h"
@@ -49,7 +50,8 @@ static const UiTheme MENU_THEME = {
 #define LABEL_H 22
 #define ROW_H 54
 #define FOOT_H 58
-#define MAX_ITEMS 3
+#define BUILTIN_ITEMS 3
+#define MAX_ITEMS (BUILTIN_ITEMS + APP_MAX)
 
 typedef struct
 {
@@ -57,11 +59,23 @@ typedef struct
     UiIcon icon;
 } MenuItem;
 
-static const MenuItem ITEMS[MAX_ITEMS] = {
+/* built-in desktop actions; installed apps (app.h) follow them in the list */
+static const MenuItem BUILTIN[BUILTIN_ITEMS] = {
     {"Welcome", "The HarisOS start page", UI_ICON_LOGO},
     {"Hello window", "Text boxes and dialogs", UI_ICON_TERMINAL},
     {"Settings", "Switch dark / light theme", UI_ICON_SETTINGS},
 };
+
+static int item_count(void) { return BUILTIN_ITEMS + app_count(); }
+
+static MenuItem item_get(int i)
+{
+    if (i < BUILTIN_ITEMS)
+        return BUILTIN[i];
+    const AppInfo *a = app_get(i - BUILTIN_ITEMS);
+    MenuItem m = {a->name, a->desc, a->icon};
+    return m;
+}
 
 const UiTheme *startmenu_theme(void) { return &MENU_THEME; }
 
@@ -101,7 +115,7 @@ static unsigned FILTER_SIG;
 /* ---- geometry (small functions: no big structs are copied) ---- */
 static int menu_h(void)
 {
-    return PAD + SEARCH_H + LABEL_GAP + LABEL_H + MAX_ITEMS * ROW_H + 8 + 1 + FOOT_H;
+    return PAD + SEARCH_H + LABEL_GAP + LABEL_H + item_count() * ROW_H + 8 + 1 + FOOT_H;
 }
 
 static UiRect menu_rect(void)
@@ -133,7 +147,7 @@ static UiRect row_rect(int i)
     return ui_rect(m.x + 8, rows_y() + i * ROW_H, m.w - 16, ROW_H - 4);
 }
 
-static int foot_y(void) { return rows_y() + MAX_ITEMS * ROW_H + 8; }
+static int foot_y(void) { return rows_y() + item_count() * ROW_H + 8; }
 
 /* the two power buttons in the footer: i = 0 Restart, i = 1 Shut down (the right-most) */
 #define PBTN_W 40
@@ -215,9 +229,12 @@ static unsigned text_sig(const char *s)
 static void refilter(int reset_selection)
 {
     VN = 0;
-    for (int i = 0; i < MAX_ITEMS; i++)
-        if (has_text(ITEMS[i].name, SEARCH.text) || has_text(ITEMS[i].desc, SEARCH.text))
+    for (int i = 0; i < item_count(); i++)
+    {
+        MenuItem it = item_get(i);
+        if (has_text(it.name, SEARCH.text) || has_text(it.desc, SEARCH.text))
             VIS[VN++] = i;
+    }
     if (VN == 0)
         SEL = -1;
     else if (reset_selection || SEL < 0 || SEL >= VN)
@@ -279,6 +296,12 @@ static void activate(int item)
         desktop_toggle_theme();
         break;
     default:
+        if (item >= BUILTIN_ITEMS)
+        {
+            const AppInfo *a = app_get(item - BUILTIN_ITEMS);
+            if (a && a->open)
+                a->open();
+        }
         break;
     }
 }
@@ -524,7 +547,8 @@ void startmenu_draw(void)
                          UI_ALIGN_CENTER, t->text_dim);
     for (int i = 0; i < VN; i++)
     {
-        const MenuItem *it = &ITEMS[VIS[i]];
+        MenuItem item = item_get(VIS[i]);
+        const MenuItem *it = &item;
         UiRect r = row_rect(i);
         if (i == SEL && !FOOT_KEY)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_m, ui_color(t->accent), PRESS == i ? 56 : 30);

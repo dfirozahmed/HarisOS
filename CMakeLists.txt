@@ -104,7 +104,9 @@ set(KERNEL_SOURCES
     kernel/desktop/desktop_power.c  # shut down / restart screen
     kernel/desktop/appmenu.c        # taskbar app right-click menu
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
-    kernel/desktop/taskbar.c)
+    kernel/desktop/taskbar.c
+    apps/app_registry.c             # list of installed apps (start menu reads it)
+    apps/devmgr/devmgr_app.c)       # Device Manager app
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
