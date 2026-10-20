@@ -7,6 +7,11 @@ static UiRgb darken(UiRgb c, int amount) { return ui_rgb_mix(c, ui_rgb(0, 0, 0),
 
 void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state)
 {
+    ui_button_icon(r, label, -1, kind, state);
+}
+
+void ui_button_icon(UiRect r, const char *label, int icon, UiButtonKind kind, UiState state)
+{
     const UiTheme *t = THEME;
     int rad = t->radius_m;
     if (rad > r.h / 2)
@@ -67,7 +72,21 @@ void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state)
     }
     if (kind == UI_BTN_SECONDARY && !disabled)
         gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
-    ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 20, r.h), label, UI_TEXT_LABEL, UI_ALIGN_CENTER, text);
+    if (icon < 0)
+    {
+        ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 20, r.h), label, UI_TEXT_LABEL, UI_ALIGN_CENTER, text);
+        return;
+    }
+    /* icon and label side by side, centered together as one group */
+    int isz = r.h >= 30 ? 18 : 14, gap = label[0] ? 7 : 0;
+    int tw = label[0] ? ui_text_width(label, UI_TEXT_LABEL) : 0;
+    int total = isz + gap + tw;
+    if (total > r.w - 12) /* too narrow for both: the label is shortened by ui_text_in_color */
+        tw = r.w - 12 - isz - gap, total = r.w - 12;
+    int gx = r.x + (r.w - total) / 2;
+    ui_icon((UiIcon)icon, gx + isz / 2, r.y + r.h / 2, isz, text);
+    if (tw > 0)
+        ui_text_in_color(ui_rect(gx + isz + gap, r.y, tw, r.h), label, UI_TEXT_LABEL, UI_ALIGN_LEFT, text);
 }
 
 /* ---- button widgets with events ------------------------------ */
@@ -101,7 +120,7 @@ void ui_buttons_draw(const UiButtonSet *s)
             st = UI_STATE_PRESSED;
         else if (i == s->hover && s->pressed < 0)
             st = UI_STATE_HOVER;
-        ui_button(b->r, b->label, b->kind, st);
+        ui_button_icon(b->r, b->label, b->icon - 1, b->kind, st);
     }
 }
 

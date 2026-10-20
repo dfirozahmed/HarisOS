@@ -129,6 +129,8 @@ typedef enum
 } UiButtonKind;
 
 void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state);
+/* Same, with an icon (a UiIcon value, or -1 for none) before the label. An empty label centers the icon. */
+void ui_button_icon(UiRect r, const char *label, int icon, UiButtonKind kind, UiState state);
 
 struct UiButton;
 typedef void (*UiButtonFn)(struct UiButton *btn, void *user);
@@ -144,6 +146,7 @@ typedef struct UiButton
     UiButtonFn on_hover; /* pointer entered the button      (may be NULL) */
     UiButtonFn on_leave; /* pointer left the button         (may be NULL) */
     void *user;          /* your own data, passed to every callback */
+    int icon;            /* UiIcon + 1 drawn before the label, 0 = no icon */
 } UiButton;
 
 /* Static initializer: UiButton b = UI_BUTTON("Save", UI_BTN_PRIMARY, on_save, my_data); */
@@ -271,7 +274,11 @@ typedef enum
     UI_ICON_VOLUME,
     UI_ICON_BATTERY,
     UI_ICON_CLOSE,
-    UI_ICON_CHECK
+    UI_ICON_CHECK,
+    UI_ICON_ARROW_LEFT, /* back */
+    UI_ICON_ARROW_RIGHT, /* forward */
+    UI_ICON_ARROW_UP,   /* up one level */
+    UI_ICON_FOLDER_PLUS /* new folder */
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

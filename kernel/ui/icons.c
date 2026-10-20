@@ -132,6 +132,37 @@ static void icon_check(const Frame *f, GfxColor c)
     line(f, 20, 36, 40, 12, 6, c);
 }
 
+/* arrows: a shaft and a chevron head, drawn in the tint color */
+static void icon_arrow_left(const Frame *f, GfxColor c)
+{
+    line(f, 38, 24, 10, 24, 6, c);
+    line(f, 23, 11, 10, 24, 6, c);
+    line(f, 23, 37, 10, 24, 6, c);
+}
+
+static void icon_arrow_right(const Frame *f, GfxColor c)
+{
+    line(f, 10, 24, 38, 24, 6, c);
+    line(f, 25, 11, 38, 24, 6, c);
+    line(f, 25, 37, 38, 24, 6, c);
+}
+
+static void icon_arrow_up(const Frame *f, GfxColor c)
+{
+    line(f, 24, 38, 24, 10, 6, c);
+    line(f, 11, 23, 24, 10, 6, c);
+    line(f, 37, 23, 24, 10, 6, c);
+}
+
+static void icon_folder_plus(const Frame *f)
+{
+    icon_files(f);
+    GfxColor green = gfx_rgb(52, 190, 120), white = gfx_rgb(255, 255, 255);
+    gfx_fill_circle_q(q(f, 36), qy(f, 34), len_q(f, 11), green, 255);
+    line(f, 36, 28, 36, 40, 3, white);
+    line(f, 30, 34, 42, 34, 3, white);
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -181,6 +212,18 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_CHECK:
         icon_check(&f, t);
+        break;
+    case UI_ICON_ARROW_LEFT:
+        icon_arrow_left(&f, t);
+        break;
+    case UI_ICON_ARROW_RIGHT:
+        icon_arrow_right(&f, t);
+        break;
+    case UI_ICON_ARROW_UP:
+        icon_arrow_up(&f, t);
+        break;
+    case UI_ICON_FOLDER_PLUS:
+        icon_folder_plus(&f);
         break;
     default:
         break;

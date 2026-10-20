@@ -10,6 +10,7 @@ static int DRAG_DX, DRAG_DY;
 static Window *CLOSE_PRESSED, *MIN_PRESSED, *MAX_PRESSED;
 static Window *LC_WIN;
 static Window *PRESS_WIN; /* window whose on_press started a drag (text selection): it gets on_drag */
+static Window *HOVER_CONTENT; /* window whose on_hover last saw the pointer inside */
 static unsigned long long LC_T;
 static int LC_X, LC_Y;
 static int DRAG_PX, DRAG_PY;
@@ -225,6 +226,7 @@ void wm_input_forget_window(Window *w)
     if (MAX_PRESSED == w) MAX_PRESSED = 0;
     if (LC_WIN == w) LC_WIN = 0;
     if (PRESS_WIN == w) PRESS_WIN = 0;
+    if (HOVER_CONTENT == w) HOVER_CONTENT = 0;
     if (RESIZE == w) RESIZE = 0;
     if (HOVER_WIN == w) HOVER_WIN = 0, HOVER_BTN = -1;
     if (SIG_HW == w) SIG_HW = 0;
@@ -237,6 +239,7 @@ void wm_input_forget_window(Window *w)
 int wm_pointer(int x, int y, unsigned buttons)
 {
     int down = (buttons & 1) != 0, was_down = (LAST_BUTTONS & 1) != 0;
+    int r_edge = (buttons & 2) && !(LAST_BUTTONS & 2); /* right button went down just now */
     LAST_BUTTONS = buttons;
 
     /* 1) press: focus, start dragging, or arm the close button */
@@ -281,6 +284,18 @@ int wm_pointer(int x, int y, unsigned buttons)
                 DRAG_DX = x - w->r.x;
                 DRAG_DY = y - w->r.y;
             }
+        }
+    }
+
+    /* 1a) right press: raise the window and let it show its own menu */
+    if (r_edge && !DRAG && !RESIZE)
+    {
+        Window *w = wm_window_at_internal(x, y);
+        if (w)
+        {
+            wm_raise(w);
+            if (!wm_blocker_internal(w) && !in_titlebar(w, x, y) && w->on_rpress && w->on_rpress(w, x, y))
+                wm_damage_window_internal(w);
         }
     }
 
@@ -407,6 +422,23 @@ int wm_pointer(int x, int y, unsigned buttons)
         if (WM_ZN == 0 || wm_z_index_internal(w) < 0) /* a click handler closed it */
             break;
     }
+
+    /* 4b) content hover: the window under the pointer, or nobody while dragging / blocked */
+    if (HOVER_CONTENT && HOVER_CONTENT != target && wm_z_index_internal(HOVER_CONTENT) >= 0)
+    {
+        Window *old = HOVER_CONTENT;
+        HOVER_CONTENT = 0;
+        if (old->on_hover && old->on_hover(old, -1, -1))
+            wm_damage_window_internal(old);
+    }
+    if (target && wm_z_index_internal(target) >= 0)
+    {
+        HOVER_CONTENT = target;
+        if (target->on_hover && target->on_hover(target, x, y))
+            wm_damage_window_internal(target);
+    }
+    else
+        HOVER_CONTENT = 0;
 
     if (to_close)
         wm_close(to_close);

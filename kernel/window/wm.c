@@ -226,6 +226,12 @@ int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
     return wm_add_button_ex(w, label, kind, rel, 0, on_click, user);
 }
 
+void wm_set_button_icon(Window *w, int index, UiIcon icon)
+{
+    if (w && index >= 0 && index < w->btn_count)
+        w->btn[index].icon = (int)icon + 1;
+}
+
 void wm_set_resizable(Window *w, int on)
 {
     if (w)
@@ -274,6 +280,7 @@ int wm_add_button_ex(Window *w, const char *label, UiButtonKind kind, UiRect rel
     b->on_hover = 0;
     b->on_leave = 0;
     b->user = user;
+    b->icon = 0;
     w->btn_rel[i] = rel;
     w->btn_anchor[i] = anchor;
     ui_buttons_add(&w->set, b);

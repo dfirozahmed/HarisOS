@@ -24,6 +24,9 @@
 #define WHEEL_ROWS 3
 #define DOUBLE_CLICK_MS 450
 #define HIST_MAX 16
+#define NAVBTN 36    /* icon-only Back / Forward / Up buttons */
+#define NEWBTN_X 134 /* "New folder" button in the toolbar */
+#define NEWBTN_W 118
 
 enum
 {
@@ -64,9 +67,45 @@ static int SEL = -1;
 static int SCROLL; /* first visible row */
 static int HIST[HIST_MAX];
 static int HIST_N;
+static int FWD[HIST_MAX]; /* folders to go forward to after Back */
+static int FWD_N;
 static const char *NOTE; /* one-line message for the status bar, cleared by the next action */
 static int LAST_ROW = -1;
 static unsigned long long LAST_CLICK_MS;
+static int HOVER_ROW = -1;   /* list row under the pointer, -1 = none */
+static int HOVER_PLACE = -1; /* sidebar entry under the pointer */
+static int RENAME_ID = -1;   /* node being renamed in its row (win->edits[0] holds the text), -1 = none */
+
+/* right-click menu: a small panel drawn inside the window */
+enum
+{
+    M_OPEN,
+    M_RENAME,
+    M_DELETE,
+    M_NEW_FOLDER,
+    M_NEW_FILE,
+    M_REFRESH,
+    M_SEP /* a divider line, not selectable */
+};
+#define MENU_W 224
+#define MENU_ROW_H 30
+#define MENU_SEP_H 9
+#define MENU_PAD 6
+#define MENU_MAX 5
+typedef struct
+{
+    int open;
+    int x, y;
+    int count;
+    int items[MENU_MAX];
+    int hover; /* index into items, -1 = none */
+} Menu;
+static Menu MENU;
+
+/* delete confirmation: a modal dialog of the Explorer window */
+static Window *DEL_WIN;
+static int DEL_ID;
+static char DEL_TITLE[VFS_NAME_MAX + 16], DEL_LINE[64];
 
 /* ---- file kinds ------------------------------------------------ */
 static int lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
@@ -198,12 +237,15 @@ static int put_str(char *out, int o, int cap, const char *s)
 }
 
 /* ---- navigation ------------------------------------------------ */
+static int end_rename(int commit);
+
 static void update_nav_buttons(void)
 {
     if (!EX_WIN)
         return;
-    EX_WIN->btn[0].enabled = HIST_N > 0;       /* Back */
-    EX_WIN->btn[1].enabled = CUR != VFS_ROOT;  /* Up */
+    EX_WIN->btn[0].enabled = HIST_N > 0;      /* Back */
+    EX_WIN->btn[1].enabled = FWD_N > 0;       /* Forward */
+    EX_WIN->btn[2].enabled = CUR != VFS_ROOT; /* Up */
 }
 
 static void reload(void)
@@ -222,8 +264,11 @@ static void go_to(int dir, int push)
     const VfsNode *n = vfs_node(dir);
     if (!n || !n->is_dir || dir == CUR)
         return;
+    if (RENAME_ID >= 0 && !end_rename(1))
+        end_rename(0); /* leaving the folder: keep the old name if the new one is not usable */
     if (push)
     {
+        FWD_N = 0; /* a new path ends the forward list */
         if (HIST_N == HIST_MAX)
         {
             for (int i = 1; i < HIST_MAX; i++)
@@ -247,6 +292,8 @@ static void go_back(void)
     if (HIST_N == 0)
         return;
     int dir = HIST[--HIST_N];
+    if (FWD_N < HIST_MAX)
+        FWD[FWD_N++] = CUR; /* so Forward can come back here */
     if (!vfs_node(dir))
     {
         update_nav_buttons();
@@ -285,6 +332,25 @@ static void on_back(UiButton *b, void *user)
     (void)b;
     (void)user;
     go_back();
+}
+
+static void go_forward(void)
+{
+    if (FWD_N == 0)
+        return;
+    int dir = FWD[--FWD_N];
+    int keep = FWD_N; /* a normal go_to() forgets the forward list; this one must not */
+    if (vfs_node(dir))
+        go_to(dir, 1);
+    FWD_N = keep;
+    update_nav_buttons();
+}
+
+static void on_forward(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    go_forward();
 }
 
 static void on_up(UiButton *b, void *user)
@@ -337,6 +403,397 @@ static void select_row(UiRect body, int row)
     if (row >= SCROLL + vis)
         SCROLL = row - vis + 1;
     clamp_scroll(&l);
+}
+
+/* ---- rename / new / delete ------------------------------------- */
+static int same_text(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+
+static int row_of(int id)
+{
+    for (int i = 0; i < NITEMS; i++)
+        if (ITEMS[i] == id)
+            return i;
+    return -1;
+}
+
+static void start_rename(int row)
+{
+    if (!EX_WIN || row < 0 || row >= NITEMS)
+        return;
+    const VfsNode *n = vfs_node(ITEMS[row]);
+    if (!n)
+        return;
+    select_row(wm_content(EX_WIN), row);
+    MENU.open = 0;
+    RENAME_ID = ITEMS[row];
+    UiEdit *e = &EX_WIN->edits[0];
+    ui_edit_clear(e);
+    e->max = VFS_NAME_MAX - 1;
+    ui_edit_set_text(e, n->name);
+    int stem = e->len; /* select the name without its extension, like a file manager */
+    for (int i = e->len - 1; i > 0 && !n->is_dir; i--)
+        if (e->text[i] == '.')
+        {
+            stem = i;
+            break;
+        }
+    e->anchor = 0;
+    e->cursor = stem;
+    EX_WIN->edit_count = 1;
+    EX_WIN->focus = 0;
+    EX_WIN->caret = 1;
+    ui_caret_restart();
+}
+
+/* Enter (commit = 1) or Escape (commit = 0). Returns 0 only when the new name is refused; the
+ * field then stays open so it can be fixed. */
+static int end_rename(int commit)
+{
+    if (RENAME_ID < 0 || !EX_WIN)
+        return 1;
+    UiEdit *e = &EX_WIN->edits[0];
+    int id = RENAME_ID;
+    const VfsNode *n = vfs_node(id);
+    if (commit && n && !same_text(n->name, e->text) && vfs_rename(id, e->text) < 0)
+    {
+        NOTE = e->len == 0 ? "A name cannot be empty." : "That name is already used or not allowed.";
+        return 0;
+    }
+    RENAME_ID = -1;
+    EX_WIN->edit_count = 0;
+    EX_WIN->caret = 0;
+    e->field.w = 0;
+    NOTE = 0;
+    reload(); /* the entry may sort to another place */
+    int row = row_of(id);
+    if (row >= 0)
+        select_row(wm_content(EX_WIN), row);
+    return 1;
+}
+
+/* is there already an entry with this name in the current folder (ignoring case)? */
+static int name_taken(const char *name)
+{
+    for (int i = 0; i < NITEMS; i++)
+    {
+        const VfsNode *n = vfs_node(ITEMS[i]);
+        if (!n)
+            continue;
+        const char *a = n->name, *b = name;
+        while (*a && lower((unsigned char)*a) == lower((unsigned char)*b))
+            a++, b++;
+        if (*a == *b)
+            return 1;
+    }
+    return 0;
+}
+
+/* "New folder", "New folder (2)" ... / "New file.txt", "New file (2).txt" ... */
+static void make_name(int is_dir, char *out)
+{
+    const char *base = is_dir ? "New folder" : "New file";
+    const char *ext = is_dir ? "" : ".txt";
+    for (int n = 1; n < 100; n++)
+    {
+        int o = put_str(out, 0, VFS_NAME_MAX, base);
+        if (n > 1)
+        {
+            o = put_str(out, o, VFS_NAME_MAX, " (");
+            o = put_uint(out, o, n);
+            o = put_str(out, o, VFS_NAME_MAX, ")");
+        }
+        o = put_str(out, o, VFS_NAME_MAX, ext);
+        out[o] = 0;
+        if (!name_taken(out))
+            return;
+    }
+}
+
+static void new_item(int is_dir)
+{
+    if (!EX_WIN || (RENAME_ID >= 0 && !end_rename(1)))
+        return;
+    char name[VFS_NAME_MAX];
+    make_name(is_dir, name);
+    int id = vfs_add(CUR, name, is_dir, 0);
+    if (id < 0)
+    {
+        NOTE = "The volume is full - delete something first.";
+        return;
+    }
+    reload();
+    start_rename(row_of(id)); /* type the real name right away */
+}
+
+static void on_new_folder(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    new_item(1);
+}
+
+static void do_delete(void)
+{
+    int id = DEL_ID;
+    if (DEL_WIN)
+        wm_close(DEL_WIN);
+    if (!vfs_node(id))
+        return;
+    int row = row_of(id), k = 0;
+    for (int i = 0; i < HIST_N; i++) /* forget history entries that are about to disappear */
+        if (!vfs_is_under(HIST[i], id))
+            HIST[k++] = HIST[i];
+    HIST_N = k;
+    k = 0;
+    for (int i = 0; i < FWD_N; i++)
+        if (!vfs_is_under(FWD[i], id))
+            FWD[k++] = FWD[i];
+    FWD_N = k;
+    vfs_remove(id);
+    LAST_ROW = -1;
+    NOTE = 0;
+    reload();
+    SEL = NITEMS == 0 ? -1 : (row < NITEMS ? row : NITEMS - 1);
+    if (EX_WIN && SEL >= 0)
+        select_row(wm_content(EX_WIN), SEL);
+}
+
+static void on_del_yes(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    do_delete();
+}
+
+static void on_del_no(UiButton *b, void *user)
+{
+    (void)b;
+    wm_close((Window *)user);
+}
+
+static void del_draw(Window *w, UiRect body)
+{
+    (void)w;
+    const UiTheme *t = ui_theme();
+    body = ui_inset(body, t->pad);
+    ui_text_in(ui_rect(body.x, body.y, body.w, 26), DEL_TITLE, UI_TEXT_TITLE, UI_ALIGN_LEFT);
+    ui_text_in_color(ui_rect(body.x, body.y + 34, body.w, 22), DEL_LINE, UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
+    ui_text_in_color(ui_rect(body.x, body.y + 58, body.w, 20), "This cannot be undone (there is no Recycle Bin yet).",
+                     UI_TEXT_SMALL, UI_ALIGN_LEFT, t->warning);
+}
+
+static void del_key(Window *w, const KeyEvent *k)
+{
+    if (!k->pressed)
+        return;
+    if (k->key == KEY_ENTER)
+        do_delete();
+    else if (k->key == KEY_ESC)
+        wm_close(w);
+}
+
+static void del_close(Window *w)
+{
+    (void)w;
+    DEL_WIN = 0;
+}
+
+static void ask_delete(int row)
+{
+    if (!EX_WIN || DEL_WIN || row < 0 || row >= NITEMS)
+        return;
+    int id = ITEMS[row];
+    if (RENAME_ID >= 0 && !end_rename(1)) /* finishing a rename may re-sort the list: keep the id, not the row */
+        return;
+    DEL_ID = id;
+    const VfsNode *n = vfs_node(DEL_ID);
+    if (!n)
+        return;
+    MENU.open = 0;
+    int o = put_str(DEL_TITLE, 0, sizeof DEL_TITLE, n->is_dir ? "Delete folder \"" : "Delete \"");
+    o = put_str(DEL_TITLE, o, sizeof DEL_TITLE, n->name);
+    o = put_str(DEL_TITLE, o, sizeof DEL_TITLE, "\"?");
+    DEL_TITLE[o] = 0;
+    if (n->is_dir)
+    {
+        int inside = vfs_subtree_count(DEL_ID);
+        o = put_str(DEL_LINE, 0, sizeof DEL_LINE, "The folder and ");
+        o = put_uint(DEL_LINE, o, inside);
+        o = put_str(DEL_LINE, o, sizeof DEL_LINE, inside == 1 ? " item inside it" : " items inside it");
+        o = put_str(DEL_LINE, o, sizeof DEL_LINE, " will be removed.");
+    }
+    else
+        o = put_str(DEL_LINE, 0, sizeof DEL_LINE, "The file will be removed.");
+    DEL_LINE[o] = 0;
+
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int w = 420, h = 200;
+    int x = EX_WIN->r.x + (EX_WIN->r.w - w) / 2, y = EX_WIN->r.y + (EX_WIN->r.h - h) / 2;
+    if (x + w > W)
+        x = W - w;
+    if (y + h > H - TASKBAR_HEIGHT)
+        y = H - TASKBAR_HEIGHT - h;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    Window *win = wm_create_dialog(EX_WIN, "Delete", x, y, w, h, del_draw, 0);
+    if (!win)
+    {
+        NOTE = "Window limit reached - close one first.";
+        return;
+    }
+    DEL_WIN = win;
+    win->on_key = del_key;
+    win->on_close = del_close;
+    int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
+    int anchor = WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM;
+    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34), anchor,
+                     on_del_no, win);
+    wm_add_button_ex(win, "Delete", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34), anchor, on_del_yes, 0);
+}
+
+/* ---- right-click menu ------------------------------------------ */
+static const char *menu_label(int item)
+{
+    static const char *const L[] = {"Open", "Rename", "Delete", "New folder", "New text file", "Refresh"};
+    return item < M_SEP ? L[item] : "";
+}
+
+static const char *menu_hint(int item)
+{
+    static const char *const H[] = {"Enter", "F2", "Del", "Ctrl+Shift+N", "", "F5"};
+    return item < M_SEP ? H[item] : "";
+}
+
+static int menu_height(void)
+{
+    int h = MENU_PAD * 2;
+    for (int i = 0; i < MENU.count; i++)
+        h += MENU.items[i] == M_SEP ? MENU_SEP_H : MENU_ROW_H;
+    return h;
+}
+
+static UiRect menu_item_rect(int index)
+{
+    int y = MENU.y + MENU_PAD;
+    for (int i = 0; i < index; i++)
+        y += MENU.items[i] == M_SEP ? MENU_SEP_H : MENU_ROW_H;
+    return ui_rect(MENU.x + MENU_PAD, y, MENU_W - MENU_PAD * 2, MENU.items[index] == M_SEP ? MENU_SEP_H : MENU_ROW_H);
+}
+
+/* the selectable item under (x, y), -1 if none */
+static int menu_hit(int x, int y)
+{
+    for (int i = 0; i < MENU.count; i++)
+        if (MENU.items[i] != M_SEP && ui_contains(menu_item_rect(i), x, y))
+            return i;
+    return -1;
+}
+
+/* Open the menu at (x, y), kept inside the window's content area. */
+static void menu_open(int x, int y, int on_item)
+{
+    MENU.count = 0;
+    if (on_item)
+    {
+        MENU.items[MENU.count++] = M_OPEN;
+        MENU.items[MENU.count++] = M_RENAME;
+        MENU.items[MENU.count++] = M_SEP;
+        MENU.items[MENU.count++] = M_DELETE;
+    }
+    else
+    {
+        MENU.items[MENU.count++] = M_NEW_FOLDER;
+        MENU.items[MENU.count++] = M_NEW_FILE;
+        MENU.items[MENU.count++] = M_SEP;
+        MENU.items[MENU.count++] = M_REFRESH;
+    }
+    UiRect b = wm_content(EX_WIN);
+    int h = menu_height();
+    if (x + MENU_W > b.x + b.w - 4)
+        x = b.x + b.w - 4 - MENU_W;
+    if (y + h > b.y + b.h - 4)
+        y = b.y + b.h - 4 - h;
+    MENU.x = x < b.x + 4 ? b.x + 4 : x;
+    MENU.y = y < b.y + 4 ? b.y + 4 : y;
+    MENU.hover = -1;
+    MENU.open = 1;
+}
+
+static void menu_run(int item)
+{
+    MENU.open = 0;
+    switch (item)
+    {
+    case M_OPEN:
+        open_item(SEL);
+        break;
+    case M_RENAME:
+        start_rename(SEL);
+        break;
+    case M_DELETE:
+        ask_delete(SEL);
+        break;
+    case M_NEW_FOLDER:
+        new_item(1);
+        break;
+    case M_NEW_FILE:
+        new_item(0);
+        break;
+    case M_REFRESH:
+        reload();
+        NOTE = 0;
+        break;
+    default:
+        break;
+    }
+}
+
+/* keyboard: move the highlight to the next / previous selectable item (wraps) */
+static void menu_step(int dir)
+{
+    int i = MENU.hover;
+    for (int k = 0; k < MENU.count; k++)
+    {
+        i = i < 0 ? (dir > 0 ? 0 : MENU.count - 1) : (i + dir + MENU.count) % MENU.count;
+        if (MENU.items[i] != M_SEP)
+        {
+            MENU.hover = i;
+            return;
+        }
+    }
+}
+
+static void menu_draw(const UiTheme *t)
+{
+    if (!MENU.open)
+        return;
+    int h = menu_height();
+    gfx_shadow(MENU.x, MENU.y, MENU_W, h, t->radius_m, 14, 0, 5, 120);
+    gfx_fill_round_rect(MENU.x, MENU.y, MENU_W, h, t->radius_m, ui_color(t->surface));
+    gfx_round_rect(MENU.x, MENU.y, MENU_W, h, t->radius_m, 1, ui_color(t->border));
+    for (int i = 0; i < MENU.count; i++)
+    {
+        UiRect r = menu_item_rect(i);
+        int item = MENU.items[i];
+        if (item == M_SEP)
+        {
+            ui_separator(r.x + 6, r.y + r.h / 2, r.w - 12);
+            continue;
+        }
+        if (i == MENU.hover)
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 60);
+        UiRgb c = item == M_DELETE ? t->danger : t->text;
+        ui_text_in_color(ui_rect(r.x + 12, r.y, r.w - 24, r.h - 2), menu_label(item), UI_TEXT_BODY, UI_ALIGN_LEFT, c);
+        ui_text_in_color(ui_rect(r.x + 12, r.y, r.w - 24, r.h - 2), menu_hint(item), UI_TEXT_SMALL, UI_ALIGN_RIGHT,
+                         t->text_dim);
+    }
 }
 
 /* ---- drawing --------------------------------------------------- */
@@ -394,7 +851,7 @@ static void draw_toolbar(const Layout *l, const UiTheme *t)
     gfx_fill_rect_alpha(tb.x, tb.y, tb.w, tb.h, t->surface_alt.r, t->surface_alt.g, t->surface_alt.b, 70);
     ui_separator(tb.x, tb.y + tb.h - 1, tb.w);
 
-    int px = tb.x + 10 + 70 + 6 + 60 + 10; /* after Back and Up */
+    int px = tb.x + NEWBTN_X + NEWBTN_W + 10; /* after Back, Up and New folder */
     UiRect bar = ui_rect(px, tb.y + 9, tb.w - (px - tb.x) - 10, 34);
     if (bar.w < 40)
         return;
@@ -424,6 +881,8 @@ static void draw_sidebar(const Layout *l, const UiTheme *t)
         /* "This PC" is current only at the root; the others while inside them */
         int here = id == VFS_ROOT ? CUR == VFS_ROOT : vfs_is_under(CUR, id);
         UiRect r = ui_rect(s.x + 8, y, s.w - 16, PLACE_H);
+        if (!here && i == HOVER_PLACE)
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 20);
         if (here)
         {
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 44);
@@ -489,14 +948,21 @@ static void draw_list(const Layout *l, const UiTheme *t)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 46);
             gfx_fill_round_rect(r.x, r.y + 7, 3, r.h - 14, 1, ui_color(t->accent_hi));
         }
+        else if (ri == HOVER_ROW)
+        {
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 20);
+        }
         else if (ri & 1)
         {
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->surface_alt), 40);
         }
         int kind = kind_of(n);
         draw_icon(r.x + 24, r.y + r.h / 2, ICON_PX, kind);
-        ui_text_in(ui_rect(r.x + 42, r.y, type_x - r.x - 46, r.h), n->name, ri == SEL ? UI_TEXT_LABEL : UI_TEXT_BODY,
-                   UI_ALIGN_LEFT);
+        if (ITEMS[ri] == RENAME_ID && EX_WIN)
+            ui_edit_draw(ui_rect(r.x + 40, r.y + 2, type_x - r.x - 46, r.h - 4), &EX_WIN->edits[0], "", 1);
+        else
+            ui_text_in(ui_rect(r.x + 42, r.y, type_x - r.x - 46, r.h), n->name, ri == SEL ? UI_TEXT_LABEL : UI_TEXT_BODY,
+                       UI_ALIGN_LEFT);
         if (show_type)
             ui_text_in_color(ui_rect(type_x, r.y, TYPE_COL_W, r.h), kind_name(kind), UI_TEXT_SMALL, UI_ALIGN_LEFT,
                              t->text_dim);
@@ -572,7 +1038,6 @@ static void draw_status(const Layout *l, const UiTheme *t)
 
 static void ex_draw(Window *w, UiRect body)
 {
-    (void)w;
     const UiTheme *t = ui_theme();
     Layout l = layout(body);
     clamp_scroll(&l);
@@ -580,6 +1045,9 @@ static void ex_draw(Window *w, UiRect body)
     draw_list(&l, t);
     draw_toolbar(&l, t);
     draw_status(&l, t);
+    if (MENU.open && w != wm_top())
+        MENU.open = 0; /* focus moved elsewhere (another window or the delete dialog) */
+    menu_draw(t);
 }
 
 /* ---- input ----------------------------------------------------- */
@@ -587,6 +1055,29 @@ static int ex_press(Window *w, int x, int y)
 {
     UiRect body = wm_content(w);
     Layout l = layout(body);
+
+    if (MENU.open) /* a click on an item runs it; a click anywhere else only closes the menu */
+    {
+        int hit = menu_hit(x, y);
+        if (hit >= 0)
+            menu_run(MENU.items[hit]);
+        else
+            MENU.open = 0;
+        return 1;
+    }
+    if (RENAME_ID >= 0)
+    {
+        UiRect f = w->edits[0].field;
+        if (f.w > 0 && ui_contains(f, x, y))
+        {
+            ui_edit_mouse(&w->edits[0], x, y, 1);
+            ui_caret_restart();
+            return 1;
+        }
+        if (!end_rename(1)) /* name refused: stay in the field */
+            return 1;
+        l = layout(body);
+    }
 
     if (ui_contains(l.side, x, y))
     {
@@ -621,6 +1112,67 @@ static int ex_press(Window *w, int x, int y)
         open_item(row);
     }
     return 1;
+}
+
+/* holding the button after a press in the rename field selects text */
+static int ex_drag(Window *w, int x, int y, unsigned buttons)
+{
+    if (RENAME_ID < 0 || !w->edits[0].dragging)
+        return 0;
+    int changed = ui_edit_mouse(&w->edits[0], x, y, buttons);
+    if (changed)
+        ui_caret_restart();
+    return changed;
+}
+
+/* right click: select the entry under the pointer and show its menu, or the folder menu on empty space */
+static int ex_rpress(Window *w, int x, int y)
+{
+    UiRect body = wm_content(w);
+    Layout l = layout(body);
+    if (RENAME_ID >= 0 && !end_rename(1))
+        return 1;
+    MENU.open = 0;
+    if (!ui_contains(l.list, x, y) && !ui_contains(l.head, x, y))
+        return 1; /* toolbar, sidebar, status bar: no menu */
+    l = layout(body);
+    int row = ui_contains(l.list, x, y) ? SCROLL + (y - l.list.y) / ROW_H : -1;
+    if (row >= 0 && row < NITEMS)
+    {
+        select_row(body, row);
+        menu_open(x, y, 1);
+    }
+    else
+    {
+        SEL = -1;
+        NOTE = 0;
+        menu_open(x, y, 0);
+    }
+    return 1;
+}
+
+/* pointer moved: hover highlight in the list / sidebar, or in the open menu */
+static int ex_hover(Window *w, int x, int y)
+{
+    int old_row = HOVER_ROW, old_place = HOVER_PLACE, old_menu = MENU.hover;
+    HOVER_ROW = HOVER_PLACE = -1;
+    if (MENU.open)
+        MENU.hover = x < 0 ? -1 : menu_hit(x, y);
+    else if (x >= 0)
+    {
+        Layout l = layout(wm_content(w));
+        if (ui_contains(l.list, x, y))
+        {
+            int row = SCROLL + (y - l.list.y) / ROW_H;
+            HOVER_ROW = row < NITEMS ? row : -1;
+        }
+        else if (ui_contains(l.side, x, y) && y >= l.side.y + 32)
+        {
+            int p = (y - (l.side.y + 32)) / (PLACE_H + 2);
+            HOVER_PLACE = p < PLACE_N ? p : -1;
+        }
+    }
+    return old_row != HOVER_ROW || old_place != HOVER_PLACE || old_menu != MENU.hover;
 }
 
 static int ex_wheel(Window *w, int steps)
@@ -658,9 +1210,40 @@ static void ex_key(Window *w, const KeyEvent *k)
     if (page < 1)
         page = 1;
 
+    if (RENAME_ID >= 0) /* the name field has the keyboard */
+    {
+        if (k->key == KEY_ENTER)
+            end_rename(1);
+        else if (k->key == KEY_ESC)
+            end_rename(0);
+        else if (ui_edit_key(&w->edits[0], k))
+        {
+            NOTE = 0;
+            ui_caret_restart();
+        }
+        return;
+    }
+    if (MENU.open)
+    {
+        if (k->key == KEY_UP)
+            menu_step(-1);
+        else if (k->key == KEY_DOWN)
+            menu_step(1);
+        else if (k->key == KEY_ENTER && MENU.hover >= 0)
+            menu_run(MENU.items[MENU.hover]);
+        else if (k->key == KEY_ESC)
+            MENU.open = 0;
+        return;
+    }
+
     if ((k->mods & KMOD_ALT) && k->key == KEY_LEFT)
     {
         go_back();
+        return;
+    }
+    if ((k->mods & KMOD_ALT) && k->key == KEY_RIGHT)
+    {
+        go_forward();
         return;
     }
     if ((k->mods & KMOD_ALT) && k->key == KEY_UP)
@@ -674,6 +1257,12 @@ static void ex_key(Window *w, const KeyEvent *k)
         reload();
         NOTE = 0;
         return;
+    case KEY_F2:
+        start_rename(SEL);
+        return;
+    case KEY_DELETE:
+        ask_delete(SEL);
+        return;
     case KEY_BACKSPACE:
         go_up();
         return;
@@ -682,6 +1271,11 @@ static void ex_key(Window *w, const KeyEvent *k)
         return;
     default:
         break;
+    }
+    if ((k->mods & KMOD_CTRL) && (k->mods & KMOD_SHIFT) && k->key == 'n')
+    {
+        new_item(1);
+        return;
     }
     if (NITEMS == 0)
         return;
@@ -716,6 +1310,8 @@ static void ex_close(Window *w)
 {
     (void)w;
     EX_WIN = 0;
+    RENAME_ID = -1;
+    MENU.open = 0;
 }
 
 static void explorer_app_open(void)
@@ -747,6 +1343,9 @@ static void explorer_app_open(void)
     win->on_key = ex_key;
     win->on_press = ex_press;
     win->on_wheel = ex_wheel;
+    win->on_drag = ex_drag;
+    win->on_rpress = ex_rpress;
+    win->on_hover = ex_hover;
     win->on_close = ex_close;
     win->icon = TASKBAR_ICON_FILES;
     wm_set_min_size(win, 480, 320);
@@ -754,15 +1353,26 @@ static void explorer_app_open(void)
     desktop_set_status(0);
 
     /* Back and Up sit at the left of the toolbar (button 0 and 1: update_nav_buttons relies on it) */
-    wm_add_button_ex(win, "Back", UI_BTN_SECONDARY, ui_rect(10, 9, 70, 34), 0, on_back, 0);
-    wm_add_button_ex(win, "Up", UI_BTN_SECONDARY, ui_rect(86, 9, 60, 34), 0, on_up, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10, 8, NAVBTN, NAVBTN), 0, on_back, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10 + NAVBTN + 2, 8, NAVBTN, NAVBTN), 0, on_forward, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10 + 2 * (NAVBTN + 2), 8, NAVBTN, NAVBTN), 0, on_up, 0);
+    wm_add_button_ex(win, "New folder", UI_BTN_PRIMARY, ui_rect(NEWBTN_X, 9, NEWBTN_W, 34), 0, on_new_folder, 0);
+
+    wm_set_button_icon(win, 0, UI_ICON_ARROW_LEFT);
+    wm_set_button_icon(win, 1, UI_ICON_ARROW_RIGHT);
+    wm_set_button_icon(win, 2, UI_ICON_ARROW_UP);
+    wm_set_button_icon(win, 3, UI_ICON_FOLDER_PLUS);
 
     CUR = VFS_ROOT;
     HIST_N = 0;
+    FWD_N = 0;
     SEL = -1;
     SCROLL = 0;
     NOTE = 0;
     LAST_ROW = -1;
+    HOVER_ROW = HOVER_PLACE = -1;
+    RENAME_ID = -1;
+    MENU.open = 0;
     reload();
     if (NITEMS > 0)
         SEL = 0;

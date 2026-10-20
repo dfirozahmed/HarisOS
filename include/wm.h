@@ -51,6 +51,8 @@ typedef struct Window
     int (*on_press)(struct Window *w, int x, int y);     /* left press inside the window below the title bar; return 1 if it changed what is shown (may be NULL) */
     int (*on_drag)(struct Window *w, int x, int y, unsigned buttons); /* called while the left button stays down after an on_press (and once when it is released, buttons & 1 == 0); return 1 if it changed what is shown (may be NULL) */
     int (*on_wheel)(struct Window *w, int steps);        /* mouse wheel over the window (steps: + = down, like MouseState.wheel); return 1 if it changed what is shown (may be NULL) */
+    int (*on_rpress)(struct Window *w, int x, int y);    /* right button went down inside the window below the title bar (the window is raised first); return 1 if it changed what is shown (may be NULL) */
+    int (*on_hover)(struct Window *w, int x, int y);     /* the pointer moved over the window (x, y on screen, may be on the title bar); called once with x = y = -1 when it leaves. Return 1 only if the look changed (may be NULL) */
     UiEdit edits[WM_MAX_EDITS];                         /* ready-made text inputs for the window to use (start empty) */
     int edit_count;                                      /* how many of them the window uses (0 = none) */
     int focus;                                           /* which input has the keyboard (0 .. edit_count-1) */
@@ -76,6 +78,9 @@ void wm_raise(Window *w);
 /* Add a button; rect is relative to the content area. -1 = window is full. */
 int wm_add_button(Window *w, const char *label, UiButtonKind kind, UiRect rel,
                   UiButtonFn on_click, void *user);
+
+/* Put an icon before the label of button `index` (0 = the first one added). */
+void wm_set_button_icon(Window *w, int index, UiIcon icon);
 
 /* Same, with an anchor. When the window grows (maximize), a button anchored to
  * the right / bottom keeps its distance from that edge instead of the left / top. */

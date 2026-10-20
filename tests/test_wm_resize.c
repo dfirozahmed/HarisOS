@@ -13,6 +13,9 @@ static void draw(Window*w,UiRect b){ ui_text(b.x+16,b.y+16,"Resizable window",UI
 static void ptr(int x,int y,unsigned b){ wm_pointer(x,y,b); }
 static int wheel_steps, wheel_ret;
 static int on_wheel_cb(Window*w,int steps){ (void)w; wheel_steps+=steps; return wheel_ret; }
+static int hov_calls, hov_x, hov_y, rp_calls, rp_x;
+static int on_hover_cb(Window*w,int x,int y){ (void)w; hov_calls++; hov_x=x; hov_y=y; return 0; }
+static int on_rpress_cb(Window*w,int x,int y){ (void)w; (void)y; rp_calls++; rp_x=x; return 0; }
 int main(void){
   int W=1024,H=640; unsigned*fb=calloc(W*H,4);
   ui_set_theme(&ui_theme_dark); gfx_init(fb,W,H,W,1);
@@ -83,6 +86,30 @@ int main(void){
     wheel_ret=0; wm_take_damage(&(UiRect){0}); /* clear damage */
     wm_wheel(w->r.x+50,w->r.y+100,-1);
     assert(wheel_steps==-1 && !WM_HAS_DMG);                 /* handler said "no change": no redraw */
+    wm_close(other);
+  }
+  /* hover and right press */
+  {
+    wm_pointer(5000,5000,0);
+    w->r = ui_rect(300,200,400,300); wm_layout_internal(w);
+    Window*other=wm_create("Other",20,20,100,100,draw,0);
+    hov_calls=0; rp_calls=0; w->on_hover=on_hover_cb; w->on_rpress=on_rpress_cb;
+    wm_pointer(w->r.x+50,w->r.y+100,0);
+    assert(hov_calls==1 && hov_x==w->r.x+50);                /* pointer entered */
+    wm_pointer(w->r.x+60,w->r.y+100,0);
+    assert(hov_calls==2 && hov_x==w->r.x+60);                /* moved inside */
+    wm_pointer(5000,5000,0);
+    assert(hov_calls==3 && hov_x==-1 && hov_y==-1);          /* left: told once */
+    wm_pointer(5001,5000,0);
+    assert(hov_calls==3);                                    /* not told again */
+    wm_pointer(w->r.x+50,w->r.y+100,0);
+    int c=hov_calls; wm_pointer(w->r.x+50,w->r.y+100,2);     /* right button down inside */
+    assert(rp_calls==1 && rp_x==w->r.x+50 && wm_top()==w);   /* delivered, window raised */
+    wm_pointer(w->r.x+50,w->r.y+100,2); assert(rp_calls==1); /* held: no repeat */
+    wm_pointer(w->r.x+50,w->r.y+100,0);
+    wm_pointer(w->r.x+50,w->r.y+10,2); assert(rp_calls==1);  /* title bar: not delivered */
+    wm_pointer(w->r.x+50,w->r.y+10,0);
+    (void)c;
     wm_close(other);
   }
   printf("wm resize tests passed\n");

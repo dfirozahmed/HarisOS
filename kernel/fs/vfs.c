@@ -46,10 +46,10 @@ static int find_child(int dir, const char *name)
     return -1;
 }
 
-int vfs_add(int parent, const char *name, int is_dir, unsigned size)
+/* length of a usable name, or -1 (empty, too long, contains '/') */
+static int name_len(const char *name)
 {
-    const VfsNode *p = vfs_node(parent);
-    if (!p || !p->is_dir || !name || !name[0])
+    if (!name || !name[0])
         return -1;
     int len = 0;
     while (name[len])
@@ -58,6 +58,15 @@ int vfs_add(int parent, const char *name, int is_dir, unsigned size)
             return -1;
         len++;
     }
+    return len;
+}
+
+int vfs_add(int parent, const char *name, int is_dir, unsigned size)
+{
+    const VfsNode *p = vfs_node(parent);
+    int len = name_len(name);
+    if (!p || !p->is_dir || len < 0)
+        return -1;
     if (find_child(parent, name) >= 0)
         return -1;
     for (int i = 1; i < VFS_MAX_NODES; i++)
@@ -212,4 +221,43 @@ void vfs_init(void)
     vfs_add(boot, "BOOTX64.EFI", 0, 11264);
     vfs_add(sys, "KERNEL.EFI", 0, 262144);
     vfs_add(sys, "config.ini", 0, 128);
+}
+
+/* ---- rename / remove ------------------------------------------- */
+int vfs_rename(int id, const char *name)
+{
+    const VfsNode *n = vfs_node(id);
+    int len = name_len(name);
+    if (!n || id == VFS_ROOT || len < 0)
+        return -1;
+    int dup = find_child(n->parent, name);
+    if (dup >= 0 && dup != id) /* a case-only change of its own name is fine */
+        return -1;
+    for (int k = 0; k <= len; k++)
+        NODES[id].name[k] = name[k];
+    return 0;
+}
+
+int vfs_subtree_count(int id)
+{
+    int n = 0;
+    if (!vfs_node(id))
+        return 0;
+    for (int i = 1; i < VFS_MAX_NODES; i++)
+        if (NODES[i].used && NODES[i].parent == id)
+            n += 1 + vfs_subtree_count(i);
+    return n;
+}
+
+int vfs_remove(int id)
+{
+    if (!vfs_node(id) || id == VFS_ROOT)
+        return -1;
+    int removed = 1;
+    for (int i = 1; i < VFS_MAX_NODES; i++)
+        if (NODES[i].used && NODES[i].parent == id)
+            removed += vfs_remove(i);
+    NODES[id].used = 0;
+    NODES[id].name[0] = 0;
+    return removed;
 }

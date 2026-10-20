@@ -41,6 +41,17 @@ int vfs_path(int id, char *out, int cap);
 /* Find a node by absolute path ("/", "/Documents", "/Documents/readme.txt"). -1 if not found. */
 int vfs_lookup(const char *path);
 
+/* Rename a node. -1 if the name is empty / too long / has '/', a sibling already has it (ignoring case),
+ * or id is the root. Giving a node the same name with other capitals is allowed. */
+int vfs_rename(int id, const char *name);
+
+/* Delete a node and everything below it. Returns how many nodes were removed, -1 for the root or a bad id.
+ * Ids of removed nodes may be reused by later vfs_add() calls. */
+int vfs_remove(int id);
+
+/* How many nodes lie below `id` (0 for a file or an empty folder). */
+int vfs_subtree_count(int id);
+
 /* 1 if `id` is `ancestor` or lies below it. */
 int vfs_is_under(int id, int ancestor);
 

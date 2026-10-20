@@ -76,6 +76,32 @@ int main(void)
     }
     CHECK(added == VFS_MAX_NODES - 1);
 
+    /* rename */
+    vfs_reset();
+    int r1 = vfs_add(VFS_ROOT, "one.txt", 0, 1);
+    int r2 = vfs_add(VFS_ROOT, "two.txt", 0, 2);
+    CHECK(vfs_rename(r1, "uno.txt") == 0 && strcmp(vfs_node(r1)->name, "uno.txt") == 0);
+    CHECK(vfs_rename(r1, "TWO.txt") == -1);            /* sibling has it */
+    CHECK(vfs_rename(r1, "UNO.TXT") == 0);             /* only the capitals change */
+    CHECK(vfs_rename(r1, "") == -1 && vfs_rename(r1, "a/b") == -1);
+    CHECK(vfs_rename(VFS_ROOT, "x") == -1 && vfs_rename(77, "x") == -1);
+    CHECK(strcmp(vfs_node(r1)->name, "UNO.TXT") == 0); /* failed renames change nothing */
+    CHECK(vfs_lookup("/uno.txt") == r1);
+
+    /* remove: a folder takes everything below it along */
+    int rd = vfs_add(VFS_ROOT, "dir", 1, 0);
+    int rs = vfs_add(rd, "sub", 1, 0);
+    vfs_add(rs, "deep.txt", 0, 3);
+    vfs_add(rd, "x.txt", 0, 4);
+    CHECK(vfs_subtree_count(rd) == 3 && vfs_subtree_count(r2) == 0);
+    int before_n = vfs_count();
+    CHECK(vfs_remove(rd) == 4);
+    CHECK(vfs_count() == before_n - 4);
+    CHECK(vfs_lookup("/dir") == -1 && vfs_lookup("/dir/sub/deep.txt") == -1);
+    CHECK(vfs_remove(rd) == -1 && vfs_remove(VFS_ROOT) == -1);
+    CHECK(vfs_add(VFS_ROOT, "dir", 1, 0) > 0);         /* the name and slots are free again */
+    CHECK(vfs_list(vfs_lookup("/dir"), ids, 16) == 0); /* ... and nothing of the old content is back */
+
     /* demo content */
     vfs_init();
     CHECK(vfs_lookup("/System/EFI/BOOT/BOOTX64.EFI") > 0);
