@@ -11,6 +11,7 @@
 #include "rtc.h"
 #include "taskbar.h"
 #include "timer.h"
+#include "vfs.h"
 
 void kernel_main(const BootInfo *info)
 {
@@ -63,6 +64,7 @@ void kernel_main(const BootInfo *info)
 
     /* Device Manager list: PCI scan + what the input drivers found (after mouse_init). */
     devmgr_init(kbd_ok);
+    vfs_init(); /* RAM volume for the File Explorer */
 
     timer_init(); /* needed for double-click */
 

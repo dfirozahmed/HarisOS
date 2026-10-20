@@ -1,0 +1,215 @@
+/* In-memory virtual file system. See include/vfs.h. */
+#include "vfs.h"
+
+static VfsNode NODES[VFS_MAX_NODES];
+
+static int lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+static int same_name(const char *a, const char *b)
+{
+    while (*a && lower((unsigned char)*a) == lower((unsigned char)*b))
+        a++, b++;
+    return *a == *b;
+}
+
+void vfs_reset(void)
+{
+    for (int i = 0; i < VFS_MAX_NODES; i++)
+    {
+        NODES[i].used = 0;
+        NODES[i].name[0] = 0;
+    }
+    NODES[VFS_ROOT].used = 1;
+    NODES[VFS_ROOT].is_dir = 1;
+    NODES[VFS_ROOT].size = 0;
+    NODES[VFS_ROOT].parent = -1;
+}
+
+const VfsNode *vfs_node(int id)
+{
+    return (id >= 0 && id < VFS_MAX_NODES && NODES[id].used) ? &NODES[id] : (const VfsNode *)0;
+}
+
+int vfs_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < VFS_MAX_NODES; i++)
+        n += NODES[i].used;
+    return n;
+}
+
+static int find_child(int dir, const char *name)
+{
+    for (int i = 1; i < VFS_MAX_NODES; i++)
+        if (NODES[i].used && NODES[i].parent == dir && same_name(NODES[i].name, name))
+            return i;
+    return -1;
+}
+
+int vfs_add(int parent, const char *name, int is_dir, unsigned size)
+{
+    const VfsNode *p = vfs_node(parent);
+    if (!p || !p->is_dir || !name || !name[0])
+        return -1;
+    int len = 0;
+    while (name[len])
+    {
+        if (name[len] == '/' || len >= VFS_NAME_MAX - 1)
+            return -1;
+        len++;
+    }
+    if (find_child(parent, name) >= 0)
+        return -1;
+    for (int i = 1; i < VFS_MAX_NODES; i++)
+    {
+        if (NODES[i].used)
+            continue;
+        for (int k = 0; k <= len; k++)
+            NODES[i].name[k] = name[k];
+        NODES[i].used = 1;
+        NODES[i].is_dir = is_dir != 0;
+        NODES[i].size = is_dir ? 0 : size;
+        NODES[i].parent = parent;
+        return i;
+    }
+    return -1;
+}
+
+/* a sorts before b: folders first, then names ignoring case */
+static int before(int a, int b)
+{
+    if (NODES[a].is_dir != NODES[b].is_dir)
+        return NODES[a].is_dir;
+    const char *x = NODES[a].name, *y = NODES[b].name;
+    while (*x && lower((unsigned char)*x) == lower((unsigned char)*y))
+        x++, y++;
+    return lower((unsigned char)*x) < lower((unsigned char)*y);
+}
+
+int vfs_list(int dir, int *out, int max)
+{
+    int total = 0;
+    if (!vfs_node(dir) || !NODES[dir].is_dir)
+        return 0;
+    for (int i = 1; i < VFS_MAX_NODES; i++)
+    {
+        if (!NODES[i].used || NODES[i].parent != dir)
+            continue;
+        /* insertion sort into out[] (the pool is small); entries past max only count */
+        int pos = total < max ? total : max;
+        while (pos > 0 && before(i, out[pos - 1]))
+            pos--;
+        if (pos < max)
+        {
+            int last = total < max ? total : max - 1;
+            for (int k = last; k > pos; k--)
+                out[k] = out[k - 1];
+            out[pos] = i;
+        }
+        total++;
+    }
+    return total;
+}
+
+int vfs_path(int id, char *out, int cap)
+{
+    if (cap <= 0)
+        return 0;
+    out[0] = 0;
+    if (!vfs_node(id))
+        return 0;
+    if (id == VFS_ROOT)
+    {
+        if (cap < 2)
+            return 0;
+        out[0] = '/';
+        out[1] = 0;
+        return 1;
+    }
+    /* collect ids from the node up to the root, then write them root first */
+    int chain[VFS_MAX_NODES], depth = 0;
+    for (int n = id; n > VFS_ROOT && depth < VFS_MAX_NODES; n = NODES[n].parent)
+        chain[depth++] = n;
+    int len = 0;
+    for (int d = depth - 1; d >= 0; d--)
+    {
+        if (len + 1 < cap)
+            out[len++] = '/';
+        for (const char *s = NODES[chain[d]].name; *s && len + 1 < cap; s++)
+            out[len++] = *s;
+    }
+    out[len] = 0;
+    return len;
+}
+
+int vfs_lookup(const char *path)
+{
+    if (!path || path[0] != '/')
+        return -1;
+    int cur = VFS_ROOT;
+    while (*path)
+    {
+        while (*path == '/')
+            path++;
+        if (!*path)
+            break;
+        char part[VFS_NAME_MAX];
+        int n = 0;
+        while (*path && *path != '/')
+        {
+            if (n >= VFS_NAME_MAX - 1)
+                return -1;
+            part[n++] = *path++;
+        }
+        part[n] = 0;
+        if (!NODES[cur].is_dir)
+            return -1;
+        cur = find_child(cur, part);
+        if (cur < 0)
+            return -1;
+    }
+    return cur;
+}
+
+int vfs_is_under(int id, int ancestor)
+{
+    for (int guard = 0; vfs_node(id) && guard < VFS_MAX_NODES; guard++)
+    {
+        if (id == ancestor)
+            return 1;
+        id = NODES[id].parent;
+    }
+    return 0;
+}
+
+/* ---- demo content ---------------------------------------------- */
+void vfs_init(void)
+{
+    vfs_reset();
+    int docs = vfs_add(VFS_ROOT, "Documents", 1, 0);
+    int pics = vfs_add(VFS_ROOT, "Pictures", 1, 0);
+    int music = vfs_add(VFS_ROOT, "Music", 1, 0);
+    int sys = vfs_add(VFS_ROOT, "System", 1, 0);
+    vfs_add(VFS_ROOT, "readme.txt", 0, 1284);
+
+    vfs_add(docs, "notes.txt", 0, 612);
+    vfs_add(docs, "todo.md", 0, 238);
+    vfs_add(docs, "learning-log.txt", 0, 4410);
+    int proj = vfs_add(docs, "Projects", 1, 0);
+    vfs_add(proj, "haris.c", 0, 18342);
+    vfs_add(proj, "haris.h", 0, 2096);
+    vfs_add(proj, "Makefile", 0, 904);
+
+    vfs_add(pics, "wallpaper.bmp", 0, 3145782);
+    vfs_add(pics, "logo.png", 0, 48210);
+    vfs_add(pics, "screenshot.png", 0, 912044);
+
+    vfs_add(music, "intro.wav", 0, 5292044);
+    vfs_add(music, "boot-chime.mp3", 0, 162304);
+
+    int efi = vfs_add(sys, "EFI", 1, 0);
+    int boot = vfs_add(efi, "BOOT", 1, 0);
+    vfs_add(boot, "BOOTX64.EFI", 0, 11264);
+    vfs_add(sys, "KERNEL.EFI", 0, 262144);
+    vfs_add(sys, "config.ini", 0, 128);
+}

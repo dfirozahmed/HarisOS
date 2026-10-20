@@ -64,6 +64,7 @@ set(KERNEL_SOURCES
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/core/devmgr_sys.c         # Device Manager glue: asks PCI and the drivers
+    kernel/fs/vfs.c                  # in-memory file system (File Explorer)
     kernel/time/rtc.c
     kernel/time/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
     kernel/graphics/gfx_clip.c  # clipping state and safe clip-box intersection
@@ -107,6 +108,7 @@ set(KERNEL_SOURCES
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c
     apps/app_registry.c             # list of installed apps (start menu reads it)
+    apps/explorer/explorer_app.c    # File Explorer app
     apps/devmgr/devmgr_app.c)       # Device Manager app
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h)
