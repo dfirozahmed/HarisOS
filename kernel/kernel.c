@@ -90,6 +90,8 @@ void kernel_main(const BootInfo *info)
         {
             gfx_cursor_move(m.x, m.y);
             desktop_pointer(m.x, m.y, m.buttons);
+            if (m.wheel)
+                desktop_wheel(m.x, m.y, m.wheel);
         }
         KeyEvent ke;
         while (gfx_ready() && keyboard_poll(&ke))

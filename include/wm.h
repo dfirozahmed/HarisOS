@@ -50,7 +50,8 @@ typedef struct Window
     void (*on_key)(struct Window *w, const KeyEvent *k); /* key press / release while focused (may be NULL) */
     int (*on_press)(struct Window *w, int x, int y);     /* left press inside the window below the title bar; return 1 if it changed what is shown (may be NULL) */
     int (*on_drag)(struct Window *w, int x, int y, unsigned buttons); /* called while the left button stays down after an on_press (and once when it is released, buttons & 1 == 0); return 1 if it changed what is shown (may be NULL) */
-    UiEdit edits[WM_MAX_EDITS];                          /* ready-made text inputs for the window to use (start empty) */
+    int (*on_wheel)(struct Window *w, int steps);        /* mouse wheel over the window (steps: + = down, like MouseState.wheel); return 1 if it changed what is shown (may be NULL) */
+    UiEdit edits[WM_MAX_EDITS];                         /* ready-made text inputs for the window to use (start empty) */
     int edit_count;                                      /* how many of them the window uses (0 = none) */
     int focus;                                           /* which input has the keyboard (0 .. edit_count-1) */
     int caret;                                           /* 1 = the window shows a blinking caret in the focused input */
@@ -132,5 +133,10 @@ int wm_key(const KeyEvent *k);
 
 /* Feed the mouse state. Returns 1 when something changed (then call wm_take_damage()). */
 int wm_pointer(int x, int y, unsigned buttons);
+
+/* Mouse wheel turned while the pointer is at (x, y): goes to the window under the pointer
+ * (its on_wheel), without focusing or raising it. Ignored while a window is being dragged, and
+ * for a window blocked by its dialog. Returns 1 when something changed (then call wm_take_damage()). */
+int wm_wheel(int x, int y, int steps);
 
 #endif

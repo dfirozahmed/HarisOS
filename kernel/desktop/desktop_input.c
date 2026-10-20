@@ -54,6 +54,14 @@ int desktop_pointer(int x, int y, unsigned buttons)
     return desktop_finish_input(bar_changed);
 }
 
+int desktop_wheel(int x, int y, int steps)
+{
+    if (startmenu_is_open() || appmenu_is_open() || y >= (int)gfx_height() - TASKBAR_HEIGHT)
+        return 0;
+    wm_wheel(x, y, steps);
+    return desktop_finish_input(0);
+}
+
 /* Alt+Tab: focus the next window (a minimized one is restored). shift = go backwards. */
 static void cycle_windows(int backwards)
 {

@@ -11,6 +11,8 @@ int timer_ready(void){return 0;}
 void timer_init(void){}
 static void draw(Window*w,UiRect b){ ui_text(b.x+16,b.y+16,"Resizable window",UI_TEXT_HEADING); (void)w; }
 static void ptr(int x,int y,unsigned b){ wm_pointer(x,y,b); }
+static int wheel_steps, wheel_ret;
+static int on_wheel_cb(Window*w,int steps){ (void)w; wheel_steps+=steps; return wheel_ret; }
 int main(void){
   int W=1024,H=640; unsigned*fb=calloc(W*H,4);
   ui_set_theme(&ui_theme_dark); gfx_init(fb,W,H,W,1);
@@ -65,6 +67,24 @@ int main(void){
   /* title drag still works when pressing in the middle of the title bar */
   int ox=w->r.x; ptr(w->r.x+200,w->r.y+20,1); ptr(w->r.x+240,w->r.y+20,1); ptr(w->r.x+240,w->r.y+20,0);
   assert(w->r.x==ox+40);
+  /* mouse wheel: goes to the window under the pointer, without focusing it */
+  {
+    wm_pointer(5000,5000,0);
+    w->r = ui_rect(300,200,400,300); wm_layout_internal(w);
+    Window*other=wm_create("Other",20,20,100,100,draw,0); /* on top and focused, away from w */
+    wheel_steps=0; wheel_ret=1;
+    w->on_wheel=on_wheel_cb;
+    assert(wm_top()==other);
+    assert(wm_wheel(w->r.x+50,w->r.y+100,2)!=0);
+    assert(wheel_steps==2 && wm_top()==other);              /* delivered, focus unchanged */
+    wheel_steps=0; wm_wheel(5000,5000,3); assert(wheel_steps==0);   /* nothing under the pointer */
+    wm_wheel(other->r.x+10,other->r.y+10,3); assert(wheel_steps==0); /* other has no on_wheel */
+    wm_wheel(w->r.x+50,w->r.y+100,0); assert(wheel_steps==0);        /* zero steps ignored */
+    wheel_ret=0; wm_take_damage(&(UiRect){0}); /* clear damage */
+    wm_wheel(w->r.x+50,w->r.y+100,-1);
+    assert(wheel_steps==-1 && !WM_HAS_DMG);                 /* handler said "no change": no redraw */
+    wm_close(other);
+  }
   printf("wm resize tests passed\n");
   return 0;
 }

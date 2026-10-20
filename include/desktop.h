@@ -18,6 +18,10 @@ void desktop_draw(void);
  * Returns 1 if something was drawn, so the caller should gfx_present(). */
 int desktop_pointer(int x, int y, unsigned buttons);
 
+/* Mouse wheel (steps: + = down). Goes to the window under the pointer; ignored while a menu is
+ * open or the pointer is on the taskbar. Returns 1 if something was drawn. */
+int desktop_wheel(int x, int y, int steps);
+
 int desktop_key(const KeyEvent *k);
 
 /* Call on every main-loop pass (cheap): makes the text caret blink.

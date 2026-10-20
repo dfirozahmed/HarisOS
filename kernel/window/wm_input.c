@@ -421,6 +421,18 @@ int wm_pointer(int x, int y, unsigned buttons)
     return WM_HAS_DMG;
 }
 
+int wm_wheel(int x, int y, int steps)
+{
+    if (steps == 0 || DRAG || RESIZE)
+        return 0;
+    Window *w = wm_window_at_internal(x, y);
+    if (!w || wm_blocker_internal(w) || !w->on_wheel)
+        return 0;
+    if (w->on_wheel(w, steps))
+        wm_damage_window_internal(w);
+    return WM_HAS_DMG;
+}
+
 int wm_key(const KeyEvent *k)
 {
     Window *w = wm_top();

@@ -157,6 +157,22 @@ static int dm_press(Window *w, int x, int y)
     return 1;
 }
 
+/* wheel: scroll the view by 3 rows per step; the selection stays where it is */
+#define WHEEL_ROWS 3
+static int dm_wheel(Window *w, int steps)
+{
+    int max_scroll = NROWS - visible_rows(wm_content(w));
+    if (max_scroll < 0)
+        max_scroll = 0;
+    int old = SCROLL;
+    SCROLL += steps * WHEEL_ROWS;
+    if (SCROLL > max_scroll)
+        SCROLL = max_scroll;
+    if (SCROLL < 0)
+        SCROLL = 0;
+    return SCROLL != old;
+}
+
 static void dm_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed || NROWS == 0)
@@ -238,6 +254,7 @@ static void devmgr_app_open(void)
     }
     win->on_key = dm_key;
     win->on_press = dm_press;
+    win->on_wheel = dm_wheel;
     win->on_close = dm_close;
     win->icon = TASKBAR_ICON_SETTINGS;
     DM_WIN = win;
