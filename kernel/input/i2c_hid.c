@@ -233,9 +233,23 @@ static int bring_up(const AmlI2cHid *c)
 }
 
 
+static I2cHidInfo INFO[MAX_CAND];
+static int NINFO;
+
+int i2c_hid_count(void) { return NINFO; }
+
+int i2c_hid_info(int i, I2cHidInfo *out)
+{
+    if (i < 0 || i >= NINFO)
+        return -1;
+    *out = INFO[i];
+    return 0;
+}
+
 int i2c_hid_init(void)
 {
     S.active = 0;
+    NINFO = 0;
     AmlI2cHid cand[MAX_CAND];
     int nc = 0;
     for (int i = 0; i < acpi_aml_count() && nc < MAX_CAND; i++)
@@ -246,8 +260,18 @@ int i2c_hid_init(void)
             nc += aml_find_i2c_hid(t, len, cand + nc, MAX_CAND - nc);
     }
     for (int i = 0; i < nc; i++)
+    {
+        INFO[i].addr = cand[i].addr;
+        INFO[i].speed = cand[i].speed;
+        for (int j = 0; j < 5; j++)
+            INFO[i].ctrl[j] = cand[i].ctrl[j];
+        INFO[i].started = 0;
+    }
+    NINFO = nc;
+    for (int i = 0; i < nc; i++)
         if (bring_up(&cand[i]) == 0)
         {
+            INFO[i].started = 1;
             S.dx = S.dy = S.wheel = 0;
             S.buttons = 0;
             S.errs = 0;
@@ -339,6 +363,8 @@ int i2c_hid_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
 #else
 
 int i2c_hid_init(void) { return -1; }
+int i2c_hid_count(void) { return 0; }
+int i2c_hid_info(int i, I2cHidInfo *out) { (void)i; (void)out; return -1; }
 int i2c_hid_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
 {
     (void)dx; (void)dy; (void)wheel;

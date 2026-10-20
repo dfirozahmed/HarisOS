@@ -25,6 +25,18 @@ static void sb_str(Sb *s, const char *t)
         sb_char(s, *t++);
 }
 
+static void sb_dec(Sb *s, unsigned v)
+{
+    char tmp[10];
+    int n = 0;
+    do {
+        tmp[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    while (n)
+        sb_char(s, tmp[--n]);
+}
+
 static void sb_hex(Sb *s, unsigned v, int digits)
 {
     for (int i = digits - 1; i >= 0; i--)
@@ -94,8 +106,22 @@ int devmgr_build(const DevmgrInputs *in)
             add(DEV_CAT_INPUT, "PS/2 mouse", "i8042 aux port", 1);
         if (in->mouse_sources & MOUSE_SRC_USB)
             add(DEV_CAT_INPUT, "USB mouse", "HID boot protocol (xHCI)", 1);
-        if (in->mouse_sources & MOUSE_SRC_I2C)
-            add(DEV_CAT_INPUT, "I2C-HID touchpad", "ACPI + DesignWare I2C", 1);
+        /* I2C-HID devices from the ACPI tables; a started one is the touchpad in use */
+        int n = in->i2c_count < DEVMGR_MAX_I2C ? in->i2c_count : DEVMGR_MAX_I2C;
+        for (int i = 0; i < n; i++) {
+            const DevmgrI2c *c = &in->i2c[i];
+            char detail[48];
+            Sb s = {detail, sizeof detail, 0};
+            detail[0] = 0;
+            sb_str(&s, "I2C 0x");
+            sb_hex(&s, c->addr, 2);
+            sb_str(&s, " on ");
+            sb_str(&s, c->ctrl[0] ? c->ctrl : "?");
+            sb_str(&s, ", ");
+            sb_dec(&s, c->speed / 1000);
+            sb_str(&s, " kHz");
+            add(DEV_CAT_INPUT, c->started ? "I2C-HID touchpad" : "I2C-HID device", detail, c->started);
+        }
     }
     return g_count;
 }

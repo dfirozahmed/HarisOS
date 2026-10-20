@@ -29,7 +29,10 @@ static unsigned int fake(unsigned bus, unsigned dev, unsigned fn, unsigned off)
 int main(void)
 {
     pci_scan_with(fake);
-    DevmgrInputs in = {1, MOUSE_SRC_PS2 | MOUSE_SRC_USB, 1};
+    DevmgrInputs in = {0};
+    in.keyboard_ps2 = 1;
+    in.mouse_sources = MOUSE_SRC_PS2 | MOUSE_SRC_USB;
+    in.usb_running = 1;
     CHECK(devmgr_build(&in) == 5); /* 2 PCI + kbd + 2 mice */
 
     const DevEntry *e = devmgr_get(0);
@@ -49,6 +52,20 @@ int main(void)
     in.usb_running = 0;
     devmgr_build(&in);
     CHECK(!devmgr_get(1)->has_driver);
+
+    /* I2C-HID: one started touchpad, one the firmware describes but the driver did not start */
+    in.i2c_count = 2;
+    in.i2c[0] = (DevmgrI2c){0x2C, 400000, "I2CD", 1};
+    in.i2c[1] = (DevmgrI2c){0x10, 100000, "", 0};
+    CHECK(devmgr_build(&in) == 7);
+    const DevEntry *t = devmgr_get(5);
+    CHECK(strcmp(t->name, "I2C-HID touchpad") == 0 && t->has_driver && t->category == DEV_CAT_INPUT);
+    CHECK(strcmp(t->detail, "I2C 0x2C on I2CD, 400 kHz") == 0);
+    t = devmgr_get(6);
+    CHECK(strcmp(t->name, "I2C-HID device") == 0 && !t->has_driver);
+    CHECK(strcmp(t->detail, "I2C 0x10 on ?, 100 kHz") == 0);
+    in.i2c_count = 99; /* out-of-range count is clamped */
+    CHECK(devmgr_build(&in) == 5 + DEVMGR_MAX_I2C);
 
     CHECK(devmgr_build(NULL) == 2);
     CHECK(strcmp(devmgr_category_name(DEV_CAT_INPUT), "Input devices") == 0);

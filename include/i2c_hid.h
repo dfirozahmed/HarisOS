@@ -22,4 +22,18 @@ int i2c_hid_init(void);
  * stores the held buttons (MOUSE_* bits) in *buttons. Returns 1 while a touchpad is active. */
 int i2c_hid_poll(int *dx, int *dy, int *wheel, unsigned *buttons);
 
+/* What i2c_hid_init() found in the ACPI tables, for the Device Manager. */
+typedef struct
+{
+    unsigned addr;  /* 7-bit I2C address */
+    unsigned speed; /* bus speed in Hz the firmware asks for */
+    char ctrl[5];   /* ACPI name of the I2C controller, e.g. "I2CD" */
+    int started;    /* 1 = this is the touchpad the driver is using */
+} I2cHidInfo;
+
+/* Number of I2C-HID devices the firmware describes (0 before i2c_hid_init) and the i-th one's info.
+ * i2c_hid_info() returns 0 on success, -1 if i is out of range. */
+int i2c_hid_count(void);
+int i2c_hid_info(int i, I2cHidInfo *out);
+
 #endif
