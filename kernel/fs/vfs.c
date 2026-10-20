@@ -261,3 +261,102 @@ int vfs_remove(int id)
     NODES[id].name[0] = 0;
     return removed;
 }
+
+/* ---- copy / move ----------------------------------------------- */
+/* A name for a new entry in `dir` that is not taken yet: `name` itself, else "stem (2).ext", "stem (3).ext" ...
+ * (a folder has no extension). The stem is shortened if the result would not fit. */
+static void unique_name(int dir, const char *name, int is_dir, char *out)
+{
+    int len = 0;
+    while (name[len])
+        len++;
+    if (find_child(dir, name) < 0)
+    {
+        for (int k = 0; k <= len; k++)
+            out[k] = name[k];
+        return;
+    }
+    int dot = len; /* where the extension starts */
+    for (int i = len - 1; i > 0 && !is_dir; i--)
+        if (name[i] == '.')
+        {
+            dot = i;
+            break;
+        }
+    int ext = len - dot;
+    for (int n = 2; n < 1000; n++)
+    {
+        char suffix[8];
+        int sl = 0;
+        suffix[sl++] = ' ';
+        suffix[sl++] = '(';
+        if (n >= 100)
+            suffix[sl++] = (char)('0' + n / 100);
+        if (n >= 10)
+            suffix[sl++] = (char)('0' + n / 10 % 10);
+        suffix[sl++] = (char)('0' + n % 10);
+        suffix[sl++] = ')';
+        int stem = dot;
+        if (stem + sl + ext > VFS_NAME_MAX - 1)
+            stem = VFS_NAME_MAX - 1 - sl - ext;
+        if (stem < 1)
+            break;
+        int o = 0;
+        for (int k = 0; k < stem; k++)
+            out[o++] = name[k];
+        for (int k = 0; k < sl; k++)
+            out[o++] = suffix[k];
+        for (int k = dot; k < len; k++)
+            out[o++] = name[k];
+        out[o] = 0;
+        if (find_child(dir, out) < 0)
+            return;
+    }
+    for (int k = 0; k <= len; k++) /* cannot happen with a 96-entry pool, but never leave out[] unset */
+        out[k] = name[k];
+}
+
+static int copy_tree(int src, int dest, const char *name)
+{
+    int id = vfs_add(dest, name, NODES[src].is_dir, NODES[src].size);
+    if (id < 0 || !NODES[src].is_dir)
+        return id;
+    for (int i = 1; i < VFS_MAX_NODES; i++)
+        if (NODES[i].used && NODES[i].parent == src)
+        {
+            char child[VFS_NAME_MAX];
+            for (int k = 0; k < VFS_NAME_MAX; k++)
+                child[k] = NODES[i].name[k];
+            copy_tree(i, id, child);
+        }
+    return id;
+}
+
+int vfs_copy(int id, int dest)
+{
+    const VfsNode *n = vfs_node(id);
+    const VfsNode *d = vfs_node(dest);
+    if (!n || id == VFS_ROOT || !d || !d->is_dir || vfs_is_under(dest, id))
+        return -1;
+    if (vfs_subtree_count(id) + 1 > VFS_MAX_NODES - vfs_count()) /* all or nothing */
+        return -1;
+    char name[VFS_NAME_MAX];
+    unique_name(dest, n->name, n->is_dir, name);
+    return copy_tree(id, dest, name);
+}
+
+int vfs_move(int id, int dest)
+{
+    const VfsNode *n = vfs_node(id);
+    const VfsNode *d = vfs_node(dest);
+    if (!n || id == VFS_ROOT || !d || !d->is_dir || vfs_is_under(dest, id))
+        return -1;
+    if (n->parent == dest)
+        return 0;
+    char name[VFS_NAME_MAX];
+    unique_name(dest, n->name, n->is_dir, name);
+    for (int k = 0; k < VFS_NAME_MAX; k++)
+        NODES[id].name[k] = name[k];
+    NODES[id].parent = dest;
+    return 0;
+}

@@ -102,6 +102,46 @@ int main(void)
     CHECK(vfs_add(VFS_ROOT, "dir", 1, 0) > 0);         /* the name and slots are free again */
     CHECK(vfs_list(vfs_lookup("/dir"), ids, 16) == 0); /* ... and nothing of the old content is back */
 
+    /* copy / move */
+    vfs_reset();
+    int cd = vfs_add(VFS_ROOT, "src", 1, 0);
+    int cf = vfs_add(cd, "a.txt", 0, 7);
+    int cs = vfs_add(cd, "inner", 1, 0);
+    vfs_add(cs, "b.txt", 0, 9);
+    int cdst = vfs_add(VFS_ROOT, "dst", 1, 0);
+    int c1 = vfs_copy(cf, cd);                         /* same folder: gets a new name */
+    CHECK(c1 > 0 && strcmp(vfs_node(c1)->name, "a (2).txt") == 0 && vfs_node(c1)->size == 7);
+    int c2 = vfs_copy(cf, cd);
+    CHECK(c2 > 0 && strcmp(vfs_node(c2)->name, "a (3).txt") == 0);
+    int c3 = vfs_copy(cd, cdst);                       /* a folder comes with everything in it */
+    CHECK(c3 > 0 && vfs_lookup("/dst/src/inner/b.txt") > 0 && vfs_lookup("/dst/src/a (3).txt") > 0);
+    CHECK(vfs_lookup("/src/inner/b.txt") > 0);         /* the original is untouched */
+    CHECK(vfs_copy(cd, cd) == -1 && vfs_copy(cd, cs) == -1);   /* not into itself */
+    CHECK(vfs_copy(VFS_ROOT, cdst) == -1 && vfs_copy(cf, cf) == -1 && vfs_copy(cf, 80) == -1);
+    int c4 = vfs_copy(cd, cdst);                       /* the folder name is taken: "src (2)" */
+    CHECK(c4 > 0 && strcmp(vfs_node(c4)->name, "src (2)") == 0);
+
+    CHECK(vfs_move(cf, cdst) == 0);                    /* same id, new place */
+    CHECK(vfs_node(cf)->parent == cdst && vfs_lookup("/dst/a.txt") == cf && vfs_lookup("/src/a.txt") == -1);
+    int mf = vfs_add(cd, "a.txt", 0, 1);
+    CHECK(vfs_move(mf, cdst) == 0 && strcmp(vfs_node(mf)->name, "a (2).txt") == 0); /* clash: renamed */
+    CHECK(vfs_move(mf, cdst) == 0);                    /* already there: nothing changes */
+    CHECK(strcmp(vfs_node(mf)->name, "a (2).txt") == 0);
+    CHECK(vfs_move(cd, cs) == -1 && vfs_move(cd, cd) == -1);   /* not into itself */
+    CHECK(vfs_move(VFS_ROOT, cdst) == -1 && vfs_move(cf, mf) == -1);
+
+    /* a copy that does not fit leaves nothing behind */
+    vfs_reset();
+    int bd = vfs_add(VFS_ROOT, "big", 1, 0);
+    for (int i = 0; vfs_count() < VFS_MAX_NODES - 2; i++) {
+        nm[0] = 'f'; nm[1] = (char)('a' + i / 26); nm[2] = (char)('a' + i % 26); nm[3] = 0;
+        vfs_add(bd, nm, 0, 1);
+    }
+    int room = VFS_MAX_NODES - vfs_count();
+    int dd = vfs_add(VFS_ROOT, "dd", 1, 0);            /* uses one of the 2 free slots */
+    CHECK(room == 2 && dd > 0 && vfs_count() == VFS_MAX_NODES - 1);
+    CHECK(vfs_copy(bd, dd) == -1 && vfs_count() == VFS_MAX_NODES - 1);
+
     /* demo content */
     vfs_init();
     CHECK(vfs_lookup("/System/EFI/BOOT/BOOTX64.EFI") > 0);

@@ -278,7 +278,14 @@ typedef enum
     UI_ICON_ARROW_LEFT, /* back */
     UI_ICON_ARROW_RIGHT, /* forward */
     UI_ICON_ARROW_UP,   /* up one level */
-    UI_ICON_FOLDER_PLUS /* new folder */
+    UI_ICON_FOLDER_PLUS, /* new folder */
+    UI_ICON_CUT,
+    UI_ICON_COPY,
+    UI_ICON_PASTE,
+    UI_ICON_RENAME,
+    UI_ICON_FILE_PLUS, /* new file */
+    UI_ICON_TRASH,     /* delete */
+    UI_ICON_REFRESH
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

@@ -52,6 +52,16 @@ int vfs_remove(int id);
 /* How many nodes lie below `id` (0 for a file or an empty folder). */
 int vfs_subtree_count(int id);
 
+/* Copy a node (a folder with everything in it) into folder `dest`. A name already used there becomes
+ * "name (2).ext". Returns the id of the copy, or -1 if there is not enough room for all of it (nothing is
+ * copied then), `dest` is not a folder, or `dest` is the node itself or lies below it. */
+int vfs_copy(int id, int dest);
+
+/* Move a node into folder `dest` (same id, same content below it). A name already used there becomes
+ * "name (2).ext". Returns 0 (also when it is already in `dest`), or -1 for the root, a bad id, a `dest` that
+ * is not a folder, or `dest` inside the node itself. */
+int vfs_move(int id, int dest);
+
 /* 1 if `id` is `ancestor` or lies below it. */
 int vfs_is_under(int id, int ancestor);
 

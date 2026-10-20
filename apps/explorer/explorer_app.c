@@ -12,7 +12,9 @@
 #include "vfs.h"
 #include "wm.h"
 
-#define TOOLBAR_H 52
+#define NAV_ROW_H 52 /* Back / Forward / Up + path bar */
+#define CMD_ROW_H 44 /* New folder, Cut, Copy, Paste, Rename */
+#define TOOLBAR_H (NAV_ROW_H + CMD_ROW_H)
 #define STATUS_H 28
 #define SIDE_W 164
 #define HEAD_H 26
@@ -24,9 +26,27 @@
 #define WHEEL_ROWS 3
 #define DOUBLE_CLICK_MS 450
 #define HIST_MAX 16
+/* toolbar button ids = the order they are added in explorer_app_open() */
+enum
+{
+    BTN_BACK,
+    BTN_FORWARD,
+    BTN_UP,
+    BTN_REFRESH,
+    BTN_NEW_FOLDER,
+    BTN_NEW_FILE,
+    BTN_CUT,
+    BTN_COPY,
+    BTN_PASTE,
+    BTN_RENAME,
+    BTN_DELETE
+};
 #define NAVBTN 36    /* icon-only Back / Forward / Up buttons */
-#define NEWBTN_X 134 /* "New folder" button in the toolbar */
+#define PATH_X (10 + 3 * (NAVBTN + 2) + 6) /* path bar starts after the three navigation buttons */
+#define NEWBTN_X 10 /* "New folder" in the command row */
 #define NEWBTN_W 118
+#define CMD_X0 (NEWBTN_X + NEWBTN_W + 2 + NAVBTN + 16) /* Cut / Copy / Paste / Rename start here, after a divider */
+#define CMD_Y (NAV_ROW_H + 5)
 
 enum
 {
@@ -74,6 +94,8 @@ static int LAST_ROW = -1;
 static unsigned long long LAST_CLICK_MS;
 static int HOVER_ROW = -1;   /* list row under the pointer, -1 = none */
 static int HOVER_PLACE = -1; /* sidebar entry under the pointer */
+static int CLIP_ID = -1;     /* entry on the clipboard (Cut or Copy), -1 = empty */
+static int CLIP_CUT;         /* 1 = it moves on Paste, 0 = a copy is made */
 static int RENAME_ID = -1;   /* node being renamed in its row (win->edits[0] holds the text), -1 = none */
 
 /* right-click menu: a small panel drawn inside the window */
@@ -85,13 +107,16 @@ enum
     M_NEW_FOLDER,
     M_NEW_FILE,
     M_REFRESH,
+    M_CUT,
+    M_COPY,
+    M_PASTE,
     M_SEP /* a divider line, not selectable */
 };
 #define MENU_W 224
 #define MENU_ROW_H 30
 #define MENU_SEP_H 9
 #define MENU_PAD 6
-#define MENU_MAX 5
+#define MENU_MAX 8
 typedef struct
 {
     int open;
@@ -243,9 +268,9 @@ static void update_nav_buttons(void)
 {
     if (!EX_WIN)
         return;
-    EX_WIN->btn[0].enabled = HIST_N > 0;      /* Back */
-    EX_WIN->btn[1].enabled = FWD_N > 0;       /* Forward */
-    EX_WIN->btn[2].enabled = CUR != VFS_ROOT; /* Up */
+    EX_WIN->btn[BTN_BACK].enabled = HIST_N > 0;
+    EX_WIN->btn[BTN_FORWARD].enabled = FWD_N > 0;
+    EX_WIN->btn[BTN_UP].enabled = CUR != VFS_ROOT;
 }
 
 static void reload(void)
@@ -537,6 +562,104 @@ static void on_new_folder(UiButton *b, void *user)
     new_item(1);
 }
 
+/* Cut (cut = 1) or Copy (cut = 0): remember the selected entry. Nothing changes until Paste. */
+static void clip_set(int cut)
+{
+    if (RENAME_ID >= 0 || SEL < 0 || SEL >= NITEMS)
+        return;
+    CLIP_ID = ITEMS[SEL];
+    CLIP_CUT = cut;
+    NOTE = 0;
+}
+
+/* Paste into the current folder: Cut moves the entry here, Copy makes a copy (a taken name becomes "name (2)"). */
+static void paste(void)
+{
+    const VfsNode *n = vfs_node(CLIP_ID);
+    if (!n)
+    {
+        CLIP_ID = -1;
+        return;
+    }
+    if (RENAME_ID >= 0 && !end_rename(1))
+        return;
+    if (CLIP_CUT && n->parent == CUR) /* cut and pasted in the same place: nothing to do */
+    {
+        CLIP_ID = -1;
+        return;
+    }
+    if (vfs_is_under(CUR, CLIP_ID))
+    {
+        NOTE = CLIP_CUT ? "A folder cannot be moved into itself." : "A folder cannot be copied into itself.";
+        return;
+    }
+    int id = CLIP_CUT ? CLIP_ID : vfs_copy(CLIP_ID, CUR);
+    if (id < 0 || (CLIP_CUT && vfs_move(CLIP_ID, CUR) < 0))
+    {
+        NOTE = "There is not enough room on the volume.";
+        return;
+    }
+    if (CLIP_CUT)
+        CLIP_ID = -1; /* a moved entry leaves the clipboard; a copied one can be pasted again */
+    NOTE = 0;
+    reload();
+    int row = row_of(id);
+    if (row >= 0 && EX_WIN)
+        select_row(wm_content(EX_WIN), row);
+}
+
+static void ask_delete(int row);
+
+static void on_new_file(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    new_item(0);
+}
+
+static void on_delete(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    ask_delete(SEL);
+}
+
+static void on_refresh(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    reload();
+    NOTE = 0;
+}
+
+static void on_cut(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    clip_set(1);
+}
+
+static void on_copy(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    clip_set(0);
+}
+
+static void on_paste(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    paste();
+}
+
+static void on_rename(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    start_rename(SEL);
+}
+
 static void do_delete(void)
 {
     int id = DEL_ID;
@@ -554,6 +677,8 @@ static void do_delete(void)
         if (!vfs_is_under(FWD[i], id))
             FWD[k++] = FWD[i];
     FWD_N = k;
+    if (CLIP_ID >= 0 && vfs_is_under(CLIP_ID, id))
+        CLIP_ID = -1; /* its id may be reused by the next new entry */
     vfs_remove(id);
     LAST_ROW = -1;
     NOTE = 0;
@@ -661,13 +786,13 @@ static void ask_delete(int row)
 /* ---- right-click menu ------------------------------------------ */
 static const char *menu_label(int item)
 {
-    static const char *const L[] = {"Open", "Rename", "Delete", "New folder", "New text file", "Refresh"};
+    static const char *const L[] = {"Open", "Rename", "Delete", "New folder", "New text file", "Refresh", "Cut", "Copy", "Paste"};
     return item < M_SEP ? L[item] : "";
 }
 
 static const char *menu_hint(int item)
 {
-    static const char *const H[] = {"Enter", "F2", "Del", "Ctrl+Shift+N", "", "F5"};
+    static const char *const H[] = {"Enter", "F2", "Del", "Ctrl+Shift+N", "", "F5", "Ctrl+X", "Ctrl+C", "Ctrl+V"};
     return item < M_SEP ? H[item] : "";
 }
 
@@ -703,8 +828,11 @@ static void menu_open(int x, int y, int on_item)
     if (on_item)
     {
         MENU.items[MENU.count++] = M_OPEN;
-        MENU.items[MENU.count++] = M_RENAME;
         MENU.items[MENU.count++] = M_SEP;
+        MENU.items[MENU.count++] = M_CUT;
+        MENU.items[MENU.count++] = M_COPY;
+        MENU.items[MENU.count++] = M_SEP;
+        MENU.items[MENU.count++] = M_RENAME;
         MENU.items[MENU.count++] = M_DELETE;
     }
     else
@@ -712,6 +840,11 @@ static void menu_open(int x, int y, int on_item)
         MENU.items[MENU.count++] = M_NEW_FOLDER;
         MENU.items[MENU.count++] = M_NEW_FILE;
         MENU.items[MENU.count++] = M_SEP;
+        if (CLIP_ID >= 0 && vfs_node(CLIP_ID)) /* nothing to paste: no entry */
+        {
+            MENU.items[MENU.count++] = M_PASTE;
+            MENU.items[MENU.count++] = M_SEP;
+        }
         MENU.items[MENU.count++] = M_REFRESH;
     }
     UiRect b = wm_content(EX_WIN);
@@ -749,6 +882,15 @@ static void menu_run(int item)
     case M_REFRESH:
         reload();
         NOTE = 0;
+        break;
+    case M_CUT:
+        clip_set(1);
+        break;
+    case M_COPY:
+        clip_set(0);
+        break;
+    case M_PASTE:
+        paste();
         break;
     default:
         break;
@@ -851,8 +993,11 @@ static void draw_toolbar(const Layout *l, const UiTheme *t)
     gfx_fill_rect_alpha(tb.x, tb.y, tb.w, tb.h, t->surface_alt.r, t->surface_alt.g, t->surface_alt.b, 70);
     ui_separator(tb.x, tb.y + tb.h - 1, tb.w);
 
-    int px = tb.x + NEWBTN_X + NEWBTN_W + 10; /* after Back, Up and New folder */
-    UiRect bar = ui_rect(px, tb.y + 9, tb.w - (px - tb.x) - 10, 34);
+    /* command row: a divider between New folder and the clipboard / rename buttons */
+    gfx_fill_rect_alpha(tb.x + CMD_X0 - 9, tb.y + CMD_Y + 6, 1, 22, t->border.r, t->border.g, t->border.b, 255);
+
+    int px = tb.x + PATH_X;
+    UiRect bar = ui_rect(px, tb.y + 9, tb.w - (px - tb.x) - 10 - NAVBTN - 4, 34); /* room for Refresh on the right */
     if (bar.w < 40)
         return;
     gfx_fill_round_rect(bar.x, bar.y, bar.w, bar.h, t->radius_m, ui_color(t->surface));
@@ -958,6 +1103,8 @@ static void draw_list(const Layout *l, const UiTheme *t)
         }
         int kind = kind_of(n);
         draw_icon(r.x + 24, r.y + r.h / 2, ICON_PX, kind);
+        if (CLIP_CUT && ITEMS[ri] == CLIP_ID) /* waiting to be moved: faded */
+            gfx_fill_round_rect_alpha(r.x + 12, r.y + 4, ICON_PX + 2, ICON_PX + 2, 4, ui_color(t->surface), 140);
         if (ITEMS[ri] == RENAME_ID && EX_WIN)
             ui_edit_draw(ui_rect(r.x + 40, r.y + 2, type_x - r.x - 46, r.h - 4), &EX_WIN->edits[0], "", 1);
         else
@@ -1036,11 +1183,30 @@ static void draw_status(const Layout *l, const UiTheme *t)
     }
 }
 
+/* grey out the toolbar buttons that cannot do anything right now */
+static void sync_buttons(void)
+{
+    if (!EX_WIN)
+        return;
+    int idle = RENAME_ID < 0;
+    int has = SEL >= 0 && SEL < NITEMS;
+    EX_WIN->btn[BTN_REFRESH].enabled = idle;
+    EX_WIN->btn[BTN_NEW_FOLDER].enabled = idle;
+    EX_WIN->btn[BTN_NEW_FILE].enabled = idle;
+    EX_WIN->btn[BTN_CUT].enabled = idle && has;
+    EX_WIN->btn[BTN_COPY].enabled = idle && has;
+    EX_WIN->btn[BTN_PASTE].enabled = idle && vfs_node(CLIP_ID) != 0;
+    EX_WIN->btn[BTN_RENAME].enabled = idle && has;
+    EX_WIN->btn[BTN_DELETE].enabled = idle && has && !DEL_WIN;
+    update_nav_buttons();
+}
+
 static void ex_draw(Window *w, UiRect body)
 {
     const UiTheme *t = ui_theme();
     Layout l = layout(body);
     clamp_scroll(&l);
+    sync_buttons(); /* before the window draws its buttons */
     draw_sidebar(&l, t);
     draw_list(&l, t);
     draw_toolbar(&l, t);
@@ -1272,6 +1438,14 @@ static void ex_key(Window *w, const KeyEvent *k)
     default:
         break;
     }
+    if ((k->mods & KMOD_CTRL) && !(k->mods & (KMOD_SHIFT | KMOD_ALT)) && (k->key == 'x' || k->key == 'c' || k->key == 'v'))
+    {
+        if (k->key == 'v')
+            paste();
+        else
+            clip_set(k->key == 'x');
+        return;
+    }
     if ((k->mods & KMOD_CTRL) && (k->mods & KMOD_SHIFT) && k->key == 'n')
     {
         new_item(1);
@@ -1322,7 +1496,7 @@ static void explorer_app_open(void)
         return;
     }
     int W = (int)gfx_width(), H = (int)gfx_height();
-    int w = 760, h = 500;
+    int w = 760, h = 540;
     if (w > W - 20)
         w = W - 20;
     if (h > H - TASKBAR_HEIGHT - 8)
@@ -1352,20 +1526,39 @@ static void explorer_app_open(void)
     EX_WIN = win;
     desktop_set_status(0);
 
-    /* Back and Up sit at the left of the toolbar (button 0 and 1: update_nav_buttons relies on it) */
+    /* Toolbar buttons, in the order of the BTN_* ids (sync_buttons / update_nav_buttons rely on it).
+     * Navigation row: Back, Forward, Up (left), Refresh (right end). Command row: New folder, New file,
+     * then Cut, Copy, Paste, Rename, Delete after a divider. All ghost style: only the icon shows until hovered. */
+    int cw = w - 2;
+    int step = NAVBTN + 2;
     wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10, 8, NAVBTN, NAVBTN), 0, on_back, 0);
-    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10 + NAVBTN + 2, 8, NAVBTN, NAVBTN), 0, on_forward, 0);
-    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10 + 2 * (NAVBTN + 2), 8, NAVBTN, NAVBTN), 0, on_up, 0);
-    wm_add_button_ex(win, "New folder", UI_BTN_PRIMARY, ui_rect(NEWBTN_X, 9, NEWBTN_W, 34), 0, on_new_folder, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10 + step, 8, NAVBTN, NAVBTN), 0, on_forward, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(10 + 2 * step, 8, NAVBTN, NAVBTN), 0, on_up, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(cw - 10 - NAVBTN, 8, NAVBTN, NAVBTN), WM_ANCHOR_RIGHT, on_refresh, 0);
+    wm_add_button_ex(win, "New folder", UI_BTN_GHOST, ui_rect(NEWBTN_X, CMD_Y, NEWBTN_W, 34), 0, on_new_folder, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(NEWBTN_X + NEWBTN_W + 2, CMD_Y, NAVBTN, 34), 0, on_new_file, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0, CMD_Y, NAVBTN, 34), 0, on_cut, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0 + step, CMD_Y, NAVBTN, 34), 0, on_copy, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0 + 2 * step, CMD_Y, NAVBTN, 34), 0, on_paste, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0 + 3 * step, CMD_Y, NAVBTN, 34), 0, on_rename, 0);
+    wm_add_button_ex(win, "", UI_BTN_GHOST, ui_rect(CMD_X0 + 4 * step, CMD_Y, NAVBTN, 34), 0, on_delete, 0);
 
-    wm_set_button_icon(win, 0, UI_ICON_ARROW_LEFT);
-    wm_set_button_icon(win, 1, UI_ICON_ARROW_RIGHT);
-    wm_set_button_icon(win, 2, UI_ICON_ARROW_UP);
-    wm_set_button_icon(win, 3, UI_ICON_FOLDER_PLUS);
+    wm_set_button_icon(win, BTN_BACK, UI_ICON_ARROW_LEFT);
+    wm_set_button_icon(win, BTN_FORWARD, UI_ICON_ARROW_RIGHT);
+    wm_set_button_icon(win, BTN_UP, UI_ICON_ARROW_UP);
+    wm_set_button_icon(win, BTN_REFRESH, UI_ICON_REFRESH);
+    wm_set_button_icon(win, BTN_NEW_FOLDER, UI_ICON_FOLDER_PLUS);
+    wm_set_button_icon(win, BTN_NEW_FILE, UI_ICON_FILE_PLUS);
+    wm_set_button_icon(win, BTN_CUT, UI_ICON_CUT);
+    wm_set_button_icon(win, BTN_COPY, UI_ICON_COPY);
+    wm_set_button_icon(win, BTN_PASTE, UI_ICON_PASTE);
+    wm_set_button_icon(win, BTN_RENAME, UI_ICON_RENAME);
+    wm_set_button_icon(win, BTN_DELETE, UI_ICON_TRASH);
 
     CUR = VFS_ROOT;
     HIST_N = 0;
     FWD_N = 0;
+    CLIP_ID = -1;
     SEL = -1;
     SCROLL = 0;
     NOTE = 0;

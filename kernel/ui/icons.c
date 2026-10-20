@@ -163,6 +163,83 @@ static void icon_folder_plus(const Frame *f)
     line(f, 30, 34, 42, 34, 3, white);
 }
 
+/* scissors: two crossing blades and two finger rings */
+static void icon_cut(const Frame *f, GfxColor c)
+{
+    line(f, 15, 5, 31, 31, 5, c);
+    line(f, 33, 5, 17, 31, 5, c);
+    gfx_ring_q(q(f, 14), qy(f, 37), len_q(f, 7), len_q(f, 3), c, 255);
+    gfx_ring_q(q(f, 34), qy(f, 37), len_q(f, 7), len_q(f, 3), c, 255);
+}
+
+/* two sheets: the one behind shows only its top-left edge */
+static void icon_copy(const Frame *f, GfxColor c)
+{
+    line(f, 11, 34, 11, 8, 4, c);
+    line(f, 11, 8, 31, 8, 4, c);
+    line(f, 31, 8, 31, 14, 4, c);
+    line(f, 11, 34, 17, 34, 4, c);
+    gfx_round_rect(px(f, 17), py(f, 14), pl(f, 22), pl(f, 28), pl(f, 5), f->s >= 30 ? 3 : 1, c);
+}
+
+/* clipboard: board, clip on top, two lines of text */
+static void icon_paste(const Frame *f, GfxColor c)
+{
+    gfx_round_rect(px(f, 8), py(f, 8), pl(f, 32), pl(f, 36), pl(f, 6), f->s >= 30 ? 3 : 1, c);
+    rrect(f, 16, 4, 16, 9, 4, c);
+    line(f, 16, 24, 32, 24, 4, c);
+    line(f, 16, 32, 28, 32, 4, c);
+}
+
+/* a text box with an I-beam caret: edit the name */
+static void icon_rename(const Frame *f, GfxColor c)
+{
+    gfx_round_rect(px(f, 4), py(f, 14), pl(f, 40), pl(f, 20), pl(f, 6), f->s >= 30 ? 3 : 1, c);
+    line(f, 24, 8, 24, 40, 4, c);
+    line(f, 19, 8, 29, 8, 4, c);
+    line(f, 19, 40, 29, 40, 4, c);
+}
+
+/* a page with a green plus badge: new file */
+static void icon_file_plus(const Frame *f, GfxColor c)
+{
+    gfx_round_rect(px(f, 9), py(f, 4), pl(f, 26), pl(f, 38), pl(f, 5), f->s >= 30 ? 3 : 1, c);
+    line(f, 15, 16, 29, 16, 3, c);
+    line(f, 15, 24, 29, 24, 3, c);
+    GfxColor green = gfx_rgb(52, 190, 120), white = gfx_rgb(255, 255, 255);
+    gfx_fill_circle_q(q(f, 36), qy(f, 36), len_q(f, 11), green, 255);
+    line(f, 36, 30, 36, 42, 3, white);
+    line(f, 30, 36, 42, 36, 3, white);
+}
+
+/* bin: handle, lid, tapered body with two slots */
+static void icon_trash(const Frame *f, GfxColor c)
+{
+    line(f, 8, 12, 40, 12, 5, c);
+    line(f, 18, 12, 18, 6, 4, c);
+    line(f, 18, 6, 30, 6, 4, c);
+    line(f, 30, 6, 30, 12, 4, c);
+    line(f, 12, 18, 14, 41, 4, c);
+    line(f, 14, 41, 34, 41, 4, c);
+    line(f, 34, 41, 36, 18, 4, c);
+    line(f, 20, 22, 20, 36, 3, c);
+    line(f, 28, 22, 28, 36, 3, c);
+}
+
+/* three quarters of a circle (8 steps of 45 degrees, top-right gap) with an arrow head at the top */
+static void icon_refresh(const Frame *f, GfxColor c)
+{
+    const int R = 14;
+    for (int i = 6; i > 0; i--) /* from the top (6), counter-clockwise on screen, to the right (0) */
+    {
+        int a = i % 8, b = (i - 1) % 8;
+        line(f, 24 + DIR8[a][0] * R / 256, 24 + DIR8[a][1] * R / 256, 24 + DIR8[b][0] * R / 256,
+             24 + DIR8[b][1] * R / 256, 5, c);
+    }
+    int head[6] = {q(f, 22), qy(f, 2), q(f, 36), qy(f, 10), q(f, 22), qy(f, 18)};
+    gfx_fill_poly_q(head, 3, c, 255);
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -224,6 +301,27 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_FOLDER_PLUS:
         icon_folder_plus(&f);
+        break;
+    case UI_ICON_CUT:
+        icon_cut(&f, t);
+        break;
+    case UI_ICON_COPY:
+        icon_copy(&f, t);
+        break;
+    case UI_ICON_PASTE:
+        icon_paste(&f, t);
+        break;
+    case UI_ICON_RENAME:
+        icon_rename(&f, t);
+        break;
+    case UI_ICON_FILE_PLUS:
+        icon_file_plus(&f, t);
+        break;
+    case UI_ICON_TRASH:
+        icon_trash(&f, t);
+        break;
+    case UI_ICON_REFRESH:
+        icon_refresh(&f, t);
         break;
     default:
         break;
