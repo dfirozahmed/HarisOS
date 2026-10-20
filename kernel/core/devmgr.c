@@ -59,6 +59,7 @@ static DevEntry *add(DevCategory cat, const char *name, const char *detail, int 
     copy(e->name, sizeof e->name, name);
     copy(e->detail, sizeof e->detail, detail);
     e->has_driver = driver;
+    e->note[0] = 0;
     return e;
 }
 
@@ -104,8 +105,10 @@ int devmgr_build(const DevmgrInputs *in)
             add(DEV_CAT_INPUT, "PS/2 keyboard", "i8042 port 0x60", 1);
         if (in->mouse_sources & MOUSE_SRC_PS2)
             add(DEV_CAT_INPUT, "PS/2 mouse", "i8042 aux port", 1);
-        if (in->mouse_sources & MOUSE_SRC_USB)
+        for (int i = 0; i < in->usb_mice; i++)
             add(DEV_CAT_INPUT, "USB mouse", "HID boot protocol (xHCI)", 1);
+        for (int i = 0; i < in->usb_keyboards; i++)
+            add(DEV_CAT_INPUT, "USB keyboard", "HID boot protocol (xHCI)", 1);
         /* I2C-HID devices from the ACPI tables; a started one is the touchpad in use */
         int n = in->i2c_count < DEVMGR_MAX_I2C ? in->i2c_count : DEVMGR_MAX_I2C;
         for (int i = 0; i < n; i++) {
@@ -120,7 +123,9 @@ int devmgr_build(const DevmgrInputs *in)
             sb_str(&s, ", ");
             sb_dec(&s, c->speed / 1000);
             sb_str(&s, " kHz");
-            add(DEV_CAT_INPUT, c->started ? "I2C-HID touchpad" : "I2C-HID device", detail, c->started);
+            DevEntry *e = add(DEV_CAT_INPUT, c->started ? "I2C-HID touchpad" : "I2C-HID device", detail, c->started);
+            if (e && !c->started && c->reason)
+                copy(e->note, sizeof e->note, c->reason);
         }
     }
     return g_count;

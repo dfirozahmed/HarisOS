@@ -131,7 +131,7 @@ static int bring_up(const AmlI2cHid *c)
 {
     AmlDevice cd;
     if (!find_device(c->ctrl, &cd))
-        return -1;
+        return I2C_HID_ERR_NO_CONTROLLER;
 
     unsigned long long base = 0;
     unsigned vendor = 0;
@@ -140,7 +140,7 @@ static int bring_up(const AmlI2cHid *c)
     else if (cd.has_adr)
         base = pci_bar0(cd.adr, &vendor);
     if (!base)
-        return -1;
+        return I2C_HID_ERR_NO_BASE;
 
     unsigned clk = str_eq(cd.hid, "AMDI0010") ? 150000000u : 133000000u; /* controller input clock */
     unsigned hz = c->speed >= 100000 && c->speed <= 400000 ? c->speed : 400000;
@@ -150,14 +150,14 @@ static int bring_up(const AmlI2cHid *c)
     if (dw_i2c_probe(&S.bus, base))
     {
         if (vendor != 0x8086)
-            return -1;
+            return I2C_HID_ERR_CTRL_PROBE;
         *(volatile unsigned *)(base + 0x204) = 3; /* Intel LPSS: take the controller out of reset */
         udelay(1000);
         if (dw_i2c_probe(&S.bus, base))
-            return -1;
+            return I2C_HID_ERR_CTRL_PROBE;
     }
     if (dw_i2c_setup(&S.bus, c->addr, clk, hz))
-        return -1;
+        return I2C_HID_ERR_CTRL_SETUP;
 
     /* the register of the HID descriptor: what the _DSM says, then the usual suspects */
     unsigned regs[AML_MAX_REGS + 2], nr = 0;
@@ -170,7 +170,7 @@ static int bring_up(const AmlI2cHid *c)
     for (unsigned i = 0; i < nr && !ok; i++)
         ok = read_hid_desc(regs[i], d) == 0;
     if (!ok)
-        return -1;
+        return I2C_HID_ERR_NO_HID_DESC;
 
     unsigned rdlen = le16(d + 4), rdreg = le16(d + 6);
     S.max_in = le16(d + 10) > MAX_INPUT ? MAX_INPUT : le16(d + 10);
@@ -226,10 +226,25 @@ static int bring_up(const AmlI2cHid *c)
     }
 
     if (read_reg(rdreg, RDESC, rdlen))
-        return -1;
+        return I2C_HID_ERR_RDESC_READ;
     if (!hid_find_mouse(RDESC, rdlen, &S.mouse)) /* a touchscreen, or a pad without a mouse mode */
-        return -1;
-    return 0;
+        return I2C_HID_ERR_NO_MOUSE;
+    return I2C_HID_OK;
+}
+
+const char *i2c_hid_error_text(int error)
+{
+    switch (error)
+    {
+    case I2C_HID_ERR_NO_CONTROLLER: return "I2C controller not found in ACPI";
+    case I2C_HID_ERR_NO_BASE: return "I2C controller has no memory range";
+    case I2C_HID_ERR_CTRL_PROBE: return "I2C controller is not a DesignWare block";
+    case I2C_HID_ERR_CTRL_SETUP: return "I2C controller setup failed";
+    case I2C_HID_ERR_NO_HID_DESC: return "device gave no HID descriptor";
+    case I2C_HID_ERR_RDESC_READ: return "HID report descriptor unreadable";
+    case I2C_HID_ERR_NO_MOUSE: return "no mouse mode (touchscreen?)";
+    default: return "";
+    }
 }
 
 
@@ -266,10 +281,14 @@ int i2c_hid_init(void)
         for (int j = 0; j < 5; j++)
             INFO[i].ctrl[j] = cand[i].ctrl[j];
         INFO[i].started = 0;
+        INFO[i].error = I2C_HID_OK;
     }
     NINFO = nc;
     for (int i = 0; i < nc; i++)
-        if (bring_up(&cand[i]) == 0)
+    {
+        int err = bring_up(&cand[i]);
+        INFO[i].error = err;
+        if (err == I2C_HID_OK)
         {
             INFO[i].started = 1;
             S.dx = S.dy = S.wheel = 0;
@@ -280,6 +299,7 @@ int i2c_hid_init(void)
             S.active = 1;
             return 0;
         }
+    }
     return -1;
 }
 
@@ -363,6 +383,7 @@ int i2c_hid_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
 #else
 
 int i2c_hid_init(void) { return -1; }
+const char *i2c_hid_error_text(int error) { (void)error; return ""; }
 int i2c_hid_count(void) { return 0; }
 int i2c_hid_info(int i, I2cHidInfo *out) { (void)i; (void)out; return -1; }
 int i2c_hid_poll(int *dx, int *dy, int *wheel, unsigned *buttons)

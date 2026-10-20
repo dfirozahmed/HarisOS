@@ -2,8 +2,6 @@
 #include "bootinfo.h"
 #include "desktop.h"
 #include "devmgr.h"
-#include "i2c_hid.h"
-#include "pci.h"
 #include "acpi.h"
 #include "gfx.h"
 #include "keyboard.h"
@@ -64,24 +62,7 @@ void kernel_main(const BootInfo *info)
     desktop_set_mouse(have_mouse);
 
     /* Device Manager list: PCI scan + what the input drivers found (after mouse_init). */
-    pci_scan();
-    DevmgrInputs dm_in = {0};
-    dm_in.keyboard_ps2 = kbd_ok;
-    dm_in.mouse_sources = mouse_sources();
-    dm_in.usb_running = (dm_in.mouse_sources & MOUSE_SRC_USB) != 0;
-    for (int i = 0; i < i2c_hid_count() && dm_in.i2c_count < DEVMGR_MAX_I2C; i++)
-    {
-        I2cHidInfo hi;
-        if (i2c_hid_info(i, &hi))
-            break;
-        DevmgrI2c *d = &dm_in.i2c[dm_in.i2c_count++];
-        d->addr = hi.addr;
-        d->speed = hi.speed;
-        for (int j = 0; j < 5; j++)
-            d->ctrl[j] = hi.ctrl[j];
-        d->started = hi.started;
-    }
-    devmgr_build(&dm_in);
+    devmgr_init(kbd_ok);
 
     timer_init(); /* needed for double-click */
 

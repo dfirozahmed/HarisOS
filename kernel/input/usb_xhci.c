@@ -1165,8 +1165,23 @@ int usb_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
     return mouse;
 }
 
+void usb_hid_counts(int *mice, int *keyboards)
+{
+    *mice = *keyboards = 0;
+    for (int i = 0; i < MAX_HID; i++)
+    {
+        if (!HID[i].active)
+            continue;
+        if (HID[i].kind == KIND_MOUSE)
+            (*mice)++;
+        else if (HID[i].kind == KIND_KBD)
+            (*keyboards)++;
+    }
+}
+
 #else /* not x86-64: no PCI ports */
 
+void usb_hid_counts(int *mice, int *keyboards) { *mice = *keyboards = 0; }
 int usb_init(void) { return -1; }
 int usb_kbd_pop(unsigned char report[8])
 {

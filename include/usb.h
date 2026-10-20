@@ -25,4 +25,7 @@ int usb_poll(int *dx, int *dy, int *wheel, unsigned *buttons);
  * from any USB keyboard. Returns 1 if there was one, 0 if not. Never blocks. */
 int usb_kbd_pop(unsigned char report[8]);
 
+/* How many HID boot-protocol mice / keyboards are attached right now (for the Device Manager). */
+void usb_hid_counts(int *mice, int *keyboards);
+
 #endif

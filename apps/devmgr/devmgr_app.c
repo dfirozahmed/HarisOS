@@ -10,6 +10,7 @@
 
 #define ROW_H 26
 #define DETAIL_H 78
+#define REFRESH_W 96 /* the Refresh button sits at the right end of the details strip */
 
 /* A flat row: a category header (dev < 0) or one device. */
 typedef struct
@@ -48,6 +49,13 @@ static void rebuild_rows(void)
                 SEL = NROWS - 1;
         }
     }
+}
+
+static int same_text(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
 }
 
 static UiRect list_rect(UiRect body)
@@ -136,10 +144,11 @@ static void dm_draw(Window *w, UiRect body)
     if (SEL >= 0)
     {
         const DevEntry *e = devmgr_get(ROWS[SEL].dev);
-        ui_text_in(ui_rect(d.x + 4, d.y + 4, d.w - 8, 24), e->name, UI_TEXT_TITLE, UI_ALIGN_LEFT);
-        ui_text_in(ui_rect(d.x + 4, d.y + 30, d.w - 8, 20), e->detail, UI_TEXT_DIM, UI_ALIGN_LEFT);
-        ui_text_in_color(ui_rect(d.x + 4, d.y + 52, d.w - 8, 20),
-                         e->has_driver ? "Driver loaded" : "No HarisOS driver for this device",
+        int tw = d.w - 8 - REFRESH_W - 8; /* leave room for the Refresh button */
+        ui_text_in(ui_rect(d.x + 4, d.y + 4, tw, 24), e->name, UI_TEXT_TITLE, UI_ALIGN_LEFT);
+        ui_text_in(ui_rect(d.x + 4, d.y + 30, tw, 20), e->detail, UI_TEXT_DIM, UI_ALIGN_LEFT);
+        ui_text_in_color(ui_rect(d.x + 4, d.y + 52, tw, 20),
+                         e->has_driver ? "Driver loaded" : (e->note[0] ? e->note : "No HarisOS driver for this device"),
                          UI_TEXT_SMALL, UI_ALIGN_LEFT, e->has_driver ? t->success : t->warning);
     }
 }
@@ -173,8 +182,53 @@ static int dm_wheel(Window *w, int steps)
     return SCROLL != old;
 }
 
+/* Ask the system again (PCI + drivers) and rebuild the rows. The selection stays on the same
+ * device (matched by name and detail) if it is still there, otherwise it goes to the first one. */
+static void refresh_list(void)
+{
+    char name[sizeof(((DevEntry *)0)->name)], detail[sizeof(((DevEntry *)0)->detail)];
+    int had = SEL >= 0;
+    if (had)
+    {
+        const DevEntry *e = devmgr_get(ROWS[SEL].dev);
+        for (unsigned i = 0; i < sizeof name; i++)
+            name[i] = e->name[i];
+        for (unsigned i = 0; i < sizeof detail; i++)
+            detail[i] = e->detail[i];
+    }
+    int top = SCROLL;
+    devmgr_refresh();
+    rebuild_rows();
+    if (!had)
+        return;
+    for (int r = 0; r < NROWS; r++)
+    {
+        const DevEntry *e = ROWS[r].dev >= 0 ? devmgr_get(ROWS[r].dev) : 0;
+        if (e && same_text(e->name, name) && same_text(e->detail, detail))
+        {
+            SEL = r;
+            break;
+        }
+    }
+    SCROLL = top < NROWS ? top : 0;
+    if (DM_WIN)
+        select_to(wm_content(DM_WIN), SEL); /* keep the selection on screen */
+}
+
+static void on_refresh(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    refresh_list();
+}
+
 static void dm_key(Window *w, const KeyEvent *k)
 {
+    if (k->pressed && k->key == KEY_F5)
+    {
+        refresh_list();
+        return;
+    }
     if (!k->pressed || NROWS == 0)
         return;
     UiRect body = wm_content(w);
@@ -244,6 +298,7 @@ static void devmgr_app_open(void)
     if (y < 0)
         y = 0;
 
+    devmgr_refresh(); /* the boot-time list may be out of date (USB devices come and go) */
     rebuild_rows();
     Window *win = wm_create("Device Manager", x, y, w, h, dm_draw, 0);
     if (!win)
@@ -259,6 +314,11 @@ static void devmgr_app_open(void)
     win->icon = TASKBAR_ICON_SETTINGS;
     DM_WIN = win;
     desktop_set_status(0);
+
+    /* Refresh button in the corner of the details strip (F5 does the same) */
+    int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
+    wm_add_button_ex(win, "Refresh", UI_BTN_SECONDARY, ui_rect(cw - 8 - REFRESH_W, ch - 8 - 34, REFRESH_W, 34),
+                     WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_refresh, 0);
 }
 
 const AppInfo APP_DEVMGR = {

@@ -29,7 +29,24 @@ typedef struct
     unsigned speed; /* bus speed in Hz the firmware asks for */
     char ctrl[5];   /* ACPI name of the I2C controller, e.g. "I2CD" */
     int started;    /* 1 = this is the touchpad the driver is using */
+    int error;      /* I2C_HID_ERR_*: why it was not started (0 when started or not tried) */
 } I2cHidInfo;
+
+/* Where bring-up of one described device stopped. */
+enum
+{
+    I2C_HID_OK = 0,
+    I2C_HID_ERR_NO_CONTROLLER, /* the I2C controller named by the firmware is not in the ACPI tables */
+    I2C_HID_ERR_NO_BASE,       /* the controller has no memory range / PCI BAR */
+    I2C_HID_ERR_CTRL_PROBE,    /* the controller registers do not look like a DesignWare I2C block */
+    I2C_HID_ERR_CTRL_SETUP,    /* the controller refused address / speed setup */
+    I2C_HID_ERR_NO_HID_DESC,   /* the device gave no valid HID descriptor at any candidate register */
+    I2C_HID_ERR_RDESC_READ,    /* the HID report descriptor could not be read */
+    I2C_HID_ERR_NO_MOUSE       /* it is not a mouse-mode pointing device (touchscreen, precision-only pad) */
+};
+
+/* Short English text for an I2C_HID_ERR_* value ("" for I2C_HID_OK). */
+const char *i2c_hid_error_text(int error);
 
 /* Number of I2C-HID devices the firmware describes (0 before i2c_hid_init) and the i-th one's info.
  * i2c_hid_info() returns 0 on success, -1 if i is out of range. */

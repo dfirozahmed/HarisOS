@@ -21,6 +21,7 @@ typedef struct {
     char name[40];   /* e.g. "USB controller" */
     char detail[48]; /* e.g. "Intel 8086:1237 at 00:1F.2" */
     int has_driver;  /* 1 = HarisOS drives this device */
+    char note[48];   /* why there is no driver, when known ("" = nothing to add) */
 } DevEntry;
 
 /* An I2C-HID device the firmware describes in ACPI (copied from i2c_hid_info()). */
@@ -29,6 +30,7 @@ typedef struct {
     unsigned speed; /* Hz */
     char ctrl[5];   /* ACPI name of the I2C controller */
     int started;    /* the driver is using it */
+    const char *reason; /* why it did not start (static text; NULL or "" = unknown) */
 } DevmgrI2c;
 
 #define DEVMGR_MAX_I2C 8
@@ -36,14 +38,22 @@ typedef struct {
 /* What the drivers reported at boot (filled by kernel.c). */
 typedef struct {
     int keyboard_ps2;
-    int mouse_sources; /* MOUSE_SRC_PS2 / MOUSE_SRC_USB bits (I2C comes from i2c[]) */
+    int mouse_sources; /* MOUSE_SRC_PS2 bit (USB comes from the counts below, I2C from i2c[]) */
     int usb_running;   /* usb_init() succeeded */
+    int usb_mice;      /* USB mice attached right now */
+    int usb_keyboards; /* USB keyboards attached right now */
     int i2c_count;
     DevmgrI2c i2c[DEVMGR_MAX_I2C];
 } DevmgrInputs;
 
 /* Rebuilds the list from pci_count()/pci_get() and the inputs. Returns the entry count. */
 int devmgr_build(const DevmgrInputs *in);
+
+/* System glue (kernel/core/devmgr_sys.c): asks the drivers and PCI, then devmgr_build().
+ * devmgr_init() once after the input drivers started (keyboard_ok = keyboard_init() == 0);
+ * devmgr_refresh() any time later (the Device Manager's Refresh button). Returns the entry count. */
+int devmgr_init(int keyboard_ok);
+int devmgr_refresh(void);
 
 int devmgr_count(void);
 const DevEntry *devmgr_get(int index);
