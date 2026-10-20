@@ -62,6 +62,7 @@ set(KERNEL_SOURCES
     kernel/core/power.c              # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code)
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
+    kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/time/rtc.c
     kernel/time/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
     kernel/graphics/gfx_clip.c  # clipping state and safe clip-box intersection

@@ -28,4 +28,10 @@ int mouse_poll(MouseState *out);
 
 int mouse_present(void);
 
+/* Which back-ends found a device: MOUSE_SRC_* bits (used by the Device Manager). */
+#define MOUSE_SRC_PS2 1
+#define MOUSE_SRC_USB 2
+#define MOUSE_SRC_I2C 4
+int mouse_sources(void);
+
 #endif

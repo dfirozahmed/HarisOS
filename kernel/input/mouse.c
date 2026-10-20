@@ -175,6 +175,8 @@ int mouse_init(int w, int h)
 
 int mouse_present(void) { return PRESENT || USB_OK || I2C_OK; }
 
+int mouse_sources(void) { return (PRESENT ? MOUSE_SRC_PS2 : 0) | (USB_OK ? MOUSE_SRC_USB : 0) | (I2C_OK ? MOUSE_SRC_I2C : 0); }
+
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 /* Turn pointer speed into a gentle acceleration: slow moves stay precise. */
@@ -249,6 +251,7 @@ int mouse_poll(MouseState *out)
 
 int mouse_init(int w, int h) { (void)w; (void)h; return -1; }
 int mouse_present(void) { return 0; }
+int mouse_sources(void) { return 0; }
 int mouse_poll(MouseState *out)
 {
     out->x = out->y = out->dx = out->dy = out->wheel = 0;

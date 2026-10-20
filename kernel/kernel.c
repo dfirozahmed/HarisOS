@@ -1,6 +1,8 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
 #include "bootinfo.h"
 #include "desktop.h"
+#include "devmgr.h"
+#include "pci.h"
 #include "acpi.h"
 #include "gfx.h"
 #include "keyboard.h"
@@ -54,11 +56,16 @@ void kernel_main(const BootInfo *info)
     desktop_set_double_buffered(double_buffered);
 
     /* keyboard: initialised before the mouse; if it does not answer we still poll it */
-    keyboard_init();
+    int kbd_ok = (keyboard_init() == 0);
 
     /* mouse: if there is none, the desktop simply stays non-interactive */
     int have_mouse = gfx_ready() && mouse_init((int)info->width, (int)info->height) == 0;
     desktop_set_mouse(have_mouse);
+
+    /* Device Manager list: PCI scan + what the input drivers found (after mouse_init). */
+    pci_scan();
+    DevmgrInputs dm_in = {kbd_ok, mouse_sources(), (mouse_sources() & MOUSE_SRC_USB) != 0};
+    devmgr_build(&dm_in);
 
     timer_init(); /* needed for double-click */
 
