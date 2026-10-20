@@ -102,7 +102,8 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
     gfx_fill_round_rect(r.x, r.y, r.w, tb + rad * 2 + (flat ? 1 : 0), rad, ui_color(t->titlebar));
     gfx_restore_clip(saved);
     gfx_hline(r.x, r.y + tb, r.w, ui_color(t->border));
-    gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
+    if (!flat) /* a maximized window fills the screen: no outline */
+        gfx_round_rect(r.x, r.y, r.w, r.h, rad, 1, ui_color(t->border));
 
     /* window buttons (close / minimize / maximize); the symbols show on the focused window */
     int cy = r.y + tb / 2;
@@ -131,6 +132,8 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
     UiRect tr = ui_rect(r.x + 80, r.y, r.w - 160 > 0 ? r.w - 160 : 0, tb);
     ui_text_in_color(tr, title, UI_TEXT_LABEL, UI_ALIGN_CENTER, active ? t->text : t->text_dim);
 
+    if (flat) /* no border to leave room for */
+        return ui_rect(r.x, r.y + tb + 1, r.w, r.h - tb - 1);
     return ui_rect(r.x + 1, r.y + tb + 1, r.w - 2, r.h - tb - 2);
 }
 
