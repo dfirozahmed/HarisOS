@@ -108,10 +108,18 @@ set(KERNEL_SOURCES
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c
     apps/app_registry.c             # list of installed apps (start menu reads it)
-    apps/explorer/explorer_app.c    # File Explorer app
+    apps/explorer/explorer_app.c      # File Explorer: AppInfo, open / close window
+    apps/explorer/explorer_state.c    # File Explorer: shared state
+    apps/explorer/explorer_util.c     # File Explorer: file kinds, size text
+    apps/explorer/explorer_nav.c      # File Explorer: folder, history, sort, layout, selection
+    apps/explorer/explorer_ops.c      # File Explorer: rename, new, clipboard, delete
+    apps/explorer/explorer_menu.c     # File Explorer: right-click and sort menus
+    apps/explorer/explorer_toolbar.c  # File Explorer: toolbar buttons and tooltips
+    apps/explorer/explorer_draw.c     # File Explorer: sidebar, list, status bar
+    apps/explorer/explorer_input.c    # File Explorer: mouse and keyboard
     apps/devmgr/devmgr_app.c)       # Device Manager app
 
-file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h)
+file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h ${CMAKE_SOURCE_DIR}/apps/explorer/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
 set(KERNEL_OBJS "")
 foreach(SRC ${KERNEL_SOURCES})

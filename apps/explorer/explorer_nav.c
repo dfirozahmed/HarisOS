@@ -1,0 +1,172 @@
+/* File Explorer: current folder, history, sorting, window layout and selection. */
+#include "explorer.h"
+
+void ex_update_nav_buttons(void)
+{
+    if (!EX_WIN)
+        return;
+    EX_WIN->btn[BTN_BACK].enabled = EX_HIST_N > 0;
+    EX_WIN->btn[BTN_FORWARD].enabled = EX_FWD_N > 0;
+    EX_WIN->btn[BTN_UP].enabled = EX_CUR != VFS_ROOT;
+}
+
+void ex_reload(void)
+{
+    int total = vfs_list_by(EX_CUR, EX_ITEMS, VFS_MAX_NODES, EX_SORT_KEY, EX_SORT_DESC);
+    EX_NITEMS = total < VFS_MAX_NODES ? total : VFS_MAX_NODES;
+    if (EX_SEL >= EX_NITEMS)
+        EX_SEL = EX_NITEMS - 1;
+    if (EX_SCROLL > EX_NITEMS - 1)
+        EX_SCROLL = EX_NITEMS > 0 ? EX_NITEMS - 1 : 0;
+    ex_update_nav_buttons();
+}
+
+void ex_go_to(int dir, int push)
+{
+    const VfsNode *n = vfs_node(dir);
+    if (!n || !n->is_dir || dir == EX_CUR)
+        return;
+    if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
+        ex_end_rename(0); /* leaving the folder: keep the old name if the new one is not usable */
+    if (push)
+    {
+        EX_FWD_N = 0; /* a new path ends the forward list */
+        if (EX_HIST_N == HIST_MAX)
+        {
+            for (int i = 1; i < HIST_MAX; i++)
+                EX_HIST[i - 1] = EX_HIST[i];
+            EX_HIST_N--;
+        }
+        EX_HIST[EX_HIST_N++] = EX_CUR;
+    }
+    EX_CUR = dir;
+    EX_SEL = -1;
+    EX_SCROLL = 0;
+    EX_LAST_ROW = -1;
+    EX_NOTE = 0;
+    ex_reload();
+    if (EX_NITEMS > 0)
+        EX_SEL = 0;
+}
+
+void ex_go_back(void)
+{
+    if (EX_HIST_N == 0)
+        return;
+    int dir = EX_HIST[--EX_HIST_N];
+    if (EX_FWD_N < HIST_MAX)
+        EX_FWD[EX_FWD_N++] = EX_CUR; /* so Forward can come back here */
+    if (!vfs_node(dir))
+    {
+        ex_update_nav_buttons();
+        return;
+    }
+    ex_go_to(dir, 0);
+}
+
+void ex_go_up(void)
+{
+    const VfsNode *n = vfs_node(EX_CUR);
+    if (!n || EX_CUR == VFS_ROOT)
+        return;
+    int from = EX_CUR;
+    ex_go_to(n->parent, 1);
+    for (int i = 0; i < EX_NITEMS; i++) /* select the folder we just left */
+        if (EX_ITEMS[i] == from)
+            EX_SEL = i;
+}
+
+void ex_open_item(int row)
+{
+    if (row < 0 || row >= EX_NITEMS)
+        return;
+    const VfsNode *n = vfs_node(EX_ITEMS[row]);
+    if (!n)
+        return;
+    if (n->is_dir)
+        ex_go_to(EX_ITEMS[row], 1);
+    else
+        EX_NOTE = "No app can open this file yet.";
+}
+
+void ex_go_forward(void)
+{
+    if (EX_FWD_N == 0)
+        return;
+    int dir = EX_FWD[--EX_FWD_N];
+    int keep = EX_FWD_N; /* a normal ex_go_to() forgets the forward list; this one must not */
+    if (vfs_node(dir))
+        ex_go_to(dir, 1);
+    EX_FWD_N = keep;
+    ex_update_nav_buttons();
+}
+
+Layout ex_layout(UiRect body)
+{
+    Layout l;
+    UiRect b = body;
+    l.toolbar = ui_cut_top(&b, TOOLBAR_H);
+    l.status = ui_cut_bottom(&b, STATUS_H);
+    l.side = ui_cut_left(&b, SIDE_W);
+    l.head = ui_cut_top(&b, HEAD_H);
+    l.list = b;
+    return l;
+}
+
+int ex_visible_rows(const Layout *l)
+{
+    int n = l->list.h / ROW_H;
+    return n < 1 ? 1 : n;
+}
+
+void ex_clamp_scroll(const Layout *l)
+{
+    int max_scroll = EX_NITEMS - ex_visible_rows(l);
+    if (max_scroll < 0)
+        max_scroll = 0;
+    if (EX_SCROLL > max_scroll)
+        EX_SCROLL = max_scroll;
+    if (EX_SCROLL < 0)
+        EX_SCROLL = 0;
+}
+
+void ex_select_row(UiRect body, int row)
+{
+    if (row < 0 || row >= EX_NITEMS)
+        return;
+    Layout l = ex_layout(body);
+    int vis = ex_visible_rows(&l);
+    EX_SEL = row;
+    EX_NOTE = 0;
+    if (row < EX_SCROLL)
+        EX_SCROLL = row;
+    if (row >= EX_SCROLL + vis)
+        EX_SCROLL = row - vis + 1;
+    ex_clamp_scroll(&l);
+}
+
+int ex_row_of(int id)
+{
+    for (int i = 0; i < EX_NITEMS; i++)
+        if (EX_ITEMS[i] == id)
+            return i;
+    return -1;
+}
+
+/* Change the order of the list; the selected entry stays selected (and in view). */
+void ex_set_sort(int key, int desc)
+{
+    if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
+        return;
+    int id = (EX_SEL >= 0 && EX_SEL < EX_NITEMS) ? EX_ITEMS[EX_SEL] : -1;
+    EX_SORT_KEY = key;
+    EX_SORT_DESC = desc;
+    ex_reload();
+    int row = ex_row_of(id);
+    if (row >= 0 && EX_WIN)
+        ex_select_row(wm_content(EX_WIN), row);
+    EX_LAST_ROW = -1;
+}
+
+int ex_place_id(int i) { return vfs_lookup(EX_PLACES[i].path); }
+
