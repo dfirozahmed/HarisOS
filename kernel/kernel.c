@@ -2,6 +2,7 @@
 #include "bootinfo.h"
 #include "desktop.h"
 #include "devmgr.h"
+#include "exfat.h"
 #include "fat32.h"
 #include "acpi.h"
 #include "gfx.h"
@@ -91,6 +92,7 @@ void kernel_main(const BootInfo *info)
     if (pmm_ok)
     {
         fat_set_clock(fat_clock); /* timestamps of files made or changed on a drive */
+        exfat_set_clock(fat_clock);
         volume_mount_all();       /* FAT32 drives found on the disks */
     }
 

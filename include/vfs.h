@@ -26,6 +26,8 @@
 #define VFS_ERR_BADNAME -6
 #define VFS_ERR_ARG -7
 #define VFS_ERR_UNSUPPORTED -8 /* e.g. copying between the RAM Disk and a drive */
+#define VFS_ERR_NOWRITE -9     /* the file system can only be read (NTFS, exFAT) */
+#define VFS_ERR_NOTREADABLE -10 /* a compressed or encrypted file */
 
 typedef struct
 {
@@ -55,17 +57,18 @@ typedef struct
     int lockable;           /* the user can lock / unlock it (vfs_set_locked) */
 } VfsVolInfo;
 
-/* A drive's file system code. Any function may be NULL for a read-only volume (then create is NULL too).
+/* A drive's file system code. `list` marks a real drive (the RAM Disk has none). A read-only file system
+ * leaves create / remove / rename / move / write NULL: the VFS then refuses changes with VFS_ERR_NOWRITE.
  * Functions return 0 / a byte count, or a negative VFS_ERR_* code. Nodes are passed as pointers into the
  * node table: `fs` holds the backend's locator and the backend updates it when an entry changes. */
 typedef struct VfsBackend
 {
     /* call vfs_attach() for every entry of folder node `dir` */
     int (*list)(void *ctx, int dir);
-    int (*create)(void *ctx, const VfsNode *parent, const char *name, int is_dir, unsigned char *fs_out);
+    int (*create)(void *ctx, VfsNode *parent, const char *name, int is_dir, unsigned char *fs_out); /* may update parent->fs (a folder that grew) */
     int (*remove)(void *ctx, const VfsNode *n); /* a file or an EMPTY folder */
     int (*rename)(void *ctx, VfsNode *n, const char *new_name);
-    int (*move)(void *ctx, VfsNode *n, const char *name, const VfsNode *new_parent);
+    int (*move)(void *ctx, VfsNode *n, const char *name, VfsNode *new_parent); /* updates n->fs and maybe new_parent->fs */
     int (*read)(void *ctx, const VfsNode *n, unsigned offset, void *buf, unsigned len);
     int (*write)(void *ctx, VfsNode *n, unsigned offset, const void *buf, unsigned len); /* updates n->size */
     void (*info)(void *ctx, VfsVolInfo *out);

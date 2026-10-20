@@ -188,6 +188,11 @@ void ex_paste(void);
 void ex_ask_delete(int row);
 int ex_delete_pending(void);                   /* the confirmation dialog is open */
 
+/* A drive that has a lock to show: one that can be locked (FAT32) or one that can only be read (NTFS, exFAT),
+ * which always looks locked. The RAM Disk has none. */
+#define EX_VOL_SHOWS_LOCK(vi) ((vi)->lockable || !(vi)->writable)
+#define EX_VOL_LOCKED(vi) ((vi)->locked || !(vi)->writable)
+
 /* ---- explorer_drive.c ------------------------------------------- */
 int ex_is_drive(const VfsNode *n);             /* a drive under This PC */
 int ex_cur_drive(VfsVolInfo *vi);              /* the drive the current folder is on; 0 at This PC */

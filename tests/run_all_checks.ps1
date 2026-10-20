@@ -23,6 +23,9 @@ try {
         @('Virtual file system tests', 'tests/run_vfs_tests.sh'),
         @('Block device and partition tests', 'tests/run_blk_tests.sh'),
         @('FAT32 tests', 'tests/run_fat32_tests.sh'),
+        @('exFAT tests', 'tests/run_exfat_tests.sh'),
+        @('exFAT write tests', 'tests/run_exfatw_tests.sh'),
+        @('NTFS tests', 'tests/run_ntfs_tests.sh'),
         @('Volume (drives in the VFS) tests', 'tests/run_volume_tests.sh')
     )
     $Total = $Tests.Count + 1

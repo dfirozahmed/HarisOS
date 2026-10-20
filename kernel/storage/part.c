@@ -47,9 +47,21 @@ static int is_zero16(const u8 *a)
     return 1;
 }
 
-/* Does sector 0 look like a FAT boot sector? (then the whole disk is one volume, not a partition table) */
+/* Does sector 0 look like the boot sector of a file system? (then the whole disk is one volume, not a partition
+ * table: the "partition entries" would be boot code). NTFS and exFAT say so in the name at byte 3; FAT has a
+ * jump and a plausible BPB. */
 static int looks_like_fat_boot(const u8 *s, unsigned sector_size)
 {
+    static const u8 NTFS[8] = {'N', 'T', 'F', 'S', ' ', ' ', ' ', ' '};
+    static const u8 EXFAT[8] = {'E', 'X', 'F', 'A', 'T', ' ', ' ', ' '};
+    int ntfs = 1, exfat = 1;
+    for (int i = 0; i < 8; i++)
+    {
+        ntfs &= s[3 + i] == NTFS[i];
+        exfat &= s[3 + i] == EXFAT[i];
+    }
+    if (ntfs || exfat)
+        return 1;
     if (s[0] != 0xEB && s[0] != 0xE9)
         return 0;
     u32 bps = le16(s + 11);

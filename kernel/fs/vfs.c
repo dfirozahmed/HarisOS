@@ -42,6 +42,10 @@ const char *vfs_error_text(int code)
         return "That cannot be done here.";
     case VFS_ERR_UNSUPPORTED:
         return "Copying between the RAM Disk and a drive is not supported.";
+    case VFS_ERR_NOTREADABLE:
+        return "This file is compressed or encrypted: HarisOS cannot read it yet.";
+    case VFS_ERR_NOWRITE:
+        return "HarisOS can only read this kind of drive (NTFS / exFAT), not change it.";
     default:
         return "That did not work.";
     }
@@ -153,7 +157,7 @@ static const VfsBackend *ops_of(int id)
     int v = NODES[id].vol;
     if (v < 0 || v >= NVOLS)
         return (const VfsBackend *)0;
-    return (VOLS[v].ops && VOLS[v].ops->create) ? VOLS[v].ops : (const VfsBackend *)0;
+    return (VOLS[v].ops && VOLS[v].ops->list) ? VOLS[v].ops : (const VfsBackend *)0;
 }
 
 static void *ctx_of(int id) { return VOLS[NODES[id].vol].ctx; }
@@ -273,7 +277,7 @@ int vfs_mount(const VfsBackend *ops, void *ctx, const char *name)
     VOLS[v].ctx = ctx;
     VOLS[v].root = id;
     NODES[id].vol = v;
-    NODES[id].loaded = !(ops && ops->create); /* a drive's root is read on first use */
+    NODES[id].loaded = !(ops && ops->list); /* a drive's root is read on first use */
     return v;
 }
 
@@ -319,10 +323,12 @@ int vfs_add(int parent, const char *name, int is_dir, unsigned size)
         ensure_loaded(parent);
         if (find_child(parent, name) >= 0)
             return fail(VFS_ERR_EXISTS);
+        if (!b->create)
+            return fail(VFS_ERR_NOWRITE);
         if (free_slot() < 0)
             return fail(VFS_ERR_FULL);
         unsigned char fs[VFS_FS_BYTES];
-        int r = b->create(ctx_of(parent), p, name, is_dir, fs);
+        int r = b->create(ctx_of(parent), &NODES[parent], name, is_dir, fs);
         if (r < 0)
             return fail(r);
         int id = new_node(parent, name, is_dir, 0, fs);
@@ -547,6 +553,8 @@ int vfs_rename(int id, const char *name)
         return fail(VFS_ERR_EXISTS);
     if (b)
     {
+        if (!b->rename)
+            return fail(VFS_ERR_NOWRITE);
         int r = b->rename(ctx_of(id), &NODES[id], name);
         if (r < 0)
             return fail(r);
@@ -614,6 +622,8 @@ int vfs_remove(int id)
         return fail(VFS_ERR_ARG);
     if (!ops_of(id))
         return remove_in_memory(id);
+    if (!ops_of(id)->remove)
+        return fail(VFS_ERR_NOWRITE);
     batch(id, 1);
     int r = remove_on_drive(id);
     batch(id, 0);
@@ -769,6 +779,8 @@ int vfs_copy(int id, int dest)
         unique_name(dest, n->name, n->is_dir, name);
         return copy_tree(id, dest, name);
     }
+    if (!db->create || !db->write || !sb->read) /* to a read-only drive; or from a drive that cannot be read */
+        return fail(!sb->read ? VFS_ERR_UNSUPPORTED : VFS_ERR_NOWRITE);
     ensure_loaded(dest);
     VfsVolInfo info;
     vfs_volume_info(NODES[dest].vol, &info);
@@ -804,12 +816,14 @@ int vfs_move(int id, int dest)
         NODES[id].vol = NODES[dest].vol;
         return id;
     }
+    if (!sb->remove || !db->create) /* moving = copy + delete: both sides must be writable */
+        return fail(VFS_ERR_NOWRITE);
     ensure_loaded(dest);
     if (NODES[id].vol == NODES[dest].vol) /* same drive: only the folder entries change */
     {
         char name[VFS_NAME_MAX];
         unique_name(dest, n->name, n->is_dir, name);
-        int r = sb->move ? sb->move(ctx_of(id), &NODES[id], name, d) : VFS_ERR_UNSUPPORTED;
+        int r = sb->move ? sb->move(ctx_of(id), &NODES[id], name, &NODES[dest]) : VFS_ERR_UNSUPPORTED;
         if (r < 0)
             return fail(r);
         copy_name(NODES[id].name, name);

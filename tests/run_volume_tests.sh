@@ -9,6 +9,8 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/kernel/fs/vfs.c" \
   "$ROOT/kernel/fs/volume.c" \
   "$ROOT/kernel/fs/fat32.c" \
+  "$ROOT/kernel/fs/exfat.c" \
+  "$ROOT/kernel/fs/ntfs.c" \
   "$ROOT/kernel/storage/blk.c" \
   "$ROOT/kernel/storage/part.c" \
   -o "$OUT"

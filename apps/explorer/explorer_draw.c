@@ -144,7 +144,7 @@ static void draw_sidebar(const Layout *l, const UiTheme *t)
             ex_draw_drive_icon(r.x + 22, r.y + r.h / 2, 20); /* This PC */
         else
             ex_draw_drive_icon(r.x + 22, r.y + r.h / 2, 20);
-        int right = (drive && vi.lockable) ? 22 : 0; /* room for the padlock */
+        int right = (drive && EX_VOL_SHOWS_LOCK(&vi)) ? 22 : 0; /* room for the padlock */
         const char *label = id == VFS_ROOT ? "This PC" : vfs_node(id)->name;
         char base[VFS_NAME_MAX], sub[VFS_NAME_MAX];
         split_drive_name(label, base, sub, VFS_NAME_MAX);
@@ -158,7 +158,7 @@ static void draw_sidebar(const Layout *l, const UiTheme *t)
         else
             ui_text_in_color(ui_rect(r.x + 42, r.y, r.w - 46 - right, r.h), label, st_main, UI_ALIGN_LEFT, c_main);
         if (right)
-            ex_draw_lock_icon(r.x + r.w - 14, r.y + r.h / 2, 13, vi.locked, vi.locked ? t->warning : t->success);
+            ex_draw_lock_icon(r.x + r.w - 14, r.y + r.h / 2, 13, EX_VOL_LOCKED(&vi), EX_VOL_LOCKED(&vi) ? t->warning : t->success);
     }
 
     /* the drive the current folder is on: how full it is */
@@ -241,8 +241,8 @@ static void draw_drive_row(const VfsNode *n, UiRect r, int sel, int type_x, int 
     free_text(&vi, fr, sizeof fr, 0);
     if (fr[0])
         ui_text_in_color(ui_rect(size_x - 30, r.y, SIZE_COL_W + 6, r.h), fr, UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
-    if (vi.lockable)
-        ex_draw_lock_icon(r.x + r.w - 10, r.y + r.h / 2, 13, vi.locked, vi.locked ? t->warning : t->success);
+    if (EX_VOL_SHOWS_LOCK(&vi))
+        ex_draw_lock_icon(r.x + r.w - 10, r.y + r.h / 2, 13, EX_VOL_LOCKED(&vi), EX_VOL_LOCKED(&vi) ? t->warning : t->success);
 }
 
 static void draw_list(const Layout *l, const UiTheme *t)
@@ -390,11 +390,11 @@ static void draw_status(const Layout *l, const UiTheme *t)
     {
         VfsVolInfo vi;
         ex_cur_drive(&vi);
-        UiRgb c = vi.locked ? t->warning : t->success;
+        UiRgb c = EX_VOL_LOCKED(&vi) ? t->warning : t->success;
         gfx_fill_round_rect_alpha(pill.x, pill.y, pill.w, pill.h, pill.h / 2, ui_color(c), 38);
         gfx_round_rect_alpha(pill.x, pill.y, pill.w, pill.h, pill.h / 2, 1, ui_color(c), 150);
-        ex_draw_lock_icon(pill.x + 15, pill.y + pill.h / 2, 13, vi.locked, c);
-        ui_text_in_color(ui_rect(pill.x + 26, pill.y, pill.w - 30, pill.h), vi.locked ? "Read-only" : "Writable", UI_TEXT_SMALL,
+        ex_draw_lock_icon(pill.x + 15, pill.y + pill.h / 2, 13, EX_VOL_LOCKED(&vi), c);
+        ui_text_in_color(ui_rect(pill.x + 26, pill.y, pill.w - 30, pill.h), EX_VOL_LOCKED(&vi) ? "Read-only" : "Writable", UI_TEXT_SMALL,
                          UI_ALIGN_LEFT, c);
         rx = pill.x - 12;
     }

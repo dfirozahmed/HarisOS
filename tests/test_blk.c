@@ -187,6 +187,14 @@ int main(void)
     DISK[510] = 0x55; DISK[511] = 0xAA;
     DISK[446 + 4] = 0x0B; put32(DISK + 446 + 8, 100); put32(DISK + 446 + 12, 100); /* boot code garbage that looks like an entry */
     CHECK(part_scan(d0) == 0);
+    /* the same for NTFS and exFAT, which are recognised by the name at byte 3 */
+    fresh_disk(50000); d0 = add_disk("sata0");
+    memcpy(DISK + 3, "NTFS    ", 8);
+    DISK[510] = 0x55; DISK[511] = 0xAA;
+    DISK[446 + 4] = 0x07; put32(DISK + 446 + 8, 100); put32(DISK + 446 + 12, 100);
+    CHECK(part_scan(d0) == 0);
+    memcpy(DISK + 3, "EXFAT   ", 8);
+    CHECK(part_scan(d0) == 0);
     fresh_disk(50000); d0 = add_disk("sata0");                          /* an empty disk */
     CHECK(part_scan(d0) == 0);
 

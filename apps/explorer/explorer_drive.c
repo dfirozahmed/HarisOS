@@ -22,6 +22,11 @@ int ex_check_writable(void)
         return 0;
     }
     VfsVolInfo vi;
+    if (ex_cur_drive(&vi) && !vi.writable)
+    {
+        EX_NOTE = vfs_error_text(VFS_ERR_NOWRITE); /* NTFS / exFAT: read only for good */
+        return 0;
+    }
     if (ex_cur_drive(&vi) && vi.lockable && vi.locked)
     {
         EX_NOTE = vfs_error_text(VFS_ERR_RO);
@@ -36,7 +41,7 @@ void ex_note_error(void) { EX_NOTE = vfs_error_text(vfs_last_error()); }
 int ex_lock_rect(const Layout *l, UiRect *r)
 {
     VfsVolInfo vi;
-    if (!ex_cur_drive(&vi) || !vi.lockable || l->status.w < 300)
+    if (!ex_cur_drive(&vi) || !EX_VOL_SHOWS_LOCK(&vi) || l->status.w < 300)
         return 0;
     int w = 108;
     *r = ui_rect(l->status.x + l->status.w - 12 - w, l->status.y + 3, w, l->status.h - 6);
@@ -106,8 +111,14 @@ static void lock_close(Window *w)
 void ex_toggle_lock(void)
 {
     VfsVolInfo vi;
-    if (!EX_WIN || LOCK_WIN || !ex_cur_drive(&vi) || !vi.lockable)
+    if (!EX_WIN || LOCK_WIN || !ex_cur_drive(&vi))
         return;
+    if (!vi.lockable) /* a read-only file system: the lock cannot be opened, say why */
+    {
+        if (!vi.writable)
+            EX_NOTE = vfs_error_text(VFS_ERR_NOWRITE);
+        return;
+    }
     if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
         return;
     LOCK_VOL = vfs_volume_of(EX_CUR);
