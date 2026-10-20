@@ -21,8 +21,10 @@ static struct
     unsigned max_in;           /* wMaxInputLength */
     unsigned cmd_reg;
     volatile unsigned *gpio;   /* pad register of the interrupt pin, 0 = unknown */
-    int gpio_low, gpio_miss;
-    unsigned long long last, last_full;
+    int gpio_active;           /* pin level while the device has data */
+    int have_prev;
+    unsigned prev_len;
+    unsigned long long last;
     unsigned spin, errs;
     int dx, dy, wheel;
     unsigned buttons;
@@ -30,6 +32,10 @@ static struct
 
 static unsigned char RDESC[RDESC_MAX];
 static unsigned char RBUF[MAX_INPUT];
+static unsigned char PREV[MAX_INPUT];
+
+/* AMD GPIO pad register: bit 16 is the level of the pin */
+static int pin_level(volatile unsigned *p) { return (int)((*p >> 16) & 1); }
 
 static void udelay(unsigned us) /* a read of port 0x80 takes about 1 us */
 {
@@ -170,24 +176,8 @@ static int bring_up(const AmlI2cHid *c)
     S.max_in = le16(d + 10) > MAX_INPUT ? MAX_INPUT : le16(d + 10);
     S.cmd_reg = le16(d + 16);
 
-    send_cmd(0x00, 0x08); /* SET_POWER: on */
-    send_cmd(0x00, 0x01); /* RESET */
-    for (int i = 0; i < 50; i++) /* it answers with an empty report (length 0) when it is ready */
-    {
-        udelay(10000);
-        unsigned char b[2];
-        if (dw_i2c_xfer(&S.bus, 0, 0, b, 2) == 0 && b[0] == 0 && b[1] == 0)
-            break;
-    }
-
-    if (read_reg(rdreg, RDESC, rdlen))
-        return -1;
-    if (!hid_find_mouse(RDESC, rdlen, &S.mouse)) /* a touchscreen, or a pad without a mouse mode */
-        return -1;
-
-    /* interrupt line through the AMD GPIO controller, when we know how */
-    S.gpio = 0;
-    S.gpio_miss = 0;
+    /* The interrupt pin (AMD GPIO controller), looked up first so that it can be watched during the reset. */
+    volatile unsigned *pin = 0;
     if (c->has_gpio)
     {
         AmlDevice gd;
@@ -196,14 +186,52 @@ static int bring_up(const AmlI2cHid *c)
         {
             volatile unsigned *reg = (volatile unsigned *)(gd.base + 4ULL * c->gpio_pin);
             if (*reg != 0xFFFFFFFFu)
-            {
-                S.gpio = reg;
-                S.gpio_low = c->gpio_active_low;
-            }
+                pin = reg;
         }
     }
+
+    send_cmd(0x00, 0x08); /* SET_POWER: on */
+    int idle = 0, seen = 0;
+    if (pin)
+    {
+        dw_i2c_xfer(&S.bus, 0, 0, RBUF, S.max_in); /* empty whatever is pending */
+        udelay(2000);
+        idle = pin_level(pin);
+    }
+    send_cmd(0x00, 0x01); /* RESET */
+    for (int i = 0; pin && i < 400 && !seen; i++) /* the reset answer makes the device pull the line */
+    {
+        udelay(250);
+        seen = pin_level(pin) != idle;
+    }
+    for (int i = 0; i < 50; i++) /* it answers with an empty report (length 0) when it is ready */
+    {
+        udelay(10000);
+        unsigned char b[2];
+        if (dw_i2c_xfer(&S.bus, 0, 0, b, 2) == 0 && b[0] == 0 && b[1] == 0)
+            break;
+    }
+
+    /* The pin is only trusted if it was seen to change when the reset answer arrived and to come back
+     * once that was read. Its polarity is whatever it did then, not what the firmware says. */
+    S.gpio = 0;
+    if (pin && seen)
+    {
+        udelay(2000);
+        if (pin_level(pin) == idle)
+        {
+            S.gpio = pin;
+            S.gpio_active = !idle;
+        }
+    }
+
+    if (read_reg(rdreg, RDESC, rdlen))
+        return -1;
+    if (!hid_find_mouse(RDESC, rdlen, &S.mouse)) /* a touchscreen, or a pad without a mouse mode */
+        return -1;
     return 0;
 }
+
 
 int i2c_hid_init(void)
 {
@@ -223,21 +251,15 @@ int i2c_hid_init(void)
             S.dx = S.dy = S.wheel = 0;
             S.buttons = 0;
             S.errs = 0;
-            S.last = S.last_full = 0;
+            S.last = 0;
+            S.have_prev = 0;
             S.active = 1;
             return 0;
         }
     return -1;
 }
 
-/* the interrupt pin: is the touchpad holding data for us? (AMD pad register: bit 16 = pin level) */
-static int irq_asserted(void)
-{
-    int level = (int)((*S.gpio >> 16) & 1);
-    return S.gpio_low ? !level : level;
-}
-
-/* One report from the touchpad. Returns 1 if it carried data. */
+/* One report from the touchpad. Returns 1 if it was a new one. */
 static int read_report(void)
 {
     if (dw_i2c_xfer(&S.bus, 0, 0, RBUF, S.max_in))
@@ -249,7 +271,23 @@ static int read_report(void)
     S.errs = 0;
     unsigned len = le16(RBUF);
     if (len < 3 || len > S.max_in)
+    {
+        S.have_prev = 0; /* nothing there */
         return 0;
+    }
+
+    /* Many touchpads keep their last report and hand it out again when asked with nothing new
+     * pending. Acting on it would make the pointer run on by itself. */
+    int same = S.have_prev && S.prev_len == len;
+    for (unsigned i = 0; same && i < len; i++)
+        same = PREV[i] == RBUF[i];
+    for (unsigned i = 0; i < len; i++)
+        PREV[i] = RBUF[i];
+    S.prev_len = len;
+    S.have_prev = 1;
+    if (same && (!S.gpio || pin_level(S.gpio) == S.gpio_active)) /* the line still says "data" after we read it: stale */
+        return 0;
+
     unsigned at = 2;
     if (S.mouse.uses_ids)
     {
@@ -275,30 +313,20 @@ int i2c_hid_poll(int *dx, int *dy, int *wheel, unsigned *buttons)
         *buttons = 0;
         return 0;
     }
-    unsigned long long now = timer_ready() ? timer_ms() : 0;
-    int due = 0, sanity = 0;
+    int due;
     if (S.gpio)
-    {
-        due = irq_asserted();
-        if (!due && now - S.last_full >= 250) /* now and then ask anyway: is the pin reading right? */
-            due = sanity = 1;
-    }
+        due = pin_level(S.gpio) == S.gpio_active; /* read only when the device says it has something */
     else if (timer_ready())
+    {
+        unsigned long long now = timer_ms();
         due = now - S.last >= 8;
+        if (due)
+            S.last = now;
+    }
     else
         due = (++S.spin & 63) == 0;
-
     if (due)
-    {
-        S.last = now;
-        if (!S.gpio || sanity)
-            S.last_full = now;
-        int got = read_report();
-        if (sanity && got && ++S.gpio_miss >= 3)
-            S.gpio = 0; /* it had data while the pin said "nothing": do not trust the pin */
-        if (S.gpio && !sanity)
-            S.gpio_miss = 0;
-    }
+        read_report();
 
     *dx += S.dx;
     *dy += S.dy;
