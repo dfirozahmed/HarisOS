@@ -24,7 +24,7 @@ int main(void)
     CHECK(vfs_add(VFS_ROOT, "a/b", 0, 1) == -1);
     CHECK(vfs_add(a, "child", 0, 1) == -1);            /* parent is a file */
     CHECK(vfs_add(50, "x", 0, 1) == -1);               /* parent does not exist */
-    char longname[64];
+    char longname[VFS_NAME_MAX + 10];
     memset(longname, 'n', sizeof longname - 1);
     longname[sizeof longname - 1] = 0;
     CHECK(vfs_add(VFS_ROOT, longname, 0, 1) == -1);
@@ -121,11 +121,11 @@ int main(void)
     int c4 = vfs_copy(cd, cdst);                       /* the folder name is taken: "src (2)" */
     CHECK(c4 > 0 && strcmp(vfs_node(c4)->name, "src (2)") == 0);
 
-    CHECK(vfs_move(cf, cdst) == 0);                    /* same id, new place */
+    CHECK(vfs_move(cf, cdst) == cf);                   /* same id, new place */
     CHECK(vfs_node(cf)->parent == cdst && vfs_lookup("/dst/a.txt") == cf && vfs_lookup("/src/a.txt") == -1);
     int mf = vfs_add(cd, "a.txt", 0, 1);
-    CHECK(vfs_move(mf, cdst) == 0 && strcmp(vfs_node(mf)->name, "a (2).txt") == 0); /* clash: renamed */
-    CHECK(vfs_move(mf, cdst) == 0);                    /* already there: nothing changes */
+    CHECK(vfs_move(mf, cdst) == mf && strcmp(vfs_node(mf)->name, "a (2).txt") == 0); /* clash: renamed */
+    CHECK(vfs_move(mf, cdst) == mf);                   /* already there: nothing changes */
     CHECK(strcmp(vfs_node(mf)->name, "a (2).txt") == 0);
     CHECK(vfs_move(cd, cs) == -1 && vfs_move(cd, cd) == -1);   /* not into itself */
     CHECK(vfs_move(VFS_ROOT, cdst) == -1 && vfs_move(cf, mf) == -1);
@@ -167,8 +167,13 @@ int main(void)
 
     /* demo content */
     vfs_init();
-    CHECK(vfs_lookup("/System/EFI/BOOT/BOOTX64.EFI") > 0);
-    CHECK(vfs_lookup("/Documents/Projects/haris.c") > 0);
+    CHECK(vfs_lookup("/RAM Disk/System/EFI/BOOT/BOOTX64.EFI") > 0);
+    CHECK(vfs_lookup("/RAM Disk/Documents/Projects/haris.c") > 0);
+    CHECK(vfs_volume_count() == 1 && vfs_volume_node(0) == vfs_lookup("/RAM Disk"));
+    VfsVolInfo vi;
+    CHECK(vfs_volume_info(0, &vi) == 0 && strcmp(vi.fs_name, "RAM") == 0 && vi.node == vfs_volume_node(0));
+    CHECK(vfs_rename(vfs_volume_node(0), "x") == -1 && vfs_remove(vfs_volume_node(0)) == -1);  /* a drive stays */
+    CHECK(vfs_volume_of(vfs_lookup("/RAM Disk/Music/intro.wav")) == 0 && vfs_volume_of(VFS_ROOT) == -1);
     CHECK(vfs_count() < VFS_MAX_NODES);
 
     if (fails) { printf("%d check(s) failed\n", fails); return 1; }

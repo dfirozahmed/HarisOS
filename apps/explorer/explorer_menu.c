@@ -112,8 +112,7 @@ void ex_menu_run(int item)
         ex_new_item(0);
         break;
     case M_REFRESH:
-        ex_reload();
-        EX_NOTE = 0;
+        ex_refresh();
         break;
     case M_CUT:
         ex_clip_set(1);

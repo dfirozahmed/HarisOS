@@ -2,16 +2,36 @@
 #include "bootinfo.h"
 #include "desktop.h"
 #include "devmgr.h"
+#include "fat32.h"
 #include "acpi.h"
 #include "gfx.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "pci.h"
 #include "pmm.h"
 #include "power.h"
 #include "rtc.h"
+#include "storage.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "vfs.h"
+#include "volume.h"
+
+/* the clock for FAT timestamps: the CMOS clock, in FAT date / time format */
+static void fat_clock(unsigned *date, unsigned *time)
+{
+    RtcTime t;
+    if (rtc_read(&t) == 0)
+    {
+        *date = fat_make_date((unsigned)t.year, (unsigned)t.month, (unsigned)t.day);
+        *time = fat_make_time((unsigned)t.hour, (unsigned)t.minute, (unsigned)t.second);
+    }
+    else
+    {
+        *date = fat_make_date(1980, 1, 1);
+        *time = 0;
+    }
+}
 
 void kernel_main(const BootInfo *info)
 {
@@ -63,8 +83,16 @@ void kernel_main(const BootInfo *info)
     desktop_set_mouse(have_mouse);
 
     /* Device Manager list: PCI scan + what the input drivers found (after mouse_init). */
+    pci_scan();
+    if (pmm_ok)
+        storage_init(); /* NVMe and SATA disks, their partitions */
     devmgr_init(kbd_ok);
-    vfs_init(); /* RAM volume for the File Explorer */
+    vfs_init(); /* the RAM Disk for the File Explorer */
+    if (pmm_ok)
+    {
+        fat_set_clock(fat_clock); /* timestamps of files made or changed on a drive */
+        volume_mount_all();       /* FAT32 drives found on the disks */
+    }
 
     timer_init(); /* needed for double-click */
 

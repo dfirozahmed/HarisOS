@@ -25,6 +25,10 @@ int pci_scan(void);
 int pci_count(void);
 const PciDevice *pci_get(int index); /* NULL if out of range */
 
+/* Config space of a real device, for drivers (x86: the 0xCF8 / 0xCFC ports). offset is a multiple of 4. */
+unsigned int pci_cfg_read(unsigned bus, unsigned dev, unsigned fn, unsigned off);
+void pci_cfg_write(unsigned bus, unsigned dev, unsigned fn, unsigned off, unsigned int value);
+
 /* Human readable names; never NULL. Unknown ids give "Unknown ...". */
 const char *pci_class_name(unsigned char class_code, unsigned char subclass);
 const char *pci_vendor_name(unsigned short vendor_id);

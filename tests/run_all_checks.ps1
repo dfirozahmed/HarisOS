@@ -10,38 +10,32 @@ try {
         throw 'Bash was not found. Install Git for Windows or use MSYS2 UCRT64, then add bash.exe to PATH.'
     }
 
-    $GfxTest = Join-Path $Root 'tests/run_gfx_tests.sh'
-    $FontTest = Join-Path $Root 'tests/run_font_tests.sh'
-    $EditTest = Join-Path $Root 'tests/run_edit_tests.sh'
-    $WmTest = Join-Path $Root 'tests/run_wm_tests.sh'
-    $PowerTest = Join-Path $Root 'tests/run_power_tests.sh'
-    $I2cHidTest = Join-Path $Root 'tests/run_i2chid_tests.sh'
+    # host-side tests: (title, script). The block / FAT / volume tests read build/haris.img if it exists, so
+    # run a build first for the full check (the last step builds again, clean).
+    $Tests = @(
+        @('Graphics regression tests', 'tests/run_gfx_tests.sh'),
+        @('Font regression tests', 'tests/run_font_tests.sh'),
+        @('Text input tests', 'tests/run_edit_tests.sh'),
+        @('Window manager tests', 'tests/run_wm_tests.sh'),
+        @('Power tests', 'tests/run_power_tests.sh'),
+        @('I2C-HID discovery tests', 'tests/run_i2chid_tests.sh'),
+        @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),
+        @('Virtual file system tests', 'tests/run_vfs_tests.sh'),
+        @('Block device and partition tests', 'tests/run_blk_tests.sh'),
+        @('FAT32 tests', 'tests/run_fat32_tests.sh'),
+        @('Volume (drives in the VFS) tests', 'tests/run_volume_tests.sh')
+    )
+    $Total = $Tests.Count + 1
 
-    Write-Host "`n[1/7] Graphics regression tests" -ForegroundColor Yellow
-    & $Bash.Source $GfxTest
-    if ($LASTEXITCODE -ne 0) { throw "Graphics regression tests failed (exit $LASTEXITCODE)." }
+    $n = 0
+    foreach ($t in $Tests) {
+        $n++
+        Write-Host "`n[$n/$Total] $($t[0])" -ForegroundColor Yellow
+        & $Bash.Source (Join-Path $Root $t[1])
+        if ($LASTEXITCODE -ne 0) { throw "$($t[0]) failed (exit $LASTEXITCODE)." }
+    }
 
-    Write-Host "`n[2/7] Font regression tests" -ForegroundColor Yellow
-    & $Bash.Source $FontTest
-    if ($LASTEXITCODE -ne 0) { throw "Font regression tests failed (exit $LASTEXITCODE)." }
-
-    Write-Host "`n[3/7] Text input tests" -ForegroundColor Yellow
-    & $Bash.Source $EditTest
-    if ($LASTEXITCODE -ne 0) { throw "Text input tests failed (exit $LASTEXITCODE)." }
-
-    Write-Host "`n[4/7] Window resize tests" -ForegroundColor Yellow
-    & $Bash.Source $WmTest
-    if ($LASTEXITCODE -ne 0) { throw "Window resize tests failed (exit $LASTEXITCODE)." }
-
-    Write-Host "`n[5/7] Power tests" -ForegroundColor Yellow
-    & $Bash.Source $PowerTest
-    if ($LASTEXITCODE -ne 0) { throw "Power tests failed (exit $LASTEXITCODE)." }
-
-    Write-Host "`n[6/7] I2C-HID discovery tests" -ForegroundColor Yellow
-    & $Bash.Source $I2cHidTest
-    if ($LASTEXITCODE -ne 0) { throw "I2C-HID discovery tests failed (exit $LASTEXITCODE)." }
-
-    Write-Host "`n[7/7] UEFI build" -ForegroundColor Yellow
+    Write-Host "`n[$Total/$Total] UEFI build" -ForegroundColor Yellow
     $CMake = Get-Command cmake -ErrorAction SilentlyContinue
     if (-not $CMake) { throw 'CMake was not found. Install CMake and add it to PATH.' }
 

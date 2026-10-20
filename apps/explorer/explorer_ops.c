@@ -17,6 +17,13 @@ void ex_start_rename(int row)
         return;
     ex_select_row(wm_content(EX_WIN), row);
     EX_MENU.open = 0;
+    if (ex_is_drive(n))
+    {
+        EX_NOTE = "A drive cannot be renamed.";
+        return;
+    }
+    if (!ex_check_writable())
+        return;
     EX_RENAME_ID = EX_ITEMS[row];
     UiEdit *e = &EX_WIN->edits[0];
     ui_edit_clear(e);
@@ -48,7 +55,7 @@ int ex_end_rename(int commit)
     const VfsNode *n = vfs_node(id);
     if (commit && n && !ex_same_text(n->name, e->text) && vfs_rename(id, e->text) < 0)
     {
-        EX_NOTE = e->len == 0 ? "A name cannot be empty." : "That name is already used or not allowed.";
+        ex_note_error(); /* the field stays open so the name can be fixed */
         return 0;
     }
     EX_RENAME_ID = -1;
@@ -105,12 +112,14 @@ void ex_new_item(int is_dir)
 {
     if (!EX_WIN || (EX_RENAME_ID >= 0 && !ex_end_rename(1)))
         return;
+    if (!ex_check_writable())
+        return;
     char name[VFS_NAME_MAX];
     make_name(is_dir, name);
     int id = vfs_add(EX_CUR, name, is_dir, 0);
     if (id < 0)
     {
-        EX_NOTE = "The volume is full - delete something first.";
+        ex_note_error();
         return;
     }
     ex_reload();
@@ -122,6 +131,11 @@ void ex_clip_set(int cut)
 {
     if (EX_RENAME_ID >= 0 || EX_SEL < 0 || EX_SEL >= EX_NITEMS)
         return;
+    if (ex_is_drive(vfs_node(EX_ITEMS[EX_SEL])))
+    {
+        EX_NOTE = "A drive cannot be cut or copied.";
+        return;
+    }
     EX_CLIP_ID = EX_ITEMS[EX_SEL];
     EX_CLIP_CUT = cut;
     EX_NOTE = 0;
@@ -143,15 +157,18 @@ void ex_paste(void)
         EX_CLIP_ID = -1;
         return;
     }
+    if (!ex_check_writable())
+        return;
     if (vfs_is_under(EX_CUR, EX_CLIP_ID))
     {
         EX_NOTE = EX_CLIP_CUT ? "A folder cannot be moved into itself." : "A folder cannot be copied into itself.";
         return;
     }
-    int id = EX_CLIP_CUT ? EX_CLIP_ID : vfs_copy(EX_CLIP_ID, EX_CUR);
-    if (id < 0 || (EX_CLIP_CUT && vfs_move(EX_CLIP_ID, EX_CUR) < 0))
+    int id = EX_CLIP_CUT ? vfs_move(EX_CLIP_ID, EX_CUR) : vfs_copy(EX_CLIP_ID, EX_CUR);
+    if (id < 0)
     {
-        EX_NOTE = "There is not enough room on the volume.";
+        ex_note_error();
+        ex_reload(); /* a copy between drives may have been partly done and undone: show what is there */
         return;
     }
     if (EX_CLIP_CUT)
@@ -182,9 +199,11 @@ static void do_delete(void)
     EX_FWD_N = k;
     if (EX_CLIP_ID >= 0 && vfs_is_under(EX_CLIP_ID, id))
         EX_CLIP_ID = -1; /* its id may be reused by the next new entry */
-    vfs_remove(id);
+    int removed = vfs_remove(id);
     EX_LAST_ROW = -1;
     EX_NOTE = 0;
+    if (removed < 0)
+        ex_note_error(); /* some of it may be gone */
     ex_reload();
     EX_SEL = EX_NITEMS == 0 ? -1 : (row < EX_NITEMS ? row : EX_NITEMS - 1);
     if (EX_WIN && EX_SEL >= 0)
@@ -243,6 +262,13 @@ void ex_ask_delete(int row)
     if (!n)
         return;
     EX_MENU.open = 0;
+    if (ex_is_drive(n))
+    {
+        EX_NOTE = "A drive cannot be deleted.";
+        return;
+    }
+    if (!ex_check_writable())
+        return;
     int o = ex_put_str(DEL_TITLE, 0, sizeof DEL_TITLE, n->is_dir ? "Delete folder \"" : "Delete \"");
     o = ex_put_str(DEL_TITLE, o, sizeof DEL_TITLE, n->name);
     o = ex_put_str(DEL_TITLE, o, sizeof DEL_TITLE, "\"?");

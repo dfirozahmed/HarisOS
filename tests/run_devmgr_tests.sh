@@ -8,5 +8,6 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/tests/test_devmgr.c" \
   "$ROOT/kernel/core/devmgr.c" \
   "$ROOT/kernel/core/pci.c" \
+  "$ROOT/kernel/storage/blk.c" \
   -o "$OUT"
 "$OUT"

@@ -39,6 +39,18 @@ typedef struct {
 #define DEVMGR_MAX_I2C 8
 #define DEVMGR_MAX_USB_MICE 4
 
+#define DEVMGR_MAX_DISKS 12
+
+/* A disk the storage drivers found (copied from blk.h). */
+typedef struct {
+    char name[16];  /* "nvme0", "sata0" */
+    char model[48];
+    unsigned long long bytes;
+    int kind;       /* BLK_* from blk.h */
+    int parts;      /* partitions found on it */
+    int locked;     /* writing is locked */
+} DevmgrDisk;
+
 /* What the drivers reported at boot (filled by kernel.c). */
 typedef struct {
     int keyboard_ps2;
@@ -50,6 +62,9 @@ typedef struct {
     int usb_keyboards; /* USB keyboards attached right now */
     int i2c_count;
     DevmgrI2c i2c[DEVMGR_MAX_I2C];
+    int storage_running; /* the AHCI / NVMe drivers ran */
+    int disk_count;
+    DevmgrDisk disks[DEVMGR_MAX_DISKS];
 } DevmgrInputs;
 
 /* Rebuilds the list from pci_count()/pci_get() and the inputs. Returns the entry count. */

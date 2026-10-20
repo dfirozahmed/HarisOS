@@ -128,3 +128,24 @@ const char *pci_vendor_name(unsigned short v)
     default: return "Unknown vendor";
     }
 }
+
+/* ---- config space access for drivers --------------------------- */
+unsigned int pci_cfg_read(unsigned bus, unsigned dev, unsigned fn, unsigned off)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    return port_read(bus, dev, fn, off);
+#else
+    (void)bus; (void)dev; (void)fn; (void)off;
+    return 0xFFFFFFFFu;
+#endif
+}
+
+void pci_cfg_write(unsigned bus, unsigned dev, unsigned fn, unsigned off, unsigned int value)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    io_out32(0xCF8, 0x80000000u | (bus << 16) | (dev << 11) | (fn << 8) | (off & 0xFC));
+    io_out32(0xCFC, value);
+#else
+    (void)bus; (void)dev; (void)fn; (void)off; (void)value;
+#endif
+}

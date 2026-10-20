@@ -2,13 +2,6 @@
 #include "explorer.h"
 
 Window *EX_WIN;
-const Place EX_PLACES[PLACE_N] = {
-    {"This PC", "/"},
-    {"Documents", "/Documents"},
-    {"Pictures", "/Pictures"},
-    {"Music", "/Music"},
-    {"System", "/System"},
-};
 
 int EX_CUR = VFS_ROOT;
 int EX_ITEMS[VFS_MAX_NODES];

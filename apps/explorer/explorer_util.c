@@ -41,7 +41,7 @@ int ex_kind_of(const VfsNode *n)
 
 const char *ex_kind_name(int k)
 {
-    static const char *const NAMES[] = {"Folder", "Text file", "Source code", "Image", "Audio", "EFI program", "File"};
+    static const char *const NAMES[] = {"Folder", "Text file", "Source code", "Image", "Audio", "EFI program", "File", "Drive"};
     return NAMES[k];
 }
 
@@ -62,6 +62,28 @@ UiRgb ex_kind_color(int k)
     default:
         return ui_rgb(150, 160, 185);
     }
+}
+
+/* "812 B", "1.2 KB", "3.0 GB", "1.8 TB": binary units like Windows shows them, one decimal rounded down */
+void ex_fmt_size_big(unsigned long long bytes, char *out)
+{
+    static const char *const UNIT[] = {" B", " KB", " MB", " GB", " TB"};
+    int u = 0;
+    unsigned long long scaled = bytes, rest = 0;
+    while (scaled >= 1024 && u < 4)
+    {
+        rest = scaled % 1024;
+        scaled /= 1024;
+        u++;
+    }
+    int o = ex_put_uint(out, 0, (int)scaled);
+    if (u > 0)
+    {
+        out[o++] = '.';
+        out[o++] = (char)('0' + rest * 10 / 1024);
+    }
+    o = ex_put_str(out, o, 24, UNIT[u]);
+    out[o] = 0;
 }
 
 /* "812 B", "1.2 KB", "3.0 MB" (one decimal, rounded down) */

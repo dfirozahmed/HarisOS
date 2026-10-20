@@ -63,6 +63,13 @@ set(KERNEL_SOURCES
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code)
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
+    kernel/storage/blk.c             # block devices: sector I/O and the write lock
+    kernel/storage/part.c            # partition tables (GPT, MBR)
+    kernel/storage/ahci.c            # SATA SSD / hard disk driver (AHCI)
+    kernel/storage/nvme.c            # NVMe SSD driver
+    kernel/storage/storage.c         # starts the drivers
+    kernel/fs/fat32.c                # FAT32 file system
+    kernel/fs/volume.c               # puts FAT32 volumes into the virtual file system
     kernel/core/devmgr_sys.c         # Device Manager glue: asks PCI and the drivers
     kernel/fs/vfs.c                  # in-memory file system (File Explorer)
     kernel/time/rtc.c
@@ -113,6 +120,7 @@ set(KERNEL_SOURCES
     apps/explorer/explorer_util.c     # File Explorer: file kinds, size text
     apps/explorer/explorer_nav.c      # File Explorer: folder, history, sort, layout, selection
     apps/explorer/explorer_ops.c      # File Explorer: rename, new, clipboard, delete
+    apps/explorer/explorer_drive.c    # File Explorer: drives, lock, error messages
     apps/explorer/explorer_menu.c     # File Explorer: right-click and sort menus
     apps/explorer/explorer_toolbar.c  # File Explorer: toolbar buttons and tooltips
     apps/explorer/explorer_draw.c     # File Explorer: sidebar, list, status bar

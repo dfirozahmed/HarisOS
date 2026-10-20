@@ -53,8 +53,7 @@ static void on_refresh(UiButton *b, void *user)
 {
     (void)b;
     (void)user;
-    ex_reload();
-    EX_NOTE = 0;
+    ex_refresh();
 }
 
 static void on_cut(UiButton *b, void *user)
@@ -155,15 +154,16 @@ void ex_sync_buttons(void)
     if (!EX_WIN)
         return;
     int idle = EX_RENAME_ID < 0;
-    int has = EX_SEL >= 0 && EX_SEL < EX_NITEMS;
+    int has = EX_SEL >= 0 && EX_SEL < EX_NITEMS && !ex_is_drive(vfs_node(EX_ITEMS[EX_SEL])); /* a drive cannot be cut, renamed ... */
+    int inside = EX_CUR != VFS_ROOT;                                                       /* nothing is created in This PC */
     EX_WIN->btn[BTN_REFRESH].enabled = idle;
-    EX_WIN->btn[BTN_NEW_FOLDER].enabled = idle;
-    EX_WIN->btn[BTN_NEW_FILE].enabled = idle;
+    EX_WIN->btn[BTN_NEW_FOLDER].enabled = idle && inside;
+    EX_WIN->btn[BTN_NEW_FILE].enabled = idle && inside;
     EX_WIN->btn[BTN_CUT].enabled = idle && has;
     EX_WIN->btn[BTN_COPY].enabled = idle && has;
-    EX_WIN->btn[BTN_PASTE].enabled = idle && vfs_node(EX_CLIP_ID) != 0;
+    EX_WIN->btn[BTN_PASTE].enabled = idle && inside && vfs_node(EX_CLIP_ID) != 0;
     EX_WIN->btn[BTN_RENAME].enabled = idle && has;
-    EX_WIN->btn[BTN_DELETE].enabled = idle && has && !ex_delete_pending();
+    EX_WIN->btn[BTN_DELETE].enabled = idle && has && !ex_delete_pending() && !ex_lock_dialog_pending();
     EX_WIN->btn[BTN_SORT].enabled = idle;
     ex_update_nav_buttons();
 }

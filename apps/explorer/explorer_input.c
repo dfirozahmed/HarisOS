@@ -31,10 +31,16 @@ int ex_press(Window *w, int x, int y)
         l = ex_layout(body);
     }
 
+    UiRect pill;
+    if (ex_lock_rect(&l, &pill) && ui_contains(pill, x, y)) /* the lock in the status bar */
+    {
+        ex_toggle_lock();
+        return 1;
+    }
     if (ui_contains(l.side, x, y))
     {
         int row = (y - (l.side.y + 32)) / (PLACE_H + 2);
-        if (y >= l.side.y + 32 && row >= 0 && row < PLACE_N && ex_place_id(row) >= 0)
+        if (y >= l.side.y + 32 && row >= 0 && row < ex_place_count() && ex_place_id(row) >= 0)
         {
             ex_go_to(ex_place_id(row), 1);
             return 1;
@@ -139,7 +145,7 @@ int ex_hover(Window *w, int x, int y)
         else if (ui_contains(l.side, x, y) && y >= l.side.y + 32)
         {
             int p = (y - (l.side.y + 32)) / (PLACE_H + 2);
-            EX_HOVER_PLACE = p < PLACE_N ? p : -1;
+            EX_HOVER_PLACE = p < ex_place_count() ? p : -1;
         }
     }
     return old_row != EX_HOVER_ROW || old_place != EX_HOVER_PLACE || old_menu != EX_MENU.hover || was_shown != EX_TIP_SHOWN;
@@ -224,8 +230,7 @@ void ex_key(Window *w, const KeyEvent *k)
     switch (k->key)
     {
     case KEY_F5:
-        ex_reload();
-        EX_NOTE = 0;
+        ex_refresh();
         return;
     case KEY_F2:
         ex_start_rename(EX_SEL);
@@ -248,6 +253,11 @@ void ex_key(Window *w, const KeyEvent *k)
             ex_paste();
         else
             ex_clip_set(k->key == 'x');
+        return;
+    }
+    if ((k->mods & KMOD_CTRL) && !(k->mods & (KMOD_SHIFT | KMOD_ALT)) && k->key == 'l') /* the drive's lock */
+    {
+        ex_toggle_lock();
         return;
     }
     if ((k->mods & KMOD_CTRL) && (k->mods & KMOD_SHIFT) && k->key == 'n')

@@ -10,6 +10,15 @@ void ex_update_nav_buttons(void)
     EX_WIN->btn[BTN_UP].enabled = EX_CUR != VFS_ROOT;
 }
 
+static void note_for_folder(void)
+{
+    const VfsNode *cur = vfs_node(EX_CUR);
+    if (cur && !cur->loaded)
+        EX_NOTE = "This folder could not be read.";
+    else if (cur && cur->truncated)
+        EX_NOTE = "This folder has more items than can be shown here.";
+}
+
 void ex_reload(void)
 {
     int total = vfs_list_by(EX_CUR, EX_ITEMS, VFS_MAX_NODES, EX_SORT_KEY, EX_SORT_DESC);
@@ -19,6 +28,23 @@ void ex_reload(void)
     if (EX_SCROLL > EX_NITEMS - 1)
         EX_SCROLL = EX_NITEMS > 0 ? EX_NITEMS - 1 : 0;
     ex_update_nav_buttons();
+}
+
+/* ask the drive again (changed entries show up), then list */
+void ex_refresh(void)
+{
+    if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
+        return;
+    int id = (EX_SEL >= 0 && EX_SEL < EX_NITEMS) ? EX_ITEMS[EX_SEL] : -1;
+    EX_NOTE = 0;
+    vfs_refresh(EX_CUR);
+    ex_reload();
+    note_for_folder();
+    int row = ex_row_of(id);
+    if (row >= 0)
+        EX_SEL = row;
+    else if (EX_SEL >= EX_NITEMS)
+        EX_SEL = EX_NITEMS - 1;
 }
 
 void ex_go_to(int dir, int push)
@@ -45,6 +71,7 @@ void ex_go_to(int dir, int push)
     EX_LAST_ROW = -1;
     EX_NOTE = 0;
     ex_reload();
+    note_for_folder();
     if (EX_NITEMS > 0)
         EX_SEL = 0;
 }
@@ -168,5 +195,11 @@ void ex_set_sort(int key, int desc)
     EX_LAST_ROW = -1;
 }
 
-int ex_place_id(int i) { return vfs_lookup(EX_PLACES[i].path); }
+int ex_place_count(void)
+{
+    int n = 1 + vfs_volume_count();
+    return n < PLACE_MAX ? n : PLACE_MAX;
+}
+
+int ex_place_id(int i) { return i == 0 ? VFS_ROOT : vfs_volume_node(i - 1); }
 

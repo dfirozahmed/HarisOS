@@ -6,6 +6,7 @@
  *   explorer_util.c     file kinds, size text, small string helpers
  *   explorer_nav.c      current folder, history, sorting, layout of the window, selection
  *   explorer_ops.c      rename, new folder / file, clipboard (cut / copy / paste), delete with its dialog
+ *   explorer_drive.c    drives: the write lock, drive information, VFS error messages
  *   explorer_menu.c     the right-click menu and the sort menu
  *   explorer_toolbar.c  toolbar buttons, their tooltips, path bar
  *   explorer_draw.c     icons, sidebar, file list, status bar, the window's draw function
@@ -75,7 +76,8 @@ enum
     FK_IMAGE,
     FK_AUDIO,
     FK_EFI,
-    FK_OTHER
+    FK_OTHER,
+    FK_DRIVE /* a drive under This PC */
 };
 
 /* ---- window layout --------------------------------------------- */
@@ -90,12 +92,7 @@ typedef struct
     int show_type, type_x, size_x;
 } Cols;
 
-typedef struct
-{
-    const char *label;
-    const char *path;
-} Place;
-#define PLACE_N 5 /* entries of EX_PLACES */
+#define PLACE_MAX (VFS_MAX_VOLUMES + 1) /* sidebar entries: This PC and the drives */
 
 /* ---- right-click menu: a small panel drawn inside the window ---- */
 enum
@@ -129,7 +126,6 @@ typedef struct
 
 /* ---- shared state (explorer_state.c) ---------------------------- */
 extern Window *EX_WIN;
-extern const Place EX_PLACES[PLACE_N];
 extern int EX_CUR;                 /* folder being shown */
 extern int EX_ITEMS[VFS_MAX_NODES]; /* its children, in the sort order */
 extern int EX_NITEMS;
@@ -160,13 +156,15 @@ int ex_kind_of(const VfsNode *n);
 const char *ex_kind_name(int kind);
 UiRgb ex_kind_color(int kind);
 void ex_fmt_size(unsigned bytes, char *out);   /* "812 B", "1.2 KB", "3.0 MB" */
+void ex_fmt_size_big(unsigned long long bytes, char *out); /* the same up to "1.8 TB" (for drives) */
 int ex_put_uint(char *out, int o, int v);      /* append a number at out[o]; returns the new length */
 int ex_put_str(char *out, int o, int cap, const char *s);
 int ex_same_text(const char *a, const char *b);
 
 /* ---- explorer_nav.c --------------------------------------------- */
 void ex_update_nav_buttons(void);
-void ex_reload(void);                          /* read the current folder again (in the sort order) */
+void ex_reload(void);                          /* list the current folder again (in the sort order) */
+void ex_refresh(void);                         /* ... after asking the drive again */
 void ex_go_to(int dir, int push);
 void ex_go_back(void);
 void ex_go_forward(void);
@@ -174,7 +172,8 @@ void ex_go_up(void);
 void ex_open_item(int row);                    /* folder: go in; file: no app yet */
 void ex_set_sort(int key, int desc);
 int ex_row_of(int id);                         /* row of a node in the list, -1 if not shown */
-int ex_place_id(int i);                        /* node of a sidebar place, -1 if it does not exist */
+int ex_place_count(void);                      /* This PC + the drives */
+int ex_place_id(int i);                        /* node of a sidebar place (0 = This PC, then the drives), -1 if none */
 Layout ex_layout(UiRect body);
 int ex_visible_rows(const Layout *l);
 void ex_clamp_scroll(const Layout *l);
@@ -188,6 +187,15 @@ void ex_clip_set(int cut);
 void ex_paste(void);
 void ex_ask_delete(int row);
 int ex_delete_pending(void);                   /* the confirmation dialog is open */
+
+/* ---- explorer_drive.c ------------------------------------------- */
+int ex_is_drive(const VfsNode *n);             /* a drive under This PC */
+int ex_cur_drive(VfsVolInfo *vi);              /* the drive the current folder is on; 0 at This PC */
+void ex_note_error(void);                      /* show why the last VFS call failed */
+int ex_check_writable(void);                   /* 1 if the current folder can be changed; else shows why and gives 0 */
+int ex_lock_rect(const Layout *l, UiRect *r);  /* the Read-only / Writable pill in the status bar; 0 if none */
+void ex_toggle_lock(void);                     /* lock the drive, or ask before unlocking it */
+int ex_lock_dialog_pending(void);
 
 /* ---- explorer_menu.c -------------------------------------------- */
 void ex_menu_open(int x, int y, int kind);
@@ -205,6 +213,8 @@ int ex_tick(Window *w);
 
 /* ---- explorer_draw.c -------------------------------------------- */
 void ex_draw_folder_icon(int cx, int cy, int size);
+void ex_draw_drive_icon(int cx, int cy, int size);
+void ex_draw_lock_icon(int cx, int cy, int size, int locked, UiRgb color);
 void ex_draw_icon(int cx, int cy, int size, int kind);
 Cols ex_columns(const Layout *l);
 void ex_draw(Window *w, UiRect body);

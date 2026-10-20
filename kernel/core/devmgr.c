@@ -1,4 +1,5 @@
 /* Device Manager list: turns the PCI table and the input driver results into DevEntry rows. */
+#include "blk.h"
 #include "devmgr.h"
 #include "mouse.h"
 #include "pci.h"
@@ -35,6 +36,27 @@ static void sb_dec(Sb *s, unsigned v)
     } while (v);
     while (n)
         sb_char(s, tmp[--n]);
+}
+
+/* "476.9 GB", "512 MB" ... from a byte count (1 GB = 10^9 bytes, like drive makers and Windows disk size) */
+static void sb_size(Sb *s, unsigned long long bytes)
+{
+    if (bytes >= 1000000000ULL * 1000) {
+        unsigned long long tenth = bytes / (100000000ULL * 1000);
+        sb_dec(s, (unsigned)(tenth / 10));
+        sb_char(s, '.');
+        sb_dec(s, (unsigned)(tenth % 10));
+        sb_str(s, " TB");
+    } else if (bytes >= 1000000000ULL) {
+        unsigned long long tenth = bytes / 100000000ULL;
+        sb_dec(s, (unsigned)(tenth / 10));
+        sb_char(s, '.');
+        sb_dec(s, (unsigned)(tenth % 10));
+        sb_str(s, " GB");
+    } else {
+        sb_dec(s, (unsigned)(bytes / 1000000ULL));
+        sb_str(s, " MB");
+    }
 }
 
 static void sb_hex(Sb *s, unsigned v, int digits)
@@ -95,8 +117,11 @@ int devmgr_build(const DevmgrInputs *in)
         sb_hex(&s, d->dev, 2);
         sb_char(&s, '.');
         sb_hex(&s, d->fn, 1);
-        /* Only xHCI (class 0C03, prog-if 0x30) has a HarisOS driver among PCI devices. */
+        /* xHCI (class 0C03, prog-if 0x30), AHCI (0106, prog-if 01) and NVMe (0108, prog-if 02) have a HarisOS driver. */
         int driver = in && in->usb_running && d->class_code == 0x0C && d->subclass == 0x03 && d->prog_if == 0x30;
+        if (in && in->storage_running && d->class_code == 0x01 &&
+            ((d->subclass == 0x06 && d->prog_if == 0x01) || (d->subclass == 0x08 && d->prog_if == 0x02)))
+            driver = 1;
         add(pci_category(d), pci_class_name(d->class_code, d->subclass), detail, driver);
     }
 
@@ -113,6 +138,24 @@ int devmgr_build(const DevmgrInputs *in)
                      !in->usb_mouse_rp[i]    ? "Boot protocol: 3-byte reports, no scroll wheel"
                      : in->usb_mouse_wheel[i] ? "Report protocol; scroll wheel: yes"
                                               : "Report protocol; scroll wheel: no");
+        }
+        for (int i = 0; i < in->disk_count && i < DEVMGR_MAX_DISKS; i++) {
+            const DevmgrDisk *k = &in->disks[i];
+            char name[40], detail[48], note[64];
+            Sb sn = {name, sizeof name, 0}, sd = {detail, sizeof detail, 0}, sf = {note, sizeof note, 0};
+            name[0] = detail[0] = note[0] = 0;
+            sb_str(&sn, blk_kind_name(k->kind));
+            sb_char(&sn, ' ');
+            sb_str(&sn, k->name);
+            sb_str(&sd, k->model[0] ? k->model : "(no model)");
+            sb_str(&sd, ", ");
+            sb_size(&sd, k->bytes);
+            sb_dec(&sf, (unsigned)k->parts);
+            sb_str(&sf, k->parts == 1 ? " partition; " : " partitions; ");
+            sb_str(&sf, k->locked ? "writing is locked" : "writing is unlocked");
+            DevEntry *e = add(DEV_CAT_STORAGE, name, detail, 1);
+            if (e)
+                copy(e->note, sizeof e->note, note);
         }
         for (int i = 0; i < in->usb_keyboards; i++)
             add(DEV_CAT_INPUT, "USB keyboard", "HID boot protocol (xHCI)", 1);
