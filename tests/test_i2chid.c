@@ -178,6 +178,29 @@ static void test_touchpad_mouse_collection(void)
     assert(!m.has_wheel);
 }
 
+/* A precision touchpad: Touch Pad collection with two Finger collections and a Device Mode feature. */
+static void test_touchpad_ptp(void)
+{
+    static const unsigned char D[] = {
+        0x05, 0x0D, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x05,             /* Digitizers / Touch Pad, ID 5 */
+        0x09, 0x22, 0xA1, 0x02, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, /* Finger 1 */
+        0x95, 0x01, 0x09, 0x42, 0x81, 0x02, 0xC0,                   /*   tip switch */
+        0x09, 0x22, 0xA1, 0x02, 0x09, 0x42, 0x81, 0x02, 0xC0,       /* Finger 2 */
+        0x85, 0x07, 0x09, 0x52, 0x75, 0x08, 0x95, 0x01, 0xB1, 0x02, /* ID 7, Feature: Device Mode */
+        0xC0};
+    HidTouchpad t;
+    assert(hid_find_touchpad(D, sizeof D, &t));
+    assert(t.is_ptp && t.fingers == 2 && t.has_mode && t.mode_report_id == 7);
+
+    /* the mouse-only descriptors above are not precision touchpads; garbage and truncation are safe */
+    static const unsigned char M[] = {0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0xC0, 0xC0};
+    assert(!hid_find_touchpad(M, sizeof M, &t) && !t.is_ptp && t.fingers == 0 && !t.has_mode);
+    assert(!hid_find_touchpad(D, 5, &t) && !hid_find_touchpad(D, 0, &t));
+    /* a finger-like usage on another page (vendor 0xFF00) must not count */
+    static const unsigned char V[] = {0x06, 0x00, 0xFF, 0x09, 0x22, 0xA1, 0x02, 0xC0};
+    assert(!hid_find_touchpad(V, sizeof V, &t) && t.fingers == 0);
+}
+
 /* Absolute X / Y (a touchscreen or a plain digitizer) is not a mouse. */
 static void test_absolute_is_not_a_mouse(void)
 {
@@ -270,6 +293,7 @@ int main(void)
     test_boot_mouse();
     test_touchpad_mouse_collection();
     test_absolute_is_not_a_mouse();
+    test_touchpad_ptp();
     test_acpi_walk();
     puts("i2c-hid tests passed");
     return 0;

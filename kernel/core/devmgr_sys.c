@@ -18,6 +18,12 @@ int devmgr_refresh(void)
     in.mouse_sources = mouse_sources();
     in.usb_running = (mouse_sources() & MOUSE_SRC_USB) != 0;
     usb_hid_counts(&in.usb_mice, &in.usb_keyboards);
+    for (int i = 0; i < DEVMGR_MAX_USB_MICE; i++)
+    {
+        in.usb_mouse_rp[i] = in.usb_mouse_wheel[i] = 0;
+        if (i < in.usb_mice)
+            usb_mouse_info(i, &in.usb_mouse_rp[i], &in.usb_mouse_wheel[i]);
+    }
     in.i2c_count = 0;
     for (int i = 0; i < i2c_hid_count() && in.i2c_count < DEVMGR_MAX_I2C; i++)
     {
@@ -30,6 +36,9 @@ int devmgr_refresh(void)
         for (int j = 0; j < 5; j++)
             d->ctrl[j] = hi.ctrl[j];
         d->started = hi.started;
+        d->has_wheel = hi.has_wheel;
+        d->ptp_fingers = hi.ptp_fingers;
+        d->ptp_mode = hi.ptp_mode;
         d->reason = i2c_hid_error_text(hi.error);
     }
     return devmgr_build(&in);

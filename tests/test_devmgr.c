@@ -29,7 +29,7 @@ static unsigned int fake(unsigned bus, unsigned dev, unsigned fn, unsigned off)
 int main(void)
 {
     pci_scan_with(fake);
-    DevmgrInputs in = {0};
+    static DevmgrInputs in; /* zeroed (static): it is large */
     in.keyboard_ps2 = 1;
     in.mouse_sources = MOUSE_SRC_PS2;
     in.usb_running = 1;
@@ -49,6 +49,16 @@ int main(void)
     CHECK(strcmp(devmgr_get(4)->name, "USB mouse") == 0);
     CHECK(devmgr_get(5) == NULL);
 
+    /* USB mouse remark: boot protocol has no wheel; report protocol says whether the descriptor has one */
+    CHECK(strcmp(devmgr_get(4)->note, "Boot protocol: 3-byte reports, no scroll wheel") == 0);
+    in.usb_mouse_rp[0] = 1;
+    devmgr_build(&in);
+    CHECK(strcmp(devmgr_get(4)->note, "Report protocol; scroll wheel: no") == 0);
+    in.usb_mouse_wheel[0] = 1;
+    devmgr_build(&in);
+    CHECK(strcmp(devmgr_get(4)->note, "Report protocol; scroll wheel: yes") == 0);
+    in.usb_mouse_rp[0] = in.usb_mouse_wheel[0] = 0;
+
     /* hot-plug: a second mouse and a keyboard appear -> more rows after a rebuild */
     in.usb_mice = 2;
     in.usb_keyboards = 1;
@@ -64,9 +74,9 @@ int main(void)
 
     /* I2C-HID: one started touchpad, one the firmware describes but the driver did not start */
     in.i2c_count = 2;
-    in.i2c[0] = (DevmgrI2c){0x2C, 400000, "I2CD", 1, 0};
+    in.i2c[0] = (DevmgrI2c){0x2C, 400000, "I2CD", 1, 0, 0, 0, 0};
     in.i2c[0].reason = "ignored when started";
-    in.i2c[1] = (DevmgrI2c){0x10, 100000, "", 0, "device gave no HID descriptor"};
+    in.i2c[1] = (DevmgrI2c){0x10, 100000, "", 0, 0, 0, 0, "device gave no HID descriptor"};
     CHECK(devmgr_build(&in) == 7);
     const DevEntry *t = devmgr_get(5);
     CHECK(strcmp(t->name, "I2C-HID touchpad") == 0 && t->has_driver && t->category == DEV_CAT_INPUT);
@@ -75,7 +85,22 @@ int main(void)
     CHECK(strcmp(t->name, "I2C-HID device") == 0 && !t->has_driver);
     CHECK(strcmp(t->detail, "I2C 0x10 on ?, 100 kHz") == 0);
     CHECK(strcmp(t->note, "device gave no HID descriptor") == 0);
-    CHECK(devmgr_get(5)->note[0] == 0);          /* started: no note */
+    CHECK(strcmp(devmgr_get(5)->note, "Mouse mode; no scroll wheel in its report") == 0); /* started: pointer remark, reason ignored */
+    in.i2c[0].has_wheel = 1;
+    devmgr_build(&in);
+    CHECK(strcmp(devmgr_get(5)->note, "Mouse mode; the report has a scroll wheel") == 0);
+    in.i2c[0].has_wheel = 0;
+    in.i2c[0].ptp_fingers = 5;                   /* precision pad without a wheel */
+    in.i2c[0].ptp_mode = 1;
+    devmgr_build(&in);
+    CHECK(strcmp(devmgr_get(5)->note, "No wheel; precision pad: 5 contacts, mode switch: yes") == 0);
+    in.i2c[0].ptp_mode = 0;
+    devmgr_build(&in);
+    CHECK(strcmp(devmgr_get(5)->note, "No wheel; precision pad: 5 contacts, mode switch: no") == 0);
+    in.i2c[0].has_wheel = 1;                     /* a wheel wins: the plain wheel message */
+    devmgr_build(&in);
+    CHECK(strcmp(devmgr_get(5)->note, "Mouse mode; the report has a scroll wheel") == 0);
+    in.i2c[0].has_wheel = in.i2c[0].ptp_fingers = 0;
     CHECK(devmgr_get(0)->note[0] == 0);          /* PCI: no note */
     in.i2c[1].reason = 0;                        /* unknown reason: empty note, no crash */
     devmgr_build(&in);

@@ -21,7 +21,7 @@ typedef struct {
     char name[40];   /* e.g. "USB controller" */
     char detail[48]; /* e.g. "Intel 8086:1237 at 00:1F.2" */
     int has_driver;  /* 1 = HarisOS drives this device */
-    char note[48];   /* why there is no driver, when known ("" = nothing to add) */
+    char note[64];   /* extra line for the details: why there is no driver, or a remark about the driver ("" = none) */
 } DevEntry;
 
 /* An I2C-HID device the firmware describes in ACPI (copied from i2c_hid_info()). */
@@ -30,10 +30,14 @@ typedef struct {
     unsigned speed; /* Hz */
     char ctrl[5];   /* ACPI name of the I2C controller */
     int started;    /* the driver is using it */
+    int has_wheel;  /* started device: its mouse report has a scroll wheel field */
+    int ptp_fingers; /* started device: contacts per report if a precision touchpad, else 0 */
+    int ptp_mode;    /* ... with a "Device Mode" feature (switch to precision mode) */
     const char *reason; /* why it did not start (static text; NULL or "" = unknown) */
 } DevmgrI2c;
 
 #define DEVMGR_MAX_I2C 8
+#define DEVMGR_MAX_USB_MICE 4
 
 /* What the drivers reported at boot (filled by kernel.c). */
 typedef struct {
@@ -41,6 +45,8 @@ typedef struct {
     int mouse_sources; /* MOUSE_SRC_PS2 bit (USB comes from the counts below, I2C from i2c[]) */
     int usb_running;   /* usb_init() succeeded */
     int usb_mice;      /* USB mice attached right now */
+    int usb_mouse_rp[DEVMGR_MAX_USB_MICE];    /* per mouse: 1 = report protocol, 0 = boot protocol */
+    int usb_mouse_wheel[DEVMGR_MAX_USB_MICE]; /* per mouse: its report has a scroll wheel */
     int usb_keyboards; /* USB keyboards attached right now */
     int i2c_count;
     DevmgrI2c i2c[DEVMGR_MAX_I2C];

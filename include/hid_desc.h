@@ -26,6 +26,20 @@ typedef struct
 /* Returns 1 and fills *m when the descriptor contains a usable mouse, else 0. */
 int hid_find_mouse(const unsigned char *desc, unsigned len, HidMouse *m);
 
+/* What the descriptor says about a Windows "precision touchpad" (Digitizers page, Touch Pad
+ * application collection). Many laptop pads have this next to their mouse collection and start in
+ * mouse mode; only the precision mode reports the fingers (needed for two-finger scrolling). */
+typedef struct
+{
+    int is_ptp;         /* a Touch Pad application collection exists */
+    int fingers;        /* Finger collections inside it = how many contacts one report carries */
+    int has_mode;       /* a Feature item "Device Mode" exists: the way to switch the pad to precision mode */
+    int mode_report_id; /* its report ID (0 = the descriptor has no IDs) */
+} HidTouchpad;
+
+/* Returns 1 and fills *t when a Touch Pad collection was found, else 0 (*t is still filled). */
+int hid_find_touchpad(const unsigned char *desc, unsigned len, HidTouchpad *t);
+
 /* Field of `size` bits (1..32) at bit offset `off` of data[0..len). Out-of-range bits read as 0. */
 long hid_value(const unsigned char *data, unsigned len, unsigned off, unsigned size, int is_signed);
 

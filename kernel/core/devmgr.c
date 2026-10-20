@@ -106,7 +106,14 @@ int devmgr_build(const DevmgrInputs *in)
         if (in->mouse_sources & MOUSE_SRC_PS2)
             add(DEV_CAT_INPUT, "PS/2 mouse", "i8042 aux port", 1);
         for (int i = 0; i < in->usb_mice; i++)
-            add(DEV_CAT_INPUT, "USB mouse", "HID boot protocol (xHCI)", 1);
+        {
+            DevEntry *e = add(DEV_CAT_INPUT, "USB mouse", "HID mouse (xHCI)", 1);
+            if (e && i < DEVMGR_MAX_USB_MICE)
+                copy(e->note, sizeof e->note,
+                     !in->usb_mouse_rp[i]    ? "Boot protocol: 3-byte reports, no scroll wheel"
+                     : in->usb_mouse_wheel[i] ? "Report protocol; scroll wheel: yes"
+                                              : "Report protocol; scroll wheel: no");
+        }
         for (int i = 0; i < in->usb_keyboards; i++)
             add(DEV_CAT_INPUT, "USB keyboard", "HID boot protocol (xHCI)", 1);
         /* I2C-HID devices from the ACPI tables; a started one is the touchpad in use */
@@ -126,6 +133,22 @@ int devmgr_build(const DevmgrInputs *in)
             DevEntry *e = add(DEV_CAT_INPUT, c->started ? "I2C-HID touchpad" : "I2C-HID device", detail, c->started);
             if (e && !c->started && c->reason)
                 copy(e->note, sizeof e->note, c->reason);
+            else if (e && c->started && !c->has_wheel && c->ptp_fingers > 0)
+            {
+                /* e.g. "No wheel; precision pad: 5 contacts, mode switch: yes" */
+                char note[64];
+                Sb n = {note, sizeof note, 0};
+                note[0] = 0;
+                sb_str(&n, "No wheel; precision pad: ");
+                sb_dec(&n, (unsigned)c->ptp_fingers);
+                sb_str(&n, " contacts, mode switch: ");
+                sb_str(&n, c->ptp_mode ? "yes" : "no");
+                copy(e->note, sizeof e->note, note);
+            }
+            else if (e && c->started)
+                copy(e->note, sizeof e->note,
+                     c->has_wheel ? "Mouse mode; the report has a scroll wheel"
+                                  : "Mouse mode; no scroll wheel in its report");
         }
     }
     return g_count;

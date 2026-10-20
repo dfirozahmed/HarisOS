@@ -28,4 +28,9 @@ int usb_kbd_pop(unsigned char report[8]);
 /* How many HID boot-protocol mice / keyboards are attached right now (for the Device Manager). */
 void usb_hid_counts(int *mice, int *keyboards);
 
+/* About the i-th attached mouse (0-based, same order as the Device Manager lists them):
+ * *report_protocol = 1 when its report descriptor was read (fields decoded from it), 0 = boot protocol
+ * (3-byte reports: no wheel); *has_wheel = 1 when the descriptor has a wheel. Returns -1 if no such mouse. */
+int usb_mouse_info(int index, int *report_protocol, int *has_wheel);
+
 #endif

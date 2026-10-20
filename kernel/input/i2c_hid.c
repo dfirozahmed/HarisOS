@@ -30,6 +30,7 @@ static struct
     unsigned buttons;
 } S;
 
+static HidTouchpad TP; /* precision-touchpad facts of the device brought up last */
 static unsigned char RDESC[RDESC_MAX];
 static unsigned char RBUF[MAX_INPUT];
 static unsigned char PREV[MAX_INPUT];
@@ -227,6 +228,7 @@ static int bring_up(const AmlI2cHid *c)
 
     if (read_reg(rdreg, RDESC, rdlen))
         return I2C_HID_ERR_RDESC_READ;
+    hid_find_touchpad(RDESC, rdlen, &TP); /* for the Device Manager: can this pad report fingers? */
     if (!hid_find_mouse(RDESC, rdlen, &S.mouse)) /* a touchscreen, or a pad without a mouse mode */
         return I2C_HID_ERR_NO_MOUSE;
     return I2C_HID_OK;
@@ -243,6 +245,7 @@ const char *i2c_hid_error_text(int error)
     case I2C_HID_ERR_NO_HID_DESC: return "device gave no HID descriptor";
     case I2C_HID_ERR_RDESC_READ: return "HID report descriptor unreadable";
     case I2C_HID_ERR_NO_MOUSE: return "no mouse mode (touchscreen?)";
+    case I2C_HID_NOT_TRIED: return "not tried: an earlier device already started";
     default: return "";
     }
 }
@@ -281,7 +284,9 @@ int i2c_hid_init(void)
         for (int j = 0; j < 5; j++)
             INFO[i].ctrl[j] = cand[i].ctrl[j];
         INFO[i].started = 0;
-        INFO[i].error = I2C_HID_OK;
+        INFO[i].error = I2C_HID_NOT_TRIED; /* replaced below when bring_up() actually runs on it */
+        INFO[i].has_wheel = 0;
+        INFO[i].ptp_fingers = INFO[i].ptp_mode = 0;
     }
     NINFO = nc;
     for (int i = 0; i < nc; i++)
@@ -291,6 +296,9 @@ int i2c_hid_init(void)
         if (err == I2C_HID_OK)
         {
             INFO[i].started = 1;
+            INFO[i].has_wheel = S.mouse.has_wheel;
+            INFO[i].ptp_fingers = TP.is_ptp ? TP.fingers : 0;
+            INFO[i].ptp_mode = TP.has_mode;
             S.dx = S.dy = S.wheel = 0;
             S.buttons = 0;
             S.errs = 0;

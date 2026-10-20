@@ -10,6 +10,7 @@
  * Address Device, read descriptors, and if it is a boot mouse: Configure Endpoint, then
  * queue one interrupt-IN transfer at a time and turn every report into dx/dy/buttons. */
 #include "usb.h"
+#include "hid_desc.h"
 #include "io.h"
 #include "pmm.h"
 #include "timer.h"
@@ -157,7 +158,12 @@ typedef struct
     Ring ring;
     volatile u8 *buf;
     u64 buf_phys;
+    int rp;       /* mouse in report protocol: reports are decoded with hm (the boot layout has no wheel) */
+    HidMouse hm;  /* where the buttons, X, Y and wheel sit in that report */
 } Hid;
+
+#define RDESC_MAX 1024 /* longest mouse report descriptor we read; longer = stay in boot protocol */
+static u8 RDESC[RDESC_MAX];
 
 static Hid HID[MAX_HID];
 
@@ -368,7 +374,28 @@ static void hid_event(Xhci *x, const Trb *e)
         {
             int resid = (int)(e->d2 & 0xFFFFFF);
             int len = h->rlen > resid ? h->rlen - resid : 0;
-            if (h->kind == KIND_MOUSE && len >= 3)
+            if (h->kind == KIND_MOUSE && h->rp)
+            {
+                /* report protocol: fields are where the report descriptor says (see hid_desc.h) */
+                u8 rep[64];
+                if (len > (int)sizeof rep)
+                    len = (int)sizeof rep;
+                for (int k = 0; k < len; k++)
+                    rep[k] = h->buf[k];
+                const HidMouse *m = &h->hm;
+                int at = m->uses_ids ? 1 : 0;
+                if (len > at && (!m->uses_ids || rep[0] == m->report_id))
+                {
+                    const u8 *data = rep + at;
+                    unsigned dlen = (unsigned)(len - at);
+                    MS.buttons = (unsigned)hid_value(data, dlen, m->btn_off, m->btn_n > 3 ? 3 : m->btn_n, 0);
+                    MS.dx += (int)hid_value(data, dlen, m->x_off, m->x_size, m->x_signed);
+                    MS.dy += (int)hid_value(data, dlen, m->y_off, m->y_size, m->y_signed);
+                    if (m->has_wheel)
+                        MS.wheel -= (int)hid_value(data, dlen, m->w_off, m->w_size, m->w_signed); /* HID: + = up */
+                }
+            }
+            else if (h->kind == KIND_MOUSE && len >= 3)
             {
                 MS.buttons = h->buf[0] & 7u;
                 MS.dx += (s8)h->buf[1];
@@ -742,9 +769,9 @@ static int bring_up(Xhci *x, const Loc *L)
     /* Look for boot-protocol keyboard / mouse interfaces (at most one of each kind). */
     struct
     {
-        int kind, iface, addr, mps, interval;
+        int kind, iface, addr, mps, interval, rdlen;
     } F[2];
-    int nf = 0, cur = -1, cur_kind = 0;
+    int nf = 0, cur = -1, cur_kind = 0, cur_rdlen = 0;
     for (u32 off = 0; off + 2 <= total && x->dma[off] >= 2; off += x->dma[off])
     {
         u8 len = x->dma[off], type = x->dma[off + 1];
@@ -754,12 +781,15 @@ static int bring_up(Xhci *x, const Loc *L)
         {
             cur = x->dma[off + 2];
             cur_kind = 0;
+            cur_rdlen = 0;
             if (x->dma[off + 5] == 3 && x->dma[off + 6] == 1)
                 cur_kind = x->dma[off + 7] == 1 ? KIND_KBD : (x->dma[off + 7] == 2 ? KIND_MOUSE : 0);
             for (int i = 0; i < nf; i++)
                 if (F[i].kind == cur_kind)
                     cur_kind = 0;
         }
+        else if (type == 0x21 && len >= 9 && cur_kind == KIND_MOUSE && x->dma[off + 6] == 0x22)
+            cur_rdlen = x->dma[off + 7] | (x->dma[off + 8] << 8); /* HID descriptor: length of the report descriptor */
         else if (type == 5 && len >= 7 && cur_kind && nf < 2) /* first endpoint of that interface */
         {
             if ((x->dma[off + 2] & 0x80) && (x->dma[off + 3] & 3) == 3 && (x->dma[off + 2] & 15)) /* interrupt IN */
@@ -769,6 +799,7 @@ static int bring_up(Xhci *x, const Loc *L)
                 F[nf].addr = x->dma[off + 2] & 15;
                 F[nf].mps = (x->dma[off + 4] | (x->dma[off + 5] << 8)) & 0x7FF;
                 F[nf].interval = x->dma[off + 6];
+                F[nf].rdlen = cur_rdlen;
                 if (F[nf].mps >= 3)
                     nf++;
                 cur_kind = 0;
@@ -835,8 +866,24 @@ static int bring_up(Xhci *x, const Loc *L)
         FAIL;
     }
     for (int i = 0; i < nh; i++)
-        if (control(x, (int)slot, &d->ep0, 0x21, 0x0B, 0, (u16)F[i].iface, 0, 0) == 6) /* SET_PROTOCOL: boot */
+    {
+        /* A mouse: try its report descriptor first. The boot report has only 3 bytes (buttons, X, Y), so a
+         * scroll wheel needs the report protocol. If the descriptor cannot be read or understood we stay in
+         * boot protocol exactly as before. Keyboards always use the boot protocol. */
+        hid[i]->rp = 0;
+        int rdlen = F[i].rdlen;
+        if (F[i].kind == KIND_MOUSE && rdlen >= 16 && rdlen <= RDESC_MAX &&
+            ctrl_ok(control(x, (int)slot, &d->ep0, 0x81, 6, 0x2200, (u16)F[i].iface, (u16)rdlen, 1))) /* GET_DESCRIPTOR: report */
+        {
+            for (int k = 0; k < rdlen; k++)
+                RDESC[k] = x->dma[k];
+            if (hid_find_mouse(RDESC, (unsigned)rdlen, &hid[i]->hm))
+                hid[i]->rp = 1;
+        }
+        u16 proto = hid[i]->rp ? 1 : 0; /* SET_PROTOCOL: 1 = report, 0 = boot */
+        if (control(x, (int)slot, &d->ep0, 0x21, 0x0B, proto, (u16)F[i].iface, 0, 0) == 6)
             ep_recover(x, (int)slot, 1, &d->ep0);
+    }
 
     for (int i = 0; i < nh; i++)
     {
@@ -1179,9 +1226,29 @@ void usb_hid_counts(int *mice, int *keyboards)
     }
 }
 
+int usb_mouse_info(int index, int *report_protocol, int *has_wheel)
+{
+    for (int i = 0; i < MAX_HID; i++)
+    {
+        if (!HID[i].active || HID[i].kind != KIND_MOUSE)
+            continue;
+        if (index-- > 0)
+            continue;
+        *report_protocol = HID[i].rp;
+        *has_wheel = HID[i].rp && HID[i].hm.has_wheel;
+        return 0;
+    }
+    return -1;
+}
+
 #else /* not x86-64: no PCI ports */
 
 void usb_hid_counts(int *mice, int *keyboards) { *mice = *keyboards = 0; }
+int usb_mouse_info(int index, int *report_protocol, int *has_wheel)
+{
+    (void)index; (void)report_protocol; (void)has_wheel;
+    return -1;
+}
 int usb_init(void) { return -1; }
 int usb_kbd_pop(unsigned char report[8])
 {

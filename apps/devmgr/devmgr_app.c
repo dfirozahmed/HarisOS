@@ -148,7 +148,7 @@ static void dm_draw(Window *w, UiRect body)
         ui_text_in(ui_rect(d.x + 4, d.y + 4, tw, 24), e->name, UI_TEXT_TITLE, UI_ALIGN_LEFT);
         ui_text_in(ui_rect(d.x + 4, d.y + 30, tw, 20), e->detail, UI_TEXT_DIM, UI_ALIGN_LEFT);
         ui_text_in_color(ui_rect(d.x + 4, d.y + 52, tw, 20),
-                         e->has_driver ? "Driver loaded" : (e->note[0] ? e->note : "No HarisOS driver for this device"),
+                         e->note[0] ? e->note : (e->has_driver ? "Driver loaded" : "No HarisOS driver for this device"),
                          UI_TEXT_SMALL, UI_ALIGN_LEFT, e->has_driver ? t->success : t->warning);
     }
 }

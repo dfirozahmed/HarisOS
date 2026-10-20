@@ -30,6 +30,9 @@ typedef struct
     char ctrl[5];   /* ACPI name of the I2C controller, e.g. "I2CD" */
     int started;    /* 1 = this is the touchpad the driver is using */
     int error;      /* I2C_HID_ERR_*: why it was not started (0 when started or not tried) */
+    int has_wheel;  /* started device only: its mouse report has a scroll wheel field */
+    int ptp_fingers; /* started device only: contacts per report if it is a precision touchpad, else 0 */
+    int ptp_mode;    /* ... and it has a "Device Mode" feature to switch to precision mode */
 } I2cHidInfo;
 
 /* Where bring-up of one described device stopped. */
@@ -42,7 +45,8 @@ enum
     I2C_HID_ERR_CTRL_SETUP,    /* the controller refused address / speed setup */
     I2C_HID_ERR_NO_HID_DESC,   /* the device gave no valid HID descriptor at any candidate register */
     I2C_HID_ERR_RDESC_READ,    /* the HID report descriptor could not be read */
-    I2C_HID_ERR_NO_MOUSE       /* it is not a mouse-mode pointing device (touchscreen, precision-only pad) */
+    I2C_HID_ERR_NO_MOUSE,      /* it is not a mouse-mode pointing device (touchscreen, precision-only pad) */
+    I2C_HID_NOT_TRIED          /* bring-up stopped at an earlier device that worked, so this one was never tried */
 };
 
 /* Short English text for an I2C_HID_ERR_* value ("" for I2C_HID_OK). */

@@ -45,6 +45,77 @@ static unsigned unsigned_item(const unsigned char *p, unsigned n)
     return v;
 }
 
+/* Usage Page 0x0D (Digitizers): 0x05 Touch Pad, 0x22 Finger, 0x52 Device Mode (HID Usage Tables) */
+int hid_find_touchpad(const unsigned char *d, unsigned len, HidTouchpad *t)
+{
+    unsigned page = 0, report_id = 0;
+    unsigned usages[MAX_USAGES], upages[MAX_USAGES], nus = 0;
+    t->is_ptp = t->fingers = t->has_mode = 0;
+    t->mode_report_id = 0;
+
+    for (unsigned i = 0; i < len;)
+    {
+        unsigned char b = d[i];
+        unsigned sz, type, tag;
+        if (b == 0xFE) /* long item: skip */
+        {
+            if (i + 1 >= len)
+                break;
+            i += 3u + d[i + 1];
+            continue;
+        }
+        sz = b & 3;
+        if (sz == 3)
+            sz = 4;
+        type = (b >> 2) & 3;
+        tag = b >> 4;
+        if (i + 1 + sz > len)
+            break;
+        const unsigned char *v = d + i + 1;
+        i += 1 + sz;
+
+        if (type == 1) /* global */
+        {
+            if (tag == 0)
+                page = unsigned_item(v, sz);
+            else if (tag == 8)
+                report_id = unsigned_item(v, sz);
+        }
+        else if (type == 2) /* local */
+        {
+            if (tag == 0 && nus < MAX_USAGES)
+            {
+                unsigned u = unsigned_item(v, sz);
+                upages[nus] = sz == 4 ? (u >> 16) : page;
+                usages[nus++] = u & 0xFFFF;
+            }
+        }
+        else if (type == 0) /* main */
+        {
+            unsigned kind = unsigned_item(v, sz);
+            int digit_last = nus && upages[nus - 1] == 0x0D;
+            if (tag == 0xA && digit_last) /* Collection */
+            {
+                if (kind == 1 && usages[nus - 1] == 0x05)
+                    t->is_ptp = 1;
+                else if (kind == 2 && usages[nus - 1] == 0x22)
+                    t->fingers++;
+            }
+            else if (tag == 0xB) /* Feature */
+            {
+                for (unsigned k = 0; k < nus; k++)
+                    if (upages[k] == 0x0D && usages[k] == 0x52)
+                    {
+                        t->has_mode = 1;
+                        t->mode_report_id = (int)report_id;
+                    }
+            }
+            nus = 0;
+        }
+    }
+    return t->is_ptp;
+}
+
 int hid_find_mouse(const unsigned char *d, unsigned len, HidMouse *m)
 {
     Global g = {0, 0, 0, 0, 0};
