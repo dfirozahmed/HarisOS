@@ -534,18 +534,28 @@ int ntfs_space(Ntfs *nt, unsigned long long *total, unsigned long long *free_byt
         {
             u64 used = 0, done = 0, pos = 0;
             int ok = 1;
-            u8 buf[512];
+            /* the bitmap can be megabytes: read it in big pieces (one disk command each), not sector by sector.
+             * IDXBUF is free here: the code is not re-entered. */
+            u8 *buf = IDXBUF;
             while (ok && done < nt->clusters)
             {
-                int r = stream_read(nt, &S_AUX, pos, buf, sizeof buf);
+                int r = stream_read(nt, &S_AUX, pos, buf, sizeof IDXBUF);
                 if (r <= 0)
                 {
                     ok = 0;
                     break;
                 }
                 for (int i = 0; i < r && done < nt->clusters; i++)
-                    for (int bit = 0; bit < 8 && done < nt->clusters; bit++, done++)
-                        used += (buf[i] >> bit) & 1;
+                {
+                    if (done + 8 <= nt->clusters)
+                    {
+                        used += (u64)__builtin_popcount(buf[i]);
+                        done += 8;
+                    }
+                    else
+                        for (int bit = 0; bit < 8 && done < nt->clusters; bit++, done++)
+                            used += (buf[i] >> bit) & 1;
+                }
                 pos += (u64)r;
             }
             if (ok)
@@ -650,22 +660,46 @@ int ntfs_list(Ntfs *nt, const NtEntry *dir, NtfsListFn cb, void *user)
     if (load_stream(nt, dir->recno, AT_BITMAP, "$I30", &S_AUX) != 0 || !S_AUX.found)
         return -1;
     u64 nblocks = S_MAIN.size / block;
-    for (u64 n = 0; n < nblocks && !c.stop; n++)
+    /* several blocks per disk command: every command is a polled round trip, slow on a real drive */
+    u32 group = block <= sizeof IDXBUF ? (u32)(sizeof IDXBUF / block) : 1;
+    for (u64 first = 0; first < nblocks && !c.stop; first += group)
     {
-        u8 bits;
-        int r = stream_read(nt, &S_AUX, n / 8, &bits, 1);
-        if (r <= 0)
+        u32 cnt = nblocks - first < group ? (u32)(nblocks - first) : group;
+        u32 used = 0, lo = cnt, hi = 0; /* used blocks, and the span of them inside this group */
+        for (u32 i = 0; i < cnt; i++)
+        {
+            u8 bits;
+            u64 n = first + i;
+            if (stream_read(nt, &S_AUX, n / 8, &bits, 1) <= 0)
+                return -1;
+            if ((bits >> (n % 8)) & 1) /* a free block may still hold old entries: skip it */
+            {
+                used++;
+                if (i < lo)
+                    lo = i;
+                hi = i + 1;
+            }
+        }
+        if (!used)
+            continue;
+        if (stream_read(nt, &S_MAIN, (first + lo) * block, IDXBUF + (u64)lo * block, (hi - lo) * block) != (int)((hi - lo) * block))
             return -1;
-        if (!((bits >> (n % 8)) & 1))
-            continue; /* this block is free: it may still hold old entries */
-        if (stream_read(nt, &S_MAIN, n * block, IDXBUF, block) != (int)block)
-            return -1;
-        if (IDXBUF[0] != 'I' || IDXBUF[1] != 'N' || IDXBUF[2] != 'D' || IDXBUF[3] != 'X' || apply_fixups(IDXBUF, block))
-            return -1;
-        u32 eo = rd32(IDXBUF + 24), et = rd32(IDXBUF + 28);
-        if (24 + et > block)
-            return -1;
-        walk_entries(IDXBUF, 24 + eo, 24 + et, &c);
+        for (u32 i = lo; i < hi && !c.stop; i++)
+        {
+            u64 n = first + i;
+            u8 bits;
+            if (stream_read(nt, &S_AUX, n / 8, &bits, 1) <= 0)
+                return -1;
+            if (!((bits >> (n % 8)) & 1))
+                continue;
+            u8 *b = IDXBUF + (u64)i * block;
+            if (b[0] != 'I' || b[1] != 'N' || b[2] != 'D' || b[3] != 'X' || apply_fixups(b, block))
+                return -1;
+            u32 eo = rd32(b + 24), et = rd32(b + 28);
+            if (24 + et > block)
+                return -1;
+            walk_entries(b, 24 + eo, 24 + et, &c);
+        }
     }
     return c.reported;
 }

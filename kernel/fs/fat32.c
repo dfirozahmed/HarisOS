@@ -597,9 +597,17 @@ static void sfn_to_name(const u8 *e, char *out)
 static const u8 LFN_OFFS[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
 
 /* ---- listing ---------------------------------------------------- */
+/* A folder is read in chunks of up to LIST_BUF_BYTES: one disk command per chunk, not one per sector
+ * (every command is a polled round trip, which is slow on a real drive). */
+#define LIST_BUF_BYTES 16384
+static u8 LIST_BUF[LIST_BUF_BYTES];
+
 int fat_list(Fat *f, unsigned dir, FatListFn cb, void *user)
 {
     char lfn[FAT_NAME_MAX], name[FAT_NAME_MAX];
+    u32 per_read = LIST_BUF_BYTES / f->ss;
+    if (per_read < 1)
+        per_read = 1;
     int lfn_ok = 0, expect = 0, nlfn = 0;
     if (!f->fat_dirty) /* listing is how a folder is read (again): do not trust what was cached earlier */
     {
@@ -616,14 +624,15 @@ int fat_list(Fat *f, unsigned dir, FatListFn cb, void *user)
     u32 index = 0, cl = dir, guard = 0;
     while (valid_cluster(f, cl) && guard++ <= f->clusters)
     {
-        for (u32 s = 0; s < f->spc; s++)
+        for (u32 s = 0; s < f->spc; s += per_read)
         {
-            if (rd_sectors(f, cluster_lba(f, cl) + s, 1, f->sec))
+            u32 n = f->spc - s < per_read ? f->spc - s : per_read;
+            if (rd_sectors(f, cluster_lba(f, cl) + s, n, LIST_BUF))
                 return FAT_ERR_IO;
-            for (u32 o = 0; o < f->ss; o += 32, index++)
+            for (u32 o = 0; o < n * f->ss; o += 32, index++)
             {
                 u8 e[32];
-                copy(e, f->sec + o, 32);
+                copy(e, LIST_BUF + o, 32);
                 if (e[0] == 0x00)
                     return reported; /* end of the folder */
                 if (e[0] == 0xE5)
