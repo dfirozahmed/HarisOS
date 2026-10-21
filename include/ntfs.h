@@ -113,6 +113,10 @@ int ntfs_read(Ntfs *nt, const NtEntry *e, unsigned offset, void *buf, unsigned l
  * Changes nothing on the disk. */
 int ntfs_is_clean(Ntfs *nt);
 
+/* 1 if this looks like the volume Windows is installed on: a folder "Windows" in the root, and "Users" or
+ * "Program Files" next to it (names in any case). Changes nothing. */
+int ntfs_is_windows(Ntfs *nt);
+
 /* Total and free bytes. 1 if the free space is known (the $Bitmap was read), else 0. */
 int ntfs_space(Ntfs *nt, unsigned long long *total, unsigned long long *free_bytes);
 

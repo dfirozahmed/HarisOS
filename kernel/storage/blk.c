@@ -56,7 +56,7 @@ int blk_write(int index, unsigned long long lba, unsigned count, const void *buf
 {
     BlkDev *d = blk_get(index);
     BlkDev *disk = disk_of(index);
-    if (!d || !disk || !disk->write || !disk->writable || disk->locked || !buf || !in_range(d, lba, count))
+    if (!d || !disk || !disk->write || !disk->writable || d->locked || !buf || !in_range(d, lba, count))
         return -1;
     unsigned long long abs = lba + (d->parent >= 0 ? d->first_lba : 0);
     return disk->write(disk, abs, count, buf);
@@ -72,12 +72,14 @@ int blk_flush(int index)
 
 void blk_set_locked(int index, int locked)
 {
-    BlkDev *disk = disk_of(index);
-    if (disk)
-        disk->locked = locked != 0;
-    for (int i = 0; i < NDEVS; i++) /* partitions mirror their disk, so the UI can read d->locked anywhere */
-        if (DEVS[i].parent >= 0 && &DEVS[DEVS[i].parent] == disk)
-            DEVS[i].locked = disk->locked;
+    BlkDev *d = blk_get(index);
+    if (!d)
+        return;
+    d->locked = locked != 0;
+    if (d->parent < 0) /* a whole disk: its partitions follow it; a partition on its own does not touch the others */
+        for (int i = 0; i < NDEVS; i++)
+            if (DEVS[i].parent == index)
+                DEVS[i].locked = d->locked;
 }
 
 const char *blk_kind_name(int kind)

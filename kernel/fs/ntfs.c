@@ -1472,6 +1472,42 @@ static int hiber_cb(const char *name, const NtEntry *e, void *user)
     return 1;
 }
 
+/* ntfs_is_windows: a folder "Windows" in the root, together with "Users" or "Program Files" */
+typedef struct
+{
+    int windows, others;
+} WinFind;
+
+static int ieq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++)
+        if ((*a >= 'A' && *a <= 'Z' ? *a + 32 : *a) != (*b >= 'A' && *b <= 'Z' ? *b + 32 : *b))
+            return 0;
+    return *a == *b;
+}
+
+static int win_cb(const char *name, const NtEntry *e, void *user)
+{
+    WinFind *w = (WinFind *)user;
+    if (e->is_dir)
+    {
+        if (ieq(name, "Windows"))
+            w->windows = 1;
+        else if (ieq(name, "Users") || ieq(name, "Program Files"))
+            w->others = 1;
+    }
+    return w->windows && w->others;
+}
+
+int ntfs_is_windows(Ntfs *nt)
+{
+    WinFind w = {0, 0};
+    NtEntry root;
+    ntfs_root(&root);
+    ntfs_list(nt, &root, win_cb, &w);
+    return w.windows && w.others;
+}
+
 int ntfs_is_clean(Ntfs *nt)
 {
     u32 fl;

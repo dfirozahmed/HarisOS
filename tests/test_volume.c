@@ -535,6 +535,17 @@ int main(void)
         CHECK(volume_unlock_clean() == 3);
         CHECK(vfs_volume_info(1, &vi) == 0 && vi.locked == 0 && vfs_volume_info(3, &vi) == 0 && vi.locked == 1);
         EXIMG[106] &= ~0x02;
+
+        /* the EFI System Partition (here: drive 2) stays locked, with its lock; the others are unlocked as before */
+        blk_get(1)->part_kind = PART_ESP;
+        for (int v = 1; v <= 5; v++)
+            vfs_set_locked(v, 1);
+        CHECK(volume_unlock_clean() == 3);
+        CHECK(vfs_volume_info(2, &vi) == 0 && vi.locked == 1 && vi.lockable == 1);
+        CHECK(vfs_volume_info(1, &vi) == 0 && vi.locked == 0 && vi.lockable == 0);
+        blk_get(1)->part_kind = PART_UNKNOWN;
+
+        /* (a Windows NTFS drive is kept locked the same way: see ntfs_is_windows in test_ntfsw.c) */
     }
 
     free(IMG[0]);

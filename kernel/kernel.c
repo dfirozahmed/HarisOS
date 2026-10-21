@@ -110,7 +110,7 @@ void kernel_main(const BootInfo *info)
         exfat_set_clock(fat_clock);
         ntfs_set_clock(nt_clock);
         volume_mount_all();       /* FAT32, exFAT and NTFS drives found on the disks */
-        volume_unlock_clean();    /* clean ones can be written at once; the rest stay locked */
+        volume_unlock_clean();    /* ordinary clean drives can be written at once; system and unclean ones stay locked */
     }
 
     timer_init(); /* needed for double-click */

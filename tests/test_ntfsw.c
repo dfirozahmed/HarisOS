@@ -698,6 +698,27 @@ static void test_refusals(void)
         CHECK(ntfs_mount(&F, DEV) == 0);
         ntfs_root(&root);
     }
+    /* a Windows drive (kept locked by the volume code): a folder "Windows" with "Users" or "Program Files" next to it */
+    {
+        NtEntry w;
+        fresh();
+        ntfs_root(&root);
+        CHECK(ntfs_is_windows(&F) == 0);
+        CHECK(ntfs_create(&F, &root, "Windows", 1, &w) >= 0);
+        CHECK(ntfs_is_windows(&F) == 0);                    /* "Windows" alone is not enough */
+        CHECK(ntfs_create(&F, &root, "Users", 1, &w) >= 0);
+        CHECK(ntfs_is_windows(&F) == 1);
+        fresh();
+        ntfs_root(&root);
+        CHECK(ntfs_create(&F, &root, "WINDOWS", 1, &w) >= 0 && ntfs_create(&F, &root, "program files", 1, &w) >= 0);
+        CHECK(ntfs_is_windows(&F) == 1);                    /* any case */
+        fresh();
+        ntfs_root(&root);
+        CHECK(ntfs_create(&F, &root, "Windows", 0, &w) >= 0 && ntfs_create(&F, &root, "Users", 1, &w) >= 0);
+        CHECK(ntfs_is_windows(&F) == 0);                    /* a file called Windows does not count */
+        fresh();
+        ntfs_root(&root);
+    }
     /* an empty ($FF) log is clean; the log is never changed by us */
     unsigned char *log_copy = malloc(8 * NT_CS);
     memcpy(log_copy, IMG + (size_t)wb_lcn_log * NT_CS, 8 * NT_CS);

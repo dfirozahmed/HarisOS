@@ -142,11 +142,17 @@ int main(void)
     memset(DISK + 2048 * SS, 0x5A, SS);
     CHECK(blk_read(1, 0, 1, out) == 0 && out[0] == 0x5A);
     CHECK(blk_read(1, 97951, 1, out) == 0 && blk_read(1, 97952, 1, out) == -1 && blk_read(1, 97951, 2, out) == -1);
-    CHECK(blk_write(1, 0, 1, sec) == -1);                               /* locked with its disk */
-    blk_set_locked(1, 0);                                               /* a partition index unlocks the disk */
-    CHECK(blk_get(0)->locked == 0 && blk_get(2)->locked == 0);
+    CHECK(blk_write(1, 0, 1, sec) == -1);                               /* locked, like every device */
+    blk_set_locked(1, 0);                                               /* a partition's lock is its own */
+    CHECK(blk_get(1)->locked == 0 && blk_get(0)->locked == 1 && blk_get(2)->locked == 1);
     CHECK(blk_write(1, 3, 1, sec) == 0 && DISK[(2048 + 3) * SS] == 0xAB);
+    CHECK(blk_write(2, 90000, 1, sec) == -1 && blk_write(0, 5, 1, sec) == -1); /* the others stay locked */
+    blk_set_locked(2, 0);
     CHECK(blk_write(2, 90000, 1, sec) == 0 && DISK[(100000 + 90000) * SS] == 0xAB);
+    blk_set_locked(0, 1);                                               /* the whole disk: its partitions follow */
+    CHECK(blk_get(1)->locked == 1 && blk_get(2)->locked == 1 && blk_write(1, 3, 1, sec) == -1);
+    blk_set_locked(0, 0);
+    CHECK(blk_get(1)->locked == 0 && blk_get(2)->locked == 0);
     CHECK(part_scan(1) == 0);                                           /* partitions have no table of their own */
 
     /* a damaged table is refused: wrong entry CRC, wrong header CRC, bad signature */

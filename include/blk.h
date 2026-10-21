@@ -80,8 +80,9 @@ int blk_read(int index, unsigned long long lba, unsigned count, void *buf);
 int blk_write(int index, unsigned long long lba, unsigned count, const void *buf);
 int blk_flush(int index);
 
-/* Lock (1) or unlock (0) writing. The lock belongs to the whole disk: giving a partition's index locks or
- * unlocks the disk it is on, and all its partitions with it. */
+/* Lock (1) or unlock (0) writing. The lock belongs to the device given: a partition has its own, so unlocking
+ * one partition leaves the others (and the disk) locked. Giving a whole disk's index locks or unlocks its
+ * partitions with it. */
 void blk_set_locked(int index, int locked);
 
 /* Read the partition table of disk `index` and register the partitions (GPT, else MBR primary

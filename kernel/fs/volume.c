@@ -25,7 +25,7 @@ typedef struct
 {
     int blk;
     int kind;
-    int no_lock; /* 1 = its disk is clean and unlocked for good: no lock is offered (see volume_unlock_clean) */
+    int no_lock; /* 1 = clean, unlocked for good, not a system drive: no lock is offered (see volume_unlock_clean) */
     char fs_name[12];
     union
     {
@@ -163,6 +163,13 @@ static int fat_be_write(void *ctx, VfsNode *n, unsigned offset, const void *buf,
 
 static void be_batch(void *ctx, int on) { fat_batch(&((Drive *)ctx)->u.fat, on); }
 
+/* the write lock is the partition's own (see blk_set_locked) */
+static int dev_locked(const Drive *v)
+{
+    const BlkDev *d = blk_get(v->blk);
+    return d ? d->locked : 1;
+}
+
 /* the part of info() every file system shares: its name and the medium it is on */
 static const BlkDev *disk_of(const Drive *v)
 {
@@ -199,8 +206,8 @@ static void fat_be_info(void *ctx, VfsVolInfo *out)
     if (!fat_space(&v->u.fat, &out->total, &out->free))
         out->free = (unsigned long long)-1;
     out->writable = disk && disk->writable;
-    out->locked = disk ? disk->locked : 1;
-    out->lockable = !v->no_lock; /* a clean disk is just writable: the lock is only offered when there is a problem */
+    out->locked = dev_locked(v);
+    out->lockable = !v->no_lock; /* an ordinary clean drive is just writable: the lock is only offered when it matters */
 }
 
 static int be_set_locked(void *ctx, int locked)
@@ -338,7 +345,7 @@ static void ex_be_info(void *ctx, VfsVolInfo *out)
     if (!exfat_space(&v->u.ex, &out->total, &out->free))
         out->free = (unsigned long long)-1;
     out->writable = disk && disk->writable;
-    out->locked = disk ? disk->locked : 1;
+    out->locked = dev_locked(v);
     out->lockable = !v->no_lock;
 }
 
@@ -441,7 +448,7 @@ static void nt_be_info(void *ctx, VfsVolInfo *out)
     if (!ntfs_space(&v->u.nt, &out->total, &out->free))
         out->free = (unsigned long long)-1;
     out->writable = disk && disk->writable;
-    out->locked = disk ? disk->locked : 1;
+    out->locked = dev_locked(v);
     out->lockable = !v->no_lock;
 }
 
@@ -480,32 +487,31 @@ static int drive_clean(Drive *v)
     }
 }
 
-/* The write lock belongs to a whole disk, so a disk is unlocked only when every drive on it is clean. */
+/* The drives that must not be changed by accident: the EFI System Partition (the firmware and Windows boot from
+ * it) and the NTFS volume Windows is installed on. They stay locked; the user can unlock them knowingly. */
+static int drive_is_system(Drive *v)
+{
+    const BlkDev *d = blk_get(v->blk);
+    if (d && d->part_kind == PART_ESP)
+        return 1;
+    return v->kind == FS_NTFS && ntfs_is_windows(&v->u.nt);
+}
+
+/* Unlock every clean drive that is not a system drive. The lock is per partition, so one problem drive (or the
+ * Windows drive) does not hold back the others on the same disk. A drive left locked keeps its lock button; an
+ * unlocked one no longer has any. Returns how many drives were unlocked. */
 int volume_unlock_clean(void)
 {
-    unsigned char seen[BLK_MAX] = {0}, bad[BLK_MAX] = {0};
+    int unlocked = 0;
     for (int i = 0; i < NDRIVES; i++)
     {
-        const BlkDev *d = blk_get(DRIVES[i].blk);
-        int disk = d && d->parent >= 0 ? d->parent : DRIVES[i].blk;
-        if (disk < 0 || disk >= BLK_MAX)
-            continue;
-        seen[disk] = 1;
-        if (!drive_clean(&DRIVES[i]))
-            bad[disk] = 1;
-    }
-    int unlocked = 0;
-    for (int disk = 0; disk < BLK_MAX; disk++)
-        if (seen[disk] && !bad[disk])
+        Drive *v = &DRIVES[i];
+        v->no_lock = !drive_is_system(v) && drive_clean(v);
+        if (v->no_lock)
         {
-            blk_set_locked(disk, 0);
+            blk_set_locked(v->blk, 0);
             unlocked++;
         }
-    for (int i = 0; i < NDRIVES; i++) /* a drive on a problem disk keeps its lock; the others no longer have one */
-    {
-        const BlkDev *d = blk_get(DRIVES[i].blk);
-        int disk = d && d->parent >= 0 ? d->parent : DRIVES[i].blk;
-        DRIVES[i].no_lock = disk >= 0 && disk < BLK_MAX && !bad[disk];
     }
     return unlocked;
 }
