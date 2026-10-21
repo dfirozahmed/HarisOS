@@ -17,5 +17,6 @@
 void timer_init(void);
 int timer_ready(void);
 unsigned long long timer_ms(void);
+unsigned long long timer_us(void); /* same clock in microseconds (for measuring short work) */
 
 #endif

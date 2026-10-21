@@ -76,7 +76,8 @@ set(KERNEL_SOURCES
     kernel/core/devmgr_sys.c         # Device Manager glue: asks PCI and the drivers
     kernel/fs/vfs.c                  # in-memory file system (File Explorer)
     kernel/time/rtc.c
-    kernel/time/timer.c              # milliseconds since boot (PIT + rdtsc), for double-click
+    kernel/time/cpuload.c            # main-loop busy share, for the Task Manager
+    kernel/time/timer.c            # milliseconds since boot (PIT + rdtsc), for double-click
     kernel/graphics/gfx_clip.c  # clipping state and safe clip-box intersection
     kernel/graphics/gfx_buffer.c # backbuffer, presentation and background cache
     kernel/graphics/gfx_dirty.c  # dirty-region tracking

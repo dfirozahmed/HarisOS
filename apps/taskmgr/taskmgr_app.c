@@ -4,6 +4,7 @@
  * Up/Down select, Delete ends the task, Tab switches the tab.
  * An app uses only public headers (ui.h, wm.h, desktop.h, ...) - never desktop_internal.h. */
 #include "app.h"
+#include "cpuload.h"
 #include "desktop.h"
 #include "gfx.h"
 #include "pmm.h"
@@ -46,6 +47,8 @@ static int TAB;
 static int PERF = PERF_MEMORY;
 static unsigned char MEM_HIST[HIST_N]; /* used memory in percent, oldest first */
 static int MEM_HIST_N;
+static unsigned char CPU_HIST[HIST_N]; /* CPU load in percent, oldest first */
+static int CPU_HIST_N;
 static Window *PROCS[WM_MAX_WINDOWS];
 static int NPROCS;
 static int SEL_ID = -1; /* id of the selected window (survives list refreshes), -1 = none */
@@ -170,15 +173,40 @@ static unsigned mem_used_percent(void)
     return total ? (unsigned)((total - pmm_free_pages()) * 100 / total) : 0;
 }
 
-static void mem_sample(void)
+/* append a sample to a history, dropping the oldest when it is full */
+static void hist_push(unsigned char *hist, int *n, unsigned value)
 {
-    if (MEM_HIST_N == HIST_N)
+    if (*n == HIST_N)
     {
         for (int i = 1; i < HIST_N; i++)
-            MEM_HIST[i - 1] = MEM_HIST[i];
-        MEM_HIST_N--;
+            hist[i - 1] = hist[i];
+        (*n)--;
     }
-    MEM_HIST[MEM_HIST_N++] = (unsigned char)mem_used_percent();
+    hist[(*n)++] = (unsigned char)(value > 100 ? 100 : value);
+}
+
+static void take_samples(void)
+{
+    hist_push(MEM_HIST, &MEM_HIST_N, mem_used_percent());
+    hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)cpuload_percent());
+}
+
+/* history graph: one bar per sample, newest at the right */
+static void draw_graph(UiRect g, const unsigned char *hist, int n)
+{
+    const UiTheme *t = ui_theme();
+    gfx_fill_round_rect(g.x, g.y, g.w, g.h, t->radius_s, ui_color(t->surface_alt));
+    int bar_w = (g.w - 4) / HIST_N;
+    if (bar_w < 1)
+        bar_w = 1;
+    int x0 = g.x + g.w - 2 - n * bar_w;
+    for (int i = 0; i < n; i++)
+    {
+        int h = (g.h - 4) * hist[i] / 100;
+        if (h < 1)
+            h = 1;
+        gfx_fill_rect(x0 + i * bar_w, g.y + g.h - 2 - h, bar_w, h, ui_color(t->accent));
+    }
 }
 
 static UiRect side_rect(UiRect body, int i)
@@ -205,20 +233,8 @@ static void draw_memory(UiRect pane)
     put_str(line, &n, "%");
     ui_text_in(ui_rect(pane.x + pane.w - 80, pane.y, 80, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
 
-    /* history graph: one bar per sample, newest at the right */
     UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 110);
-    gfx_fill_round_rect(g.x, g.y, g.w, g.h, t->radius_s, ui_color(t->surface_alt));
-    int bar_w = (g.w - 4) / HIST_N;
-    if (bar_w < 1)
-        bar_w = 1;
-    int x0 = g.x + g.w - 2 - MEM_HIST_N * bar_w;
-    for (int i = 0; i < MEM_HIST_N; i++)
-    {
-        int h = (g.h - 4) * MEM_HIST[i] / 100;
-        if (h < 1)
-            h = 1;
-        gfx_fill_rect(x0 + i * bar_w, g.y + g.h - 2 - h, bar_w, h, ui_color(t->accent));
-    }
+    draw_graph(g, MEM_HIST, MEM_HIST_N);
 
     ui_progress(ui_rect(pane.x, g.y + g.h + 14, pane.w, 12), (int)mem_used_percent());
 
@@ -237,6 +253,27 @@ static void draw_memory(UiRect pane)
     ui_text_color(pane.x, y + 52, line, UI_TEXT_SMALL, t->text_dim);
 }
 
+static void draw_cpu(UiRect pane)
+{
+    const UiTheme *t = ui_theme();
+    char line[48];
+    int n = 0;
+
+    ui_text(pane.x, pane.y, "CPU", UI_TEXT_TITLE);
+    put_dec(line, &n, (unsigned)cpuload_percent());
+    put_str(line, &n, "%");
+    ui_text_in(ui_rect(pane.x + pane.w - 80, pane.y, 80, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
+
+    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 110);
+    draw_graph(g, CPU_HIST, CPU_HIST_N);
+    ui_progress(ui_rect(pane.x, g.y + g.h + 14, pane.w, 12), cpuload_percent());
+
+    int y = g.y + g.h + 40;
+    ui_text(pane.x, y, "Busy share of the main loop over the last second.", UI_TEXT_BODY);
+    ui_text_color(pane.x, y + 26, "Counts input handling and redraws; waiting for events is idle.",
+                  UI_TEXT_SMALL, t->text_dim);
+}
+
 static void draw_performance(UiRect body)
 {
     const UiTheme *t = ui_theme();
@@ -251,6 +288,8 @@ static void draw_performance(UiRect body)
     UiRect pane = pane_rect(body);
     if (PERF == PERF_MEMORY)
         draw_memory(pane);
+    else if (PERF == PERF_CPU)
+        draw_cpu(pane);
     else
         ui_text_in(pane, "Coming next", UI_TEXT_DIM, UI_ALIGN_CENTER);
 }
@@ -369,7 +408,7 @@ static int tm_tick(Window *w)
     for (int i = 0; i < old_n; i++)
         old[i] = PROCS[i];
     reload();
-    mem_sample(); /* keep sampling while the other tab is shown, so the graph has no gap */
+    take_samples(); /* keep sampling while the other tab is shown, so the graph has no gap */
     if (TAB == TAB_PERFORMANCE)
         return 1;
     if (old_n != NPROCS)
@@ -423,7 +462,8 @@ static void taskmgr_open(void)
     PERF = PERF_MEMORY;
     LAST_MS = timer_ms();
     MEM_HIST_N = 0;
-    mem_sample();
+    CPU_HIST_N = 0;
+    take_samples();
     reload();
     desktop_set_status(0);
 

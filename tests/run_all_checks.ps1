@@ -21,6 +21,7 @@ try {
         @('I2C-HID discovery tests', 'tests/run_i2chid_tests.sh'),
         @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),
         @('Display adapter tests', 'tests/run_display_tests.sh'),
+        @('CPU load tests', 'tests/run_cpuload_tests.sh'),
         @('Virtual file system tests', 'tests/run_vfs_tests.sh'),
         @('Block device and partition tests', 'tests/run_blk_tests.sh'),
         @('USB mass storage tests', 'tests/run_usbmsc_tests.sh'),

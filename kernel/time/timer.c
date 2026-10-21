@@ -69,10 +69,18 @@ unsigned long long timer_ms(void)
     return (rdtsc() - TSC_BASE) / TSC_PER_MS;
 }
 
+unsigned long long timer_us(void)
+{
+    if (!TSC_PER_MS)
+        return 0;
+    return (rdtsc() - TSC_BASE) * 1000ULL / TSC_PER_MS;
+}
+
 #else
 
 void timer_init(void) {}
 int timer_ready(void) { return 0; }
 unsigned long long timer_ms(void) { return 0; }
+unsigned long long timer_us(void) { return 0; }
 
 #endif

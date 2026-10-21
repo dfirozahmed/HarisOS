@@ -1,6 +1,7 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
 #include "blk.h"
 #include "bootinfo.h"
+#include "cpuload.h"
 #include "desktop.h"
 #include "devmgr.h"
 #include "display.h"
@@ -137,23 +138,34 @@ void kernel_main(const BootInfo *info)
 
     for (;;)
     {
+        unsigned long long pass_start = timer_us();
+        int worked = 0; /* this pass handled something, so its time counts as busy (see cpuload.h) */
         if (have_mouse && mouse_poll(&m))
         {
             gfx_cursor_move(m.x, m.y);
             desktop_pointer(m.x, m.y, m.buttons);
             if (m.wheel)
                 desktop_wheel(m.x, m.y, m.wheel);
+            worked = 1;
         }
         KeyEvent ke;
         while (gfx_ready() && keyboard_poll(&ke))
+        {
             desktop_key(&ke);
+            worked = 1;
+        }
         if (pmm_ok && blk_generation() != blk_seen) /* a USB drive came or went (found inside mouse_poll) */
         {
             volume_sync(); /* the File Explorer notices through vfs_generation() */
             blk_seen = blk_generation();
+            worked = 1;
         }
-        if (gfx_ready())
-            desktop_tick(); /* blinking text caret */
+        if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
+            worked = 1;
+        unsigned long long pass_end = timer_us();
+        if (worked)
+            cpuload_add_busy(pass_end - pass_start);
+        cpuload_poll(pass_end);
 #if defined(__x86_64__) || defined(__i386__)
         __asm__ volatile("pause");
 #endif
