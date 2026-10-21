@@ -109,6 +109,10 @@ int ntfs_list(Ntfs *nt, const NtEntry *dir, NtfsListFn cb, void *user);
  * encrypted. */
 int ntfs_read(Ntfs *nt, const NtEntry *e, unsigned offset, void *buf, unsigned len);
 
+/* 1 if the volume is safe to write to: not dirty, $LogFile clean, and Windows is not hibernated (Fast Startup).
+ * Changes nothing on the disk. */
+int ntfs_is_clean(Ntfs *nt);
+
 /* Total and free bytes. 1 if the free space is known (the $Bitmap was read), else 0. */
 int ntfs_space(Ntfs *nt, unsigned long long *total, unsigned long long *free_bytes);
 

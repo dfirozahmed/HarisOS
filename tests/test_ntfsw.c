@@ -632,6 +632,7 @@ static void test_refusals(void)
     CHECK(ntfs_mount(&F, DEV) == 0);
     ntfs_root(&root);
     CHECK(find(&root, "hello.txt", &e));
+    CHECK(ntfs_is_clean(&F) == 0);                       /* the dirty bit is on */
     CHECK(ntfs_create(&F, &root, "dirty.txt", 0, &d) == NTFS_ERR_DIRTY);
     CHECK(ntfs_write(&F, &e, 0, buf, 10) == NTFS_ERR_DIRTY && ntfs_delete(&F, &e) == NTFS_ERR_DIRTY);
     fresh();
@@ -642,6 +643,7 @@ static void test_refusals(void)
         lg[0x30 + 14] &= (unsigned char)~2;
     }
     CHECK(ntfs_mount(&F, DEV) == 0);
+    CHECK(ntfs_is_clean(&F) == 0);
     CHECK(ntfs_create(&F, &root, "log.txt", 0, &d) == NTFS_ERR_DIRTY);
     fresh();
     {   /* the older page says "not clean", the newer one "clean": Windows left it like that after a clean shutdown */
@@ -649,6 +651,7 @@ static void test_refusals(void)
         lg[0x30 + 14] &= (unsigned char)~2;
     }
     CHECK(ntfs_mount(&F, DEV) == 0);
+    CHECK(ntfs_is_clean(&F) == 1);
     CHECK(ntfs_create(&F, &root, "log2.txt", 0, &d) >= 0);
     fresh();
     {   /* the first page is the newer one and not clean */
@@ -657,6 +660,7 @@ static void test_refusals(void)
         lg[0x30] = 0xFF; lg[0x31] = 0xFF;                  /* its LSN is now higher than the other page's */
     }
     CHECK(ntfs_mount(&F, DEV) == 0);
+    CHECK(ntfs_is_clean(&F) == 0);
     CHECK(ntfs_create(&F, &root, "log3.txt", 0, &d) == NTFS_ERR_DIRTY);
     fresh();
     {   /* one page is destroyed: the other one counts; with none left, only an empty log is clean */
@@ -664,6 +668,7 @@ static void test_refusals(void)
         memcpy(lg + 4096, "XXXX", 4);
     }
     CHECK(ntfs_mount(&F, DEV) == 0);
+    CHECK(ntfs_is_clean(&F) == 1);
     CHECK(ntfs_create(&F, &root, "log4.txt", 0, &d) >= 0);
     fresh();
     {
@@ -672,8 +677,27 @@ static void test_refusals(void)
         memcpy(lg + 4096, "XXXX", 4);
     }
     CHECK(ntfs_mount(&F, DEV) == 0);
+    CHECK(ntfs_is_clean(&F) == 0);
     CHECK(ntfs_create(&F, &root, "log5.txt", 0, &d) == NTFS_ERR_DIRTY);
     fresh();
+    /* Windows hibernated (Fast Startup): hiberfil.sys starts with "hibr" or "wake"; the volume otherwise looks clean */
+    {
+        static const char *const WHAT[] = {"hibr", "HIBR", "wake", "WAKE", "zero"};
+        static const int HIBER[] = {1, 1, 1, 1, 0};
+        for (int k = 0; k < 5; k++)
+        {
+            fresh();
+            CHECK(ntfs_mount(&F, DEV) == 0);
+            ntfs_root(&root);
+            CHECK(ntfs_is_clean(&F) == 1);                  /* no hiberfil.sys yet */
+            CHECK(ntfs_create(&F, &root, k == 1 ? "HIBERFIL.SYS" : "hiberfil.sys", 0, &d) >= 0);
+            CHECK(ntfs_write(&F, &d, 0, WHAT[k], 4) == 4);
+            CHECK(ntfs_is_clean(&F) == !HIBER[k]);
+        }
+        fresh();
+        CHECK(ntfs_mount(&F, DEV) == 0);
+        ntfs_root(&root);
+    }
     /* an empty ($FF) log is clean; the log is never changed by us */
     unsigned char *log_copy = malloc(8 * NT_CS);
     memcpy(log_copy, IMG + (size_t)wb_lcn_log * NT_CS, 8 * NT_CS);

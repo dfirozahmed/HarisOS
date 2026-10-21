@@ -283,6 +283,15 @@ void fat_batch(Fat *f, int on)
 /* ---- mount ------------------------------------------------------ */
 unsigned fat_root(const Fat *f) { return f->root_cluster; }
 
+/* FAT entry 1 keeps two flags: bit 27 "shut down cleanly" and bit 26 "no disk error"; both must be set. */
+int fat_is_clean(Fat *f)
+{
+    if (rd_sectors(f, f->fat_lba, 1, f->sec))
+        return 0;
+    u32 e1 = rd32(f->sec + 4);
+    return (e1 & 0x08000000u) && (e1 & 0x04000000u);
+}
+
 int fat_mount(Fat *f, int blk)
 {
     BlkDev *d = blk_get(blk);

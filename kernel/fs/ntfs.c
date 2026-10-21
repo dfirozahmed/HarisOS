@@ -1460,6 +1460,41 @@ static int log_clean(Ntfs *nt)
            rd32(b) == 0xFFFFFFFFu;
 }
 
+/* ntfs_is_clean: is this volume safe to write to? Also looks for a hibernated Windows (Fast Startup): its
+ * hiberfil.sys starts with "hibr" / "wake" and the volume looks clean while Windows still holds changes in RAM. */
+static int hiber_cb(const char *name, const NtEntry *e, void *user)
+{
+    static const char WANT[] = "hiberfil.sys";
+    for (int i = 0; i < (int)sizeof WANT; i++)
+        if ((name[i] >= 'A' && name[i] <= 'Z' ? name[i] + 32 : name[i]) != WANT[i])
+            return 0;
+    *(NtEntry *)user = *e;
+    return 1;
+}
+
+int ntfs_is_clean(Ntfs *nt)
+{
+    u32 fl;
+    if (vol_flags(nt, 0, 0, &fl)) /* (no change asked for: nothing is written) */
+        return 0;
+    if ((fl & (VOL_DIRTY | VOL_RESIZE_LOG | VOL_UPGRADE | VOL_DELETE_USN)) || !log_clean(nt))
+        return 0;
+    NtEntry root, hf;
+    ntfs_root(&root);
+    zero(&hf, sizeof hf);
+    if (ntfs_list(nt, &root, hiber_cb, &hf) > 0 && hf.recno)
+    {
+        u8 m[4];
+        if (ntfs_read(nt, &hf, 0, m, 4) == 4)
+        {
+            u32 magic = (u32)(m[0] | 0x20) | (u32)(m[1] | 0x20) << 8 | (u32)(m[2] | 0x20) << 16 | (u32)(m[3] | 0x20) << 24;
+            if (magic == 0x72626968u /* "hibr" */ || magic == 0x656b6177u /* "wake" */)
+                return 0;
+        }
+    }
+    return 1;
+}
+
 static int wr_begin(Ntfs *nt)
 {
     BlkDev *d = blk_get(nt->blk);

@@ -75,6 +75,9 @@ typedef struct
 /* Mount: 0 or -1 (not exFAT, damaged boot sector). */
 int exfat_mount(ExFat *f, int blk);
 
+/* 1 if the volume is not marked dirty and has no media failure flag (boot sector VolumeFlags). Changes nothing. */
+int exfat_is_clean(ExFat *f);
+
 /* The root folder as an entry. */
 void exfat_root(const ExFat *f, ExEntry *out);
 

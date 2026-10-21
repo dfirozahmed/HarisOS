@@ -504,6 +504,39 @@ int main(void)
         CHECK(check_image(1) == 0);
     }
 
+    /* ---- volume_unlock_clean: a disk is unlocked unless one of its drives is dirty ---- */
+    {
+        for (int v = 1; v <= 5; v++)
+            CHECK(vfs_set_locked(v, 1) == 0);
+        /* drives 1, 2 = FAT32, 3 = exFAT, 4 = the read-only NTFS fixture (it has no $VOLUME_INFORMATION, so its
+         * flags cannot be read: not "clean"), 5 = the writable NTFS image */
+        CHECK(volume_unlock_clean() == 4);
+        for (int v = 1; v <= 5; v++)
+            CHECK(vfs_volume_info(v, &vi) == 0 && vi.locked == (v == 4) && vi.lockable == (v == 4)); /* no lock on clean disks */
+
+        unsigned char *fat1 = IMG[0] + (size_t)RESERVED * SS + 4; /* FAT entry 1 of the first FAT32 drive */
+        unsigned keep = get32(fat1);
+        put32(fat1, keep & ~0x08000000u); /* "not shut down cleanly" */
+        for (int v = 1; v <= 5; v++)
+            vfs_set_locked(v, 1);
+        CHECK(volume_unlock_clean() == 3);
+        CHECK(vfs_volume_info(1, &vi) == 0 && vi.locked == 1 && vi.lockable == 1); /* the dirty one stays locked, with its lock */
+        CHECK(vfs_volume_info(2, &vi) == 0 && vi.lockable == 0);
+        CHECK(vfs_volume_info(2, &vi) == 0 && vi.locked == 0 && vfs_volume_info(3, &vi) == 0 && vi.locked == 0);
+        put32(fat1, keep & ~0x04000000u); /* "disk error found" */
+        for (int v = 1; v <= 5; v++)
+            vfs_set_locked(v, 1);
+        CHECK(volume_unlock_clean() == 3 && vfs_volume_info(1, &vi) == 0 && vi.locked == 1);
+        put32(fat1, keep);
+
+        EXIMG[106] |= 0x02; /* exFAT VolumeDirty */
+        for (int v = 1; v <= 5; v++)
+            vfs_set_locked(v, 1);
+        CHECK(volume_unlock_clean() == 3);
+        CHECK(vfs_volume_info(1, &vi) == 0 && vi.locked == 0 && vfs_volume_info(3, &vi) == 0 && vi.locked == 1);
+        EXIMG[106] &= ~0x02;
+    }
+
     free(IMG[0]);
     free(IMG[1]);
     free(EXIMG); free(EXBITMAP); free(NTI.img); free(NTI.mft); free(NTWIMG);

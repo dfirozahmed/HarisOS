@@ -203,6 +203,18 @@ static int get_entry(ExFat *f, const ExEntry *dir, u32 index, u8 out[32])
     return 1;
 }
 
+/* VolumeFlags (boot sector byte 106): bit 1 = volume dirty, bit 2 = media failure */
+int exfat_is_clean(ExFat *f)
+{
+    if (blk_read(f->blk, 0, 1, f->sec) != 0)
+    {
+        f->sec_lba = NONE;
+        return 0;
+    }
+    f->sec_lba = NONE; /* f->sec no longer holds the sector it was caching */
+    return (rd16(f->sec + 106) & 0x0006u) == 0;
+}
+
 void exfat_root(const ExFat *f, ExEntry *out)
 {
     zero(out, sizeof *out);

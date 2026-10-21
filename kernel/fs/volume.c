@@ -25,6 +25,7 @@ typedef struct
 {
     int blk;
     int kind;
+    int no_lock; /* 1 = its disk is clean and unlocked for good: no lock is offered (see volume_unlock_clean) */
     char fs_name[12];
     union
     {
@@ -199,7 +200,7 @@ static void fat_be_info(void *ctx, VfsVolInfo *out)
         out->free = (unsigned long long)-1;
     out->writable = disk && disk->writable;
     out->locked = disk ? disk->locked : 1;
-    out->lockable = 1;
+    out->lockable = !v->no_lock; /* a clean disk is just writable: the lock is only offered when there is a problem */
 }
 
 static int be_set_locked(void *ctx, int locked)
@@ -338,7 +339,7 @@ static void ex_be_info(void *ctx, VfsVolInfo *out)
         out->free = (unsigned long long)-1;
     out->writable = disk && disk->writable;
     out->locked = disk ? disk->locked : 1;
-    out->lockable = 1;
+    out->lockable = !v->no_lock;
 }
 
 static const VfsBackend EXFAT_BACKEND = {ex_be_list,  ex_be_create, ex_be_remove, ex_be_rename, ex_be_move,
@@ -441,7 +442,7 @@ static void nt_be_info(void *ctx, VfsVolInfo *out)
         out->free = (unsigned long long)-1;
     out->writable = disk && disk->writable;
     out->locked = disk ? disk->locked : 1;
-    out->lockable = 1;
+    out->lockable = !v->no_lock;
 }
 
 static const VfsBackend NTFS_BACKEND = {nt_be_list, nt_be_create, nt_be_remove, nt_be_rename, nt_be_move,
@@ -461,6 +462,52 @@ static void volume_name(const char *label, const BlkDev *d, char *out, int cap)
         out[n++] = *s;
     out[n++] = ')';
     out[n] = 0;
+}
+
+/* is the file system of this drive safe to write to (see fat_is_clean / exfat_is_clean / ntfs_is_clean)? */
+static int drive_clean(Drive *v)
+{
+    switch (v->kind)
+    {
+    case FS_FAT32:
+        return fat_is_clean(&v->u.fat);
+    case FS_EXFAT:
+        return exfat_is_clean(&v->u.ex);
+    case FS_NTFS:
+        return ntfs_is_clean(&v->u.nt);
+    default:
+        return 0;
+    }
+}
+
+/* The write lock belongs to a whole disk, so a disk is unlocked only when every drive on it is clean. */
+int volume_unlock_clean(void)
+{
+    unsigned char seen[BLK_MAX] = {0}, bad[BLK_MAX] = {0};
+    for (int i = 0; i < NDRIVES; i++)
+    {
+        const BlkDev *d = blk_get(DRIVES[i].blk);
+        int disk = d && d->parent >= 0 ? d->parent : DRIVES[i].blk;
+        if (disk < 0 || disk >= BLK_MAX)
+            continue;
+        seen[disk] = 1;
+        if (!drive_clean(&DRIVES[i]))
+            bad[disk] = 1;
+    }
+    int unlocked = 0;
+    for (int disk = 0; disk < BLK_MAX; disk++)
+        if (seen[disk] && !bad[disk])
+        {
+            blk_set_locked(disk, 0);
+            unlocked++;
+        }
+    for (int i = 0; i < NDRIVES; i++) /* a drive on a problem disk keeps its lock; the others no longer have one */
+    {
+        const BlkDev *d = blk_get(DRIVES[i].blk);
+        int disk = d && d->parent >= 0 ? d->parent : DRIVES[i].blk;
+        DRIVES[i].no_lock = disk >= 0 && disk < BLK_MAX && !bad[disk];
+    }
+    return unlocked;
 }
 
 int volume_unsupported_count(void) { return UNSUPPORTED; }
@@ -514,6 +561,7 @@ int volume_mount_all(void)
         const VfsBackend *be = 0;
         v->blk = i;
         v->kind = kind;
+        v->no_lock = 0;
         if (kind == FS_EXFAT && exfat_mount(&v->u.ex, i) == 0)
         {
             put(v->fs_name, sizeof v->fs_name, "exFAT");

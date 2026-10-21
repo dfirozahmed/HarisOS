@@ -79,6 +79,9 @@ int fat_mount(Fat *f, int blk);
 
 unsigned fat_root(const Fat *f); /* cluster of the root folder */
 
+/* 1 if the volume says it was shut down cleanly with no disk error (FAT entry 1). Changes nothing. */
+int fat_is_clean(Fat *f);
+
 /* Call cb for every file and folder in the folder at `dir_cluster` (not "." and "..", not the volume label).
  * Stops early if cb returns non-zero. Returns how many entries were reported, or FAT_ERR_IO. */
 typedef int (*FatListFn)(const char *name, const FatEntry *e, void *user);
