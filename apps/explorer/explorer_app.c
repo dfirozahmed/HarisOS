@@ -10,6 +10,8 @@ static void ex_close(Window *w)
     EX_TIP_BTN = -1;
     EX_TIP_SHOWN = 0;
     EX_SIDE_DRAG = 0;
+    EX_ADDR_EDIT = 0;
+    EX_HOVER_CRUMB = -1;
 }
 
 static void explorer_app_open(void)

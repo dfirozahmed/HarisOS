@@ -84,20 +84,165 @@ static void on_rename(UiButton *b, void *user)
     ex_start_rename(EX_SEL);
 }
 
-/* "This PC > Documents > Projects" */
-static void crumb_text(char *out, int cap)
+/* ---- the path bar: "This PC > Documents > Projects", each name a button ---- */
+#define CRUMB_MAX 24
+#define CRUMB_PAD 12 /* room around a name inside its button */
+#define CRUMB_SEP 16 /* the gap with the ">" between two names */
+#define CRUMB_TEXT_X 38 /* names start this far from the bar's left edge (after the folder icon) */
+
+typedef struct
 {
-    char path[160];
-    vfs_path(EX_CUR, path, sizeof path);
-    int o = ex_put_str(out, 0, cap, "This PC");
-    for (const char *p = path; *p && o < cap - 1; p++)
+    int id; /* folder it leads to */
+    const char *name;
+    int x, w;
+} Crumb;
+
+UiRect ex_path_bar(const Layout *l)
+{
+    int px = l->toolbar.x + PATH_X;
+    return ui_rect(px, l->toolbar.y + 9, l->toolbar.w - (px - l->toolbar.x) - 10 - NAVBTN - 4, 34); /* room for Refresh on the right */
+}
+
+/* The names that fit in the bar, left to right. When the path is too long the front is replaced by one "..." that
+ * leads to the folder just before the first name shown. Returns how many. */
+static int crumbs_build(const Layout *l, Crumb *out)
+{
+    int chain[CRUMB_MAX], depth = 0; /* EX_CUR up to the root */
+    for (int n = EX_CUR; depth < CRUMB_MAX && vfs_node(n); n = vfs_node(n)->parent)
     {
-        if (*p == '/')
-            o = ex_put_str(out, o, cap, "  >  ");
-        else
-            out[o++] = *p;
+        chain[depth++] = n;
+        if (n == VFS_ROOT)
+            break;
     }
+    if (depth == 0)
+        chain[depth++] = VFS_ROOT;
+    Crumb all[CRUMB_MAX];
+    int total = 0;
+    for (int i = depth - 1; i >= 0; i--, total++)
+    {
+        all[total].id = chain[i];
+        all[total].name = chain[i] == VFS_ROOT ? "This PC" : vfs_node(chain[i])->name;
+        all[total].w = ui_text_width(all[total].name, UI_TEXT_BODY) + CRUMB_PAD * 2;
+    }
+    int room = ex_path_bar(l).w - CRUMB_TEXT_X - 8;
+    int dots_w = ui_text_width("...", UI_TEXT_BODY) + CRUMB_PAD * 2;
+    int first = total - 1, used = all[total - 1].w; /* the current folder always shows */
+    while (first > 0 && used + CRUMB_SEP + all[first - 1].w + (first - 1 > 0 ? CRUMB_SEP + dots_w : 0) <= room)
+        used += CRUMB_SEP + all[--first].w;
+    if (first == total - 1 && used > room) /* the last name alone is too wide: it gets all the room, cut short */
+        all[first].w = room > 0 ? room : 0;
+
+    int n = 0, x = ex_path_bar(l).x + CRUMB_TEXT_X;
+    if (first > 0)
+    {
+        out[n].id = all[first - 1].id;
+        out[n].name = "...";
+        out[n].x = x;
+        out[n].w = dots_w;
+        x += dots_w + CRUMB_SEP;
+        n++;
+    }
+    for (int i = first; i < total; i++, n++)
+    {
+        out[n] = all[i];
+        out[n].x = x;
+        x += all[i].w + CRUMB_SEP;
+    }
+    return n;
+}
+
+static UiRect crumb_rect(const UiRect *bar, const Crumb *c) { return ui_rect(c->x, bar->y + 4, c->w, bar->h - 8); }
+
+int ex_crumb_at(const Layout *l, int x, int y)
+{
+    UiRect bar = ex_path_bar(l);
+    Crumb c[CRUMB_MAX];
+    int n = crumbs_build(l, c);
+    for (int i = 0; i < n; i++)
+        if (ui_contains(crumb_rect(&bar, &c[i]), x, y))
+            return c[i].id;
+    return -1;
+}
+
+/* what was typed -> an absolute VFS path: "\" counts as "/", a leading "This PC" is dropped, no trailing "/" */
+static void norm_path(const char *s, char *out, int cap)
+{
+    while (*s == ' ')
+        s++;
+    const char *pc = "This PC";
+    int k = 0;
+    while (pc[k] && ex_lower((unsigned char)s[k]) == ex_lower((unsigned char)pc[k]))
+        k++;
+    if (!pc[k])
+        s += k;
+    int o = 0;
+    out[o++] = '/';
+    for (; *s && o < cap - 1; s++)
+    {
+        char ch = *s == '\\' ? '/' : *s;
+        if (ch == '/' && out[o - 1] == '/')
+            continue;
+        out[o++] = ch;
+    }
+    while (o > 1 && (out[o - 1] == ' ' || out[o - 1] == '/'))
+        o--;
     out[o] = 0;
+}
+
+void ex_start_addr_edit(void)
+{
+    if (!EX_WIN || EX_ADDR_EDIT)
+        return;
+    if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
+        return;
+    EX_MENU.open = 0;
+    UiEdit *e = &EX_WIN->edits[0];
+    char path[UI_EDIT_MAX + 1];
+    vfs_path(EX_CUR, path, sizeof path);
+    ui_edit_clear(e);
+    e->max = UI_EDIT_MAX;
+    ui_edit_set_text(e, path);
+    ui_edit_select_all(e);
+    EX_ADDR_EDIT = 1;
+    EX_HOVER_CRUMB = -1;
+    EX_NOTE = 0;
+    EX_WIN->edit_count = 1;
+    EX_WIN->focus = 0;
+    EX_WIN->caret = 1;
+    ui_caret_restart();
+}
+
+int ex_end_addr(int commit)
+{
+    if (!EX_ADDR_EDIT || !EX_WIN)
+        return 1;
+    UiEdit *e = &EX_WIN->edits[0];
+    int id = -1;
+    if (commit)
+    {
+        char path[UI_EDIT_MAX + 2];
+        norm_path(e->text, path, sizeof path);
+        id = vfs_lookup(path);
+        if (!vfs_node(id))
+        {
+            EX_NOTE = "That path does not exist."; /* the field stays open so it can be fixed */
+            return 0;
+        }
+    }
+    EX_ADDR_EDIT = 0;
+    EX_WIN->edit_count = 0;
+    EX_WIN->caret = 0;
+    e->field.w = 0;
+    if (!commit)
+        return 1;
+    EX_NOTE = 0;
+    const VfsNode *n = vfs_node(id);
+    int file = n->is_dir ? -1 : id; /* a file: open its folder and select it */
+    ex_go_to(n->is_dir ? id : n->parent, 1);
+    int row = ex_row_of(file);
+    if (row >= 0)
+        ex_select_row(wm_content(EX_WIN), row);
+    return 1;
 }
 
 void ex_draw_toolbar(const Layout *l, const UiTheme *t)
@@ -111,16 +256,33 @@ void ex_draw_toolbar(const Layout *l, const UiTheme *t)
 
     gfx_fill_rect_alpha(tb.x + SORT_X - 8, tb.y + CMD_Y + 6, 1, 22, t->border.r, t->border.g, t->border.b, 255);
 
-    int px = tb.x + PATH_X;
-    UiRect bar = ui_rect(px, tb.y + 9, tb.w - (px - tb.x) - 10 - NAVBTN - 4, 34); /* room for Refresh on the right */
+    UiRect bar = ex_path_bar(l);
     if (bar.w < 40)
         return;
     gfx_fill_round_rect(bar.x, bar.y, bar.w, bar.h, t->radius_m, ui_color(t->surface));
-    gfx_round_rect(bar.x, bar.y, bar.w, bar.h, t->radius_m, 1, ui_color(t->border));
+    gfx_round_rect(bar.x, bar.y, bar.w, bar.h, t->radius_m, 1, ui_color(EX_ADDR_EDIT ? t->accent : t->border));
     ex_draw_folder_icon(bar.x + 20, bar.y + bar.h / 2, 18);
-    char crumbs[200];
-    crumb_text(crumbs, sizeof crumbs);
-    ui_text_in(ui_rect(bar.x + 38, bar.y, bar.w - 46, bar.h), crumbs, UI_TEXT_BODY, UI_ALIGN_LEFT);
+    if (EX_ADDR_EDIT && EX_WIN)
+    {
+        ui_edit_draw(ui_rect(bar.x + CRUMB_TEXT_X - 6, bar.y + 4, bar.w - CRUMB_TEXT_X - 2, bar.h - 8), &EX_WIN->edits[0],
+                     "Type a path, e.g. /RAM Disk", 1);
+        return;
+    }
+    Crumb c[CRUMB_MAX];
+    int n = crumbs_build(l, c);
+    GfxClip saved = gfx_get_clip(); /* a name that is too long is cut at the bar's edge */
+    gfx_clip_intersect(bar.x, bar.y, bar.w - 4, bar.h);
+    for (int i = 0; i < n; i++)
+    {
+        UiRect r = crumb_rect(&bar, &c[i]);
+        int last = i == n - 1;
+        if (c[i].id == EX_HOVER_CRUMB)
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 30);
+        ui_text_in_color(r, c[i].name, UI_TEXT_BODY, UI_ALIGN_CENTER, last ? t->text : t->text_dim);
+        if (!last)
+            ui_text_in_color(ui_rect(r.x + r.w, r.y, CRUMB_SEP, r.h), ">", UI_TEXT_SMALL, UI_ALIGN_CENTER, t->text_dim);
+    }
+    gfx_restore_clip(saved);
 }
 
 /* tooltip: a small label under the toolbar button the pointer rests on (above it near the bottom) */
@@ -153,7 +315,7 @@ void ex_sync_buttons(void)
 {
     if (!EX_WIN)
         return;
-    int idle = EX_RENAME_ID < 0;
+    int idle = EX_RENAME_ID < 0 && !EX_ADDR_EDIT;
     int has = EX_SEL >= 0 && EX_SEL < EX_NITEMS && !ex_is_drive(vfs_node(EX_ITEMS[EX_SEL])); /* a drive cannot be cut, renamed ... */
     int inside = EX_CUR != VFS_ROOT;                                                       /* nothing is created in This PC */
     EX_WIN->btn[BTN_REFRESH].enabled = idle;

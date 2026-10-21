@@ -48,6 +48,26 @@ int ex_press(Window *w, int x, int y)
             return 1;
         l = ex_layout(body);
     }
+    if (EX_ADDR_EDIT) /* a click in the path field moves the caret; anywhere else gives the field up */
+    {
+        UiRect f = w->edits[0].field;
+        if (f.w > 0 && ui_contains(f, x, y))
+        {
+            ui_edit_mouse(&w->edits[0], x, y, 1);
+            ui_caret_restart();
+            return 1;
+        }
+        ex_end_addr(0);
+    }
+    if (ui_contains(ex_path_bar(&l), x, y)) /* a name goes to that folder; the empty part types a path */
+    {
+        int dir = ex_crumb_at(&l, x, y);
+        if (dir >= 0)
+            ex_go_to(dir, 1);
+        else
+            ex_start_addr_edit();
+        return 1;
+    }
 
     if (on_divider(&l, x, y)) /* hold it and drag to resize the sidebar */
     {
@@ -125,7 +145,7 @@ int ex_drag(Window *w, int x, int y, unsigned buttons)
         EX_SIDE_W = side;
         return changed;
     }
-    if (EX_RENAME_ID < 0 || !w->edits[0].dragging)
+    if ((EX_RENAME_ID < 0 && !EX_ADDR_EDIT) || !w->edits[0].dragging)
         return 0;
     int changed = ui_edit_mouse(&w->edits[0], x, y, buttons);
     if (changed)
@@ -140,6 +160,7 @@ int ex_rpress(Window *w, int x, int y)
     Layout l = ex_layout(body);
     if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
         return 1;
+    ex_end_addr(0);
     EX_MENU.open = 0;
     if (!ui_contains(l.list, x, y) && !ui_contains(l.head, x, y))
         return 1; /* toolbar, sidebar, status bar: no menu */
@@ -163,8 +184,10 @@ int ex_rpress(Window *w, int x, int y)
 int ex_hover(Window *w, int x, int y)
 {
     int old_row = EX_HOVER_ROW, old_place = EX_HOVER_PLACE, old_menu = EX_MENU.hover;
-    int old_tip = EX_TIP_BTN, was_shown = EX_TIP_SHOWN;
+    int old_tip = EX_TIP_BTN, was_shown = EX_TIP_SHOWN, old_crumb = EX_HOVER_CRUMB;
     EX_TIP_BTN = -1;
+    Layout lay = ex_layout(wm_content(w));
+    EX_HOVER_CRUMB = (x >= 0 && !EX_MENU.open && !EX_ADDR_EDIT) ? ex_crumb_at(&lay, x, y) : -1;
     if (x >= 0 && !EX_MENU.open)
         for (int i = 0; i < w->btn_count; i++)
             if (ui_contains(w->btn[i].r, x, y))
@@ -191,7 +214,8 @@ int ex_hover(Window *w, int x, int y)
             EX_HOVER_PLACE = p < ex_place_count() ? p : -1;
         }
     }
-    return old_row != EX_HOVER_ROW || old_place != EX_HOVER_PLACE || old_menu != EX_MENU.hover || was_shown != EX_TIP_SHOWN;
+    return old_row != EX_HOVER_ROW || old_place != EX_HOVER_PLACE || old_menu != EX_MENU.hover || was_shown != EX_TIP_SHOWN ||
+           old_crumb != EX_HOVER_CRUMB;
 }
 
 int ex_wheel(Window *w, int steps)
@@ -229,6 +253,19 @@ void ex_key(Window *w, const KeyEvent *k)
     if (page < 1)
         page = 1;
 
+    if (EX_ADDR_EDIT) /* the path field has the keyboard */
+    {
+        if (k->key == KEY_ENTER)
+            ex_end_addr(1);
+        else if (k->key == KEY_ESC)
+            ex_end_addr(0);
+        else if (ui_edit_key(&w->edits[0], k))
+        {
+            EX_NOTE = 0;
+            ui_caret_restart();
+        }
+        return;
+    }
     if (EX_RENAME_ID >= 0) /* the name field has the keyboard */
     {
         if (k->key == KEY_ENTER)
@@ -255,6 +292,11 @@ void ex_key(Window *w, const KeyEvent *k)
         return;
     }
 
+    if (k->key == KEY_F4 || ((k->mods & KMOD_ALT) && k->key == 'd')) /* type a path */
+    {
+        ex_start_addr_edit();
+        return;
+    }
     if ((k->mods & KMOD_ALT) && k->key == KEY_LEFT)
     {
         ex_go_back();

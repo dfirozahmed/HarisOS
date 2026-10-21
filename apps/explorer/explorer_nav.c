@@ -52,6 +52,7 @@ void ex_go_to(int dir, int push)
     const VfsNode *n = vfs_node(dir);
     if (!n || !n->is_dir || dir == EX_CUR)
         return;
+    ex_end_addr(0);
     if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
         ex_end_rename(0); /* leaving the folder: keep the old name if the new one is not usable */
     if (push)

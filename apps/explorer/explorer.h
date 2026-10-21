@@ -154,6 +154,8 @@ extern int EX_TIP_SHOWN;           /* the tooltip is visible */
 extern int EX_CLIP_ID;             /* entry on the clipboard (Cut or Copy), -1 = empty */
 extern int EX_CLIP_CUT;            /* 1 = it moves on Paste, 0 = a copy is made */
 extern int EX_RENAME_ID;           /* node being renamed in its row (EX_WIN->edits[0] holds the text), -1 = none */
+extern int EX_ADDR_EDIT;           /* 1 = the path bar is a text field (EX_WIN->edits[0] holds the path) */
+extern int EX_HOVER_CRUMB;         /* node of the path bar name under the pointer, -1 = none */
 extern Menu EX_MENU;
 
 /* ---- explorer_util.c -------------------------------------------- */
@@ -219,6 +221,10 @@ void ex_menu_draw(const UiTheme *t);
 void ex_toolbar_create(Window *win, int content_w);
 void ex_sync_buttons(void);
 void ex_draw_toolbar(const Layout *l, const UiTheme *t);
+UiRect ex_path_bar(const Layout *l);                    /* where the path bar is */
+int ex_crumb_at(const Layout *l, int x, int y);         /* folder of the path bar name at (x, y), -1 = none */
+void ex_start_addr_edit(void);                          /* turn the path bar into a text field */
+int ex_end_addr(int commit);                            /* Enter (1) / Escape (0); 0 = path refused, field stays */
 void ex_tip_draw(const Window *w, UiRect body, const UiTheme *t);
 int ex_tick(Window *w);
 int ex_cursor(Window *w, int x, int y);
