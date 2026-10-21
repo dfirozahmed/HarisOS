@@ -25,6 +25,8 @@
 #define SIDE_W 120
 #define SIDE_ROW_H 40
 #define DISK_ROW_H 38
+#define MEM_FREE PMM_TAG_COUNT /* the breakdown has one more part than there are tags: the free pages */
+#define MEM_PARTS (PMM_TAG_COUNT + 1)
 #define HIST_N 60 /* history samples, one per refresh */
 
 enum
@@ -175,6 +177,18 @@ static void put_mb(char *s, int *n, unsigned long long pages)
     put_str(s, n, " MB");
 }
 
+/* "812 KB" below 1 MB, else "42 MB" (small owners such as USB are only a few pages) */
+static void put_pages(char *s, int *n, unsigned long long pages)
+{
+    if (pages < 256)
+    {
+        put_dec(s, n, (unsigned)(pages * 4));
+        put_str(s, n, " KB");
+    }
+    else
+        put_mb(s, n, pages);
+}
+
 static unsigned mem_used_percent(void)
 {
     unsigned long long total = pmm_total_pages();
@@ -289,24 +303,63 @@ static void draw_memory(UiRect pane)
     put_str(line, &n, "%");
     ui_text_in(ui_rect(pane.x + pane.w - 80, pane.y, 80, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
 
-    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 110);
+    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 80);
     draw_graph(g, MEM_HIST, MEM_HIST_N);
 
-    ui_progress(ui_rect(pane.x, g.y + g.h + 14, pane.w, 12), (int)mem_used_percent());
+    n = 0;
+    put_str(line, &n, "In use ");
+    put_pages(line, &n, total - free_p);
+    put_str(line, &n, " of ");
+    put_pages(line, &n, total);
+    ui_text_color(pane.x, g.y + g.h + 6, line, UI_TEXT_SMALL, t->text_dim);
 
-    int y = g.y + g.h + 40;
-    n = 0;
-    put_str(line, &n, "In use: ");
-    put_mb(line, &n, total - free_p);
-    ui_text(pane.x, y, line, UI_TEXT_BODY);
-    n = 0;
-    put_str(line, &n, "Available: ");
-    put_mb(line, &n, free_p);
-    ui_text(pane.x, y + 26, line, UI_TEXT_BODY);
-    n = 0;
-    put_str(line, &n, "Total: ");
-    put_mb(line, &n, total);
-    ui_text_color(pane.x, y + 52, line, UI_TEXT_SMALL, t->text_dim);
+    /* breakdown: the used part is split by owner (see PmmTag); "Other" is whatever the tags do not explain */
+    unsigned long long part[MEM_PARTS];
+    unsigned long long known = 0;
+    for (int i = 0; i < PMM_TAG_COUNT; i++)
+        if (i != PMM_TAG_OTHER)
+        {
+            part[i] = pmm_tag_pages((PmmTag)i);
+            known += part[i];
+        }
+    part[PMM_TAG_OTHER] = (total - free_p > known) ? total - free_p - known : 0;
+    part[MEM_FREE] = free_p;
+
+    UiRgb col[MEM_PARTS];
+    col[MEM_FREE] = t->surface_alt;
+    col[PMM_TAG_SYSTEM] = t->text_dim;
+    col[PMM_TAG_GRAPHICS] = t->accent;
+    col[PMM_TAG_USB] = t->success;
+    col[PMM_TAG_STORAGE] = t->warning;
+    col[PMM_TAG_OTHER] = t->danger;
+    static const char *const name[MEM_PARTS] = {"Other", "System tables", "Graphics buffers", "USB", "Storage", "Free"};
+
+    UiRect bar = ui_rect(pane.x, g.y + g.h + 30, pane.w, 14);
+    gfx_fill_round_rect(bar.x, bar.y, bar.w, bar.h, 4, ui_color(t->surface_alt));
+    unsigned long long cum = 0;
+    for (int i = 0; i < MEM_FREE && total; i++)
+    {
+        int x0 = bar.x + (int)(cum * (unsigned long long)bar.w / total);
+        cum += part[i];
+        int x1 = bar.x + (int)(cum * (unsigned long long)bar.w / total);
+        if (x1 > x0)
+            gfx_fill_rect(x0, bar.y, x1 - x0, bar.h, ui_color(col[i]));
+    }
+
+    int y = bar.y + bar.h + 14;
+    static const int order[MEM_PARTS] = {PMM_TAG_GRAPHICS, PMM_TAG_SYSTEM, PMM_TAG_USB, PMM_TAG_STORAGE,
+                                         PMM_TAG_OTHER, MEM_FREE};
+    for (int k = 0; k < MEM_PARTS; k++)
+    {
+        int i = order[k];
+        gfx_fill_circle(pane.x + 6, y + 10, 5, ui_color(col[i]));
+        ui_text_in(ui_rect(pane.x + 20, y, pane.w - 120, 22), name[i], UI_TEXT_BODY, UI_ALIGN_LEFT);
+        n = 0;
+        line[0] = 0;
+        put_pages(line, &n, part[i]);
+        ui_text_in_color(ui_rect(pane.x + pane.w - 100, y, 100, 22), line, UI_TEXT_BODY, UI_ALIGN_RIGHT, t->text);
+        y += 22;
+    }
 }
 
 static void draw_cpu(UiRect pane)

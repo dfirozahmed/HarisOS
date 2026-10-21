@@ -66,7 +66,7 @@ static inline void stor_udelay(unsigned us)
  * addresses. Returns the address (RAM is identity mapped), or 0. */
 static inline u64 stor_dma_alloc(unsigned pages, int below_4g)
 {
-    u64 p = pmm_alloc_contiguous(pages);
+    u64 p = pmm_alloc_contiguous_tag(pages, PMM_TAG_STORAGE);
     if (!p)
         return 0;
     if (below_4g && p + (u64)pages * PMM_PAGE_SIZE > 0x100000000ULL)

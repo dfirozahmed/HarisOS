@@ -218,7 +218,7 @@ static void kq_push_empty(void) /* "all keys released" */
 
 static volatile u8 *dma_page(Xhci *x, u64 *phys)
 {
-    u64 p = pmm_alloc_page();
+    u64 p = pmm_alloc_page_tag(PMM_TAG_USB);
     if (!p)
         return 0;
     if (!x->ac64 && p >= 0x100000000ULL)
@@ -982,7 +982,7 @@ static int msc_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const MscDesc
     m->out_dci = (md->out_addr & 15) * 2;
     m->errs = 0;
 
-    u64 bounce = pmm_alloc_contiguous(MSC_BUF_PAGES);
+    u64 bounce = pmm_alloc_contiguous_tag(MSC_BUF_PAGES, PMM_TAG_USB);
     if (bounce && !x->ac64 && bounce + (u64)MSC_BUF_PAGES * 4096 > 0x100000000ULL)
     {
         pmm_free_contiguous(bounce, MSC_BUF_PAGES);

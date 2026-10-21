@@ -69,7 +69,7 @@ void kernel_main(const BootInfo *info)
     if (pmm_ok && gfx_ready())
     {
         unsigned long long pages = (gfx_backbuffer_size() + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-        unsigned long long mem = pmm_alloc_contiguous(pages);
+        unsigned long long mem = pmm_alloc_contiguous_tag(pages, PMM_TAG_GRAPHICS);
         if (mem && gfx_enable_backbuffer((void *)mem) == 0)
             double_buffered = 1;
         else if (mem)
@@ -81,7 +81,7 @@ void kernel_main(const BootInfo *info)
     if (double_buffered)
     {
         unsigned long long pages = (gfx_backbuffer_size() + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-        unsigned long long mem = pmm_alloc_contiguous(pages);
+        unsigned long long mem = pmm_alloc_contiguous_tag(pages, PMM_TAG_GRAPHICS);
         if (mem && gfx_cache_enable((void *)mem) != 0)
             pmm_free_contiguous(mem, pages);
     }

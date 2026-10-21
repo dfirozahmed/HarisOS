@@ -15,7 +15,6 @@ static unsigned long long page_count;   /* pages covered by the bitmap */
 static unsigned long long usable_pages; /* pages that were ever free */
 static unsigned long long free_count;
 static unsigned long long search_hint; /* word index to start searching at */
-
 static const BootMemDesc *desc_at(const BootInfo *info, unsigned long long i)
 {
     return (const BootMemDesc *)((const char *)info->memmap + i * info->desc_size);
@@ -42,6 +41,31 @@ static void mark_free(unsigned long long p)
     free_count++;
 }
 
+/* Owner tags: 4 bits per page (two pages per byte), stored right after the bitmap. tag_pages[] counts the
+ * pages each tag owns now, so the breakdown does not need to scan anything. */
+static volatile unsigned char *tagmap;
+static unsigned long long tag_pages[PMM_TAG_COUNT];
+
+static PmmTag get_tag(unsigned long long p)
+{
+    unsigned t = (tagmap[p / 2] >> ((p % 2) * 4)) & 15u;
+    return t < PMM_TAG_COUNT ? (PmmTag)t : PMM_TAG_OTHER;
+}
+
+static void set_tag(unsigned long long p, PmmTag tag)
+{
+    unsigned sh = (unsigned)(p % 2) * 4;
+    tagmap[p / 2] = (unsigned char)((tagmap[p / 2] & ~(15u << sh)) | ((unsigned)tag << sh));
+}
+
+/* a page just taken from the free pool */
+static void take_page(unsigned long long p, PmmTag tag)
+{
+    mark_used(p);
+    set_tag(p, tag);
+    tag_pages[tag]++;
+}
+
 int pmm_init(const BootInfo *info)
 {
     unsigned long long n, i, max_end = 0;
@@ -66,8 +90,10 @@ int pmm_init(const BootInfo *info)
     page_count = max_end / PMM_PAGE_SIZE;
     unsigned long long words = (page_count + 63) / 64;
     unsigned long long bitmap_pages = (words * 8 + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    unsigned long long tag_bytes = (page_count + 1) / 2;
+    unsigned long long table_pages = bitmap_pages + (tag_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
 
-    /* 2) Find a free region (above 1 MiB) big enough to hold the bitmap itself. */
+    /* 2) Find a free region (above 1 MiB) big enough to hold the bitmap and the tag table. */
     unsigned long long bitmap_phys = 0;
     for (i = 0; i < n; i++)
     {
@@ -80,11 +106,11 @@ int pmm_init(const BootInfo *info)
             unsigned long long skip = (LOW_LIMIT - start) / PMM_PAGE_SIZE;
             if (skip >= d->pages)
                 continue;
-            if (d->pages - skip < bitmap_pages)
+            if (d->pages - skip < table_pages)
                 continue;
             start = LOW_LIMIT;
         }
-        else if (d->pages < bitmap_pages)
+        else if (d->pages < table_pages)
             continue;
         bitmap_phys = start;
         break;
@@ -96,6 +122,11 @@ int pmm_init(const BootInfo *info)
     bitmap = (volatile unsigned long long *)(unsigned long long)bitmap_phys;
     for (i = 0; i < words; i++)
         bitmap[i] = ~0ULL;
+    tagmap = (volatile unsigned char *)(unsigned long long)(bitmap_phys + bitmap_pages * PMM_PAGE_SIZE);
+    for (i = 0; i < tag_bytes; i++)
+        tagmap[i] = 0;
+    for (i = 0; i < PMM_TAG_COUNT; i++)
+        tag_pages[i] = 0;
     free_count = 0;
     usable_pages = 0;
 
@@ -114,15 +145,20 @@ int pmm_init(const BootInfo *info)
         }
     }
 
-    /* 4) The bitmap's own pages are in use. */
-    for (i = 0; i < bitmap_pages; i++)
-        mark_used(bitmap_phys / PMM_PAGE_SIZE + i);
+    /* 4) The bitmap's and tag table's own pages are in use. */
+    for (i = 0; i < table_pages; i++)
+        take_page(bitmap_phys / PMM_PAGE_SIZE + i, PMM_TAG_SYSTEM);
 
     search_hint = 0;
     return 0;
 }
 
 unsigned long long pmm_alloc_page(void)
+{
+    return pmm_alloc_page_tag(PMM_TAG_OTHER);
+}
+
+unsigned long long pmm_alloc_page_tag(PmmTag tag)
 {
     unsigned long long words = (page_count + 63) / 64;
     if (!bitmap)
@@ -137,7 +173,7 @@ unsigned long long pmm_alloc_page(void)
         unsigned long long page = w * 64 + bit;
         if (page >= page_count)
             continue;
-        mark_used(page);
+        take_page(page, tag);
         search_hint = w;
         return page * PMM_PAGE_SIZE;
     }
@@ -148,11 +184,24 @@ void pmm_free_page(unsigned long long phys)
 {
     if (!bitmap || (phys % PMM_PAGE_SIZE) || phys < LOW_LIMIT)
         return;
-    mark_free(phys / PMM_PAGE_SIZE);
+    unsigned long long p = phys / PMM_PAGE_SIZE;
+    if (p < page_count && page_used(p))
+    {
+        PmmTag t = get_tag(p);
+        if (tag_pages[t])
+            tag_pages[t]--;
+        set_tag(p, PMM_TAG_OTHER);
+    }
+    mark_free(p);
     search_hint = (phys / PMM_PAGE_SIZE) / 64;
 }
 
 unsigned long long pmm_alloc_contiguous(unsigned long long count)
+{
+    return pmm_alloc_contiguous_tag(count, PMM_TAG_OTHER);
+}
+
+unsigned long long pmm_alloc_contiguous_tag(unsigned long long count, PmmTag tag)
 {
     if (!bitmap || count == 0)
         return 0;
@@ -178,7 +227,7 @@ unsigned long long pmm_alloc_contiguous(unsigned long long count)
         if (run == count)
         {
             for (unsigned long long k = 0; k < count; k++)
-                mark_used(start + k);
+                take_page(start + k, tag);
             return start * PMM_PAGE_SIZE;
         }
     }
@@ -193,3 +242,4 @@ void pmm_free_contiguous(unsigned long long phys, unsigned long long count)
 
 unsigned long long pmm_total_pages(void) { return usable_pages; }
 unsigned long long pmm_free_pages(void) { return free_count; }
+unsigned long long pmm_tag_pages(PmmTag tag) { return tag < PMM_TAG_COUNT ? tag_pages[tag] : 0; }
