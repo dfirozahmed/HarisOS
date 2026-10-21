@@ -51,6 +51,7 @@ static void explorer_app_open(void)
     desktop_set_status(0);
 
     ex_toolbar_create(win, w - 2);
+    wm_set_maximized(win, 1); /* opens filling the screen; "restore" goes back to the size above */
 
     EX_CUR = VFS_ROOT;
     EX_HIST_N = 0;
