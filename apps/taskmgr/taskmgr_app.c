@@ -657,7 +657,6 @@ static void tm_key(Window *w, const KeyEvent *k)
 /* once a second: windows opened or closed elsewhere show up without a click */
 static int tm_tick(Window *w)
 {
-    (void)w;
     unsigned long long now = timer_ms();
     if (now - LAST_MS < REFRESH_MS)
         return 0;
@@ -670,7 +669,10 @@ static int tm_tick(Window *w)
     reload();
     take_samples(dt); /* keep sampling while the other tab is shown, so the graph has no gap */
     if (TAB == TAB_PERFORMANCE)
-        return 1;
+    {
+        wm_add_damage(pane_rect(wm_content(w))); /* only the graphs and numbers change, not the tabs or the side list */
+        return 2;
+    }
     if (old_n != NPROCS)
         return 1;
     for (int i = 0; i < NPROCS; i++)

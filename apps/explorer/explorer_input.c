@@ -215,8 +215,29 @@ int ex_hover(Window *w, int x, int y)
             EX_HOVER_PLACE = p < ex_place_count() ? p : -1;
         }
     }
-    return old_row != EX_HOVER_ROW || old_place != EX_HOVER_PLACE || old_menu != EX_MENU.hover || was_shown != EX_TIP_SHOWN ||
-           old_crumb != EX_HOVER_CRUMB;
+    if (old_menu != EX_MENU.hover || was_shown != EX_TIP_SHOWN || old_crumb != EX_HOVER_CRUMB)
+        return 1; /* menu, tooltip and path bar: rare, redraw the whole window */
+    if (old_row == EX_HOVER_ROW && old_place == EX_HOVER_PLACE)
+        return 0;
+
+    /* Only the highlight of a row or sidebar entry moved: redraw just those. A row's pixels are where the row is
+     * now, also after the list scrolled (they moved with it). */
+    Layout l = ex_layout(wm_content(w));
+    int vis = ex_visible_rows(&l);
+    int rows[2] = {old_row, EX_HOVER_ROW};
+    for (int k = 0; k < 2 && old_row != EX_HOVER_ROW; k++)
+    {
+        int i = rows[k] - EX_SCROLL;
+        if (rows[k] < 0 || i < 0 || i > vis)
+            continue;
+        int top = l.list.y + i * ROW_H, bottom = top + ROW_H;
+        if (bottom > l.list.y + l.list.h)
+            bottom = l.list.y + l.list.h;
+        wm_add_damage(ui_rect(l.list.x, top, l.list.w, bottom - top));
+    }
+    if (old_place != EX_HOVER_PLACE)
+        wm_add_damage(l.side);
+    return 2;
 }
 
 int ex_wheel(Window *w, int steps)

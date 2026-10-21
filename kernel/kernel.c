@@ -193,6 +193,8 @@ void kernel_main(const BootInfo *info)
         if (wheel_pending && pass_start - wheel_last >= WHEEL_FRAME_US)
         {
             desktop_wheel(wheel_x, wheel_y, wheel_pending);
+            if (have_mouse)
+                desktop_pointer(m.x, m.y, m.buttons); /* the list moved under a still pointer: update the hover highlight */
             wheel_pending = 0;
             wheel_last = pass_start;
             worked = 1;

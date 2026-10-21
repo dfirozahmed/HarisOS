@@ -127,6 +127,10 @@ int main(void){
     assert(wm_tick()==0 && tick_calls==1 && !WM_HAS_DMG);
     tick_ret=1;
     assert(wm_tick()==1 && tick_calls==2 && WM_HAS_DMG);
+    wm_take_damage(&(UiRect){0});
+    tick_ret=2;
+    assert(wm_tick()==1 && tick_calls==3 && !WM_HAS_DMG);   /* 2 = changed, but the handler marks its own area */
+    tick_ret=1;
     wm_minimize(w); tick_calls=0; wm_tick(); assert(tick_calls==0);   /* minimized windows are skipped */
     wm_activate(w);
   }

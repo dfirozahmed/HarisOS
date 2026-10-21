@@ -472,13 +472,13 @@ int wm_pointer(int x, int y, unsigned buttons)
     {
         Window *old = HOVER_CONTENT;
         HOVER_CONTENT = 0;
-        if (old->on_hover && old->on_hover(old, -1, -1))
+        if (old->on_hover && old->on_hover(old, -1, -1) == 1) /* 2 = it marked its own area (wm_add_damage) */
             wm_damage_window_internal(old);
     }
     if (target && wm_z_index_internal(target) >= 0)
     {
         HOVER_CONTENT = target;
-        if (target->on_hover && target->on_hover(target, x, y))
+        if (target->on_hover && target->on_hover(target, x, y) == 1)
             wm_damage_window_internal(target);
     }
     else
@@ -505,9 +505,11 @@ int wm_tick(void)
         Window *w = WM_Z[i];
         if (w->minimized || !w->on_tick)
             continue;
-        if (w->on_tick(w))
+        int r = w->on_tick(w);
+        if (r)
         {
-            wm_damage_window_internal(w);
+            if (r == 1)
+                wm_damage_window_internal(w); /* 2 = it marked its own area with wm_add_damage() */
             changed = 1;
         }
         if (i >= WM_ZN || WM_Z[i] != w) /* the handler closed or reordered windows: stop for this pass */
