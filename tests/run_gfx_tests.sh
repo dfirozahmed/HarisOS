@@ -11,6 +11,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/kernel/graphics/gfx_buffer.c" \
   "$ROOT/kernel/graphics/gfx_clip.c" \
   "$ROOT/kernel/graphics/gfx_dirty.c" \
+  "$ROOT/kernel/graphics/gfx_layer.c" \
   "$ROOT/kernel/graphics/gfx_shapes.c" \
   "$ROOT/kernel/graphics/gfx_effects.c" \
   "$ROOT/kernel/graphics/gfx_cursor.c" \

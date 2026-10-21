@@ -138,6 +138,15 @@ void wm_invalidate(void);
  * with the clip set to it. */
 int wm_take_damage(UiRect *out);
 
+/* Same, but as separate non-overlapping rectangles (at most max, never more than WM_DAMAGE_MAX), so a
+ * window dragged far leaves two small areas to redraw instead of one big box. Returns how many. */
+#define WM_DAMAGE_MAX 8
+int wm_take_damage_rects(UiRect *out, int max);
+
+/* Two buffers of `bytes` each (about the screen size) for the picture of a window being dragged.
+ * Optional: without them a dragged window is redrawn from scratch every frame. */
+void wm_set_drag_memory(void *a, void *b, unsigned long long bytes);
+
 /* Draw every window, back to front. Draw the wallpaper first. */
 void wm_draw(void);
 

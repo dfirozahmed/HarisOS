@@ -1,28 +1,66 @@
 /* Damage tracking and invalidation for the window manager. */
 #include "wm_internal.h"
 
-/* Damage: the screen area that must be redrawn (union of everything that changed). */
-int WM_HAS_DMG, WM_DMG_X0, WM_DMG_Y0, WM_DMG_X1, WM_DMG_Y1;
+/* Damage: the screen area that must be redrawn, kept as a few separate rectangles that never overlap.
+ * One bounding box would also cover the empty corners between two far-apart changes (the old and the
+ * new place of a window dragged diagonally), and every pixel of it costs redraw time. */
+typedef struct
+{
+    int x0, y0, x1, y1;
+} DmgRect;
+
+static DmgRect DMG[WM_DAMAGE_MAX];
+static int DMG_N;
+int WM_HAS_DMG; /* DMG_N > 0 */
+
+/* Add [x0,x1) x [y0,y1) minus what DMG[from..] already covers. A rectangle that only partly overlaps
+ * one in the list is cut into up to four strips around it, and each strip is added on its own. */
+static void add_from(int x0, int y0, int x1, int y1, int from)
+{
+    for (int i = from; i < DMG_N; i++)
+    {
+        DmgRect e = DMG[i];
+        if (x0 >= e.x1 || x1 <= e.x0 || y0 >= e.y1 || y1 <= e.y0)
+            continue; /* apart */
+        if (x0 >= e.x0 && x1 <= e.x1 && y0 >= e.y0 && y1 <= e.y1)
+            return; /* already covered */
+        int cy0 = y0 > e.y0 ? y0 : e.y0, cy1 = y1 < e.y1 ? y1 : e.y1; /* rows shared with e */
+        if (y0 < e.y0)
+            add_from(x0, y0, x1, e.y0, i + 1); /* above e */
+        if (y1 > e.y1)
+            add_from(x0, e.y1, x1, y1, i + 1); /* below e */
+        if (x0 < e.x0)
+            add_from(x0, cy0, e.x0, cy1, i + 1); /* left of e */
+        if (x1 > e.x1)
+            add_from(e.x1, cy0, x1, cy1, i + 1); /* right of e */
+        return;
+    }
+    if (DMG_N == WM_DAMAGE_MAX)
+    {
+        /* List full: fall back to one box around everything. */
+        for (int i = 1; i < DMG_N; i++)
+        {
+            if (DMG[i].x0 < DMG[0].x0) DMG[0].x0 = DMG[i].x0;
+            if (DMG[i].y0 < DMG[0].y0) DMG[0].y0 = DMG[i].y0;
+            if (DMG[i].x1 > DMG[0].x1) DMG[0].x1 = DMG[i].x1;
+            if (DMG[i].y1 > DMG[0].y1) DMG[0].y1 = DMG[i].y1;
+        }
+        DMG_N = 1;
+        if (x0 < DMG[0].x0) DMG[0].x0 = x0;
+        if (y0 < DMG[0].y0) DMG[0].y0 = y0;
+        if (x1 > DMG[0].x1) DMG[0].x1 = x1;
+        if (y1 > DMG[0].y1) DMG[0].y1 = y1;
+        return;
+    }
+    DMG[DMG_N++] = (DmgRect){x0, y0, x1, y1};
+}
 
 void wm_damage_internal(int x0, int y0, int x1, int y1)
 {
-    if (!WM_HAS_DMG)
-    {
-        WM_DMG_X0 = x0;
-        WM_DMG_Y0 = y0;
-        WM_DMG_X1 = x1;
-        WM_DMG_Y1 = y1;
-        WM_HAS_DMG = 1;
+    if (x1 <= x0 || y1 <= y0)
         return;
-    }
-    if (x0 < WM_DMG_X0)
-        WM_DMG_X0 = x0;
-    if (y0 < WM_DMG_Y0)
-        WM_DMG_Y0 = y0;
-    if (x1 > WM_DMG_X1)
-        WM_DMG_X1 = x1;
-    if (y1 > WM_DMG_Y1)
-        WM_DMG_Y1 = y1;
+    add_from(x0, y0, x1, y1, 0);
+    WM_HAS_DMG = DMG_N > 0;
 }
 
 /* a window plus its shadow */
@@ -37,16 +75,36 @@ void wm_invalidate(void)
     wm_damage_internal(0, 0, (int)gfx_width(), (int)gfx_height());
 }
 
+int wm_take_damage_rects(UiRect *out, int max)
+{
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int n = 0;
+    for (int i = 0; i < DMG_N && n < max; i++)
+    {
+        int x0 = DMG[i].x0 < 0 ? 0 : DMG[i].x0, y0 = DMG[i].y0 < 0 ? 0 : DMG[i].y0;
+        int x1 = DMG[i].x1 > W ? W : DMG[i].x1, y1 = DMG[i].y1 > H ? H : DMG[i].y1;
+        if (x1 > x0 && y1 > y0)
+            out[n++] = ui_rect(x0, y0, x1 - x0, y1 - y0);
+    }
+    DMG_N = 0;
+    WM_HAS_DMG = 0;
+    return n;
+}
+
 int wm_take_damage(UiRect *out)
 {
-    if (!WM_HAS_DMG)
+    UiRect r[WM_DAMAGE_MAX];
+    int n = wm_take_damage_rects(r, WM_DAMAGE_MAX);
+    if (n == 0)
         return 0;
-    int W = (int)gfx_width(), H = (int)gfx_height();
-    int x0 = WM_DMG_X0 < 0 ? 0 : WM_DMG_X0, y0 = WM_DMG_Y0 < 0 ? 0 : WM_DMG_Y0;
-    int x1 = WM_DMG_X1 > W ? W : WM_DMG_X1, y1 = WM_DMG_Y1 > H ? H : WM_DMG_Y1;
-    WM_HAS_DMG = 0;
-    if (x1 <= x0 || y1 <= y0)
-        return 0;
+    int x0 = r[0].x, y0 = r[0].y, x1 = r[0].x + r[0].w, y1 = r[0].y + r[0].h;
+    for (int i = 1; i < n; i++)
+    {
+        if (r[i].x < x0) x0 = r[i].x;
+        if (r[i].y < y0) y0 = r[i].y;
+        if (r[i].x + r[i].w > x1) x1 = r[i].x + r[i].w;
+        if (r[i].y + r[i].h > y1) y1 = r[i].y + r[i].h;
+    }
     *out = ui_rect(x0, y0, x1 - x0, y1 - y0);
     return 1;
 }

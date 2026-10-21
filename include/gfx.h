@@ -75,6 +75,20 @@ void gfx_cache_invalidate(void);
 void gfx_cache_save(void); /* copy the whole back buffer into the cache */
 void gfx_cache_restore(int x, int y, int w, int h);
 
+/* ---- layers ---------------------------------------------------
+ * Draw something once into its own w*h pixel buffer, then paste it often (a window being dragged).
+ *   gfx_layer_begin(buf, w, h, fill)  all drawing goes to buf; the "screen" is w*h with (0,0) at its corner
+ *   ... draw as usual ...
+ *   gfx_layer_end()                   back to the real screen
+ * Drawing is done twice, once over black (fill 0) and once over white (fill 0xFFFFFF) into two buffers.
+ * gfx_layer_pack() then turns the pair into one premultiplied layer: the colour is what was drawn over
+ * black, the top byte is how much of the background still shows through (255 = nothing drawn there).
+ * gfx_layer_blit() draws the layer at x,y (clipped), over what is already in the picture. */
+int gfx_layer_begin(void *buf, int w, int h, unsigned fill);
+void gfx_layer_end(void);
+void gfx_layer_pack(void *over_black, const void *over_white, int w, int h); /* w*h pixels each; the layer is w wide */
+void gfx_layer_blit(const void *layer, int lw, int lh, int x, int y);
+
 /* ---- mouse pointer ------------------------------------------
  * A smooth arrow drawn on top of everything, directly on the screen (never in
  * the back buffer), so moving it does not need a redraw of the scene.

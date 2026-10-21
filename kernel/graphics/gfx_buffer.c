@@ -86,8 +86,7 @@ static void copy_row(volatile unsigned int *dst, volatile unsigned int *src, int
 {
     if (BRIGHT >= GFX_BRIGHTNESS_MAX)
     {
-        for (int x = x0; x < x1; x++)
-            dst[x] = src[x];
+        gfx_internal_copy_fb(dst + x0, src + x0, x1 - x0);
         return;
     }
     unsigned int s = (unsigned int)gfx_internal_brightness_scale();
@@ -113,9 +112,11 @@ void gfx_present(void)
             continue;
         copy_row(FB + (long long)y * PITCH, DRAW + (long long)y * DPITCH, DX0, DX1);
     }
+    gfx_internal_copy_fb_done();
     gfx_internal_cursor_restore();
     for (int y = DY0 > cy0 ? DY0 : cy0; y < (DY1 < cy1 ? DY1 : cy1); y++)
         copy_row(FB + (long long)y * PITCH, DRAW + (long long)y * DPITCH, DX0, DX1);
+    gfx_internal_copy_fb_done();
     DX0 = DY0 = DX1 = DY1 = 0;
     gfx_internal_cursor_paint();
 }
@@ -160,8 +161,7 @@ void gfx_cache_save(void)
     {
         volatile unsigned int *src = DRAW + (long long)y * DPITCH;
         volatile unsigned int *dst = CACHE + (long long)y * W;
-        for (int x = 0; x < W; x++)
-            dst[x] = src[x];
+        gfx_internal_copy32(dst, src, W);
     }
     CACHE_OK = 1;
 }
@@ -177,8 +177,7 @@ void gfx_cache_restore(int x, int y, int w, int h)
     {
         volatile unsigned int *src = CACHE + (long long)yy * W;
         volatile unsigned int *dst = DRAW + (long long)yy * DPITCH;
-        for (int xx = x0; xx < x1; xx++)
-            dst[xx] = src[xx];
+        gfx_internal_copy32(dst + x0, src + x0, x1 - x0);
     }
     gfx_internal_mark_dirty(x0, y0, x1, y1);
 }

@@ -125,6 +125,35 @@ int main(void){
     wm_minimize(w); tick_calls=0; wm_tick(); assert(tick_calls==0);   /* minimized windows are skipped */
     wm_activate(w);
   }
+  /* damage: overlapping areas become separate non-overlapping rectangles that cover exactly their union */
+  {
+    UiRect r[WM_DAMAGE_MAX]; int n;
+    wm_take_damage_rects(r,WM_DAMAGE_MAX);
+    wm_add_damage(ui_rect(100,100,200,100));
+    wm_add_damage(ui_rect(150,150,200,100));       /* diagonal move: overlaps the first at a corner */
+    n=wm_take_damage_rects(r,WM_DAMAGE_MAX);
+    assert(n>=2 && !WM_HAS_DMG);
+    {
+      long area=0; unsigned char*g=calloc(W*H,1);
+      for(int i=0;i<n;i++){
+        area+=(long)r[i].w*r[i].h;
+        for(int y=r[i].y;y<r[i].y+r[i].h;y++) for(int x=r[i].x;x<r[i].x+r[i].w;x++) g[y*W+x]++;
+      }
+      assert(area==200*100+200*100-150*50);         /* union area, not the bounding box */
+      for(int y=0;y<H;y++) for(int x=0;x<W;x++){
+        int in=(x>=100&&x<300&&y>=100&&y<200)||(x>=150&&x<350&&y>=150&&y<250);
+        assert(g[y*W+x]==(in?1:0));                 /* covered once, nothing else */
+      }
+      free(g);
+    }
+    wm_add_damage(ui_rect(100,100,200,100));
+    wm_add_damage(ui_rect(120,120,50,50));          /* inside the first: nothing new */
+    assert(wm_take_damage_rects(r,WM_DAMAGE_MAX)==1);
+    for(int i=0;i<20;i++) wm_add_damage(ui_rect(i*40,i*20,10,10)); /* too many pieces: falls back to one box */
+    n=wm_take_damage_rects(r,WM_DAMAGE_MAX); assert(n>=1 && n<=WM_DAMAGE_MAX);
+    wm_add_damage(ui_rect(10,10,20,20)); wm_add_damage(ui_rect(500,300,20,20));
+    { UiRect b; assert(wm_take_damage(&b) && b.x==10 && b.y==10 && b.w==510 && b.h==310); }
+  }
   printf("wm resize tests passed\n");
   return 0;
 }

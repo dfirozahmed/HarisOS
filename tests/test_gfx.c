@@ -76,6 +76,38 @@ int main(void)
     assert(gfx_set_brightness(50) == -1); /* needs the back buffer */
     assert(!gfx_double_buffered());
 
+    {   /* layers: a shape drawn into a layer and pasted must look like the shape drawn directly */
+        enum { SW = 120, SH = 90, LW = 60, LH = 50, LX = 30, LY = 20 };
+        static unsigned int scr[SW * SH], want[SW * SH], black[LW * LH], white[LW * LH];
+        gfx_init(scr, SW, SH, SW, 1);
+        for (int pass = 0; pass < 2; ++pass) {
+            if (pass == 0) {
+                gfx_layer_begin(black, LW, LH, 0x000000u);
+            } else {
+                gfx_layer_begin(white, LW, LH, 0xFFFFFFu);
+            }
+            gfx_fill_rect_alpha(4, 4, 40, 30, 200, 100, 50, 128);   /* translucent, like a shadow */
+            gfx_fill_rect(14, 14, 20, 20, gfx_rgb(10, 200, 30));     /* opaque */
+            gfx_layer_end();
+        }
+        assert(gfx_width() == SW && gfx_height() == SH);            /* the real screen is back */
+        gfx_layer_pack(black, white, LW, LH);
+        assert((black[0] >> 24) == 255);                             /* nothing drawn: fully see-through */
+        assert((black[20 * LW + 20] >> 24) == 0);                    /* opaque pixel */
+        for (int i = 0; i < SW * SH; ++i) scr[i] = 0x00405060u;
+        for (int i = 0; i < SW * SH; ++i) want[i] = scr[i];
+        gfx_layer_blit(black, LW, LH, LX, LY);
+        gfx_init(want, SW, SH, SW, 1);
+        gfx_fill_rect_alpha(LX + 4, LY + 4, 40, 30, 200, 100, 50, 128);
+        gfx_fill_rect(LX + 14, LY + 14, 20, 20, gfx_rgb(10, 200, 30));
+        for (int i = 0; i < SW * SH; ++i) {
+            int d0 = (int)(scr[i] & 0xFF) - (int)(want[i] & 0xFF);
+            int d1 = (int)((scr[i] >> 8) & 0xFF) - (int)((want[i] >> 8) & 0xFF);
+            int d2 = (int)((scr[i] >> 16) & 0xFF) - (int)((want[i] >> 16) & 0xFF);
+            assert(d0 >= -2 && d0 <= 2 && d1 >= -2 && d1 <= 2 && d2 >= -2 && d2 <= 2);   /* rounding only */
+        }
+    }
+
     puts("Graphics regression tests passed.");
     return 0;
 }

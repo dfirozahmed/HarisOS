@@ -23,6 +23,7 @@
 #include "timer.h"
 #include "vfs.h"
 #include "volume.h"
+#include "wm.h"
 
 /* the clock for FAT timestamps: the CMOS clock, in FAT date / time format */
 static void fat_clock(unsigned *date, unsigned *time)
@@ -86,6 +87,20 @@ void kernel_main(const BootInfo *info)
         unsigned long long mem = pmm_alloc_contiguous_tag(pages, PMM_TAG_GRAPHICS);
         if (mem && gfx_cache_enable((void *)mem) != 0)
             pmm_free_contiguous(mem, pages);
+    }
+
+    /* Drag layer: two more buffers of the same size hold the picture of a window while it is moved
+     * (see wm_render.c). Optional too: without them a dragged window is redrawn every frame. */
+    if (double_buffered)
+    {
+        unsigned long long bytes = gfx_backbuffer_size();
+        unsigned long long pages = (bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+        unsigned long long a = pmm_alloc_contiguous_tag(pages, PMM_TAG_GRAPHICS);
+        unsigned long long b = a ? pmm_alloc_contiguous_tag(pages, PMM_TAG_GRAPHICS) : 0;
+        if (a && b)
+            wm_set_drag_memory((void *)a, (void *)b, bytes);
+        else if (a)
+            pmm_free_contiguous(a, pages);
     }
 
     /* Tell the desktop what to show (after the allocation above, so the free-memory figure includes it). */

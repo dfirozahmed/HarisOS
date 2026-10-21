@@ -6,6 +6,7 @@
 
 #define DOUBLE_CLICK_MS 450 /* two title-bar clicks within this time toggle maximize */
 static Window *DRAG;
+static int DRAG_MOVED; /* the dragged window has changed place at least once */
 static int DRAG_DX, DRAG_DY;
 static Window *CLOSE_PRESSED, *MIN_PRESSED, *MAX_PRESSED;
 static Window *LC_WIN;
@@ -229,6 +230,8 @@ static void clamp_to_screen(Window *w)
 
 int wm_dragging(void) { return DRAG != 0 || RESIZE != 0; }
 
+Window *wm_moving_window_internal(void) { return DRAG_MOVED ? DRAG : 0; }
+
 int wm_cursor_hint(int x, int y)
 {
     Window *w = PRESS_WIN; /* a held press keeps its shape wherever the pointer goes */
@@ -244,7 +247,7 @@ int wm_cursor_hint(int x, int y)
 void wm_input_forget_window(Window *w)
 {
     if (DRAG == w)
-        DRAG = 0;
+        DRAG = 0, DRAG_MOVED = 0;
     if (CLOSE_PRESSED == w)
         CLOSE_PRESSED = 0;
     if (MIN_PRESSED == w)
@@ -315,6 +318,7 @@ int wm_pointer(int x, int y, unsigned buttons)
             if (!RESIZE && !CLOSE_PRESSED && !MIN_PRESSED && !MAX_PRESSED && in_titlebar(w, x, y))
             {
                 DRAG = w;
+                DRAG_MOVED = 0;
                 DRAG_PX = x;
                 DRAG_PY = y;
                 DRAG_DX = x - w->r.x;
@@ -376,6 +380,7 @@ int wm_pointer(int x, int y, unsigned buttons)
         if (nx != DRAG->r.x || ny != DRAG->r.y)
         {
             wm_damage_window_internal(DRAG); /* where it was */
+            DRAG_MOVED = 1;
             DRAG->r.x = nx;
             DRAG->r.y = ny;
             clamp_to_screen(DRAG);
@@ -391,6 +396,9 @@ int wm_pointer(int x, int y, unsigned buttons)
         RESIZE = 0;
         Window *pressed = DRAG; /* title bar pressed and released without moving = a click */
         DRAG = 0;
+        if (pressed && DRAG_MOVED)
+            wm_damage_window_internal(pressed); /* it was shown as a frozen picture: draw the real window again */
+        DRAG_MOVED = 0;
         if (pressed)
         {
             int mx = x - DRAG_PX, my = y - DRAG_PY;
