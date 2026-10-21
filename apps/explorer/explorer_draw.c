@@ -24,6 +24,20 @@ void ex_draw_drive_icon(int cx, int cy, int s)
     gfx_fill_round_rect(x + 5, y + h - sh / 2 - 3, s / 3, 2, 1, gfx_rgb(150, 164, 196));
 }
 
+/* "This PC": a monitor on a stand (grey frame like the drive icon, a dark screen with a soft shine) */
+void ex_draw_pc_icon(int cx, int cy, int s)
+{
+    int w = s, mh = s * 11 / 16, x = cx - w / 2;
+    int y = cy - (mh + s / 4) / 2; /* the monitor and its stand are centered together */
+    gfx_fill_round_rect(x, y, w, mh, 3, gfx_rgb(196, 205, 226));
+    int b = s >= 24 ? 3 : 2; /* frame thickness */
+    gfx_fill_round_rect(x + b, y + b, w - 2 * b, mh - 2 * b, 2, gfx_rgb(52, 74, 122));
+    gfx_fill_rect_alpha(x + b + 1, y + b + 1, w - 2 * b - 2, (mh - 2 * b) / 3, 140, 190, 255, 70); /* shine on the glass */
+    int nw = s / 5, ny = y + mh;
+    gfx_fill_rect(cx - nw / 2, ny, nw, s / 8 + 1, gfx_rgb(150, 164, 196)); /* neck */
+    gfx_fill_round_rect(cx - s / 4, ny + s / 8, s / 2, s / 8, 2, gfx_rgb(104, 118, 150)); /* base */
+}
+
 /* a padlock: closed (locked) or with the shackle lifted (unlocked) */
 void ex_draw_lock_icon(int cx, int cy, int s, int locked, UiRgb c)
 {
@@ -141,7 +155,7 @@ static void draw_sidebar(const Layout *l, const UiTheme *t)
         VfsVolInfo vi;
         int drive = id != VFS_ROOT && vfs_volume_info(vfs_volume_of(id), &vi) == 0;
         if (id == VFS_ROOT)
-            ex_draw_drive_icon(r.x + 22, r.y + r.h / 2, 20); /* This PC */
+            ex_draw_pc_icon(r.x + 22, r.y + r.h / 2, 20); /* This PC */
         else
             ex_draw_drive_icon(r.x + 22, r.y + r.h / 2, 20);
         int right = (drive && EX_VOL_SHOWS_LOCK(&vi)) ? 22 : 0; /* room for the padlock */

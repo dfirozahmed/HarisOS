@@ -261,7 +261,10 @@ void ex_draw_toolbar(const Layout *l, const UiTheme *t)
         return;
     gfx_fill_round_rect(bar.x, bar.y, bar.w, bar.h, t->radius_m, ui_color(t->surface));
     gfx_round_rect(bar.x, bar.y, bar.w, bar.h, t->radius_m, 1, ui_color(EX_ADDR_EDIT ? t->accent : t->border));
-    ex_draw_folder_icon(bar.x + 20, bar.y + bar.h / 2, 18);
+    if (EX_CUR == VFS_ROOT)
+        ex_draw_pc_icon(bar.x + 20, bar.y + bar.h / 2, 20);
+    else
+        ex_draw_folder_icon(bar.x + 20, bar.y + bar.h / 2, 18);
     if (EX_ADDR_EDIT && EX_WIN)
     {
         ui_edit_draw(ui_rect(bar.x + CRUMB_TEXT_X - 6, bar.y + 4, bar.w - CRUMB_TEXT_X - 2, bar.h - 8), &EX_WIN->edits[0],

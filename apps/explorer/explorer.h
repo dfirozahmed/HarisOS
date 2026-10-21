@@ -232,6 +232,7 @@ int ex_cursor(Window *w, int x, int y);
 /* ---- explorer_draw.c -------------------------------------------- */
 void ex_draw_folder_icon(int cx, int cy, int size);
 void ex_draw_drive_icon(int cx, int cy, int size);
+void ex_draw_pc_icon(int cx, int cy, int size);        /* "This PC": a monitor */
 void ex_draw_lock_icon(int cx, int cy, int size, int locked, UiRgb color);
 void ex_draw_icon(int cx, int cy, int size, int kind);
 Cols ex_columns(const Layout *l);

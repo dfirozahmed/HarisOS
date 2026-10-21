@@ -203,7 +203,7 @@ void ui_text_field(UiRect r, const char *text, const char *placeholder, int focu
  * Options (set e.flags, e.max): UI_EDIT_PASSWORD shows '*' and blocks copy / cut;
  * UI_EDIT_READONLY allows moving, selecting and copying but no changes;
  * UI_EDIT_NUMERIC accepts only the digits 0-9. e.max = 0 means UI_EDIT_MAX. */
-#define UI_EDIT_MAX 120
+#define UI_EDIT_MAX 260
 #define UI_EDIT_PASSWORD 1
 #define UI_EDIT_READONLY 2
 #define UI_EDIT_NUMERIC 4
