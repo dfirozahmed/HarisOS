@@ -29,7 +29,11 @@
 #define CMD_ROW_H 44 /* New folder, Cut, Copy, Paste, Rename ... */
 #define TOOLBAR_H (NAV_ROW_H + CMD_ROW_H)
 #define STATUS_H 28
-#define SIDE_W 164
+#define SIDE_W_DEFAULT 200 /* the sidebar can be dragged between SIDE_W_MIN and SIDE_W_MAX */
+#define SIDE_W_MIN 140
+#define SIDE_W_MAX 360
+#define SIDE_GRAB 4        /* the drag zone reaches this far to each side of the divider */
+#define LIST_W_MIN 240     /* the list always keeps at least this much room */
 #define HEAD_H 26
 #define ROW_H 32
 #define PLACE_H 34
@@ -136,7 +140,9 @@ extern int EX_HIST_N;
 extern int EX_FWD[HIST_MAX];       /* folders to go forward to after Back */
 extern int EX_FWD_N;
 extern const char *EX_NOTE;        /* one-line message for the status bar, cleared by the next action */
-extern int EX_LAST_ROW;            /* double-click detection */
+extern int EX_SIDE_W;               /* sidebar width, set by dragging its edge */
+extern int EX_SIDE_DRAG;            /* 1 while the edge is held */
+extern int EX_LAST_ROW;           /* double-click detection */
 extern unsigned long long EX_LAST_CLICK_MS;
 extern int EX_HOVER_ROW;           /* list row under the pointer, -1 = none */
 extern int EX_HOVER_PLACE;         /* sidebar entry under the pointer */

@@ -9,6 +9,7 @@ static void ex_close(Window *w)
     EX_MENU.open = 0;
     EX_TIP_BTN = -1;
     EX_TIP_SHOWN = 0;
+    EX_SIDE_DRAG = 0;
 }
 
 static void explorer_app_open(void)

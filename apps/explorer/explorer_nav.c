@@ -134,7 +134,12 @@ Layout ex_layout(UiRect body)
     UiRect b = body;
     l.toolbar = ui_cut_top(&b, TOOLBAR_H);
     l.status = ui_cut_bottom(&b, STATUS_H);
-    l.side = ui_cut_left(&b, SIDE_W);
+    int side = EX_SIDE_W;
+    if (side > b.w - LIST_W_MIN) /* a narrow window: the list wins */
+        side = b.w - LIST_W_MIN;
+    if (side < SIDE_W_MIN)
+        side = SIDE_W_MIN;
+    l.side = ui_cut_left(&b, side);
     l.head = ui_cut_top(&b, HEAD_H);
     l.list = b;
     return l;

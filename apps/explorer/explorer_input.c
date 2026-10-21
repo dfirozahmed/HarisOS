@@ -31,6 +31,13 @@ int ex_press(Window *w, int x, int y)
         l = ex_layout(body);
     }
 
+    int edge = l.side.x + l.side.w; /* the divider: hold it and drag to resize the sidebar */
+    if (x >= edge - SIDE_GRAB && x < edge + SIDE_GRAB && y >= l.side.y && y < l.side.y + l.side.h)
+    {
+        EX_SIDE_DRAG = 1;
+        return 1;
+    }
+
     UiRect pill;
     if (ex_lock_rect(&l, &pill) && ui_contains(pill, x, y)) /* the lock in the status bar */
     {
@@ -82,6 +89,25 @@ int ex_press(Window *w, int x, int y)
 /* holding the button after a press in the rename field selects text */
 int ex_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (EX_SIDE_DRAG)
+    {
+        if (!(buttons & 1))
+        {
+            EX_SIDE_DRAG = 0;
+            return 0;
+        }
+        UiRect body = wm_content(w);
+        int side = x - body.x;
+        if (side > SIDE_W_MAX)
+            side = SIDE_W_MAX;
+        if (side > body.w - LIST_W_MIN)
+            side = body.w - LIST_W_MIN;
+        if (side < SIDE_W_MIN)
+            side = SIDE_W_MIN;
+        int changed = side != EX_SIDE_W;
+        EX_SIDE_W = side;
+        return changed;
+    }
     if (EX_RENAME_ID < 0 || !w->edits[0].dragging)
         return 0;
     int changed = ui_edit_mouse(&w->edits[0], x, y, buttons);

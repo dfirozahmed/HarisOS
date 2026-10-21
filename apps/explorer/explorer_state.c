@@ -13,6 +13,8 @@ int EX_HIST_N;
 int EX_FWD[HIST_MAX];
 int EX_FWD_N;
 const char *EX_NOTE;
+int EX_SIDE_W = SIDE_W_DEFAULT;
+int EX_SIDE_DRAG;
 int EX_LAST_ROW = -1;
 unsigned long long EX_LAST_CLICK_MS;
 int EX_HOVER_ROW = -1;
