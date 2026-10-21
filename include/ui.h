@@ -174,7 +174,8 @@ int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons);
 UiRect ui_buttons_bounds(const UiButtonSet *s);
 
 void ui_progress(UiRect r, int percent);                /* 0..100 */
-void ui_toggle(UiRect r, int on);                       /* switch; 40x22 looks best */
+void ui_slider(UiRect r, int percent);                  /* track + knob; r.h of 20 looks best; 0..100 */
+void ui_toggle(UiRect r, int on);                      /* switch; 40x22 looks best */
 int ui_badge(int x, int y, const char *s, UiRgb color); /* small pill; returns its width */
 void ui_text_field(UiRect r, const char *text, const char *placeholder, int focused);
 

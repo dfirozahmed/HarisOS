@@ -81,7 +81,7 @@ set(KERNEL_SOURCES
     kernel/graphics/gfx_buffer.c # backbuffer, presentation and background cache
     kernel/graphics/gfx_dirty.c  # dirty-region tracking
     kernel/graphics/gfx_backend.c # framebuffer initialization and backend properties
-    kernel/graphics/display.c     # display adapters on PCI: Bochs VBE mode setting, framebuffer owner
+    kernel/core/display.c         # display adapters on PCI: Bochs VBE mode setting, framebuffer owner
     kernel/graphics/gfx_shapes.c  # anti-aliased rounded rectangles and circles
     kernel/graphics/gfx_effects.c # gradients, shadows and glow effects
     kernel/graphics/gfx_cursor.c # software cursor save/restore and rendering
@@ -129,7 +129,8 @@ set(KERNEL_SOURCES
     apps/explorer/explorer_toolbar.c  # File Explorer: toolbar buttons and tooltips
     apps/explorer/explorer_draw.c     # File Explorer: sidebar, list, status bar
     apps/explorer/explorer_input.c    # File Explorer: mouse and keyboard
-    apps/devmgr/devmgr_app.c)       # Device Manager app
+    apps/devmgr/devmgr_app.c        # Device Manager app
+    apps/display/display_app.c)     # Display Settings app: brightness slider
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h ${CMAKE_SOURCE_DIR}/apps/explorer/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)

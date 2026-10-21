@@ -25,6 +25,8 @@ void gfx_internal_cursor_restore(void);
 void gfx_internal_cursor_y_range(int *y0, int *y1); /* screen rows covered by the pointer (when drawn) */
 void gfx_internal_cursor_paint(void);
 
+int gfx_internal_brightness_scale(void); /* 0..256: factor for pixels written straight to the screen */
+
 extern int CX0, CY0, CX1, CY1;
 
 /* Clips [x0,x1) x [y0,y1) to the active clip rectangle.

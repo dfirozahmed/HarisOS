@@ -59,7 +59,21 @@ int main(void)
     gfx_present();
     assert(screen[PITCH + 1] == red);
     assert(gfx_double_buffered());
+
+    /* Brightness scales only what goes to the screen; the back buffer keeps the true picture. */
+    GfxColor white = gfx_rgb(255, 255, 255);
+    gfx_fill_rect(0, 0, WIDTH, HEIGHT, white);
+    gfx_present();
+    assert(gfx_brightness() == GFX_BRIGHTNESS_MAX);
+    assert(gfx_set_brightness(50) == 0 && gfx_brightness() == 50);
+    expect_rgb(screen[0], 127, 127, 127);
+    assert(back[0] == white);
+    assert(gfx_set_brightness(0) == 0 && gfx_brightness() == GFX_BRIGHTNESS_MIN); /* never fully black */
+    expect_rgb(screen[0], 24, 24, 24);
+    assert(gfx_set_brightness(500) == 0 && gfx_brightness() == GFX_BRIGHTNESS_MAX);
+    assert(screen[0] == white);
     gfx_disable_backbuffer();
+    assert(gfx_set_brightness(50) == -1); /* needs the back buffer */
     assert(!gfx_double_buffered());
 
     puts("Graphics regression tests passed.");

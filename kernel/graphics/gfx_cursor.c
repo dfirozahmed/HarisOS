@@ -119,7 +119,7 @@ void gfx_internal_cursor_paint(void)
                 continue;
             volatile unsigned int *p = FB + (long long)sy * PITCH + sx;
             CUR_SAVE[y * cw + x] = *p;
-            int shade = pix[2 * (y * cw + x)];
+            int shade = pix[2 * (y * cw + x)] * gfx_internal_brightness_scale() >> 8; /* drawn on the dimmed screen */
             int alpha = pix[2 * (y * cw + x) + 1];
             gfx_internal_blend_ptr(p, shade, shade, shade, alpha);
         }

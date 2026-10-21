@@ -4,6 +4,7 @@
  */
 #include "gfx_internal.h"
 
+static int BRIGHT = GFX_BRIGHTNESS_MAX; /* percent; see "brightness" below */
 volatile unsigned int *FB;
 volatile unsigned int *DRAW;
 int W, H;
@@ -27,6 +28,7 @@ void gfx_internal_buffer_init(void *framebuffer, int width, int height, int pitc
     gfx_internal_dirty_reset();
     CUR_DRAWN = 0;
     CUR_Y_SHARED = 0;
+    BRIGHT = GFX_BRIGHTNESS_MAX;
 }
 
 /* ---- double buffering --------------------------------------- */
@@ -51,6 +53,52 @@ int gfx_enable_backbuffer(void *memory)
     return 0;
 }
 
+/* ---- brightness ----------------------------------------------
+ * Software dimming: the back buffer always holds the true picture; only the copy that goes to the
+ * screen is scaled. (Real panel backlights are driven through ACPI / GPU registers, which HarisOS
+ * has no driver for.) */
+
+int gfx_brightness(void) { return BRIGHT; }
+
+int gfx_internal_brightness_scale(void)
+{
+    return BRIGHT * 256 / GFX_BRIGHTNESS_MAX; /* 0..256 */
+}
+
+int gfx_set_brightness(int percent)
+{
+    if (!BACK)
+        return -1; /* without a back buffer there is no true picture to scale from */
+    if (percent < GFX_BRIGHTNESS_MIN)
+        percent = GFX_BRIGHTNESS_MIN;
+    if (percent > GFX_BRIGHTNESS_MAX)
+        percent = GFX_BRIGHTNESS_MAX;
+    if (percent == BRIGHT)
+        return 0;
+    BRIGHT = percent;
+    gfx_internal_mark_dirty(0, 0, W, H);
+    gfx_present();
+    return 0;
+}
+
+/* Copies pixels [x0,x1) of one row to the screen, scaling the three color bytes by BRIGHT. */
+static void copy_row(volatile unsigned int *dst, volatile unsigned int *src, int x0, int x1)
+{
+    if (BRIGHT >= GFX_BRIGHTNESS_MAX)
+    {
+        for (int x = x0; x < x1; x++)
+            dst[x] = src[x];
+        return;
+    }
+    unsigned int s = (unsigned int)gfx_internal_brightness_scale();
+    for (int x = x0; x < x1; x++)
+    {
+        unsigned int p = src[x];
+        dst[x] = (((p & 0xFFu) * s) >> 8) | ((((p >> 8) & 0xFFu) * s >> 8) << 8) |
+                 ((((p >> 16) & 0xFFu) * s >> 8) << 16);
+    }
+}
+
 void gfx_present(void)
 {
     if (!BACK || DX1 <= DX0 || DY1 <= DY0)
@@ -63,19 +111,11 @@ void gfx_present(void)
     {
         if (y >= cy0 && y < cy1)
             continue;
-        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
-        volatile unsigned int *dst = FB + (long long)y * PITCH;
-        for (int x = DX0; x < DX1; x++)
-            dst[x] = src[x];
+        copy_row(FB + (long long)y * PITCH, DRAW + (long long)y * DPITCH, DX0, DX1);
     }
     gfx_internal_cursor_restore();
     for (int y = DY0 > cy0 ? DY0 : cy0; y < (DY1 < cy1 ? DY1 : cy1); y++)
-    {
-        volatile unsigned int *src = DRAW + (long long)y * DPITCH;
-        volatile unsigned int *dst = FB + (long long)y * PITCH;
-        for (int x = DX0; x < DX1; x++)
-            dst[x] = src[x];
-    }
+        copy_row(FB + (long long)y * PITCH, DRAW + (long long)y * DPITCH, DX0, DX1);
     DX0 = DY0 = DX1 = DY1 = 0;
     gfx_internal_cursor_paint();
 }

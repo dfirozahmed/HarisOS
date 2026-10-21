@@ -210,6 +210,25 @@ void ui_progress(UiRect r, int percent)
         gfx_fill_round_rect_gradient(r.x, r.y, fw, r.h, rad, ui_color(t->accent_hi), ui_color(t->accent));
 }
 
+/* The knob is a circle of diameter r.h; its center runs from r.x + r.h/2 to r.x + r.w - r.h/2. */
+void ui_slider(UiRect r, int percent)
+{
+    const UiTheme *t = THEME;
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+    int kr = r.h / 2;
+    int th = 6; /* track thickness */
+    int ty = r.y + (r.h - th) / 2;
+    int cx = r.x + kr + (r.w - r.h) * percent / 100;
+    gfx_fill_round_rect(r.x + kr, ty, r.w - r.h, th, th / 2, ui_color(t->surface_alt));
+    if (percent > 0)
+        gfx_fill_round_rect_gradient(r.x + kr, ty, cx - r.x - kr, th, th / 2, ui_color(t->accent_hi), ui_color(t->accent));
+    gfx_fill_circle(cx, r.y + kr, kr, ui_color(t->accent));
+    gfx_fill_circle(cx, r.y + kr, kr - 3, ui_color(t->surface));
+}
+
 void ui_toggle(UiRect r, int on)
 {
     const UiTheme *t = THEME;

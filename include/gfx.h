@@ -58,6 +58,15 @@ void gfx_present(void);                       /* copy changed area to the screen
 void gfx_disable_backbuffer(void);            /* present, then draw directly again */
 int gfx_double_buffered(void);
 
+/* ---- brightness ---------------------------------------------
+ * Software dimming of what gfx_present() sends to the screen (needs the back buffer; returns -1
+ * without it). percent is clamped to GFX_BRIGHTNESS_MIN..GFX_BRIGHTNESS_MAX so the screen never
+ * goes fully black. The picture is redrawn at once. */
+#define GFX_BRIGHTNESS_MIN 10
+#define GFX_BRIGHTNESS_MAX 100
+int gfx_set_brightness(int percent);
+int gfx_brightness(void);
+
 /* ---- background cache ---------------------------------------
  */
 int gfx_cache_enable(void *memory); /* 0 = ok, -1 = no back buffer */
