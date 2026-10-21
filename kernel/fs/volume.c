@@ -3,7 +3,7 @@
  * Three kinds of volume, each a VfsBackend:
  *   FAT32   read and write (fat32.c)
  *   exFAT   read and write (exfat.c)
- *   NTFS    read only      (ntfs.c)
+ *   NTFS    read and write (ntfs.c)
  * A node of a volume keeps the file system's own locator (FatEntry / ExEntry / NtEntry: where the entry lives
  * on the disk) in node->fs. The volume's root folder is a child of "This PC"; its locator is not stored, the
  * root folder of the file system is used instead. */
@@ -344,7 +344,18 @@ static void ex_be_info(void *ctx, VfsVolInfo *out)
 static const VfsBackend EXFAT_BACKEND = {ex_be_list,  ex_be_create, ex_be_remove, ex_be_rename, ex_be_move,
                                          ex_be_read,  ex_be_write,  ex_be_info,   be_set_locked, ex_be_batch};
 
-/* ====================== NTFS (read only) ====================== */
+/* ====================== NTFS (read and write) ====================== */
+/* NTFS_ERR_* are the same numbers as VFS_ERR_*, except that a dirty volume has a code of its own */
+static int nt_err(int r) { return r == NTFS_ERR_DIRTY ? VFS_ERR_DIRTY : r; }
+
+static void nt_dir(const VfsNode *n, NtEntry *e)
+{
+    if (is_volume_root(n))
+        ntfs_root(e);
+    else
+        GET(NtEntry, n, e);
+}
+
 static int nt_list_cb(const char *name, const NtEntry *e, void *user)
 {
     return attach(*(int *)user, name, e->is_dir != 0, e->size, e, sizeof *e);
@@ -354,12 +365,50 @@ static int nt_be_list(void *ctx, int dir)
 {
     Drive *v = (Drive *)ctx;
     NtEntry d;
-    if (is_volume_root(vfs_node(dir)))
-        ntfs_root(&d);
-    else
-        GET(NtEntry, vfs_node(dir), &d);
+    nt_dir(vfs_node(dir), &d);
     int r = ntfs_list(&v->u.nt, &d, nt_list_cb, &dir);
     return r < 0 ? VFS_ERR_IO : 0;
+}
+
+static int nt_be_create(void *ctx, VfsNode *parent, const char *name, int is_dir, unsigned char *fs_out)
+{
+    NtEntry d, e;
+    nt_dir(parent, &d);
+    int r = ntfs_create(&((Drive *)ctx)->u.nt, &d, name, is_dir, &e);
+    if (r < 0)
+        return nt_err(r);
+    for (int i = 0; i < VFS_FS_BYTES; i++)
+        fs_out[i] = 0;
+    copy_bytes(fs_out, &e, sizeof e);
+    return 0;
+}
+
+static int nt_be_remove(void *ctx, const VfsNode *n)
+{
+    NtEntry e;
+    GET(NtEntry, n, &e);
+    return nt_err(ntfs_delete(&((Drive *)ctx)->u.nt, &e));
+}
+
+static int nt_be_rename(void *ctx, VfsNode *n, const char *new_name)
+{
+    NtEntry e;
+    GET(NtEntry, n, &e);
+    int r = ntfs_rename(&((Drive *)ctx)->u.nt, &e, new_name);
+    if (r == 0)
+        SET(NtEntry, n, &e);
+    return nt_err(r);
+}
+
+static int nt_be_move(void *ctx, VfsNode *n, const char *name, VfsNode *new_parent)
+{
+    NtEntry e, d;
+    GET(NtEntry, n, &e);
+    nt_dir(new_parent, &d);
+    int r = ntfs_move(&((Drive *)ctx)->u.nt, &e, &d, name);
+    if (r == 0)
+        SET(NtEntry, n, &e);
+    return nt_err(r);
 }
 
 static int nt_be_read(void *ctx, const VfsNode *n, unsigned offset, void *buf, unsigned len)
@@ -370,16 +419,33 @@ static int nt_be_read(void *ctx, const VfsNode *n, unsigned offset, void *buf, u
     return r == -2 ? VFS_ERR_NOTREADABLE : r < 0 ? VFS_ERR_IO : r;
 }
 
+static int nt_be_write(void *ctx, VfsNode *n, unsigned offset, const void *buf, unsigned len)
+{
+    NtEntry e;
+    GET(NtEntry, n, &e);
+    int r = ntfs_write(&((Drive *)ctx)->u.nt, &e, offset, buf, len);
+    if (r >= 0)
+    {
+        SET(NtEntry, n, &e);
+        n->size = e.size;
+    }
+    return nt_err(r);
+}
+
 static void nt_be_info(void *ctx, VfsVolInfo *out)
 {
     Drive *v = (Drive *)ctx;
+    const BlkDev *disk = disk_of(v);
     common_info(v, out);
     if (!ntfs_space(&v->u.nt, &out->total, &out->free))
         out->free = (unsigned long long)-1;
-    out->writable = 0;
+    out->writable = disk && disk->writable;
+    out->locked = disk ? disk->locked : 1;
+    out->lockable = 1;
 }
 
-static const VfsBackend NTFS_BACKEND = {nt_be_list, 0, 0, 0, 0, nt_be_read, 0, nt_be_info, 0, 0};
+static const VfsBackend NTFS_BACKEND = {nt_be_list, nt_be_create, nt_be_remove, nt_be_rename, nt_be_move,
+                                        nt_be_read, nt_be_write,  nt_be_info,   be_set_locked, 0};
 
 /* ====================== finding the volumes ====================== */
 /* "HARISOS (nvme0p1)": the volume label, else the partition's name, else "Local Disk" */

@@ -2,8 +2,8 @@
  * the File Explorer shows them as drives under "This PC".
  *
  * volume_mount_all() looks at every partition (and every disk without a partition table) registered with
- * blk.h and mounts what it recognises: FAT32 (read and write), exFAT and NTFS (read only). Other partitions
- * (ext4, BitLocker ...) are left alone. A FAT32 drive starts LOCKED (read-only): see vfs_set_locked(). */
+ * blk.h and mounts what it recognises: FAT32, exFAT and NTFS (all read and write). Other partitions
+ * (ext4, BitLocker ...) are left alone. A drive starts LOCKED (read-only): see vfs_set_locked(). */
 #ifndef HARIS_VOLUME_H
 #define HARIS_VOLUME_H
 

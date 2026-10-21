@@ -26,8 +26,9 @@
 #define VFS_ERR_BADNAME -6
 #define VFS_ERR_ARG -7
 #define VFS_ERR_UNSUPPORTED -8 /* e.g. copying between the RAM Disk and a drive */
-#define VFS_ERR_NOWRITE -9     /* the file system can only be read (NTFS, exFAT) */
+#define VFS_ERR_NOWRITE -9     /* the drive cannot be written at all (no write driver for this disk) */
 #define VFS_ERR_NOTREADABLE -10 /* a compressed or encrypted file */
+#define VFS_ERR_DIRTY -11      /* an NTFS drive that was not shut down cleanly: Windows has to check it first */
 
 typedef struct
 {

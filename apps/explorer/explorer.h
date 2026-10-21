@@ -188,7 +188,7 @@ void ex_paste(void);
 void ex_ask_delete(int row);
 int ex_delete_pending(void);                   /* the confirmation dialog is open */
 
-/* A drive that has a lock to show: one that can be locked (FAT32) or one that can only be read (NTFS, exFAT),
+/* A drive that has a lock to show: one that can be locked (FAT32, exFAT, NTFS) or one on a disk that cannot be written at all,
  * which always looks locked. The RAM Disk has none. */
 #define EX_VOL_SHOWS_LOCK(vi) ((vi)->lockable || !(vi)->writable)
 #define EX_VOL_LOCKED(vi) ((vi)->locked || !(vi)->writable)

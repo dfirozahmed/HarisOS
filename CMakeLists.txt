@@ -70,7 +70,7 @@ set(KERNEL_SOURCES
     kernel/storage/storage.c         # starts the drivers
     kernel/fs/fat32.c                # FAT32 file system
     kernel/fs/exfat.c                # exFAT file system (read only)
-    kernel/fs/ntfs.c                 # NTFS file system (read only)
+    kernel/fs/ntfs.c                 # NTFS file system (read and write)
     kernel/fs/volume.c               # puts FAT32 / exFAT / NTFS volumes into the virtual file system
     kernel/core/devmgr_sys.c         # Device Manager glue: asks PCI and the drivers
     kernel/fs/vfs.c                  # in-memory file system (File Explorer)

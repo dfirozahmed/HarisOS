@@ -26,6 +26,7 @@ try {
         @('exFAT tests', 'tests/run_exfat_tests.sh'),
         @('exFAT write tests', 'tests/run_exfatw_tests.sh'),
         @('NTFS tests', 'tests/run_ntfs_tests.sh'),
+        @('NTFS write tests', 'tests/run_ntfsw_tests.sh'),
         @('Volume (drives in the VFS) tests', 'tests/run_volume_tests.sh')
     )
     $Total = $Tests.Count + 1

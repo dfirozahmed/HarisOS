@@ -24,7 +24,7 @@ int ex_check_writable(void)
     VfsVolInfo vi;
     if (ex_cur_drive(&vi) && !vi.writable)
     {
-        EX_NOTE = vfs_error_text(VFS_ERR_NOWRITE); /* NTFS / exFAT: read only for good */
+        EX_NOTE = vfs_error_text(VFS_ERR_NOWRITE); /* a disk without a write driver: read only for good */
         return 0;
     }
     if (ex_cur_drive(&vi) && vi.lockable && vi.locked)

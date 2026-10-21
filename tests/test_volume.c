@@ -10,6 +10,8 @@
 #include "exfatimg.h"
 #include "ntfsimg.h"
 #include "exfatcheck.h"
+#include "ntfscheck.h"
+#include "ntfswimg.h"
 #include "vfs.h"
 #include "volume.h"
 
@@ -198,6 +200,21 @@ static void make_ntfs(void)
     add_ro_disk(NTI.img, NT_SECTORS, "sata9");
 }
 
+/* a second NTFS volume that can be written (when unlocked): the one the NTFS write tests use */
+static unsigned char *NTWIMG;
+static void make_ntfsw(void)
+{
+    wb_build(0);
+    NTWIMG = malloc((size_t)NT_SECTORS * NT_SS);
+    memcpy(NTWIMG, WB_BASE, (size_t)NT_SECTORS * NT_SS);
+    BlkDev d;
+    memset(&d, 0, sizeof d);
+    strcpy(d.name, "nvme8");
+    d.kind = BLK_NVME; d.media = BLK_MEDIA_SSD; d.parent = -1; d.sector_size = 512; d.sectors = NT_SECTORS; d.writable = 1;
+    d.read = rd_ro; d.write = wr_rw; d.ctx = NTWIMG;
+    blk_register(&d);
+}
+
 int main(void)
 {
     blk_reset();
@@ -205,9 +222,10 @@ int main(void)
     make_image(1, "sata1");
     make_exfat();
     make_ntfs();
+    make_ntfsw();
     vfs_init();
-    CHECK(volume_mount_all() == 4);
-    CHECK(vfs_volume_count() == 5);                      /* the RAM Disk, two FAT32 drives, an exFAT and an NTFS one */
+    CHECK(volume_mount_all() == 5);
+    CHECK(vfs_volume_count() == 6);                      /* the RAM Disk, two FAT32 drives, an exFAT and two NTFS ones */
     int a = vfs_lookup("/TESTVOL (sata0)"), b = vfs_lookup("/TESTVOL (sata1)");
     CHECK(a > 0 && b > 0 && a != b);
     CHECK(vfs_volume_node(1) == a && vfs_volume_node(2) == b && vfs_volume_of(a) == 1);
@@ -331,14 +349,14 @@ int main(void)
     CHECK(WRITES == w0);
     CHECK(vfs_lookup("/TESTVOL (sata0)/Documents/SHORT.TXT") == note);   /* reading still works */
 
-    /* ---- exFAT and NTFS drives: browse, read, copy out; every change is refused ---- */
+    /* ---- exFAT and NTFS drives: browse, read, copy out; every change is refused (locked, or no write driver) ---- */
     {
         int ex = vfs_lookup("/EXVOL (nvme7)"), nt = vfs_lookup("/NTVOL (sata9)");
         CHECK(ex > 0 && nt > 0 && vfs_volume_of(ex) == 3 && vfs_volume_of(nt) == 4);
         CHECK(vfs_volume_info(3, &vi) == 0 && strcmp(vi.fs_name, "exFAT") == 0 && strcmp(vi.device, "SSD (NVMe)") == 0);
         CHECK(vi.writable == 1 && vi.lockable == 1 && vi.locked == 1 && vi.total == (unsigned long long)EX_CLUSTERS * 2048 && vi.free != (unsigned long long)-1);
         CHECK(vfs_volume_info(4, &vi) == 0 && strcmp(vi.fs_name, "NTFS") == 0 && vi.writable == 0 && vi.total > 0);
-        CHECK(vfs_set_locked(4, 0) == -1);                                        /* NTFS: nothing to unlock, it is never writable */
+        CHECK(vi.lockable == 1 && vi.locked == 1);                                /* NTFS has the lock too; this disk has no write driver */
 
         int es = vfs_lookup("/EXVOL (nvme7)/small.txt"), eb = vfs_lookup("/EXVOL (nvme7)/Folder/big.bin");
         CHECK(es > 0 && eb > 0 && vfs_node(es)->size == sizeof EX_DATA_SMALL && vfs_node(eb)->size == sizeof EX_DATA_BIG);
@@ -357,14 +375,14 @@ int main(void)
 
         /* changes are refused, nothing is written (the read-only disks have no write function anyway) */
         CHECK(vfs_add(ex, "x", 1, 0) == -1 && vfs_last_error() == VFS_ERR_RO);               /* exFAT: locked */
-        CHECK(vfs_add(nt, "x", 0, 0) == -1 && vfs_last_error() == VFS_ERR_NOWRITE);
+        CHECK(vfs_add(nt, "x", 0, 0) == -1 && vfs_last_error() == VFS_ERR_RO);
         CHECK(vfs_rename(es, "y.txt") == -1 && vfs_last_error() == VFS_ERR_RO);
-        CHECK(vfs_remove(ns) == -1 && vfs_last_error() == VFS_ERR_NOWRITE && vfs_node(ns));
+        CHECK(vfs_remove(ns) == -1 && vfs_last_error() == VFS_ERR_RO && vfs_node(ns));
         CHECK(vfs_remove(vfs_lookup("/EXVOL (nvme7)/Folder")) == -1 && vfs_last_error() == VFS_ERR_RO);
         CHECK(vfs_copy(docs, ex) == -1 && vfs_last_error() == VFS_ERR_RO);        /* a copy INTO a locked drive */
-        CHECK(vfs_copy(docs, nt) == -1 && vfs_last_error() == VFS_ERR_NOWRITE);   /* ... or a read-only one */
+        CHECK(vfs_copy(docs, nt) == -1 && vfs_last_error() == VFS_ERR_RO);        /* ... or an NTFS one */
         CHECK(vfs_move(es, a) == -1 && vfs_last_error() == VFS_ERR_RO);                       /* a move OUT to a locked FAT32 drive */
-        CHECK(vfs_move(ns, a) == -1 && vfs_last_error() == VFS_ERR_NOWRITE);                  /* from NTFS: would delete the source */
+        CHECK(vfs_move(ns, a) == -1 && vfs_last_error() == VFS_ERR_RO);                       /* NTFS -> a locked FAT32 drive */
         CHECK(vfs_lookup("/TESTVOL (sata0)/small.txt") == -1);                                /* ... and nothing was copied */
 
         /* a copy OUT to a FAT32 drive works (that drive is locked now: unlock it first) */
@@ -409,6 +427,59 @@ int main(void)
         vfs_set_locked(3, 1);
     }
 
+    /* ---- a writable NTFS drive: unlock it, then everything works, and the NTFS checker (which shares no code with
+     * ntfs.c) finds the volume perfect after each step ---- */
+    {
+        static const unsigned long long RES[1][2] = {{0, 4}};
+        nk_upcase = WB_UPC;
+        int nw = vfs_lookup("/NTTEST (nvme8)");
+        CHECK(nw > 0 && vfs_volume_of(nw) == 5);
+        CHECK(vfs_volume_info(5, &vi) == 0 && strcmp(vi.fs_name, "NTFS") == 0 && vi.writable == 1 && vi.lockable == 1 && vi.locked == 1);
+        CHECK(vfs_add(nw, "x", 0, 0) == -1 && vfs_last_error() == VFS_ERR_RO);              /* locked */
+        CHECK(vfs_rename(vfs_lookup("/NTTEST (nvme8)/hello.txt"), "y.txt") == -1 && vfs_last_error() == VFS_ERR_RO);
+        CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);                            /* nothing was written */
+        CHECK(vfs_set_locked(5, 0) == 0 && vfs_volume_info(5, &vi) == 0 && vi.locked == 0);
+
+        int eb2 = vfs_lookup("/EXVOL (nvme7)/Folder/big.bin"), nsm = vfs_lookup("/NTVOL (sata9)/small.txt"), nbg = vfs_lookup("/NTVOL (sata9)/big.bin");
+        CHECK(eb2 > 0 && nsm > 0 && nbg > 0);
+        unsigned char hello[300];
+        for (unsigned i = 0; i < sizeof hello; i++) hello[i] = wb_pat(1, i);
+        CHECK(same_content_buf(vfs_lookup("/NTTEST (nvme8)/hello.txt"), hello, sizeof hello));   /* what was there before */
+
+        int nf = vfs_add(nw, "New Folder", 1, 0);
+        CHECK(nf > 0 && vfs_node(nf)->vol == 5 && vfs_is_under(nf, nw));
+        CHECK(vfs_add(nw, "new folder", 1, 0) == -1 && vfs_last_error() == VFS_ERR_EXISTS);
+        CHECK(vfs_add(nw, "bad:name", 0, 0) == -1 && vfs_last_error() == VFS_ERR_BADNAME);
+        CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+        int c1 = vfs_copy(eb2, nf);                                                          /* exFAT -> NTFS: 70000 bytes */
+        CHECK(c1 > 0 && vfs_node(c1)->vol == 5 && same_content_buf(c1, EX_DATA_BIG, sizeof EX_DATA_BIG));
+        int c2 = vfs_copy(nsm, nf);                                                          /* NTFS -> NTFS: a resident file */
+        CHECK(c2 > 0 && same_content_buf(c2, NT_SMALL, sizeof NT_SMALL));
+        int c3 = vfs_copy(nbg, nf);
+        CHECK(c3 > 0 && same_content_buf(c3, NT_BIG, sizeof NT_BIG));
+        CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+        int cd = vfs_copy(docs, nw);                                                         /* FAT32 -> NTFS: a folder with its files */
+        CHECK(cd > 0 && vfs_subtree_count(cd) == vfs_subtree_count(docs));
+        CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+        CHECK(vfs_rename(c1, "renamed.bin") == 0 && same_content_buf(c1, EX_DATA_BIG, sizeof EX_DATA_BIG));
+        CHECK(vfs_rename(c1, "RENAMED.BIN") == 0 && vfs_lookup("/NTTEST (nvme8)/New Folder/RENAMED.BIN") == c1);
+        CHECK(vfs_move(c3, nw) == c3 && vfs_lookup("/NTTEST (nvme8)/big (2).bin") == c3 && same_content_buf(c3, NT_BIG, sizeof NT_BIG));
+        CHECK(vfs_node(c3)->parent == nw);
+        CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+        CHECK(vfs_refresh(nw) == 0 && vfs_lookup("/NTTEST (nvme8)/big (2).bin") == c3);          /* the folder on disk agrees */
+        int out = vfs_move(c2, a);                                                           /* NTFS -> FAT32: copy, then delete */
+        CHECK(out > 0 && vfs_node(out)->vol == 1 && same_content_buf(out, NT_SMALL, sizeof NT_SMALL));
+        CHECK(vfs_lookup("/NTTEST (nvme8)/New Folder/small.txt") == -1);
+        int back = vfs_copy(c1, a);                                                          /* NTFS -> FAT32 */
+        CHECK(back > 0 && same_content_buf(back, EX_DATA_BIG, sizeof EX_DATA_BIG));
+        CHECK(vfs_remove(nf) > 0 && vfs_lookup("/NTTEST (nvme8)/New Folder") == -1);
+        CHECK(vfs_remove(c3) > 0 && vfs_remove(cd) > 0);
+        CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0 && check_image(0) == 0);
+        CHECK(vfs_refresh(nw) == 0 && vfs_lookup("/NTTEST (nvme8)/hello.txt") > 0);
+        CHECK(vfs_remove(vfs_lookup("/NTTEST (nvme8)/attrlist.bin")) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);   /* not supported yet */
+        vfs_set_locked(5, 1);
+    }
+
     /* ---- a folder with more entries than the node table can hold: the rest is left out and flagged ---- */
     {
         Fat g;
@@ -435,7 +506,7 @@ int main(void)
 
     free(IMG[0]);
     free(IMG[1]);
-    free(EXIMG); free(EXBITMAP); free(NTI.img); free(NTI.mft);
+    free(EXIMG); free(EXBITMAP); free(NTI.img); free(NTI.mft); free(NTWIMG);
     if (fails) { printf("%d check(s) failed\n", fails); return 1; }
     printf("volume tests passed\n");
     return 0;

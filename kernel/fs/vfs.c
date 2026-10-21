@@ -45,7 +45,9 @@ const char *vfs_error_text(int code)
     case VFS_ERR_NOTREADABLE:
         return "This file is compressed or encrypted: HarisOS cannot read it yet.";
     case VFS_ERR_NOWRITE:
-        return "HarisOS can only read this kind of drive (NTFS / exFAT), not change it.";
+        return "HarisOS can only read this drive, not change it.";
+    case VFS_ERR_DIRTY:
+        return "This NTFS drive was not shut down cleanly (or Windows fast startup is on). Run chkdsk in Windows first.";
     default:
         return "That did not work.";
     }

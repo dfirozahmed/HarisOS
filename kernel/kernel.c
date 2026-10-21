@@ -8,6 +8,7 @@
 #include "gfx.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "ntfs.h"
 #include "pci.h"
 #include "pmm.h"
 #include "power.h"
@@ -32,6 +33,20 @@ static void fat_clock(unsigned *date, unsigned *time)
         *date = fat_make_date(1980, 1, 1);
         *time = 0;
     }
+}
+
+/* the clock for NTFS timestamps: the CMOS clock as a FILETIME (100 ns ticks since 1601-01-01) */
+static unsigned long long nt_clock(void)
+{
+    RtcTime t;
+    if (rtc_read(&t) != 0)
+        return 133801632000000000ULL; /* 2025-01-01: no clock, but a believable date */
+    long long y = t.year - (t.month <= 2);
+    long long era = y / 400, yoe = y - era * 400;
+    long long doy = (153 * (t.month + (t.month > 2 ? -3 : 9)) + 2) / 5 + t.day - 1;
+    long long days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468; /* days since 1970-01-01 */
+    long long secs = days * 86400 + t.hour * 3600LL + t.minute * 60LL + t.second;
+    return (unsigned long long)(secs + 11644473600LL) * 10000000ULL;
 }
 
 void kernel_main(const BootInfo *info)
@@ -93,7 +108,8 @@ void kernel_main(const BootInfo *info)
     {
         fat_set_clock(fat_clock); /* timestamps of files made or changed on a drive */
         exfat_set_clock(fat_clock);
-        volume_mount_all();       /* FAT32 drives found on the disks */
+        ntfs_set_clock(nt_clock);
+        volume_mount_all();       /* FAT32, exFAT and NTFS drives found on the disks */
     }
 
     timer_init(); /* needed for double-click */
