@@ -88,6 +88,11 @@ int main(void){
     wheel_ret=0; wm_take_damage(&(UiRect){0}); /* clear damage */
     wm_wheel(w->r.x+50,w->r.y+100,-1);
     assert(wheel_steps==-1 && !WM_HAS_DMG);                 /* handler said "no change": no redraw */
+    wheel_ret=2; wm_wheel(w->r.x+50,w->r.y+100,1);
+    assert(!WM_HAS_DMG);                                    /* 2 = "I marked my own area": the window is not damaged again */
+    wheel_ret=1; wm_wheel(w->r.x+50,w->r.y+100,1);
+    assert(WM_HAS_DMG);                                     /* 1 = the whole window */
+    wm_take_damage(&(UiRect){0});
     wm_close(other);
   }
   /* hover and right press */

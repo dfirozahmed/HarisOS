@@ -523,8 +523,11 @@ int wm_wheel(int x, int y, int steps)
     Window *w = wm_window_at_internal(x, y);
     if (!w || wm_blocker_internal(w) || !w->on_wheel)
         return 0;
-    if (w->on_wheel(w, steps))
+    int changed = w->on_wheel(w, steps);
+    if (changed == 1)
         wm_damage_window_internal(w);
+    /* 2 = it changed something but marked the exact area itself (wm_add_damage): a list that only scrolled
+     * does not need its frame, shadow and toolbar redrawn */
     return WM_HAS_DMG;
 }
 

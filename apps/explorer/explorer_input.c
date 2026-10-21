@@ -224,7 +224,10 @@ int ex_wheel(Window *w, int steps)
     int old = EX_SCROLL;
     EX_SCROLL += steps * WHEEL_ROWS;
     ex_clamp_scroll(&l);
-    return EX_SCROLL != old;
+    if (EX_SCROLL == old)
+        return 0;
+    wm_add_damage(l.list); /* only the rows and the scrollbar (inside l.list) change */
+    return 2;
 }
 
 /* Jump to the next entry (after the selection, wrapping) whose name starts with `c`. */
