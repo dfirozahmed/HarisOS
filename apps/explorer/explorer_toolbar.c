@@ -336,9 +336,10 @@ void ex_sync_buttons(void)
 /* time passes: show the tooltip once the pointer has rested on a button long enough */
 int ex_tick(Window *w)
 {
+    int drives = ex_sync_drives();
     int want = EX_TIP_BTN >= 0 && !EX_MENU.open && w == wm_top() && timer_ms() - EX_TIP_SINCE >= TIP_DELAY_MS;
     if (want == EX_TIP_SHOWN)
-        return 0;
+        return drives;
     EX_TIP_SHOWN = want;
     return 1;
 }

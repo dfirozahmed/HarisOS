@@ -6,8 +6,9 @@
  *   usb_poll()      often: mouse movement, and (about once a second) looks for newly plugged devices
  *   usb_kbd_pop()   keyboard reports (decoded by keyboard.c)
  *
- * Only HID boot-protocol devices that sit directly on a root port are supported
- * (no hubs yet). Old EHCI / UHCI / OHCI controllers are not supported.
+ * HID mice / keyboards and mass-storage drives (pen drives, external disks: bulk-only transport, see
+ * usb_msc.h) are supported, also behind hubs. A mass-storage drive becomes a block device ("usb0") when it is
+ * plugged in and disappears when it is pulled out. Old EHCI / UHCI / OHCI controllers and UAS are not supported.
  * ============================================================ */
 #ifndef HARIS_USB_H
 #define HARIS_USB_H

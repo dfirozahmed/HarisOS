@@ -13,6 +13,11 @@
 /* Call after storage_init() and vfs_init(). Returns the number of drives mounted. */
 int volume_mount_all(void);
 
+/* For hot-plug (USB drives), call when blk_generation() has changed: unmounts the drives whose device was unplugged,
+ * frees their block slots (blk_reap) and mounts what is new, applying the same unlock policy as volume_unlock_clean()
+ * to the new drives only. Returns non-zero if the list of drives changed. */
+int volume_sync(void);
+
 /* Unlock the drives that are clean (not dirty, not hibernated) and are not system drives (the EFI System Partition,
  * the NTFS volume Windows is installed on), so they can be written without asking; they stop offering the lock.
  * Everything else stays locked and keeps its lock. Call after volume_mount_all(). Returns how many drives were

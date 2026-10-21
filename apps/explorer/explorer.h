@@ -173,6 +173,7 @@ int ex_same_text(const char *a, const char *b);
 void ex_update_nav_buttons(void);
 void ex_reload(void);                          /* list the current folder again (in the sort order) */
 void ex_refresh(void);                         /* ... after asking the drive again */
+int ex_sync_drives(void);                      /* a drive came or went: update the list, leave a removed drive; 1 = redraw */
 void ex_go_to(int dir, int push);
 void ex_go_back(void);
 void ex_go_forward(void);

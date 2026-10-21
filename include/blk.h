@@ -17,7 +17,8 @@ enum
     BLK_NVME,
     BLK_SATA,
     BLK_RAM, /* tests */
-    BLK_PART
+    BLK_PART,
+    BLK_USB /* USB mass storage (pen drive, external disk): can be unplugged, see blk_remove() */
 };
 
 /* what a partition holds, from its type (GPT type GUID or MBR type byte) */
@@ -50,6 +51,7 @@ typedef struct BlkDev
     unsigned long long sectors;
     int writable; /* the driver can write at all */
     int locked;   /* 1 = blk_write() refuses (the default) */
+    int removed;  /* 0 = present, 1 = unplugged (all I/O fails until blk_reap()), 2 = free slot */
 
     /* disks only: the driver's functions. `ctx` is the driver's own data. */
     int (*read)(struct BlkDev *d, unsigned long long lba, unsigned count, void *buf);
@@ -70,9 +72,17 @@ void blk_copy(BlkDev *dst, const BlkDev *src);
 /* Driver side. Copies *d; returns the index or -1 if the table is full. */
 int blk_register(const BlkDev *d);
 
-int blk_count(void);
+int blk_count(void);        /* table size, including unplugged devices (check BlkDev.removed) */
 BlkDev *blk_get(int index); /* NULL if out of range */
 void blk_reset(void);       /* forget everything (host tests) */
+
+/* Hot-plug. blk_remove() marks a disk and its partitions as unplugged: reads, writes and flushes fail from then
+ * on, but the entries stay (a mounted drive still points at them) until the file system layer has let go and
+ * calls blk_reap(), which frees their slots for the next device. blk_generation() grows whenever a device is
+ * registered or removed, so a polling loop can tell that the list changed. */
+void blk_remove(int index);
+void blk_reap(void);
+unsigned blk_generation(void);
 
 /* Sector I/O on a disk or a partition (a partition's sector 0 is its first sector). Return 0 or -1
  * (bad index, range outside the device, driver error, or - for writes - a locked / read-only device). */

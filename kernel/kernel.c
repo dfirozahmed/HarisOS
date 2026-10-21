@@ -1,4 +1,5 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
+#include "blk.h"
 #include "bootinfo.h"
 #include "desktop.h"
 #include "devmgr.h"
@@ -113,6 +114,8 @@ void kernel_main(const BootInfo *info)
         volume_unlock_clean();    /* ordinary clean drives can be written at once; system and unclean ones stay locked */
     }
 
+    unsigned blk_seen = blk_generation(); /* USB drives plugged in (or out) later change it: see volume_sync() */
+
     timer_init(); /* needed for double-click */
 
     RtcTime now;
@@ -142,6 +145,11 @@ void kernel_main(const BootInfo *info)
         KeyEvent ke;
         while (gfx_ready() && keyboard_poll(&ke))
             desktop_key(&ke);
+        if (pmm_ok && blk_generation() != blk_seen) /* a USB drive came or went (found inside mouse_poll) */
+        {
+            volume_sync(); /* the File Explorer notices through vfs_generation() */
+            blk_seen = blk_generation();
+        }
         if (gfx_ready())
             desktop_tick(); /* blinking text caret */
 #if defined(__x86_64__) || defined(__i386__)

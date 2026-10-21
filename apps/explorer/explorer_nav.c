@@ -209,3 +209,42 @@ int ex_place_count(void)
 
 int ex_place_id(int i) { return i == 0 ? VFS_ROOT : vfs_volume_node(i - 1); }
 
+
+/* A drive was plugged in or pulled out (a USB stick): list the folder again, and if the folder we were in lived on
+ * a drive that is gone, go back to "This PC". Remembered folders that no longer exist are forgotten. Returns 1 if
+ * the window needs a redraw. */
+int ex_sync_drives(void)
+{
+    static unsigned seen = ~0u;
+    unsigned gen = vfs_generation();
+    if (gen == seen)
+        return 0;
+    seen = gen;
+
+    int n = 0;
+    for (int i = 0; i < EX_HIST_N; i++)
+        if (vfs_node(EX_HIST[i]))
+            EX_HIST[n++] = EX_HIST[i];
+    EX_HIST_N = n;
+    n = 0;
+    for (int i = 0; i < EX_FWD_N; i++)
+        if (vfs_node(EX_FWD[i]))
+            EX_FWD[n++] = EX_FWD[i];
+    EX_FWD_N = n;
+    if (EX_CLIP_ID >= 0 && !vfs_node(EX_CLIP_ID))
+        EX_CLIP_ID = -1;
+    if (EX_RENAME_ID >= 0 && !vfs_node(EX_RENAME_ID))
+        ex_end_rename(0);
+
+    if (!vfs_node(EX_CUR))
+    {
+        EX_CUR = VFS_ROOT;
+        EX_SEL = -1;
+        EX_SCROLL = 0;
+        EX_NOTE = "The drive was removed.";
+    }
+    EX_LAST_ROW = EX_HOVER_ROW = EX_HOVER_PLACE = -1;
+    ex_reload();
+    ex_update_nav_buttons();
+    return 1;
+}

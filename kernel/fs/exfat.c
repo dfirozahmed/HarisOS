@@ -439,9 +439,10 @@ static void wr64(u8 *p, u64 v)
 static int writable(const ExFat *f)
 {
     const BlkDev *d = blk_get(f->blk);
-    if (d && d->parent >= 0)
-        d = blk_get(d->parent);
-    return d && d->writable && !d->locked;
+    if (!d)
+        return 0;
+    const BlkDev *disk = d->parent >= 0 ? blk_get(d->parent) : d;
+    return disk && disk->writable && !d->locked; /* the lock is the partition's own (see blk_set_locked) */
 }
 
 static int wr_sector(ExFat *f, u64 lba, const void *buf)

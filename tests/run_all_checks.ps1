@@ -22,6 +22,8 @@ try {
         @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),
         @('Virtual file system tests', 'tests/run_vfs_tests.sh'),
         @('Block device and partition tests', 'tests/run_blk_tests.sh'),
+        @('USB mass storage tests', 'tests/run_usbmsc_tests.sh'),
+        @('USB drive hot-plug tests', 'tests/run_usbvol_tests.sh'),
         @('FAT32 tests', 'tests/run_fat32_tests.sh'),
         @('exFAT tests', 'tests/run_exfat_tests.sh'),
         @('exFAT write tests', 'tests/run_exfatw_tests.sh'),

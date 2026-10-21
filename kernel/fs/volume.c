@@ -23,6 +23,8 @@ enum
 
 typedef struct
 {
+    int used;  /* this slot holds a mounted drive (a USB drive can go away, so slots are reused) */
+    int fresh; /* mounted by volume_sync() and not yet looked at by the unlock policy */
     int blk;
     int kind;
     int no_lock; /* 1 = clean, unlocked for good, not a system drive: no lock is offered (see volume_unlock_clean) */
@@ -184,7 +186,12 @@ static void common_info(const Drive *v, VfsVolInfo *out)
     const char *medium = (disk && disk->media == BLK_MEDIA_SSD)   ? "SSD"
                          : (disk && disk->media == BLK_MEDIA_HDD) ? "HDD"
                                                                   : "Disk";
-    const char *bus = (disk && disk->kind == BLK_NVME) ? "NVMe" : (disk && disk->kind == BLK_SATA) ? "SATA" : "RAM";
+    const char *bus = (disk && disk->kind == BLK_NVME)  ? "NVMe"
+                      : (disk && disk->kind == BLK_SATA) ? "SATA"
+                      : (disk && disk->kind == BLK_USB)  ? "USB"
+                                                         : "RAM";
+    if (disk && disk->kind == BLK_USB)
+        medium = "Removable"; /* a stick is neither an SSD nor a hard disk as far as we can tell */
     char dev[24];
     int n = 0;
     for (const char *s = medium; *s && n < 20; s++)
@@ -456,10 +463,12 @@ static const VfsBackend NTFS_BACKEND = {nt_be_list, nt_be_create, nt_be_remove, 
                                         nt_be_read, nt_be_write,  nt_be_info,   be_set_locked, 0};
 
 /* ====================== finding the volumes ====================== */
-/* "HARISOS (nvme0p1)": the volume label, else the partition's name, else "Local Disk" */
+/* "HARISOS (nvme0p1)": the volume label, else the partition's name, else "Local Disk" ("USB Drive" on a stick) */
 static void volume_name(const char *label, const BlkDev *d, char *out, int cap)
 {
-    const char *base = label[0] ? label : (d->part_label[0] ? d->part_label : "Local Disk");
+    const BlkDev *disk = d->parent >= 0 ? blk_get(d->parent) : d;
+    const char *fallback = (disk && disk->kind == BLK_USB) ? "USB Drive" : "Local Disk";
+    const char *base = label[0] ? label : (d->part_label[0] ? d->part_label : fallback);
     int n = 0;
     for (const char *s = base; *s && n < cap - 16; s++)
         out[n++] = *s;
@@ -497,22 +506,25 @@ static int drive_is_system(Drive *v)
     return v->kind == FS_NTFS && ntfs_is_windows(&v->u.nt);
 }
 
+/* The unlock policy for one drive: 1 if it was unlocked (clean, not a system drive), 0 if it keeps its lock. */
+static int unlock_if_clean(Drive *v)
+{
+    v->fresh = 0;
+    v->no_lock = !drive_is_system(v) && drive_clean(v);
+    if (v->no_lock)
+        blk_set_locked(v->blk, 0);
+    return v->no_lock;
+}
+
 /* Unlock every clean drive that is not a system drive. The lock is per partition, so one problem drive (or the
  * Windows drive) does not hold back the others on the same disk. A drive left locked keeps its lock button; an
  * unlocked one no longer has any. Returns how many drives were unlocked. */
 int volume_unlock_clean(void)
 {
     int unlocked = 0;
-    for (int i = 0; i < NDRIVES; i++)
-    {
-        Drive *v = &DRIVES[i];
-        v->no_lock = !drive_is_system(v) && drive_clean(v);
-        if (v->no_lock)
-        {
-            blk_set_locked(v->blk, 0);
-            unlocked++;
-        }
-    }
+    for (int i = 0; i < VFS_MAX_VOLUMES; i++)
+        if (DRIVES[i].used)
+            unlocked += unlock_if_clean(&DRIVES[i]);
     return unlocked;
 }
 
@@ -537,19 +549,39 @@ static int sniff(int blk)
     return ntfs ? FS_NTFS : exfat ? FS_EXFAT : FS_FAT32; /* anything else: let the FAT code decide */
 }
 
-int volume_mount_all(void)
+static int is_mounted(int blk)
 {
-    NDRIVES = 0;
+    for (int i = 0; i < VFS_MAX_VOLUMES; i++)
+        if (DRIVES[i].used && DRIVES[i].blk == blk)
+            return 1;
+    return 0;
+}
+
+static Drive *free_drive(void)
+{
+    for (int i = 0; i < VFS_MAX_VOLUMES; i++)
+        if (!DRIVES[i].used)
+            return &DRIVES[i];
+    return 0;
+}
+
+/* Mount every partition / disk that is not mounted yet and holds a file system we know. The count of the ones we
+ * cannot use (UNSUPPORTED) is made again each time. Returns how many drives were added. */
+static int mount_pass(void)
+{
     UNSUPPORTED = 0;
+    int added = 0;
     int n = blk_count();
     for (int i = 0; i < n; i++)
     {
         const BlkDev *d = blk_get(i);
+        if (d->removed || is_mounted(i))
+            continue;
         if (d->kind != BLK_PART) /* a whole disk: only when it has no partitions */
         {
             int has_parts = 0;
             for (int j = 0; j < n; j++)
-                if (blk_get(j)->parent == i)
+                if (!blk_get(j)->removed && blk_get(j)->parent == i)
                     has_parts = 1;
             if (has_parts)
                 continue;
@@ -559,9 +591,9 @@ int volume_mount_all(void)
             UNSUPPORTED++;
             continue;
         }
-        if (NDRIVES >= VFS_MAX_VOLUMES)
+        Drive *v = free_drive();
+        if (!v)
             break;
-        Drive *v = &DRIVES[NDRIVES];
         int kind = sniff(i);
         const char *label = "";
         const VfsBackend *be = 0;
@@ -595,7 +627,45 @@ int volume_mount_all(void)
         volume_name(label, d, name, sizeof name);
         if (vfs_mount(be, v, name) < 0)
             break;
+        v->used = 1;
+        v->fresh = 1;
         NDRIVES++;
+        added++;
     }
+    return added;
+}
+
+int volume_mount_all(void)
+{
+    for (int i = 0; i < VFS_MAX_VOLUMES; i++)
+        DRIVES[i].used = 0;
+    NDRIVES = 0;
+    mount_pass();
     return NDRIVES;
+}
+
+int volume_sync(void)
+{
+    int changed = 0;
+    for (int i = 0; i < VFS_MAX_VOLUMES; i++)
+    {
+        Drive *v = &DRIVES[i];
+        if (!v->used)
+            continue;
+        const BlkDev *d = blk_get(v->blk);
+        const BlkDev *disk = (d && d->parent >= 0) ? blk_get(d->parent) : d;
+        if (d && !d->removed && disk && !disk->removed)
+            continue;
+        vfs_unmount(v); /* its device is gone: the folder disappears from "This PC" */
+        v->used = 0;
+        NDRIVES--;
+        changed++;
+    }
+    blk_reap(); /* nothing points at the unplugged devices any more: their slots can be used again */
+    if (mount_pass() > 0)
+        changed++;
+    for (int i = 0; i < VFS_MAX_VOLUMES; i++) /* a new drive: the same unlock policy as at boot */
+        if (DRIVES[i].used && DRIVES[i].fresh)
+            unlock_if_clean(&DRIVES[i]);
+    return changed;
 }

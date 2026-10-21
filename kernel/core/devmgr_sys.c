@@ -31,8 +31,8 @@ int devmgr_refresh(void)
     for (int i = 0; i < blk_count() && in.disk_count < DEVMGR_MAX_DISKS; i++)
     {
         const BlkDev *b = blk_get(i);
-        if (b->parent >= 0)
-            continue; /* partitions are counted on their disk */
+        if (b->parent >= 0 || b->removed)
+            continue; /* partitions are counted on their disk; an unplugged USB drive is not there any more */
         DevmgrDisk *d = &in.disks[in.disk_count++];
         for (int j = 0; j < (int)sizeof d->name; j++)
             d->name[j] = b->name[j];
@@ -43,7 +43,7 @@ int devmgr_refresh(void)
         d->locked = b->locked;
         d->parts = 0;
         for (int j = 0; j < blk_count(); j++)
-            if (blk_get(j)->parent == i)
+            if (blk_get(j)->parent == i && !blk_get(j)->removed)
                 d->parts++;
     }
     in.i2c_count = 0;

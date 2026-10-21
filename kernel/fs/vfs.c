@@ -12,6 +12,7 @@ typedef struct
 
 static Volume VOLS[VFS_MAX_VOLUMES];
 static int NVOLS;
+static unsigned GEN; /* grows whenever a volume is mounted or unmounted */
 static int LAST_ERR;
 
 static int fail(int code)
@@ -279,9 +280,37 @@ int vfs_mount(const VfsBackend *ops, void *ctx, const char *name)
     VOLS[v].ctx = ctx;
     VOLS[v].root = id;
     NODES[id].vol = v;
+    GEN++;
     NODES[id].loaded = !(ops && ops->list); /* a drive's root is read on first use */
     return v;
 }
+
+/* A drive went away (a USB stick was pulled out): its folder and everything below it leave the tree, and the
+ * volumes after it move up one place (node.vol numbers follow). Ids of other nodes do not change. */
+int vfs_unmount(void *ctx)
+{
+    int v = -1;
+    for (int i = 0; i < NVOLS && v < 0; i++)
+        if (VOLS[i].ctx == ctx && VOLS[i].ops && VOLS[i].ops->list)
+            v = i;
+    if (v < 0)
+        return -1;
+    drop_subtree(VOLS[v].root);
+    for (int i = v + 1; i < NVOLS; i++)
+    {
+        VOLS[i - 1].ops = VOLS[i].ops;
+        VOLS[i - 1].ctx = VOLS[i].ctx;
+        VOLS[i - 1].root = VOLS[i].root;
+    }
+    NVOLS--;
+    for (int i = 1; i < VFS_MAX_NODES; i++)
+        if (NODES[i].used && NODES[i].vol > v)
+            NODES[i].vol--;
+    GEN++;
+    return 0;
+}
+
+unsigned vfs_generation(void) { return GEN; }
 
 int vfs_volume_count(void) { return NVOLS; }
 int vfs_volume_node(int vol) { return (vol >= 0 && vol < NVOLS) ? VOLS[vol].root : -1; }

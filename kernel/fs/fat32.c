@@ -81,9 +81,10 @@ static int same_name(const char *a, const char *b)
 static int writable(const Fat *f)
 {
     const BlkDev *d = blk_get(f->blk);
-    if (d && d->parent >= 0)
-        d = blk_get(d->parent);
-    return d && d->writable && !d->locked;
+    if (!d)
+        return 0;
+    const BlkDev *disk = d->parent >= 0 ? blk_get(d->parent) : d;
+    return disk && disk->writable && !d->locked; /* the lock is the partition's own (see blk_set_locked) */
 }
 
 static int rd_sectors(Fat *f, u64 lba, unsigned n, void *buf) { return blk_read(f->blk, lba, n, buf) == 0 ? 0 : FAT_ERR_IO; }

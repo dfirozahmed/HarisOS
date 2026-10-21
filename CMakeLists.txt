@@ -67,6 +67,7 @@ set(KERNEL_SOURCES
     kernel/storage/part.c            # partition tables (GPT, MBR)
     kernel/storage/ahci.c            # SATA SSD / hard disk driver (AHCI)
     kernel/storage/nvme.c            # NVMe SSD driver
+    kernel/storage/usb_msc.c         # USB mass storage (pen drives): bulk-only transport + SCSI commands
     kernel/storage/storage.c         # starts the drivers
     kernel/fs/fat32.c                # FAT32 file system
     kernel/fs/exfat.c                # exFAT file system (read only)
@@ -89,7 +90,7 @@ set(KERNEL_SOURCES
     kernel/graphics/font_data.c # Poppins
     kernel/graphics/cursor_data.c # mouse arrow
     kernel/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
-    kernel/input/usb_xhci.c     # USB 3 (xHCI) controller + HID boot mouse (polled)
+    kernel/input/usb_xhci.c     # USB 3 (xHCI) controller + HID mouse / keyboard + mass storage (polled)
     kernel/input/aml_scan.c     # finds I2C-HID devices in ACPI byte code
     kernel/input/hid_desc.c     # HID report descriptor: where the mouse fields are
     kernel/input/i2c_dw.c       # DesignWare I2C controller (AMD / Intel)

@@ -85,6 +85,10 @@ void vfs_init(void);
 /* ---- volumes ---------------------------------------------------- */
 /* Add a volume under the root, named `name` (made unique). Returns the volume index or -1. */
 int vfs_mount(const VfsBackend *ops, void *ctx, const char *name);
+/* Remove the volume that was mounted with this `ctx` (a drive that was unplugged), with everything in it.
+ * Later volumes move up one place, so volume numbers are not stable. 0, or -1 if there is no such volume. */
+int vfs_unmount(void *ctx);
+unsigned vfs_generation(void);               /* grows with every vfs_mount() / vfs_unmount(): "the list of drives changed" */
 int vfs_volume_count(void);
 int vfs_volume_node(int vol);                /* the volume's folder, -1 if no such volume */
 int vfs_volume_of(int id);                   /* volume of a node, -1 for the root */
