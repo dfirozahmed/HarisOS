@@ -116,7 +116,9 @@ EFI_STATUS EFIAPI efi_kernel_entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sys
     unsigned int width = gop->Mode->Info->HorizontalResolution;
     unsigned int height = gop->Mode->Info->VerticalResolution;
     unsigned int pitch = gop->Mode->Info->PixelsPerScanLine;
-    unsigned int red_mask_mode = (gop->Mode->Info->PixelFormat == 0);
+    /* PixelFormat 1 = BGR bytes in memory, i.e. the 32-bit word is 0x00RRGGBB (what red_mask_mode means);
+     * 0 = RGB bytes, i.e. the word is 0x00BBGGRR */
+    unsigned int red_mask_mode = (gop->Mode->Info->PixelFormat == 1);
     void *framebuffer = (void *)(UINTN)gop->Mode->FrameBufferBase;
 
     if (!framebuffer || width < 320 || height < 200 || pitch < width)

@@ -54,13 +54,13 @@ int main(void){
   /* title-bar buttons: hover and pressed feedback (and nothing is closed when released elsewhere) */
   {
     int tb = ui_theme()->titlebar_h, cy = w->r.y + tb / 2;
-    ptr(w->r.x + 22, cy, 0);
+    ptr(w->r.x + w->r.w - 22, cy, 0);
     assert(wm_titlebtn_hover(w) == 0 && wm_titlebtn_pressed(w) == -1);
-    ptr(w->r.x + 42, cy, 0);
+    ptr(w->r.x + w->r.w - 62, cy, 0);
     assert(wm_titlebtn_hover(w) == 1);
-    ptr(w->r.x + 62, cy, 0);
+    ptr(w->r.x + w->r.w - 42, cy, 0);
     assert(wm_titlebtn_hover(w) == 2);
-    ptr(w->r.x + 62, cy, 1);
+    ptr(w->r.x + w->r.w - 42, cy, 1);
     assert(wm_titlebtn_pressed(w) == 2 && wm_titlebtn_hover(w) == 2);
     ptr(w->r.x + 200, cy + 100, 1); /* dragged away: still held, no longer hovered */
     assert(wm_titlebtn_hover(w) == -1);

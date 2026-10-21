@@ -9,7 +9,7 @@ static Window *DRAG;
 static int DRAG_DX, DRAG_DY;
 static Window *CLOSE_PRESSED, *MIN_PRESSED, *MAX_PRESSED;
 static Window *LC_WIN;
-static Window *PRESS_WIN; /* window whose on_press started a drag (text selection): it gets on_drag */
+static Window *PRESS_WIN;     /* window whose on_press started a drag (text selection): it gets on_drag */
 static Window *HOVER_CONTENT; /* window whose on_hover last saw the pointer inside */
 static unsigned long long LC_T;
 static int LC_X, LC_Y;
@@ -23,7 +23,7 @@ static Window *SIG_HW, *SIG_CP, *SIG_MP, *SIG_XP; /* what was drawn last, to not
 static int SIG_HB = -1;
 
 /* resizing by an edge or corner */
-#define RESIZE_GRAB 6   /* pixels inside the window border that grab the edge */
+#define RESIZE_GRAB 6    /* pixels inside the window border that grab the edge */
 #define RESIZE_CORNER 14 /* ... and how far along the edge a corner reaches */
 static Window *RESIZE;
 static int RS_EDGE;      /* WM_EDGE_* being dragged */
@@ -32,23 +32,25 @@ static UiRect RS_START;  /* window rectangle when it started */
 
 static int close_hit(const Window *w, int x, int y)
 {
-    int cx = w->r.x + 22, cy = w->r.y + ui_theme()->titlebar_h / 2;
+    int cx = w->r.x + w->r.w - 22, cy = w->r.y + ui_theme()->titlebar_h / 2;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 8 * 8;
 }
 
 static int min_hit(const Window *w, int x, int y)
 {
-    if (w->dialog) return 0;
-    int cx = w->r.x + 42, cy = w->r.y + ui_theme()->titlebar_h / 2;
+    if (w->dialog)
+        return 0;
+    int cx = w->r.x + w->r.w - 62, cy = w->r.y + ui_theme()->titlebar_h / 2;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 8 * 8;
 }
 
 static int max_hit(const Window *w, int x, int y)
 {
-    if (w->dialog) return 0;
-    int cx = w->r.x + 62, cy = w->r.y + ui_theme()->titlebar_h / 2;
+    if (w->dialog)
+        return 0;
+    int cx = w->r.x + w->r.w - 42, cy = w->r.y + ui_theme()->titlebar_h / 2;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 8 * 8;
 }
@@ -62,7 +64,9 @@ int wm_titlebtn_hover(const Window *w) { return w == HOVER_WIN ? HOVER_BTN : -1;
 
 int wm_titlebtn_pressed(const Window *w)
 {
-    return CLOSE_PRESSED == w ? 0 : MIN_PRESSED == w ? 1 : MAX_PRESSED == w ? 2 : -1;
+    return CLOSE_PRESSED == w ? 0 : MIN_PRESSED == w ? 1
+                                : MAX_PRESSED == w   ? 2
+                                                     : -1;
 }
 
 static void damage_titlebar(const Window *w)
@@ -81,7 +85,9 @@ static void update_button_feedback(int x, int y)
         Window *t = wm_window_at_internal(x, y);
         if (t && !wm_blocker_internal(t))
         {
-            hb = close_hit(t, x, y) ? 0 : min_hit(t, x, y) ? 1 : max_hit(t, x, y) ? 2 : -1;
+            hb = close_hit(t, x, y) ? 0 : min_hit(t, x, y) ? 1
+                                      : max_hit(t, x, y)   ? 2
+                                                           : -1;
             if (hb >= 0)
                 hw = t;
         }
@@ -206,14 +212,19 @@ static void apply_resize(int x, int y)
 
 static void clamp_to_screen(Window *w)
 {
-    if (w->maximized) return;
+    if (w->maximized)
+        return;
     int W = (int)gfx_width(), H = (int)gfx_height();
     int tb = ui_theme()->titlebar_h;
     int keep = 120; /* keep at least this much title bar visible */
-    if (w->r.x > W - keep) w->r.x = W - keep;
-    if (w->r.x < keep - w->r.w) w->r.x = keep - w->r.w;
-    if (w->r.y < 0) w->r.y = 0;
-    if (w->r.y > H - TASKBAR_HEIGHT - tb) w->r.y = H - TASKBAR_HEIGHT - tb;
+    if (w->r.x > W - keep)
+        w->r.x = W - keep;
+    if (w->r.x < keep - w->r.w)
+        w->r.x = keep - w->r.w;
+    if (w->r.y < 0)
+        w->r.y = 0;
+    if (w->r.y > H - TASKBAR_HEIGHT - tb)
+        w->r.y = H - TASKBAR_HEIGHT - tb;
 }
 
 int wm_dragging(void) { return DRAG != 0 || RESIZE != 0; }
@@ -232,19 +243,32 @@ int wm_cursor_hint(int x, int y)
 
 void wm_input_forget_window(Window *w)
 {
-    if (DRAG == w) DRAG = 0;
-    if (CLOSE_PRESSED == w) CLOSE_PRESSED = 0;
-    if (MIN_PRESSED == w) MIN_PRESSED = 0;
-    if (MAX_PRESSED == w) MAX_PRESSED = 0;
-    if (LC_WIN == w) LC_WIN = 0;
-    if (PRESS_WIN == w) PRESS_WIN = 0;
-    if (HOVER_CONTENT == w) HOVER_CONTENT = 0;
-    if (RESIZE == w) RESIZE = 0;
-    if (HOVER_WIN == w) HOVER_WIN = 0, HOVER_BTN = -1;
-    if (SIG_HW == w) SIG_HW = 0;
-    if (SIG_CP == w) SIG_CP = 0;
-    if (SIG_MP == w) SIG_MP = 0;
-    if (SIG_XP == w) SIG_XP = 0;
+    if (DRAG == w)
+        DRAG = 0;
+    if (CLOSE_PRESSED == w)
+        CLOSE_PRESSED = 0;
+    if (MIN_PRESSED == w)
+        MIN_PRESSED = 0;
+    if (MAX_PRESSED == w)
+        MAX_PRESSED = 0;
+    if (LC_WIN == w)
+        LC_WIN = 0;
+    if (PRESS_WIN == w)
+        PRESS_WIN = 0;
+    if (HOVER_CONTENT == w)
+        HOVER_CONTENT = 0;
+    if (RESIZE == w)
+        RESIZE = 0;
+    if (HOVER_WIN == w)
+        HOVER_WIN = 0, HOVER_BTN = -1;
+    if (SIG_HW == w)
+        SIG_HW = 0;
+    if (SIG_CP == w)
+        SIG_CP = 0;
+    if (SIG_MP == w)
+        SIG_MP = 0;
+    if (SIG_XP == w)
+        SIG_XP = 0;
 }
 
 /* ---- mouse --------------------------------------------------- */

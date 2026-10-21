@@ -108,17 +108,21 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
     /* window buttons (close / minimize / maximize); the symbols show on the focused window */
     int cy = r.y + tb / 2;
     int cyq = cy * 16 + 8;
+    /* bright fixed colors (not theme-dependent) so the buttons stand out; index order: close, minimize, maximize */
+    // UiRgb dots[3] = {ui_rgb(255, 82, 82), ui_rgb(255, 196, 0), ui_rgb(0, 214, 100)};
     UiRgb dots[3] = {t->danger, t->warning, t->success};
+    /* right-aligned like Windows: [minimize][maximize][close]; distance of each center from the right edge */
+    const int from_right[3] = {22, 62, 42};
     for (int i = 0; i < (dialog ? 1 : 3); i++)
     {
-        int cxq = (r.x + 22 + 20 * i) * 16 + 8;
+        int cxq = (r.x + r.w - from_right[i]) * 16 + 8;
         int hot = (i == BTN_HOVER);
         int down = hot && (i == BTN_PRESS); /* pressed and still on the button */
         UiRgb col = dots[i];
         if (!active && !hot)
-            col = ui_rgb_mix(t->titlebar, t->text_dim, 90); /* an unfocused window's buttons are grey ... */
+            col = ui_rgb_mix(t->titlebar, t->text_dim, 90); /* an unfocused window's buttons are paler, but keep their color */
         if (hot)
-            col = ui_rgb_mix(col, ui_rgb(255, 255, 255), 60); /* ... until the pointer is on them */
+            col = ui_rgb_mix(col, ui_rgb(255, 255, 255), 60); /* lighter while the pointer is on them */
         if (down)
             col = ui_rgb_mix(dots[i], ui_rgb(0, 0, 0), 105); /* pressed: darker */
         gfx_fill_circle_q(cxq, cyq, down ? 7 * 16 + 6 : 8 * 16, ui_color(col), 255);
@@ -145,4 +149,3 @@ void ui_separator(int x, int y, int w)
 {
     gfx_hline(x, y, w, ui_color(THEME->border));
 }
-
