@@ -1,5 +1,6 @@
 /* File Explorer: mouse and keyboard handlers of the window. */
 #include "explorer.h"
+#include "taskbar.h"
 
 /* is (x, y) on the divider between the sidebar and the list (the grab zone for resizing the sidebar)? */
 static int on_divider(const Layout *l, int x, int y)
@@ -224,9 +225,26 @@ int ex_wheel(Window *w, int steps)
     int old = EX_SCROLL;
     EX_SCROLL += steps * WHEEL_ROWS;
     ex_clamp_scroll(&l);
-    if (EX_SCROLL == old)
+    int rows = EX_SCROLL - old;
+    if (rows == 0)
         return 0;
-    wm_add_damage(l.list); /* only the rows and the scrollbar (inside l.list) change */
+
+    /* Only the rows and the scrollbar (inside l.list) change. The rows that stay visible just moved, so move
+     * their pixels and draw only the rows that came into view. That is valid while this window is on top
+     * (nothing over the list to be moved with it) and the list does not reach the taskbar. */
+    UiRect li = l.list;
+    int dy = -rows * ROW_H, moved_w = li.w - 12; /* the scrollbar column is redrawn, not moved */
+    if (wm_top() == w && li.y + li.h <= (int)gfx_height() - TASKBAR_HEIGHT &&
+        gfx_scroll_rect(li.x, li.y, moved_w, li.h, dy) == 0)
+    {
+        if (dy < 0)
+            wm_add_damage(ui_rect(li.x, li.y + li.h + dy, moved_w, -dy)); /* new rows at the bottom */
+        else
+            wm_add_damage(ui_rect(li.x, li.y, moved_w, dy)); /* new rows at the top */
+        wm_add_damage(ui_rect(li.x + moved_w, li.y, li.w - moved_w, li.h)); /* scrollbar */
+    }
+    else
+        wm_add_damage(li);
     return 2;
 }
 

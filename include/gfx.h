@@ -75,6 +75,12 @@ void gfx_cache_invalidate(void);
 void gfx_cache_save(void); /* copy the whole back buffer into the cache */
 void gfx_cache_restore(int x, int y, int w, int h);
 
+/* ---- scrolling -----------------------------------------------
+ * Move the pixels of a rectangle of the back buffer up (dy < 0) or down (dy > 0) by |dy| rows, so a list that
+ * scrolled only has to draw the rows that came into view. Returns 0 if done, -1 if there is no back buffer
+ * or nothing can be kept (then redraw the whole rectangle). The rows that came into view hold old pixels. */
+int gfx_scroll_rect(int x, int y, int w, int h, int dy);
+
 /* ---- layers ---------------------------------------------------
  * Draw something once into its own w*h pixel buffer, then paste it often (a window being dragged).
  *   gfx_layer_begin(buf, w, h, fill)  all drawing goes to buf; the "screen" is w*h with (0,0) at its corner

@@ -284,9 +284,12 @@ static void draw_list(const Layout *l, const UiTheme *t)
     GfxClip saved = gfx_get_clip();
     gfx_clip_intersect(l->list.x, l->list.y, l->list.w, l->list.h); /* not ui_clip(): a partial redraw must stay inside its own clip */
     int vis = ex_visible_rows(l);
+    GfxClip cur = gfx_get_clip();
     for (int i = 0; i <= vis && EX_SCROLL + i < EX_NITEMS; i++)
     {
         int ri = EX_SCROLL + i;
+        if (l->list.y + i * ROW_H >= cur.y1 || l->list.y + (i + 1) * ROW_H <= cur.y0)
+            continue; /* a partial redraw (a few rows after scrolling) skips the rows it does not reach */
         const VfsNode *n = vfs_node(EX_ITEMS[ri]);
         if (!n)
             continue;

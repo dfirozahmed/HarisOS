@@ -167,6 +167,13 @@ void kernel_main(const BootInfo *info)
         gfx_cursor_show(1);
     }
 
+    /* Wheel / touchpad scrolling arrives faster than a list can be redrawn. Like a display's refresh rate, the
+     * steps are collected and applied at most every WHEEL_FRAME_US: the list scrolls by the sum, and the CPU
+     * is not spent on frames nobody sees. */
+    enum { WHEEL_FRAME_US = 16000 };
+    int wheel_pending = 0, wheel_x = 0, wheel_y = 0;
+    unsigned long long wheel_last = 0;
+
     for (;;)
     {
         unsigned long long pass_start = timer_us();
@@ -176,7 +183,18 @@ void kernel_main(const BootInfo *info)
             gfx_cursor_move(m.x, m.y);
             desktop_pointer(m.x, m.y, m.buttons);
             if (m.wheel)
-                desktop_wheel(m.x, m.y, m.wheel);
+            {
+                wheel_pending += m.wheel;
+                wheel_x = m.x;
+                wheel_y = m.y;
+            }
+            worked = 1;
+        }
+        if (wheel_pending && pass_start - wheel_last >= WHEEL_FRAME_US)
+        {
+            desktop_wheel(wheel_x, wheel_y, wheel_pending);
+            wheel_pending = 0;
+            wheel_last = pass_start;
             worked = 1;
         }
         KeyEvent ke;

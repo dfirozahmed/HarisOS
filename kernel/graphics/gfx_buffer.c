@@ -182,3 +182,26 @@ void gfx_cache_restore(int x, int y, int w, int h)
     gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
+
+/* ---- scrolling ----------------------------------------------- */
+int gfx_scroll_rect(int x, int y, int w, int h, int dy)
+{
+    if (!BACK || dy == 0)
+        return -1;
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w > W ? W : x + w, y1 = y + h > H ? H : y + h;
+    if (x1 <= x0 || y1 <= y0 || dy >= y1 - y0 || -dy >= y1 - y0)
+        return -1; /* nothing to move, or everything would scroll out */
+    if (dy > 0) /* down: copy from the bottom so a row is read before it is overwritten */
+    {
+        for (int yy = y1 - 1; yy >= y0 + dy; yy--)
+            gfx_internal_copy32(DRAW + (long long)yy * DPITCH + x0, DRAW + (long long)(yy - dy) * DPITCH + x0, x1 - x0);
+    }
+    else
+    {
+        for (int yy = y0; yy < y1 + dy; yy++)
+            gfx_internal_copy32(DRAW + (long long)yy * DPITCH + x0, DRAW + (long long)(yy - dy) * DPITCH + x0, x1 - x0);
+    }
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
+    return 0;
+}

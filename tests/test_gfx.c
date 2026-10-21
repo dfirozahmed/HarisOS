@@ -108,6 +108,28 @@ int main(void)
         }
     }
 
+    {   /* scrolling a rectangle of the back buffer: rows move, everything outside stays */
+        enum { SW = 20, SH = 12 };
+        static unsigned int fb[SW * SH], back[SW * SH];
+        gfx_init(fb, SW, SH, SW, 1);
+        assert(gfx_scroll_rect(0, 0, SW, SH, 1) == -1);                 /* no back buffer yet */
+        assert(gfx_enable_backbuffer(back) == 0);
+        for (int y = 0; y < SH; ++y) gfx_fill_rect(0, y, SW, 1, gfx_rgb((unsigned char)(y * 10), 0, 0));
+        assert(gfx_scroll_rect(4, 2, 10, 8, 3) == 0);                   /* rows 2..9 move down by 3 */
+        for (int x = 0; x < SW; ++x) {
+            for (int y = 0; y < SH; ++y) {
+                int inside = x >= 4 && x < 14 && y >= 2 && y < 10;
+                int from = inside && y >= 5 ? y - 3 : y;                /* rows 2..4 keep their old pixels */
+                assert(back[y * SW + x] == gfx_rgb((unsigned char)(from * 10), 0, 0));
+            }
+        }
+        assert(gfx_scroll_rect(0, 0, SW, SH, SH) == -1);                /* everything would scroll out */
+        assert(gfx_scroll_rect(0, 0, SW, SH, 0) == -1);
+        for (int y = 0; y < SH; ++y) gfx_fill_rect(0, y, SW, 1, gfx_rgb((unsigned char)(y * 10), 0, 0));
+        assert(gfx_scroll_rect(0, 0, SW, SH, -2) == 0);                 /* up by 2 */
+        for (int y = 0; y < SH - 2; ++y) assert(back[y * SW + 5] == gfx_rgb((unsigned char)((y + 2) * 10), 0, 0));
+    }
+
     puts("Graphics regression tests passed.");
     return 0;
 }
