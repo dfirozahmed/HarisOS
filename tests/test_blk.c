@@ -122,6 +122,7 @@ int main(void)
     BlkStats st;                                                        /* only successful I/O is counted */
     blk_get_stats(&st);
     CHECK(st.read_ops == 2 && st.read_bytes == 2 * SS && st.write_ops == 1 && st.write_bytes == SS);
+    CHECK(blk_get(d0)->read_bytes == 2 * SS && blk_get(d0)->write_bytes == SS);
     blk_set_locked(d0, 1);
     CHECK(blk_write(d0, 5, 1, sec) == -1);
     BlkDev *ro = blk_get(d0); ro->writable = 0; blk_set_locked(d0, 0);
@@ -148,7 +149,9 @@ int main(void)
     CHECK(blk_write(1, 0, 1, sec) == -1);                               /* locked, like every device */
     blk_set_locked(1, 0);                                               /* a partition's lock is its own */
     CHECK(blk_get(1)->locked == 0 && blk_get(0)->locked == 1 && blk_get(2)->locked == 1);
+    unsigned long long w0 = blk_get(0)->write_bytes;
     CHECK(blk_write(1, 3, 1, sec) == 0 && DISK[(2048 + 3) * SS] == 0xAB);
+    CHECK(blk_get(0)->write_bytes == w0 + SS && blk_get(1)->write_bytes == 0); /* counted on the disk, not the partition */
     CHECK(blk_write(2, 90000, 1, sec) == -1 && blk_write(0, 5, 1, sec) == -1); /* the others stay locked */
     blk_set_locked(2, 0);
     CHECK(blk_write(2, 90000, 1, sec) == 0 && DISK[(100000 + 90000) * SS] == 0xAB);

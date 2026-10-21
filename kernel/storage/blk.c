@@ -41,6 +41,7 @@ int blk_register(const BlkDev *d)
     }
     blk_copy(&DEVS[slot], d);
     DEVS[slot].locked = 1; /* nothing is written until the user says so */
+    DEVS[slot].read_bytes = DEVS[slot].write_bytes = 0;
     DEVS[slot].removed = 0;
     GEN++;
     return slot;
@@ -102,6 +103,7 @@ int blk_read(int index, unsigned long long lba, unsigned count, void *buf)
     {
         STATS.read_ops++;
         STATS.read_bytes += (unsigned long long)count * d->sector_size;
+        disk->read_bytes += (unsigned long long)count * d->sector_size;
     }
     return rc;
 }
@@ -119,6 +121,7 @@ int blk_write(int index, unsigned long long lba, unsigned count, const void *buf
     {
         STATS.write_ops++;
         STATS.write_bytes += (unsigned long long)count * d->sector_size;
+        disk->write_bytes += (unsigned long long)count * d->sector_size;
     }
     return rc;
 }

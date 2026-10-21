@@ -24,6 +24,7 @@
 #define REFRESH_MS 1000
 #define SIDE_W 120
 #define SIDE_ROW_H 40
+#define DISK_ROW_H 38
 #define HIST_N 60 /* history samples, one per refresh */
 
 enum
@@ -54,6 +55,8 @@ static unsigned DISK_HIST[HIST_N]; /* disk throughput (read + write) in KB/s, ol
 static int DISK_HIST_N;
 static BlkStats DISK_PREV; /* counters at the last sample, to get the change per second */
 static unsigned DISK_READ_KBS, DISK_WRITE_KBS;
+static unsigned long long DPREV_R[BLK_MAX], DPREV_W[BLK_MAX]; /* the same per disk (index in the blk table) */
+static unsigned DKBS_R[BLK_MAX], DKBS_W[BLK_MAX];
 static Window *PROCS[WM_MAX_WINDOWS];
 static int NPROCS;
 static int SEL_ID = -1; /* id of the selected window (survives list refreshes), -1 = none */
@@ -191,8 +194,29 @@ static void hist_push(unsigned char *hist, int *n, unsigned value)
 }
 
 /* The disk history keeps KB/s (not a percent), so the graph can scale itself to the busiest second. */
+/* KB/s from a byte counter; a counter that went down (the slot got a new drive) counts as no I/O */
+static unsigned rate_kbs(unsigned long long now, unsigned long long prev, unsigned long long dt_ms)
+{
+    return (dt_ms && now >= prev) ? (unsigned)((now - prev) * 1000 / dt_ms / 1024) : 0;
+}
+
 static void disk_sample(unsigned long long dt_ms)
 {
+    for (int i = 0; i < BLK_MAX; i++)
+    {
+        const BlkDev *d = blk_get(i);
+        if (!d || d->parent >= 0 || d->removed)
+        {
+            DPREV_R[i] = DPREV_W[i] = 0;
+            DKBS_R[i] = DKBS_W[i] = 0;
+            continue;
+        }
+        DKBS_R[i] = rate_kbs(d->read_bytes, DPREV_R[i], dt_ms);
+        DKBS_W[i] = rate_kbs(d->write_bytes, DPREV_W[i], dt_ms);
+        DPREV_R[i] = d->read_bytes;
+        DPREV_W[i] = d->write_bytes;
+    }
+
     BlkStats now;
     blk_get_stats(&now);
     if (dt_ms == 0) /* the first sample: just remember the counters, nothing to compare with yet */
@@ -354,39 +378,65 @@ static void draw_disk(UiRect pane)
     unsigned char pct[HIST_N];
     for (int i = 0; i < DISK_HIST_N; i++)
         pct[i] = (unsigned char)((unsigned long long)DISK_HIST[i] * 100 / peak);
-    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 110);
+    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 80);
     draw_graph(g, pct, DISK_HIST_N);
     n = 0;
     put_str(line, &n, "Graph scale: ");
     put_rate(line, &n, peak);
-    ui_text_color(pane.x, g.y + g.h + 6, line, UI_TEXT_SMALL, t->text_dim);
+    ui_text_color(pane.x, g.y + g.h + 4, line, UI_TEXT_SMALL, t->text_dim);
 
     BlkStats st;
     blk_get_stats(&st);
-    int y = g.y + g.h + 36;
+    int y = g.y + g.h + 26;
     n = 0;
-    put_str(line, &n, "Read: ");
-    put_rate(line, &n, DISK_READ_KBS);
-    put_str(line, &n, "   Write: ");
-    put_rate(line, &n, DISK_WRITE_KBS);
-    ui_text(pane.x, y, line, UI_TEXT_BODY);
-    n = 0;
-    put_str(line, &n, "Total read: ");
+    put_str(line, &n, "Read ");
     put_size(line, &n, st.read_bytes);
-    ui_text(pane.x, y + 26, line, UI_TEXT_BODY);
-    n = 0;
-    put_str(line, &n, "Total written: ");
+    put_str(line, &n, "   Written ");
     put_size(line, &n, st.write_bytes);
-    ui_text(pane.x, y + 52, line, UI_TEXT_BODY);
+    put_str(line, &n, " (since boot)");
+    ui_text_color(pane.x, y, line, UI_TEXT_SMALL, t->text_dim);
 
-    int disks = 0;
+    /* one row per disk (partitions are counted on their disk): name, model and type, then its speed */
+    y += 26;
+    ui_separator(pane.x, y - 4, pane.w);
+    int shown = 0, disks = 0;
     for (int i = 0; i < blk_count(); i++)
-        if (blk_get(i)->parent < 0 && !blk_get(i)->removed)
-            disks++;
-    n = 0;
-    put_dec(line, &n, (unsigned)disks);
-    put_str(line, &n, disks == 1 ? " disk, since boot" : " disks, since boot");
-    ui_text_color(pane.x, y + 82, line, UI_TEXT_SMALL, t->text_dim);
+    {
+        const BlkDev *d = blk_get(i);
+        if (d->parent >= 0 || d->removed)
+            continue;
+        disks++;
+        if (y + DISK_ROW_H > pane.y + pane.h)
+            continue; /* no room: counted for the "more" line */
+        n = 0;
+        put_str(line, &n, d->name);
+        put_str(line, &n, d->media == BLK_MEDIA_SSD ? "  SSD" : (d->media == BLK_MEDIA_HDD ? "  HDD" : ""));
+        ui_text_in(ui_rect(pane.x, y, pane.w / 2, DISK_ROW_H / 2 + 2), line, UI_TEXT_BODY, UI_ALIGN_LEFT);
+        ui_text_in_color(ui_rect(pane.x, y + DISK_ROW_H / 2, pane.w / 2, DISK_ROW_H / 2), d->model[0] ? d->model : blk_kind_name(d->kind),
+                         UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
+        n = 0;
+        put_str(line, &n, "R ");
+        put_rate(line, &n, DKBS_R[i]);
+        ui_text_in_color(ui_rect(pane.x + pane.w / 2, y, pane.w - pane.w / 2, DISK_ROW_H / 2 + 2), line, UI_TEXT_SMALL,
+                         UI_ALIGN_RIGHT, t->text);
+        n = 0;
+        put_str(line, &n, "W ");
+        put_rate(line, &n, DKBS_W[i]);
+        ui_text_in_color(ui_rect(pane.x + pane.w / 2, y + DISK_ROW_H / 2, pane.w - pane.w / 2, DISK_ROW_H / 2), line,
+                         UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text);
+        y += DISK_ROW_H;
+        shown++;
+    }
+    if (disks == 0)
+        ui_text_color(pane.x, y, "No disks found", UI_TEXT_BODY, t->text_dim);
+    else if (shown < disks)
+    {
+        n = 0;
+        put_str(line, &n, "+ ");
+        put_dec(line, &n, (unsigned)(disks - shown));
+        put_str(line, &n, " more");
+        ui_text_color(pane.x, pane.y + pane.h - 18, line, UI_TEXT_SMALL, t->text_dim);
+    }
 }
 
 static void draw_performance(UiRect body)

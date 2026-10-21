@@ -64,6 +64,9 @@ typedef struct BlkDev
     int part_kind;                /* PART_* */
     int part_no;                  /* 1, 2, 3 ... */
     char part_label[40];          /* GPT partition name (ASCII), "" for MBR */
+
+    /* disks only: successful I/O since the disk was registered (partition I/O counts on its disk) */
+    unsigned long long read_bytes, write_bytes;
 } BlkDev;
 
 /* Copy a BlkDev (a plain `*a = *b` may call memcpy, which does not exist in the kernel). */
