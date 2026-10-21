@@ -45,6 +45,7 @@ static void explorer_app_open(void)
     win->on_rpress = ex_rpress;
     win->on_hover = ex_hover;
     win->on_tick = ex_tick;
+    win->on_cursor = ex_cursor;
     win->on_close = ex_close;
     win->icon = TASKBAR_ICON_FILES;
     wm_set_min_size(win, 480, 320);

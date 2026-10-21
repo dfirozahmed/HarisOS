@@ -1,6 +1,24 @@
 /* File Explorer: mouse and keyboard handlers of the window. */
 #include "explorer.h"
 
+/* is (x, y) on the divider between the sidebar and the list (the grab zone for resizing the sidebar)? */
+static int on_divider(const Layout *l, int x, int y)
+{
+    int edge = l->side.x + l->side.w;
+    return x >= edge - SIDE_GRAB && x < edge + SIDE_GRAB && y >= l->side.y && y < l->side.y + l->side.h;
+}
+
+/* pointer shape: a left-right double arrow on the divider, and for as long as it is being dragged */
+int ex_cursor(Window *w, int x, int y)
+{
+    if (EX_SIDE_DRAG)
+        return GFX_CURSOR_SIZE_H;
+    if (EX_MENU.open || EX_RENAME_ID >= 0)
+        return GFX_CURSOR_ARROW;
+    Layout l = ex_layout(wm_content(w));
+    return on_divider(&l, x, y) ? GFX_CURSOR_SIZE_H : GFX_CURSOR_ARROW;
+}
+
 int ex_press(Window *w, int x, int y)
 {
     UiRect body = wm_content(w);
@@ -31,8 +49,7 @@ int ex_press(Window *w, int x, int y)
         l = ex_layout(body);
     }
 
-    int edge = l.side.x + l.side.w; /* the divider: hold it and drag to resize the sidebar */
-    if (x >= edge - SIDE_GRAB && x < edge + SIDE_GRAB && y >= l.side.y && y < l.side.y + l.side.h)
+    if (on_divider(&l, x, y)) /* hold it and drag to resize the sidebar */
     {
         EX_SIDE_DRAG = 1;
         return 1;

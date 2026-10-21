@@ -54,6 +54,7 @@ typedef struct Window
     int (*on_rpress)(struct Window *w, int x, int y);    /* right button went down inside the window below the title bar (the window is raised first); return 1 if it changed what is shown (may be NULL) */
     int (*on_tick)(struct Window *w);                    /* called on every main-loop pass for open, visible windows (see wm_tick); return 1 if it changed what is shown, e.g. a tooltip that is due (may be NULL) */
     int (*on_hover)(struct Window *w, int x, int y);     /* the pointer moved over the window (x, y on screen, may be on the title bar); called once with x = y = -1 when it leaves. Return 1 only if the look changed (may be NULL) */
+    int (*on_cursor)(struct Window *w, int x, int y);    /* which pointer shape to show at (x, y) over the window: a GFX_CURSOR_* value (GFX_CURSOR_ARROW = the normal arrow). Also asked while a press that started in the window is held, wherever the pointer is (may be NULL) */
     UiEdit edits[WM_MAX_EDITS];                         /* ready-made text inputs for the window to use (start empty) */
     int edit_count;                                      /* how many of them the window uses (0 = none) */
     int focus;                                           /* which input has the keyboard (0 .. edit_count-1) */
@@ -102,6 +103,9 @@ void wm_set_min_size(Window *w, int min_w, int min_h);
 #define WM_EDGE_TOP 4
 #define WM_EDGE_BOTTOM 8
 int wm_resize_hint(int x, int y);
+
+/* The pointer shape the window under (x, y) asks for with its on_cursor (GFX_CURSOR_ARROW if none). */
+int wm_cursor_hint(int x, int y);
 
 /* Maximize: fill the screen above the taskbar; un-maximize: go back to the old size. */
 void wm_set_maximized(Window *w, int on);

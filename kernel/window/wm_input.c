@@ -218,6 +218,18 @@ static void clamp_to_screen(Window *w)
 
 int wm_dragging(void) { return DRAG != 0 || RESIZE != 0; }
 
+int wm_cursor_hint(int x, int y)
+{
+    Window *w = PRESS_WIN; /* a held press keeps its shape wherever the pointer goes */
+    if (!w || wm_z_index_internal(w) < 0)
+    {
+        w = wm_window_at_internal(x, y);
+        if (w && wm_blocker_internal(w))
+            w = 0;
+    }
+    return (w && w->on_cursor) ? w->on_cursor(w, x, y) : 0;
+}
+
 void wm_input_forget_window(Window *w)
 {
     if (DRAG == w) DRAG = 0;

@@ -46,6 +46,8 @@ int desktop_pointer(int x, int y, unsigned buttons)
         shape = GFX_CURSOR_SIZE_H;
     else if (edge)
         shape = GFX_CURSOR_SIZE_V;
+    else if (to_windows && !wm_dragging() && !startmenu_is_open() && !appmenu_is_open())
+        shape = wm_cursor_hint(x, y); /* inside a window: the app may want its own (a draggable divider) */
     gfx_cursor_set_shape(shape);
 
     /* The taskbar only sees the mouse when no window is being dragged. */

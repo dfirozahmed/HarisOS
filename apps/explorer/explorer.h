@@ -221,6 +221,7 @@ void ex_sync_buttons(void);
 void ex_draw_toolbar(const Layout *l, const UiTheme *t);
 void ex_tip_draw(const Window *w, UiRect body, const UiTheme *t);
 int ex_tick(Window *w);
+int ex_cursor(Window *w, int x, int y);
 
 /* ---- explorer_draw.c -------------------------------------------- */
 void ex_draw_folder_icon(int cx, int cy, int size);
