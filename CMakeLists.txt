@@ -59,7 +59,8 @@ set(KERNEL_SOURCES
     boot/efi_entry.c            # UEFI entry: collects BootInfo, calls kernel_main
     kernel/kernel.c
     kernel/memory/pmm.c
-    kernel/core/power.c              # shut down / restart (firmware reset service + emulator fallbacks)
+    kernel/core/idle.c               # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
+    kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
     kernel/core/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
     kernel/core/pci.c                # PCI device enumeration (Device Manager)

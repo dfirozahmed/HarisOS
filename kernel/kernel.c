@@ -10,6 +10,7 @@
 #include "fat32.h"
 #include "acpi.h"
 #include "gfx.h"
+#include "idle.h"
 #include "keyboard.h"
 #include "mouse.h"
 #include "ntfs.h"
@@ -121,6 +122,7 @@ void kernel_main(const BootInfo *info)
     unsigned blk_seen = blk_generation(); /* USB drives plugged in (or out) later change it: see volume_sync() */
 
     timer_init(); /* needed for double-click */
+    idle_init();  /* 1 ms LAPIC tick so the loop can sleep (hlt) when idle; see idle.h */
 
     {
         unsigned apic_ids[ACPI_MAX_CPUS]; /* for the Task Manager's CPU page; needs timer_init (TSC speed) */
@@ -148,7 +150,7 @@ void kernel_main(const BootInfo *info)
     for (;;)
     {
         unsigned long long pass_start = timer_us();
-        int worked = 0; /* this pass handled something, so its time counts as busy (see cpuload.h) */
+        int worked = 0; /* this pass handled something: poll again at once instead of sleeping */
         if (have_mouse && mouse_poll(&m))
         {
             gfx_cursor_move(m.x, m.y);
@@ -172,11 +174,9 @@ void kernel_main(const BootInfo *info)
         if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
             worked = 1;
         unsigned long long pass_end = timer_us();
-        if (worked)
-            cpuload_add_busy(pass_end - pass_start);
+        cpuload_add_busy(pass_end - pass_start); /* everything except the sleep below is CPU time (see cpuload.h) */
         cpuload_poll(pass_end);
-#if defined(__x86_64__) || defined(__i386__)
-        __asm__ volatile("pause");
-#endif
+        if (!worked)
+            idle_wait(); /* nothing to do: halt until the next 1 ms tick */
     }
 }

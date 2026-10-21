@@ -1,11 +1,11 @@
 /* ============================================================
  * HarisOS CPU load: how busy the main loop is.
  *
- * HarisOS has no scheduler or interrupts: the kernel is one polling loop (kernel.c). A pass of that
- * loop is "busy" when it handled something (a mouse or key event, a redraw) and "idle" when it only
- * polled the hardware. The loop measures the busy time of each pass and reports it here:
+ * HarisOS has no scheduler: the kernel is one polling loop (kernel.c). Like an OS idle thread, the
+ * loop halts the CPU (idle.h) when a pass found nothing to do. Busy time is everything except that
+ * halt: the loop measures the length of each pass (polling and redraws) and reports it here:
  *
- *   cpuload_add_busy(us);   after a pass that did work: how long it took
+ *   cpuload_add_busy(us);   after every pass: how long it took (the halt is not part of a pass)
  *   cpuload_poll(now_us);   on every pass: closes a 1-second window when it is over
  *   cpuload_percent();      busy share of the last finished window, 0..100
  *

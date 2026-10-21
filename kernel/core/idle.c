@@ -1,0 +1,216 @@
+/* HarisOS idle: see include/idle.h. */
+#include "idle.h"
+#include "io.h"
+#include "timer.h"
+
+#if defined(__x86_64__)
+
+#define IDT_COUNT 256
+#define VEC_TIMER 0x40
+#define VEC_SPURIOUS 0xFF
+
+#define MSR_APIC_BASE 0x1B
+#define APIC_BASE_ENABLE (1ULL << 11)
+#define APIC_BASE_X2APIC (1ULL << 10)
+
+#define LAPIC_TPR 0x080
+#define LAPIC_EOI 0x0B0
+#define LAPIC_SVR 0x0F0
+#define LAPIC_LVT_TIMER 0x320
+#define LAPIC_TIMER_INIT 0x380
+#define LAPIC_TIMER_CUR 0x390
+#define LAPIC_TIMER_DIV 0x3E0
+
+#define LVT_MASKED (1U << 16)
+#define LVT_PERIODIC (1U << 17)
+
+#define IOAPIC_BASE 0xFEC00000ULL /* the usual address; the MADT could say otherwise, but this is only used to mask */
+
+typedef struct
+{
+    unsigned short off_lo, sel;
+    unsigned char ist, type;
+    unsigned short off_mid;
+    unsigned int off_hi, zero;
+} __attribute__((packed)) IdtEntry;
+
+typedef struct
+{
+    unsigned short limit;
+    unsigned long long base;
+} __attribute__((packed)) DescPtr;
+
+/* null, 64-bit code (0x08), data (0x10) */
+static unsigned long long GDT[3] = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
+static IdtEntry IDT[IDT_COUNT];
+
+static volatile unsigned *LAPIC;
+static int READY;
+
+/* The interrupt handlers are plain assembly: they run between any two instructions of the kernel,
+ * so they must not touch anything but the registers they save (no SSE, no C code).
+ *   timer     : acknowledge the tick (write the LAPIC EOI register) and return
+ *   other IRQ : same (an unexpected device interrupt must not stay "in service")
+ *   spurious  : return without EOI (the APIC says none is in service)
+ *   fault     : a CPU exception (vectors 0..31) is a bug: stop here instead of running on */
+unsigned long long idle_lapic_eoi; /* address of the LAPIC EOI register, read by the handlers */
+void idle_isr_timer(void);
+void idle_isr_spurious(void);
+void idle_isr_fault(void);
+
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl idle_isr_timer\n"
+        "idle_isr_timer:\n"
+        "    pushq %rax\n"
+        "    movq idle_lapic_eoi(%rip), %rax\n"
+        "    movl $0, (%rax)\n"
+        "    popq %rax\n"
+        "    iretq\n"
+        ".p2align 4\n"
+        ".globl idle_isr_spurious\n"
+        "idle_isr_spurious:\n"
+        "    iretq\n"
+        ".p2align 4\n"
+        ".globl idle_isr_fault\n"
+        "idle_isr_fault:\n"
+        "    cli\n"
+        "1:  hlt\n"
+        "    jmp 1b\n");
+
+static unsigned long long rdmsr(unsigned msr)
+{
+    unsigned lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
+static void wrmsr(unsigned msr, unsigned long long v)
+{
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"((unsigned)v), "d"((unsigned)(v >> 32)));
+}
+
+static unsigned lapic_read(unsigned reg) { return LAPIC[reg / 4]; }
+static void lapic_write(unsigned reg, unsigned v) { LAPIC[reg / 4] = v; }
+
+static void idt_set(int vec, void (*handler)(void))
+{
+    unsigned long long a = (unsigned long long)handler;
+    IDT[vec].off_lo = (unsigned short)a;
+    IDT[vec].sel = 0x08;
+    IDT[vec].ist = 0;
+    IDT[vec].type = 0x8E; /* present, interrupt gate (IF cleared on entry) */
+    IDT[vec].off_mid = (unsigned short)(a >> 16);
+    IDT[vec].off_hi = (unsigned)(a >> 32);
+    IDT[vec].zero = 0;
+}
+
+/* The firmware's GDT lives in memory we no longer own, so switch to ours before any interrupt can happen. */
+static void gdt_load(void)
+{
+    DescPtr p = {sizeof(GDT) - 1, (unsigned long long)GDT};
+    __asm__ volatile("lgdt %0\n\t"
+                     "pushq $0x08\n\t"
+                     "leaq 1f(%%rip), %%rax\n\t"
+                     "pushq %%rax\n\t"
+                     "lretq\n"
+                     "1:\n\t"
+                     "movw $0x10, %%ax\n\t"
+                     "movw %%ax, %%ds\n\t"
+                     "movw %%ax, %%es\n\t"
+                     "movw %%ax, %%ss\n\t"
+                     :
+                     : "m"(p)
+                     : "rax", "memory");
+}
+
+static void idt_load(void)
+{
+    DescPtr p = {sizeof(IDT) - 1, (unsigned long long)IDT};
+    __asm__ volatile("lidt %0" : : "m"(p));
+}
+
+/* Legacy interrupt sources stay quiet: every device is polled, none may interrupt us. */
+static void silence_legacy_irqs(void)
+{
+    io_out8(0x21, 0xFF); /* 8259 PICs: mask all lines */
+    io_out8(0xA1, 0xFF);
+
+    volatile unsigned *io = (volatile unsigned *)IOAPIC_BASE; /* IOREGSEL at +0x00, IOWIN at +0x10 */
+    io[0] = 1;
+    unsigned ver = io[4];
+    if (ver == 0xFFFFFFFFu || ver == 0)
+        return; /* no IOAPIC here */
+    unsigned last = (ver >> 16) & 0xFF;
+    for (unsigned i = 0; i <= last; i++)
+    {
+        io[0] = 0x10 + 2 * i; /* low half of redirection entry i */
+        io[4] = io[4] | LVT_MASKED;
+    }
+}
+
+int idle_init(void)
+{
+    if (!timer_ready())
+        return -1; /* the LAPIC timer is calibrated against the TSC clock */
+
+    unsigned long long base = rdmsr(MSR_APIC_BASE);
+    if (base & APIC_BASE_X2APIC)
+        return -1; /* x2APIC mode uses MSRs instead of MMIO: not supported here */
+    if (!(base & APIC_BASE_ENABLE))
+        wrmsr(MSR_APIC_BASE, base | APIC_BASE_ENABLE);
+    unsigned long long addr = base & 0xFFFFFFFFFF000ULL;
+    if (!addr)
+        return -1;
+    LAPIC = (volatile unsigned *)addr;
+    idle_lapic_eoi = addr + LAPIC_EOI;
+
+    gdt_load();
+    for (int i = 0; i < IDT_COUNT; i++)
+        idt_set(i, i < 32 ? idle_isr_fault : idle_isr_timer);
+    idt_set(VEC_SPURIOUS, idle_isr_spurious);
+    idt_load();
+
+    silence_legacy_irqs();
+
+    lapic_write(LAPIC_TPR, 0);
+    lapic_write(LAPIC_SVR, 0x100 | VEC_SPURIOUS); /* software enable */
+
+    /* Calibrate: let the timer count down from the maximum for 10 ms of TSC time. */
+    lapic_write(LAPIC_TIMER_DIV, 0x3); /* divide by 16 */
+    lapic_write(LAPIC_LVT_TIMER, LVT_MASKED | VEC_TIMER);
+    lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFFu);
+    unsigned long long t0 = timer_us();
+    while (timer_us() - t0 < 10000)
+        __asm__ volatile("pause");
+    unsigned per_ms = (0xFFFFFFFFu - lapic_read(LAPIC_TIMER_CUR)) / 10;
+    lapic_write(LAPIC_TIMER_INIT, 0);
+    if (per_ms == 0)
+        return -1;
+
+    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VEC_TIMER); /* a tick every millisecond */
+    lapic_write(LAPIC_TIMER_INIT, per_ms);
+    READY = 1;
+    return 0;
+}
+
+int idle_ready(void) { return READY; }
+
+void idle_wait(void)
+{
+    if (!READY)
+    {
+        __asm__ volatile("pause");
+        return;
+    }
+    /* "sti" takes effect after the next instruction, so a tick cannot slip in between sti and hlt and be missed. */
+    __asm__ volatile("sti; hlt; cli" : : : "memory");
+}
+
+#else
+
+int idle_init(void) { return -1; }
+int idle_ready(void) { return 0; }
+void idle_wait(void) {}
+
+#endif
