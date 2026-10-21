@@ -4,6 +4,7 @@
 static BlkDev DEVS[BLK_MAX];
 static int NDEVS;
 static unsigned GEN;
+static BlkStats STATS;
 
 /* Copying a struct with `=` could compile to a call to memcpy, which this freestanding kernel does not have. */
 void blk_copy(BlkDev *dst, const BlkDev *src)
@@ -18,6 +19,12 @@ void blk_reset(void)
 {
     NDEVS = 0;
     GEN = 0;
+    STATS.read_ops = STATS.write_ops = STATS.read_bytes = STATS.write_bytes = 0;
+}
+
+void blk_get_stats(BlkStats *out)
+{
+    *out = STATS;
 }
 
 int blk_register(const BlkDev *d)
@@ -90,7 +97,13 @@ int blk_read(int index, unsigned long long lba, unsigned count, void *buf)
     if (!d || !disk || d->removed || disk->removed || !disk->read || !buf || !in_range(d, lba, count))
         return -1;
     unsigned long long abs = lba + (d->parent >= 0 ? d->first_lba : 0);
-    return disk->read(disk, abs, count, buf);
+    int rc = disk->read(disk, abs, count, buf);
+    if (rc == 0)
+    {
+        STATS.read_ops++;
+        STATS.read_bytes += (unsigned long long)count * d->sector_size;
+    }
+    return rc;
 }
 
 int blk_write(int index, unsigned long long lba, unsigned count, const void *buf)
@@ -101,7 +114,13 @@ int blk_write(int index, unsigned long long lba, unsigned count, const void *buf
         !in_range(d, lba, count))
         return -1;
     unsigned long long abs = lba + (d->parent >= 0 ? d->first_lba : 0);
-    return disk->write(disk, abs, count, buf);
+    int rc = disk->write(disk, abs, count, buf);
+    if (rc == 0)
+    {
+        STATS.write_ops++;
+        STATS.write_bytes += (unsigned long long)count * d->sector_size;
+    }
+    return rc;
 }
 
 int blk_flush(int index)

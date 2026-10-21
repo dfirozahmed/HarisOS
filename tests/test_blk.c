@@ -119,6 +119,9 @@ int main(void)
     CHECK(blk_read(d0, 999, 2, out) == -1 && blk_read(d0, 1000, 1, out) == -1);
     CHECK(blk_read(d0, 0, 0, out) == -1 && blk_read(5, 0, 1, out) == -1 && blk_read(d0, 0, 1, 0) == -1);
     CHECK(blk_write(d0, 999, 2, out) == -1);
+    BlkStats st;                                                        /* only successful I/O is counted */
+    blk_get_stats(&st);
+    CHECK(st.read_ops == 2 && st.read_bytes == 2 * SS && st.write_ops == 1 && st.write_bytes == SS);
     blk_set_locked(d0, 1);
     CHECK(blk_write(d0, 5, 1, sec) == -1);
     BlkDev *ro = blk_get(d0); ro->writable = 0; blk_set_locked(d0, 0);

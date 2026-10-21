@@ -90,6 +90,15 @@ int blk_read(int index, unsigned long long lba, unsigned count, void *buf);
 int blk_write(int index, unsigned long long lba, unsigned count, const void *buf);
 int blk_flush(int index);
 
+/* Totals of all successful sector I/O since boot, over every device (for the Task Manager). A call on a
+ * partition counts once, not again for its disk. blk_reset() zeroes them. */
+typedef struct
+{
+    unsigned long long read_ops, write_ops;
+    unsigned long long read_bytes, write_bytes;
+} BlkStats;
+void blk_get_stats(BlkStats *out);
+
 /* Lock (1) or unlock (0) writing. The lock belongs to the device given: a partition has its own, so unlocking
  * one partition leaves the others (and the disk) locked. Giving a whole disk's index locks or unlocks its
  * partitions with it. */

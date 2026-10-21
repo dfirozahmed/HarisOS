@@ -4,6 +4,7 @@
  * Up/Down select, Delete ends the task, Tab switches the tab.
  * An app uses only public headers (ui.h, wm.h, desktop.h, ...) - never desktop_internal.h. */
 #include "app.h"
+#include "blk.h"
 #include "cpuload.h"
 #include "desktop.h"
 #include "gfx.h"
@@ -49,6 +50,10 @@ static unsigned char MEM_HIST[HIST_N]; /* used memory in percent, oldest first *
 static int MEM_HIST_N;
 static unsigned char CPU_HIST[HIST_N]; /* CPU load in percent, oldest first */
 static int CPU_HIST_N;
+static unsigned DISK_HIST[HIST_N]; /* disk throughput (read + write) in KB/s, oldest first */
+static int DISK_HIST_N;
+static BlkStats DISK_PREV; /* counters at the last sample, to get the change per second */
+static unsigned DISK_READ_KBS, DISK_WRITE_KBS;
 static Window *PROCS[WM_MAX_WINDOWS];
 static int NPROCS;
 static int SEL_ID = -1; /* id of the selected window (survives list refreshes), -1 = none */
@@ -185,10 +190,37 @@ static void hist_push(unsigned char *hist, int *n, unsigned value)
     hist[(*n)++] = (unsigned char)(value > 100 ? 100 : value);
 }
 
-static void take_samples(void)
+/* The disk history keeps KB/s (not a percent), so the graph can scale itself to the busiest second. */
+static void disk_sample(unsigned long long dt_ms)
+{
+    BlkStats now;
+    blk_get_stats(&now);
+    if (dt_ms == 0) /* the first sample: just remember the counters, nothing to compare with yet */
+    {
+        DISK_PREV = now;
+        DISK_READ_KBS = DISK_WRITE_KBS = 0;
+    }
+    else
+    {
+        DISK_READ_KBS = (unsigned)((now.read_bytes - DISK_PREV.read_bytes) * 1000 / dt_ms / 1024);
+        DISK_WRITE_KBS = (unsigned)((now.write_bytes - DISK_PREV.write_bytes) * 1000 / dt_ms / 1024);
+        DISK_PREV = now;
+    }
+    if (DISK_HIST_N == HIST_N)
+    {
+        for (int i = 1; i < HIST_N; i++)
+            DISK_HIST[i - 1] = DISK_HIST[i];
+        DISK_HIST_N--;
+    }
+    DISK_HIST[DISK_HIST_N++] = DISK_READ_KBS + DISK_WRITE_KBS;
+}
+
+/* dt_ms = time since the previous sample, 0 for the first one */
+static void take_samples(unsigned long long dt_ms)
 {
     hist_push(MEM_HIST, &MEM_HIST_N, mem_used_percent());
     hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)cpuload_percent());
+    disk_sample(dt_ms);
 }
 
 /* history graph: one bar per sample, newest at the right */
@@ -274,6 +306,89 @@ static void draw_cpu(UiRect pane)
                   UI_TEXT_SMALL, t->text_dim);
 }
 
+/* "512 KB/s" or "3.2 MB/s" */
+static void put_rate(char *s, int *n, unsigned kbs)
+{
+    if (kbs < 1024)
+    {
+        put_dec(s, n, kbs);
+        put_str(s, n, " KB/s");
+        return;
+    }
+    put_dec(s, n, kbs / 1024);
+    put_str(s, n, ".");
+    put_dec(s, n, (kbs % 1024) * 10 / 1024);
+    put_str(s, n, " MB/s");
+}
+
+/* total bytes as "812 KB" or "42 MB" */
+static void put_size(char *s, int *n, unsigned long long bytes)
+{
+    if (bytes < 1024ULL * 1024)
+    {
+        put_dec(s, n, (unsigned)(bytes / 1024));
+        put_str(s, n, " KB");
+    }
+    else
+    {
+        put_dec(s, n, (unsigned)(bytes >> 20));
+        put_str(s, n, " MB");
+    }
+}
+
+static void draw_disk(UiRect pane)
+{
+    const UiTheme *t = ui_theme();
+    char line[64];
+    int n = 0;
+
+    ui_text(pane.x, pane.y, "Disk", UI_TEXT_TITLE);
+    put_rate(line, &n, DISK_READ_KBS + DISK_WRITE_KBS);
+    ui_text_in(ui_rect(pane.x + pane.w - 120, pane.y, 120, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
+
+    /* the graph scales to the busiest second, but never below 1 MB/s so a few KB do not fill it */
+    unsigned peak = 1024;
+    for (int i = 0; i < DISK_HIST_N; i++)
+        if (DISK_HIST[i] > peak)
+            peak = DISK_HIST[i];
+    unsigned char pct[HIST_N];
+    for (int i = 0; i < DISK_HIST_N; i++)
+        pct[i] = (unsigned char)((unsigned long long)DISK_HIST[i] * 100 / peak);
+    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 110);
+    draw_graph(g, pct, DISK_HIST_N);
+    n = 0;
+    put_str(line, &n, "Graph scale: ");
+    put_rate(line, &n, peak);
+    ui_text_color(pane.x, g.y + g.h + 6, line, UI_TEXT_SMALL, t->text_dim);
+
+    BlkStats st;
+    blk_get_stats(&st);
+    int y = g.y + g.h + 36;
+    n = 0;
+    put_str(line, &n, "Read: ");
+    put_rate(line, &n, DISK_READ_KBS);
+    put_str(line, &n, "   Write: ");
+    put_rate(line, &n, DISK_WRITE_KBS);
+    ui_text(pane.x, y, line, UI_TEXT_BODY);
+    n = 0;
+    put_str(line, &n, "Total read: ");
+    put_size(line, &n, st.read_bytes);
+    ui_text(pane.x, y + 26, line, UI_TEXT_BODY);
+    n = 0;
+    put_str(line, &n, "Total written: ");
+    put_size(line, &n, st.write_bytes);
+    ui_text(pane.x, y + 52, line, UI_TEXT_BODY);
+
+    int disks = 0;
+    for (int i = 0; i < blk_count(); i++)
+        if (blk_get(i)->parent < 0 && !blk_get(i)->removed)
+            disks++;
+    n = 0;
+    put_dec(line, &n, (unsigned)disks);
+    put_str(line, &n, disks == 1 ? " disk, since boot" : " disks, since boot");
+    ui_text_color(pane.x, y + 82, line, UI_TEXT_SMALL, t->text_dim);
+}
+
 static void draw_performance(UiRect body)
 {
     const UiTheme *t = ui_theme();
@@ -291,7 +406,7 @@ static void draw_performance(UiRect body)
     else if (PERF == PERF_CPU)
         draw_cpu(pane);
     else
-        ui_text_in(pane, "Coming next", UI_TEXT_DIM, UI_ALIGN_CENTER);
+        draw_disk(pane);
 }
 
 static void tm_draw(Window *w, UiRect body)
@@ -402,13 +517,14 @@ static int tm_tick(Window *w)
     unsigned long long now = timer_ms();
     if (now - LAST_MS < REFRESH_MS)
         return 0;
+    unsigned long long dt = now - LAST_MS;
     LAST_MS = now;
     int old_n = NPROCS;
     Window *old[WM_MAX_WINDOWS];
     for (int i = 0; i < old_n; i++)
         old[i] = PROCS[i];
     reload();
-    take_samples(); /* keep sampling while the other tab is shown, so the graph has no gap */
+    take_samples(dt); /* keep sampling while the other tab is shown, so the graph has no gap */
     if (TAB == TAB_PERFORMANCE)
         return 1;
     if (old_n != NPROCS)
@@ -463,7 +579,8 @@ static void taskmgr_open(void)
     LAST_MS = timer_ms();
     MEM_HIST_N = 0;
     CPU_HIST_N = 0;
-    take_samples();
+    DISK_HIST_N = 0;
+    take_samples(0);
     reload();
     desktop_set_status(0);
 
