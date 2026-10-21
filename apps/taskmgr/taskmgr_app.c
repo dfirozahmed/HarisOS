@@ -6,6 +6,7 @@
 #include "app.h"
 #include "desktop.h"
 #include "gfx.h"
+#include "pmm.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "ui.h"
@@ -19,6 +20,9 @@
 #define STATUS_W 96
 #define PID_W 56
 #define REFRESH_MS 1000
+#define SIDE_W 120
+#define SIDE_ROW_H 40
+#define HIST_N 60 /* history samples, one per refresh */
 
 enum
 {
@@ -28,8 +32,20 @@ enum
 };
 static const char *const TAB_NAME[TAB_COUNT] = {"Processes", "Performance"};
 
+enum
+{
+    PERF_MEMORY,
+    PERF_CPU,
+    PERF_DISK,
+    PERF_COUNT
+};
+static const char *const PERF_NAME[PERF_COUNT] = {"Memory", "CPU", "Disk"};
+
 static Window *TM_WIN;
 static int TAB;
+static int PERF = PERF_MEMORY;
+static unsigned char MEM_HIST[HIST_N]; /* used memory in percent, oldest first */
+static int MEM_HIST_N;
 static Window *PROCS[WM_MAX_WINDOWS];
 static int NPROCS;
 static int SEL_ID = -1; /* id of the selected window (survives list refreshes), -1 = none */
@@ -141,10 +157,102 @@ static void draw_processes(UiRect body)
     ui_text_color(body.x + PAD, body.y + body.h - FOOT_H + 18, line, UI_TEXT_SMALL, t->text_dim);
 }
 
+/* "123 MB" for a page count (4 KiB pages: 256 per MiB) */
+static void put_mb(char *s, int *n, unsigned long long pages)
+{
+    put_dec(s, n, (unsigned)(pages / 256));
+    put_str(s, n, " MB");
+}
+
+static unsigned mem_used_percent(void)
+{
+    unsigned long long total = pmm_total_pages();
+    return total ? (unsigned)((total - pmm_free_pages()) * 100 / total) : 0;
+}
+
+static void mem_sample(void)
+{
+    if (MEM_HIST_N == HIST_N)
+    {
+        for (int i = 1; i < HIST_N; i++)
+            MEM_HIST[i - 1] = MEM_HIST[i];
+        MEM_HIST_N--;
+    }
+    MEM_HIST[MEM_HIST_N++] = (unsigned char)mem_used_percent();
+}
+
+static UiRect side_rect(UiRect body, int i)
+{
+    return ui_rect(body.x + PAD, body.y + 8 + TAB_H + 8 + i * SIDE_ROW_H, SIDE_W, SIDE_ROW_H - 4);
+}
+
+static UiRect pane_rect(UiRect body)
+{
+    int x = body.x + PAD + SIDE_W + PAD;
+    int y = body.y + 8 + TAB_H + 8;
+    return ui_rect(x, y, body.x + body.w - PAD - x, body.y + body.h - PAD - y);
+}
+
+static void draw_memory(UiRect pane)
+{
+    const UiTheme *t = ui_theme();
+    unsigned long long total = pmm_total_pages(), free_p = pmm_free_pages();
+    char line[48];
+    int n = 0;
+
+    ui_text(pane.x, pane.y, "Memory", UI_TEXT_TITLE);
+    put_dec(line, &n, mem_used_percent());
+    put_str(line, &n, "%");
+    ui_text_in(ui_rect(pane.x + pane.w - 80, pane.y, 80, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
+
+    /* history graph: one bar per sample, newest at the right */
+    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 110);
+    gfx_fill_round_rect(g.x, g.y, g.w, g.h, t->radius_s, ui_color(t->surface_alt));
+    int bar_w = (g.w - 4) / HIST_N;
+    if (bar_w < 1)
+        bar_w = 1;
+    int x0 = g.x + g.w - 2 - MEM_HIST_N * bar_w;
+    for (int i = 0; i < MEM_HIST_N; i++)
+    {
+        int h = (g.h - 4) * MEM_HIST[i] / 100;
+        if (h < 1)
+            h = 1;
+        gfx_fill_rect(x0 + i * bar_w, g.y + g.h - 2 - h, bar_w, h, ui_color(t->accent));
+    }
+
+    ui_progress(ui_rect(pane.x, g.y + g.h + 14, pane.w, 12), (int)mem_used_percent());
+
+    int y = g.y + g.h + 40;
+    n = 0;
+    put_str(line, &n, "In use: ");
+    put_mb(line, &n, total - free_p);
+    ui_text(pane.x, y, line, UI_TEXT_BODY);
+    n = 0;
+    put_str(line, &n, "Available: ");
+    put_mb(line, &n, free_p);
+    ui_text(pane.x, y + 26, line, UI_TEXT_BODY);
+    n = 0;
+    put_str(line, &n, "Total: ");
+    put_mb(line, &n, total);
+    ui_text_color(pane.x, y + 52, line, UI_TEXT_SMALL, t->text_dim);
+}
+
 static void draw_performance(UiRect body)
 {
-    ui_text_in(ui_rect(body.x, body.y + 8 + TAB_H, body.w, body.h - 8 - TAB_H), "Performance: coming next",
-               UI_TEXT_DIM, UI_ALIGN_CENTER);
+    const UiTheme *t = ui_theme();
+    for (int i = 0; i < PERF_COUNT; i++)
+    {
+        UiRect r = side_rect(body, i);
+        if (i == PERF)
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 40);
+        ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 10, r.h), PERF_NAME[i], UI_TEXT_BODY, UI_ALIGN_LEFT,
+                         i == PERF ? t->text : t->text_dim);
+    }
+    UiRect pane = pane_rect(body);
+    if (PERF == PERF_MEMORY)
+        draw_memory(pane);
+    else
+        ui_text_in(pane, "Coming next", UI_TEXT_DIM, UI_ALIGN_CENTER);
 }
 
 static void tm_draw(Window *w, UiRect body)
@@ -189,8 +297,19 @@ static int tm_press(Window *w, int x, int y)
             return changed;
         }
     }
-    if (TAB != TAB_PROCESSES)
+    if (TAB == TAB_PERFORMANCE)
+    {
+        for (int i = 0; i < PERF_COUNT; i++)
+        {
+            if (ui_contains(side_rect(body, i), x, y))
+            {
+                int changed = PERF != i;
+                PERF = i;
+                return changed;
+            }
+        }
         return 0;
+    }
     UiRect list = list_rect(body);
     if (!ui_contains(list, x, y))
         return 0;
@@ -250,8 +369,9 @@ static int tm_tick(Window *w)
     for (int i = 0; i < old_n; i++)
         old[i] = PROCS[i];
     reload();
-    if (TAB != TAB_PROCESSES)
-        return 0;
+    mem_sample(); /* keep sampling while the other tab is shown, so the graph has no gap */
+    if (TAB == TAB_PERFORMANCE)
+        return 1;
     if (old_n != NPROCS)
         return 1;
     for (int i = 0; i < NPROCS; i++)
@@ -300,7 +420,10 @@ static void taskmgr_open(void)
     TM_WIN = win;
     TAB = TAB_PROCESSES;
     SEL_ID = -1;
+    PERF = PERF_MEMORY;
     LAST_MS = timer_ms();
+    MEM_HIST_N = 0;
+    mem_sample();
     reload();
     desktop_set_status(0);
 
