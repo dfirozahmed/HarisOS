@@ -97,6 +97,43 @@ static DevCategory pci_category(const PciDevice *d)
     }
 }
 
+static const DevmgrDisplay *find_display(const DevmgrInputs *in, const PciDevice *d)
+{
+    int n = in->display_count < DEVMGR_MAX_DISPLAYS ? in->display_count : DEVMGR_MAX_DISPLAYS;
+    for (int i = 0; i < n; i++)
+        if (in->displays[i].bus == d->bus && in->displays[i].dev == d->dev && in->displays[i].fn == d->fn)
+            return &in->displays[i];
+    return (const DevmgrDisplay *)0;
+}
+
+/* A native (Bochs) adapter and the one showing the firmware framebuffer have a driver; the note says which kind. */
+static void describe_display(DevEntry *e, const DevmgrDisplay *g)
+{
+    char note[64];
+    Sb s = {note, sizeof note, 0};
+    note[0] = 0;
+    if (g->native) {
+        sb_str(&s, "Bochs VBE");
+        if (g->cur_w) {
+            sb_char(&s, ' ');
+            sb_dec(&s, g->cur_w);
+            sb_char(&s, 'x');
+            sb_dec(&s, g->cur_h);
+            sb_char(&s, 'x');
+            sb_dec(&s, g->cur_bpp);
+        }
+        sb_str(&s, ", ");
+        sb_dec(&s, g->vram_mb);
+        sb_str(&s, " MB video memory");
+    } else if (g->active) {
+        sb_str(&s, "Firmware framebuffer; no mode switching");
+    } else {
+        sb_str(&s, "Not the active display; no driver");
+    }
+    e->has_driver = g->native || g->active;
+    copy(e->note, sizeof e->note, note);
+}
+
 int devmgr_build(const DevmgrInputs *in)
 {
     g_count = 0;
@@ -122,7 +159,12 @@ int devmgr_build(const DevmgrInputs *in)
         if (in && in->storage_running && d->class_code == 0x01 &&
             ((d->subclass == 0x06 && d->prog_if == 0x01) || (d->subclass == 0x08 && d->prog_if == 0x02)))
             driver = 1;
-        add(pci_category(d), pci_class_name(d->class_code, d->subclass), detail, driver);
+        DevEntry *e = add(pci_category(d), pci_class_name(d->class_code, d->subclass), detail, driver);
+        if (e && in && d->class_code == 0x03) {
+            const DevmgrDisplay *g = find_display(in, d);
+            if (g)
+                describe_display(e, g);
+        }
     }
 
     if (in) {

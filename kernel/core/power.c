@@ -10,11 +10,6 @@ void power_init(const BootInfo *info)
 }
 
 #if defined(__x86_64__) || defined(__i386__)
-static void io_out16(unsigned short port, unsigned short v)
-{
-    __asm__ volatile("outw %0, %1" : : "a"(v), "Nd"(port));
-}
-
 #ifdef HARIS_HOST_TEST /* the unit test runs as a normal program: no privileged instructions */
 static void no_interrupts(void) {}
 #else

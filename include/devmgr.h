@@ -51,6 +51,17 @@ typedef struct {
     int locked;     /* writing is locked */
 } DevmgrDisk;
 
+#define DEVMGR_MAX_DISPLAYS 4
+
+/* A display adapter the display driver found (copied from display.h). */
+typedef struct {
+    unsigned char bus, dev, fn;
+    int native;     /* DISP_BOCHS: mode setting through its own registers */
+    int active;     /* its video memory holds the framebuffer in use */
+    unsigned cur_w, cur_h, cur_bpp; /* native only (0 = not known) */
+    unsigned vram_mb;               /* native only */
+} DevmgrDisplay;
+
 /* What the drivers reported at boot (filled by kernel.c). */
 typedef struct {
     int keyboard_ps2;
@@ -65,6 +76,8 @@ typedef struct {
     int storage_running; /* the AHCI / NVMe drivers ran */
     int disk_count;
     DevmgrDisk disks[DEVMGR_MAX_DISKS];
+    int display_count;
+    DevmgrDisplay displays[DEVMGR_MAX_DISPLAYS];
 } DevmgrInputs;
 
 /* Rebuilds the list from pci_count()/pci_get() and the inputs. Returns the entry count. */

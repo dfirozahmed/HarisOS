@@ -81,6 +81,7 @@ set(KERNEL_SOURCES
     kernel/graphics/gfx_buffer.c # backbuffer, presentation and background cache
     kernel/graphics/gfx_dirty.c  # dirty-region tracking
     kernel/graphics/gfx_backend.c # framebuffer initialization and backend properties
+    kernel/graphics/display.c     # display adapters on PCI: Bochs VBE mode setting, framebuffer owner
     kernel/graphics/gfx_shapes.c  # anti-aliased rounded rectangles and circles
     kernel/graphics/gfx_effects.c # gradients, shadows and glow effects
     kernel/graphics/gfx_cursor.c # software cursor save/restore and rendering

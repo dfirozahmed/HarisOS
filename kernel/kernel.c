@@ -3,6 +3,7 @@
 #include "bootinfo.h"
 #include "desktop.h"
 #include "devmgr.h"
+#include "display.h"
 #include "exfat.h"
 #include "fat32.h"
 #include "acpi.h"
@@ -101,6 +102,7 @@ void kernel_main(const BootInfo *info)
 
     /* Device Manager list: PCI scan + what the input drivers found (after mouse_init). */
     pci_scan();
+    display_init((unsigned long long)info->framebuffer, 0); /* GPUs on PCI; which one shows the framebuffer */
     if (pmm_ok)
         storage_init(); /* NVMe and SATA disks, their partitions */
     devmgr_init(kbd_ok);

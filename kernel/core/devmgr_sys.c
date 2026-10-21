@@ -2,6 +2,7 @@
  * Kept apart from devmgr.c so that file stays free of drivers and can be tested on the host. */
 #include "blk.h"
 #include "devmgr.h"
+#include "display.h"
 #include "i2c_hid.h"
 #include "mouse.h"
 #include "pci.h"
@@ -45,6 +46,21 @@ int devmgr_refresh(void)
         for (int j = 0; j < blk_count(); j++)
             if (blk_get(j)->parent == i && !blk_get(j)->removed)
                 d->parts++;
+    }
+    in.display_count = 0;
+    for (int i = 0; i < display_count() && in.display_count < DEVMGR_MAX_DISPLAYS; i++)
+    {
+        const DisplayAdapter *a = display_get(i);
+        DevmgrDisplay *d = &in.displays[in.display_count++];
+        d->bus = a->bus;
+        d->dev = a->dev;
+        d->fn = a->fn;
+        d->native = a->kind == DISP_BOCHS;
+        d->active = a->active;
+        d->cur_w = a->cur_w;
+        d->cur_h = a->cur_h;
+        d->cur_bpp = a->cur_bpp;
+        d->vram_mb = a->vram_bytes >> 20;
     }
     in.i2c_count = 0;
     for (int i = 0; i < i2c_hid_count() && in.i2c_count < DEVMGR_MAX_I2C; i++)

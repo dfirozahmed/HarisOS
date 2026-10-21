@@ -15,6 +15,18 @@ static inline unsigned char io_in8(unsigned short port)
     return v;
 }
 
+static inline void io_out16(unsigned short port, unsigned short v)
+{
+    __asm__ volatile("outw %0, %1" : : "a"(v), "Nd"(port));
+}
+
+static inline unsigned short io_in16(unsigned short port)
+{
+    unsigned short v;
+    __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+
 static inline void io_out32(unsigned short port, unsigned int v)
 {
     __asm__ volatile("outl %0, %1" : : "a"(v), "Nd"(port));

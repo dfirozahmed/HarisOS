@@ -26,6 +26,18 @@ static unsigned int fake(unsigned bus, unsigned dev, unsigned fn, unsigned off)
     return 0xFFFFFFFFu;
 }
 
+
+/* 00:01.0 VGA controller (class 03) */
+static unsigned int fake_gpu(unsigned bus, unsigned dev, unsigned fn, unsigned off)
+{
+    if (bus != 0 || fn != 0 || dev != 1)
+        return 0xFFFFFFFFu;
+    if (off == 0x00) return 0x11111234u;
+    if (off == 0x08) return 0x03000002u;
+    if (off == 0x0C) return 0;
+    return 0xFFFFFFFFu;
+}
+
 int main(void)
 {
     pci_scan_with(fake);
@@ -110,6 +122,24 @@ int main(void)
 
     CHECK(devmgr_build(NULL) == 2);
     CHECK(strcmp(devmgr_category_name(DEV_CAT_INPUT), "Input devices") == 0);
+
+    /* display adapter: native (Bochs) / active firmware framebuffer / inactive */
+    pci_scan_with(fake_gpu);
+    static DevmgrInputs gin;
+    gin.display_count = 1;
+    gin.displays[0] = (DevmgrDisplay){0, 1, 0, 1, 1, 1280, 800, 32, 16};
+    CHECK(devmgr_build(&gin) == 1);
+    CHECK(devmgr_get(0)->category == DEV_CAT_DISPLAY && devmgr_get(0)->has_driver);
+    CHECK(strcmp(devmgr_get(0)->note, "Bochs VBE 1280x800x32, 16 MB video memory") == 0);
+    gin.displays[0].native = 0;
+    devmgr_build(&gin);
+    CHECK(devmgr_get(0)->has_driver && strcmp(devmgr_get(0)->note, "Firmware framebuffer; no mode switching") == 0);
+    gin.displays[0].active = 0;
+    devmgr_build(&gin);
+    CHECK(!devmgr_get(0)->has_driver);
+    gin.display_count = 0; /* no display driver data: no driver, no note */
+    devmgr_build(&gin);
+    CHECK(!devmgr_get(0)->has_driver && devmgr_get(0)->note[0] == 0);
 
     if (!fails) printf("devmgr tests passed\n");
     return fails ? 1 : 0;
