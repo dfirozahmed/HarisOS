@@ -268,7 +268,7 @@ static void draw_list(const Layout *l, const UiTheme *t)
     }
 
     GfxClip saved = gfx_get_clip();
-    ui_clip(l->list);
+    gfx_clip_intersect(l->list.x, l->list.y, l->list.w, l->list.h); /* not ui_clip(): a partial redraw must stay inside its own clip */
     int vis = ex_visible_rows(l);
     for (int i = 0; i <= vis && EX_SCROLL + i < EX_NITEMS; i++)
     {
