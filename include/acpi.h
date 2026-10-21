@@ -12,6 +12,12 @@
 #define HARIS_ACPI_H
 
 void acpi_init(unsigned long long rsdp);
+
+/* Logical processors the firmware says are enabled (MADT, the "APIC" table), with their APIC ids: the ids encode
+ * which core and which socket each one is in (see cpuinfo.h). 0 when there is no MADT. */
+#define ACPI_MAX_CPUS 256
+int acpi_cpu_count(void);
+unsigned acpi_cpu_apic_id(int i);
 int acpi_aml_count(void);
 const unsigned char *acpi_aml(int i, unsigned *len);
 

@@ -60,7 +60,8 @@ set(KERNEL_SOURCES
     kernel/kernel.c
     kernel/memory/pmm.c
     kernel/core/power.c              # shut down / restart (firmware reset service + emulator fallbacks)
-    kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code)
+    kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
+    kernel/core/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/storage/blk.c             # block devices: sector I/O and the write lock

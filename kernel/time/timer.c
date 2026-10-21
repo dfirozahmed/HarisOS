@@ -69,6 +69,8 @@ unsigned long long timer_ms(void)
     return (rdtsc() - TSC_BASE) / TSC_PER_MS;
 }
 
+unsigned timer_tsc_khz(void) { return (unsigned)TSC_PER_MS; } /* cycles per millisecond = kHz */
+
 unsigned long long timer_us(void)
 {
     if (!TSC_PER_MS)
@@ -81,6 +83,7 @@ unsigned long long timer_us(void)
 void timer_init(void) {}
 int timer_ready(void) { return 0; }
 unsigned long long timer_ms(void) { return 0; }
+unsigned timer_tsc_khz(void) { return 0; }
 unsigned long long timer_us(void) { return 0; }
 
 #endif

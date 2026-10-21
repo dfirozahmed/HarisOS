@@ -5,6 +5,7 @@
  * An app uses only public headers (ui.h, wm.h, desktop.h, ...) - never desktop_internal.h. */
 #include "app.h"
 #include "blk.h"
+#include "cpuinfo.h"
 #include "cpuload.h"
 #include "desktop.h"
 #include "gfx.h"
@@ -373,14 +374,54 @@ static void draw_cpu(UiRect pane)
     put_str(line, &n, "%");
     ui_text_in(ui_rect(pane.x + pane.w - 80, pane.y, 80, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
 
-    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 110);
+    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 80);
     draw_graph(g, CPU_HIST, CPU_HIST_N);
-    ui_progress(ui_rect(pane.x, g.y + g.h + 14, pane.w, 12), cpuload_percent());
+    ui_progress(ui_rect(pane.x, g.y + g.h + 10, pane.w, 12), cpuload_percent());
+    ui_text_color(pane.x, g.y + g.h + 28, "Load = busy share of the main loop (input and redraws)", UI_TEXT_SMALL,
+                  t->text_dim);
 
-    int y = g.y + g.h + 40;
-    ui_text(pane.x, y, "Busy share of the main loop over the last second.", UI_TEXT_BODY);
-    ui_text_color(pane.x, y + 26, "Counts input handling and redraws; waiting for events is idle.",
-                  UI_TEXT_SMALL, t->text_dim);
+    const CpuInfo *c = cpuinfo_get();
+    int y = g.y + g.h + 56;
+    if (c->brand[0])
+        ui_text_in(ui_rect(pane.x, y, pane.w, 22), c->brand, UI_TEXT_LABEL, UI_ALIGN_LEFT);
+    y += 30;
+
+    /* label on the left, value next to it (a CPU the probe could not read shows "-") */
+    const int vx = pane.x + 150;
+    static const char *const label[4] = {"Base speed", "Sockets", "Cores", "Logical processors"};
+    for (int i = 0; i < 4; i++)
+    {
+        n = 0;
+        line[0] = 0;
+        unsigned v = i == 1 ? (unsigned)c->sockets : i == 2 ? (unsigned)c->cores : (unsigned)c->logical;
+        if (i == 0)
+        {
+            if (c->base_mhz >= 1000)
+            {
+                put_dec(line, &n, c->base_mhz / 1000);
+                put_str(line, &n, ".");
+                put_dec(line, &n, (c->base_mhz % 1000) / 10 / 10);
+                put_dec(line, &n, (c->base_mhz % 1000) / 10 % 10);
+                put_str(line, &n, " GHz");
+            }
+            else if (c->base_mhz)
+            {
+                put_dec(line, &n, c->base_mhz);
+                put_str(line, &n, " MHz");
+            }
+            else
+                put_str(line, &n, "-");
+            if (c->base_estimated)
+                put_str(line, &n, " (measured)");
+        }
+        else if (v)
+            put_dec(line, &n, v);
+        else
+            put_str(line, &n, "-");
+        ui_text_color(pane.x, y, label[i], UI_TEXT_BODY, t->text_dim);
+        ui_text(vx, y, line, UI_TEXT_BODY);
+        y += 24;
+    }
 }
 
 /* "512 KB/s" or "3.2 MB/s" */

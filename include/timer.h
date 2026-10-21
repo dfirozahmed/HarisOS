@@ -17,6 +17,7 @@
 void timer_init(void);
 int timer_ready(void);
 unsigned long long timer_ms(void);
+unsigned timer_tsc_khz(void); /* CPU time-stamp counter speed measured at timer_init, 0 if unknown */
 unsigned long long timer_us(void); /* same clock in microseconds (for measuring short work) */
 
 #endif

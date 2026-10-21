@@ -1,6 +1,7 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
 #include "blk.h"
 #include "bootinfo.h"
+#include "cpuinfo.h"
 #include "cpuload.h"
 #include "desktop.h"
 #include "devmgr.h"
@@ -120,6 +121,14 @@ void kernel_main(const BootInfo *info)
     unsigned blk_seen = blk_generation(); /* USB drives plugged in (or out) later change it: see volume_sync() */
 
     timer_init(); /* needed for double-click */
+
+    {
+        unsigned apic_ids[ACPI_MAX_CPUS]; /* for the Task Manager's CPU page; needs timer_init (TSC speed) */
+        int ncpu = acpi_cpu_count();
+        for (int i = 0; i < ncpu; i++)
+            apic_ids[i] = acpi_cpu_apic_id(i);
+        cpuinfo_probe(cpuinfo_hw_cpuid, apic_ids, ncpu, timer_tsc_khz());
+    }
 
     RtcTime now;
     if (rtc_read(&now) == 0)

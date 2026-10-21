@@ -8,6 +8,8 @@
 static const unsigned char *TAB[MAX_AML];
 static unsigned LEN[MAX_AML];
 static int NTAB;
+static unsigned CPU_APIC[ACPI_MAX_CPUS];
+static int NCPU;
 
 static unsigned rd32(const unsigned char *p)
 {
@@ -54,9 +56,30 @@ static void add(unsigned long long addr)
     }
 }
 
+/* MADT: after the 44-byte header come entries (type, length, ...). Type 0 = local APIC (8 bytes: APIC id at 3,
+ * flags at 4), type 9 = x2APIC (16 bytes: APIC id at 4, flags at 8). Flags bit 0 = the processor is enabled. */
+static void read_madt(const unsigned char *t, unsigned n)
+{
+    for (unsigned off = 44; off + 2 <= n;)
+    {
+        unsigned type = t[off], len = t[off + 1];
+        if (len < 2 || off + len > n)
+            break;
+        if (NCPU < ACPI_MAX_CPUS)
+        {
+            if (type == 0 && len >= 8 && (rd32(t + off + 4) & 1))
+                CPU_APIC[NCPU++] = t[off + 3];
+            else if (type == 9 && len >= 16 && (rd32(t + off + 8) & 1))
+                CPU_APIC[NCPU++] = rd32(t + off + 4);
+        }
+        off += len;
+    }
+}
+
 void acpi_init(unsigned long long rsdp)
 {
     NTAB = 0;
+    NCPU = 0;
     if (!rsdp)
         return;
     const unsigned char *r = (const unsigned char *)rsdp;
@@ -87,6 +110,8 @@ void acpi_init(unsigned long long rsdp)
             continue;
         if (sig_is(t, "SSDT"))
             add(a);
+        else if (sig_is(t, "APIC"))
+            read_madt(t, tl);
         else if (sig_is(t, "FACP"))
         {
             unsigned long long dsdt = tl >= 148 ? rd64(t + 140) : 0; /* X_DSDT, else the 32-bit pointer */
@@ -96,6 +121,10 @@ void acpi_init(unsigned long long rsdp)
         }
     }
 }
+
+int acpi_cpu_count(void) { return NCPU; }
+
+unsigned acpi_cpu_apic_id(int i) { return (i >= 0 && i < NCPU) ? CPU_APIC[i] : 0; }
 
 int acpi_aml_count(void) { return NTAB; }
 
