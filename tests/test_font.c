@@ -20,6 +20,9 @@ void gfx_blend_pixel(int x, int y, GfxColor color, unsigned char alpha)
     if (x < min_x) min_x = x;
 }
 
+static GfxClip test_clip = {-100000, -100000, 100000, 100000};
+GfxClip gfx_get_clip(void) { return test_clip; }
+
 int main(void)
 {
     assert(font_line_height(NULL) == 0);
@@ -42,6 +45,20 @@ int main(void)
     int calls_before = blend_calls;
     gfx_text_alpha(&font_ui_14, 10, 5, "A", gfx_rgb(255, 255, 255), 0);
     assert(blend_calls == calls_before); /* zero alpha is a no-op */
+
+    {   /* text outside the clip is not even visited; text inside is drawn only where the clip allows */
+        int full = blend_calls;
+        gfx_text_alpha(&font_ui_14, 10, 5, "A", gfx_rgb(255, 255, 255), 255);
+        full = blend_calls - full;
+        test_clip = (GfxClip){500, 500, 600, 600};
+        calls_before = blend_calls;
+        gfx_text_alpha(&font_ui_14, 10, 5, "A", gfx_rgb(255, 255, 255), 255);
+        assert(blend_calls == calls_before);
+        test_clip = (GfxClip){10, 5, 14, 9}; /* a small window onto the glyph */
+        calls_before = blend_calls;
+        gfx_text_alpha(&font_ui_14, 10, 5, "A", gfx_rgb(255, 255, 255), 255);
+        assert(blend_calls - calls_before < full);
+    }
 
     puts("Font regression tests passed.");
     return 0;

@@ -78,34 +78,83 @@ static int layer_capture(Window *w, int i, int top)
     return 1;
 }
 
-void wm_draw(void)
+
+/* Every visible window except `skip`, back to front, that reaches the current clip. */
+static void draw_windows(const Window *skip, int top)
 {
-    int top = wm_top_index_internal();
-    Window *moving = wm_moving_window_internal();
-    if (LAYER_WIN && LAYER_WIN != moving)
-        LAYER_WIN = 0; /* the drag is over: its picture is stale */
     for (int i = 0; i < WM_ZN; i++)
     {
         Window *w = WM_Z[i];
-        if (w->minimized)
+        if (w->minimized || w == skip)
             continue;
         GfxClip saved = gfx_get_clip();
         /* partial redraw: skip windows (and shadows) that are outside the clip */
         if (w->r.x - WM_SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + WM_SHADOW_MARGIN <= saved.x0 ||
             w->r.y - WM_SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + WM_SHADOW_MARGIN <= saved.y0)
             continue;
-        if (w == moving)
-        {
-            int ready = LAYER_WIN == w && LAYER_W == w->r.w + 2 * WM_SHADOW_MARGIN &&
-                        LAYER_H == w->r.h + 2 * WM_SHADOW_MARGIN;
-            if (!ready)
-                ready = layer_capture(w, i, top);
-            if (ready)
-            {
-                gfx_layer_blit(LAYER_A, LAYER_W, LAYER_H, w->r.x - WM_SHADOW_MARGIN, w->r.y - WM_SHADOW_MARGIN);
-                continue;
-            }
-        }
         draw_window(w, i, top);
     }
+}
+
+void wm_draw(void)
+{
+    int top = wm_top_index_internal();
+    Window *moving = wm_moving_window_internal();
+    if (LAYER_WIN && LAYER_WIN != moving)
+        LAYER_WIN = 0; /* the drag is over: its picture is stale */
+
+    /* The dragged window is on top (it was raised when grabbed), so its opaque inside hides whatever is behind
+     * it. Draw the other windows only around that inside (a File Explorer behind it is expensive), then paste
+     * the layer over everything. */
+    if (moving && wm_z_index_internal(moving) == top)
+    {
+        int ready = LAYER_WIN == moving && LAYER_W == moving->r.w + 2 * WM_SHADOW_MARGIN &&
+                    LAYER_H == moving->r.h + 2 * WM_SHADOW_MARGIN;
+        if (!ready)
+            ready = layer_capture(moving, top, top);
+        if (ready)
+        {
+            GfxClip base = gfx_get_clip();
+            int m = ui_theme()->radius_l + 2; /* the rounded corners are not opaque */
+            int cx0 = moving->r.x + m, cy0 = moving->r.y + m;
+            int cx1 = moving->r.x + moving->r.w - m, cy1 = moving->r.y + moving->r.h - m;
+            if (cx1 > cx0 && cy1 > cy0)
+            {
+                /* the clip minus the opaque inside: a band above, a band below, and two beside it */
+                int bx0 = base.x0, by0 = base.y0, bx1 = base.x1, by1 = base.y1;
+                int mid0 = cy0 > by0 ? cy0 : by0, mid1 = cy1 < by1 ? cy1 : by1;
+                if (cy0 > by0)
+                {
+                    gfx_set_clip(bx0, by0, bx1 - bx0, (cy0 < by1 ? cy0 : by1) - by0);
+                    draw_windows(moving, top);
+                }
+                if (cy1 < by1)
+                {
+                    int ys = cy1 > by0 ? cy1 : by0;
+                    gfx_set_clip(bx0, ys, bx1 - bx0, by1 - ys);
+                    draw_windows(moving, top);
+                }
+                if (mid1 > mid0)
+                {
+                    if (cx0 > bx0)
+                    {
+                        gfx_set_clip(bx0, mid0, (cx0 < bx1 ? cx0 : bx1) - bx0, mid1 - mid0);
+                        draw_windows(moving, top);
+                    }
+                    if (cx1 < bx1)
+                    {
+                        int xs = cx1 > bx0 ? cx1 : bx0;
+                        gfx_set_clip(xs, mid0, bx1 - xs, mid1 - mid0);
+                        draw_windows(moving, top);
+                    }
+                }
+                gfx_restore_clip(base);
+            }
+            else
+                draw_windows(moving, top);
+            gfx_layer_blit(LAYER_A, LAYER_W, LAYER_H, moving->r.x - WM_SHADOW_MARGIN, moving->r.y - WM_SHADOW_MARGIN);
+            return;
+        }
+    }
+    draw_windows(0, top);
 }

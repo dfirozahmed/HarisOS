@@ -7,6 +7,7 @@
 #include "devmgr.h"
 #include "display.h"
 #include "exfat.h"
+#include "fbwc.h"
 #include "fat32.h"
 #include "acpi.h"
 #include "gfx.h"
@@ -102,6 +103,10 @@ void kernel_main(const BootInfo *info)
         else if (a)
             pmm_free_contiguous(a, pages);
     }
+
+    /* Video memory write-combining: after the back buffer copied the screen (reads are slow once it is set). */
+    if (pmm_ok)
+        fbwc_enable((unsigned long long)info->framebuffer, (unsigned long long)info->pitch * info->height * 4ULL);
 
     /* Tell the desktop what to show (after the allocation above, so the free-memory figure includes it). */
     if (pmm_ok)

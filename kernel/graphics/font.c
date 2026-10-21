@@ -45,8 +45,14 @@ static unsigned char scale_coverage(unsigned char coverage, unsigned char alpha)
 static void draw_glyph(const Font *f, const FontGlyph *g, int x, int y, GfxColor c, int alpha)
 {
     const unsigned char *src = f->bitmap + g->offset;
-    for (int row = 0; row < g->h; row++)
-        for (int col = 0; col < g->w; col++)
+    /* Only visit the part of the glyph inside the clip: a window redrawn in a small area still asks for all of
+     * its text, and most of it lies outside. */
+    GfxClip clip = gfx_get_clip();
+    int gx = x + g->bx, gy = y + g->by;
+    int row0 = clip.y0 - gy > 0 ? clip.y0 - gy : 0, row1 = clip.y1 - gy < g->h ? clip.y1 - gy : g->h;
+    int col0 = clip.x0 - gx > 0 ? clip.x0 - gx : 0, col1 = clip.x1 - gx < g->w ? clip.x1 - gx : g->w;
+    for (int row = row0; row < row1; row++)
+        for (int col = col0; col < col1; col++)
         {
             int cov = src[row * g->w + col];
             if (cov)
