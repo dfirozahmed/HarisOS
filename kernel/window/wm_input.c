@@ -348,7 +348,7 @@ int wm_pointer(int x, int y, unsigned buttons)
         Window *pw = PRESS_WIN;
         if (!down)
             PRESS_WIN = 0;
-        if (pw->on_drag && pw->on_drag(pw, x, y, buttons))
+        if (pw->on_drag && pw->on_drag(pw, x, y, buttons) == 1) /* 2 = it marked its own area (wm_add_damage) */
             wm_damage_window_internal(pw);
     }
 

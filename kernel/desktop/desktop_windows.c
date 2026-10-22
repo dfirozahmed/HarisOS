@@ -71,9 +71,11 @@ static int hello_drag(Window *w, int x, int y, unsigned buttons)
     if (!w->edits[w->focus].dragging)
         return 0; /* the press was not on a box: nothing to select */
     int changed = ui_edit_mouse(&w->edits[w->focus], x, y, buttons);
-    if (changed)
-        ui_caret_restart();
-    return changed;
+    if (!changed)
+        return 0;
+    ui_caret_restart();
+    wm_add_damage(ui_inset(w->edits[w->focus].field, -3)); /* only the selection in this box changes */
+    return 2;
 }
 
 /* keyboard: typing goes to the focused box; Tab / Shift+Tab / Up / Down move between boxes;

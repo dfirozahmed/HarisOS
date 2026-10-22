@@ -149,9 +149,11 @@ int ex_drag(Window *w, int x, int y, unsigned buttons)
     if ((EX_RENAME_ID < 0 && !EX_ADDR_EDIT) || !w->edits[0].dragging)
         return 0;
     int changed = ui_edit_mouse(&w->edits[0], x, y, buttons);
-    if (changed)
-        ui_caret_restart();
-    return changed;
+    if (!changed)
+        return 0;
+    ui_caret_restart();
+    wm_add_damage(ui_inset(w->edits[0].field, -3)); /* only the selection in the rename / address box changes */
+    return 2;
 }
 
 /* right click: select the entry under the pointer and show its menu, or the folder menu on empty space */

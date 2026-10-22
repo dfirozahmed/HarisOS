@@ -15,6 +15,9 @@ static int wheel_steps, wheel_ret;
 static int on_wheel_cb(Window*w,int steps){ (void)w; wheel_steps+=steps; return wheel_ret; }
 static int hov_calls, hov_x, hov_y, rp_calls, rp_x;
 static int tick_calls, tick_ret;
+static int drag_calls, drag_ret;
+static int on_press_cb(Window*w,int x,int y){ (void)w; (void)x; (void)y; return 0; }
+static int on_drag_cb(Window*w,int x,int y,unsigned b){ (void)w; (void)x; (void)y; (void)b; drag_calls++; return drag_ret; }
 static void on_btn_cb(UiButton*b,void*u){ (void)b; (void)u; }
 static int on_tick_cb(Window*w){ (void)w; tick_calls++; return tick_ret; }
 static int on_hover_cb(Window*w,int x,int y){ (void)w; hov_calls++; hov_x=x; hov_y=y; return 0; }
@@ -95,6 +98,22 @@ int main(void){
     assert(WM_HAS_DMG);                                     /* 1 = the whole window */
     wm_take_damage(&(UiRect){0});
     wm_close(other);
+  }
+  /* on_drag: 1 = redraw the whole window, 2 = the handler marked its own area */
+  {
+    wm_pointer(5000,5000,0);
+    w->r = ui_rect(300,200,400,300); wm_layout_internal(w);
+    w->on_press=on_press_cb; w->on_drag=on_drag_cb;
+    wm_take_damage(&(UiRect){0});
+    drag_ret=2; wm_pointer(w->r.x+50,w->r.y+100,1);               /* press inside the content: starts the drag handler */
+    wm_take_damage(&(UiRect){0});
+    wm_pointer(w->r.x+60,w->r.y+100,1);                           /* held: on_drag says 2 */
+    assert(drag_calls>=1 && !WM_HAS_DMG);
+    drag_ret=1; wm_pointer(w->r.x+70,w->r.y+100,1);
+    assert(WM_HAS_DMG);                                           /* 1: the whole window */
+    wm_pointer(w->r.x+70,w->r.y+100,0);
+    w->on_press=0; w->on_drag=0;
+    wm_take_damage(&(UiRect){0});
   }
   /* hover and right press */
   {
