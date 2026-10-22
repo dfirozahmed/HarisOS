@@ -1,7 +1,7 @@
 /* Task Manager app
  * HarisOS has no separate processes, so a "process" here is an open window (an app). The list comes
  * from wm_list(), is refreshed once a second, and "End task" closes the selected window.
- * Up/Down select, Delete ends the task, Tab switches the tab.
+ * Up/Down select, Delete ends the task, Tab switches the tab. The Threads tab lists the kernel threads (task.h).
  * An app uses only public headers (ui.h, wm.h, desktop.h, ...) - never desktop_internal.h. */
 #include "app.h"
 #include "blk.h"
@@ -10,6 +10,7 @@
 #include "desktop.h"
 #include "gfx.h"
 #include "pmm.h"
+#include "task.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "ui.h"
@@ -34,10 +35,11 @@ enum
 {
     TAB_PROCESSES,
     TAB_PERFORMANCE,
+    TAB_THREADS,
     TAB_COUNT
 };
-static const char *const TAB_NAME[TAB_COUNT] = {"Processes", "Performance"};
-static const UiIcon TAB_ICON[TAB_COUNT] = {UI_ICON_LIST, UI_ICON_CHART};
+static const char *const TAB_NAME[TAB_COUNT] = {"Processes", "Performance", "Threads"};
+static const UiIcon TAB_ICON[TAB_COUNT] = {UI_ICON_LIST, UI_ICON_CHART, UI_ICON_CPU};
 
 enum
 {
@@ -179,6 +181,53 @@ static void draw_processes(UiRect body)
     int n = 0;
     put_dec(line, &n, (unsigned)NPROCS);
     put_str(line, &n, NPROCS == 1 ? " app running" : " apps running");
+    ui_text_color(body.x + PAD, body.y + body.h - FOOT_H + 18, line, UI_TEXT_SMALL, t->text_dim);
+}
+
+/* Kernel threads (task.h): the main loop is thread 0; the others are background workers. Read-only view, redrawn
+ * with the once-a-second refresh. Names are the ones given to task_create(). */
+static void draw_threads(UiRect body)
+{
+    const UiTheme *t = ui_theme();
+    UiRect list = list_rect(body);
+    int hy = list.y - HEAD_H;
+    ui_text_in_color(ui_rect(list.x + 8, hy, list.w - STATUS_W - PID_W - 16, HEAD_H), "Name", UI_TEXT_SMALL,
+                     UI_ALIGN_LEFT, t->text_dim);
+    ui_text_in_color(ui_rect(list.x + list.w - STATUS_W - PID_W - 8, hy, STATUS_W, HEAD_H), "State", UI_TEXT_SMALL,
+                     UI_ALIGN_LEFT, t->text_dim);
+    ui_text_in_color(ui_rect(list.x + list.w - PID_W - 4, hy, PID_W, HEAD_H), "ID", UI_TEXT_SMALL, UI_ALIGN_RIGHT,
+                     t->text_dim);
+    ui_separator(list.x, list.y - 2, list.w);
+
+    int vis = list.h / ROW_H, row = 0, live = 0;
+    for (int id = 0; id < TASK_MAX; id++)
+    {
+        const char *name = task_name(id);
+        TaskState st = task_state(id);
+        if (!name || st == TASK_DEAD)
+            continue;
+        live++;
+        if (row >= vis)
+            continue; /* no room: still counted below */
+        UiRect r = ui_rect(list.x, list.y + row * ROW_H, list.w, ROW_H);
+        row++;
+        ui_text_in(ui_rect(r.x + 8, r.y, r.w - STATUS_W - PID_W - 16, r.h), name, UI_TEXT_BODY, UI_ALIGN_LEFT);
+        const char *label = st == TASK_RUNNING ? "Running" : (st == TASK_SLEEPING ? "Sleeping" : "Ready");
+        ui_text_in_color(ui_rect(r.x + r.w - STATUS_W - PID_W - 8, r.y, STATUS_W, r.h), label, UI_TEXT_SMALL,
+                         UI_ALIGN_LEFT, st == TASK_RUNNING ? t->success : t->text_dim);
+        char id_s[8];
+        int n = 0;
+        put_dec(id_s, &n, (unsigned)id);
+        ui_text_in_color(ui_rect(r.x + r.w - PID_W - 4, r.y, PID_W, r.h), id_s, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
+                         t->text_dim);
+    }
+
+    char line[64];
+    int n = 0;
+    put_dec(line, &n, (unsigned)live);
+    put_str(line, &n, live == 1 ? " thread, " : " threads, ");
+    put_dec(line, &n, (unsigned)task_switches());
+    put_str(line, &n, " switches");
     ui_text_color(body.x + PAD, body.y + body.h - FOOT_H + 18, line, UI_TEXT_SMALL, t->text_dim);
 }
 
@@ -574,6 +623,8 @@ static void tm_draw(Window *w, UiRect body)
     draw_tabs(body);
     if (TAB == TAB_PROCESSES)
         draw_processes(body);
+    else if (TAB == TAB_THREADS)
+        draw_threads(body);
     else
         draw_performance(body);
 }
@@ -623,6 +674,8 @@ static int tm_press(Window *w, int x, int y)
         }
         return 0;
     }
+    if (TAB != TAB_PROCESSES) /* the thread list cannot be selected */
+        return 0;
     UiRect list = list_rect(body);
     if (!ui_contains(list, x, y))
         return 0;
@@ -688,6 +741,8 @@ static int tm_tick(Window *w)
         wm_add_damage(pane_rect(wm_content(w))); /* only the graphs and numbers change, not the tabs or the side list */
         return 2;
     }
+    if (TAB == TAB_THREADS)
+        return 1; /* threads start and end without the window manager knowing: redraw the list every second */
     if (old_n != NPROCS)
         return 1;
     for (int i = 0; i < NPROCS; i++)
