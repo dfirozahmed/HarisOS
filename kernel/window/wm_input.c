@@ -537,12 +537,22 @@ int wm_wheel(int x, int y, int steps)
     return WM_HAS_DMG;
 }
 
+static int KEY_PARTIAL; /* the on_key handler marked its own damage (wm_key_partial) */
+
+void wm_key_partial(void)
+{
+    KEY_PARTIAL = 1;
+}
+
 int wm_key(const KeyEvent *k)
 {
     Window *w = wm_top();
     if (!w || !w->on_key)
         return 0;
+    KEY_PARTIAL = 0;
     w->on_key(w, k);
-    wm_damage_window_internal(w); /* the handler probably changed what the window shows */
+    if (!KEY_PARTIAL)
+        wm_damage_window_internal(w); /* the handler probably changed what the window shows */
+    KEY_PARTIAL = 0;
     return 1;
 }

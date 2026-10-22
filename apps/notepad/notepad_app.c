@@ -138,6 +138,27 @@ static int caret_x(void)
     return gfx_text_w(np_font(), tmp);
 }
 
+/* scroll so that the caret is visible (when NP_FOLLOW is set); `in` is the text area inside its padding */
+static void follow(UiRect in)
+{
+    if (!NP_FOLLOW)
+        return;
+    NP_ROWS = in.h / np_line_h();
+    if (NP_ROWS < 1)
+        NP_ROWS = 1;
+    int cur_line = line_of(NP_CUR);
+    if (cur_line < NP_TOP)
+        NP_TOP = cur_line;
+    if (cur_line >= NP_TOP + NP_ROWS)
+        NP_TOP = cur_line - NP_ROWS + 1;
+    int cx = caret_x();
+    if (cx < NP_HSCROLL)
+        NP_HSCROLL = cx;
+    if (cx + 2 > NP_HSCROLL + in.w)
+        NP_HSCROLL = cx + 2 - in.w;
+    NP_FOLLOW = 0;
+}
+
 /* ---- drawing ---- */
 
 static void put_dec(char *s, int *n, unsigned v)
@@ -179,19 +200,7 @@ static void np_draw(Window *w, UiRect body)
 
     int total = line_count();
     int cur_line = line_of(NP_CUR);
-    if (NP_FOLLOW)
-    {
-        if (cur_line < NP_TOP)
-            NP_TOP = cur_line;
-        if (cur_line >= NP_TOP + NP_ROWS)
-            NP_TOP = cur_line - NP_ROWS + 1;
-        int cx = caret_x();
-        if (cx < NP_HSCROLL)
-            NP_HSCROLL = cx;
-        if (cx + 2 > NP_HSCROLL + in.w)
-            NP_HSCROLL = cx + 2 - in.w;
-        NP_FOLLOW = 0;
-    }
+    follow(in);
     if (NP_TOP > total - 1)
         NP_TOP = total - 1;
     if (NP_TOP < 0)
@@ -248,10 +257,14 @@ static void goto_line_col(int line, int col)
 
 static void np_key(Window *w, const KeyEvent *k)
 {
-    (void)w;
     if (!k->pressed)
+    {
+        wm_key_partial(); /* a release changes nothing: no redraw at all */
         return;
+    }
     int vertical = 0;
+    int old_lines = line_count(), old_line = line_of(NP_CUR);
+    int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
 
     switch (k->key)
     {
@@ -311,6 +324,29 @@ static void np_key(Window *w, const KeyEvent *k)
     NP_FOLLOW = 1;
     ui_caret_restart();
     NP_BLINK = 1;
+
+    /* Tell the window manager what really changed, so it does not redraw the whole window per key: the status
+     * bar always, and either the rows between the old and the new caret line, or (if the text scrolled or the
+     * number of lines changed, so the rows below moved) the whole text area. */
+    UiRect body = wm_content(w);
+    UiRect in = ui_inset(text_area(body), NP_PAD);
+    follow(in);
+    int new_line = line_of(NP_CUR);
+    UiRect rows = in;
+    if (NP_TOP == old_top && NP_HSCROLL == old_hscroll && line_count() == old_lines)
+    {
+        int a = old_line < new_line ? old_line : new_line;
+        int b = old_line < new_line ? new_line : old_line;
+        if (a < NP_TOP)
+            a = NP_TOP;
+        if (b > NP_TOP + NP_ROWS - 1)
+            b = NP_TOP + NP_ROWS - 1;
+        rows = ui_rect(in.x, in.y + (a - NP_TOP) * np_line_h(), in.w, (b - a + 1) * np_line_h());
+    }
+    if (rows.h > 0)
+        wm_add_damage(rows);
+    wm_add_damage(status_rect(body));
+    wm_key_partial();
 }
 
 static int np_press(Window *w, int x, int y)

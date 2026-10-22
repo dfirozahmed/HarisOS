@@ -154,6 +154,10 @@ void wm_draw(void);
  * that window is then marked for redraw. */
 int wm_key(const KeyEvent *k);
 
+/* Call from inside on_key, after wm_add_damage() for the areas that changed: only those areas are redrawn,
+ * instead of the whole window (typing in a big text area). Applies to the current key event only. */
+void wm_key_partial(void);
+
 /* Feed the mouse state. Returns 1 when something changed (then call wm_take_damage()). */
 int wm_pointer(int x, int y, unsigned buttons);
 
