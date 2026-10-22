@@ -290,7 +290,8 @@ typedef enum
     UI_ICON_FILE_PLUS, /* new file */
     UI_ICON_TRASH,     /* delete */
     UI_ICON_REFRESH,
-    UI_ICON_SORT
+    UI_ICON_SORT,
+    UI_ICON_TASKMGR /* performance graph */
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

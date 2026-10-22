@@ -251,6 +251,20 @@ static void icon_sort(const Frame *f, GfxColor c)
     line(f, 45, 30, 37, 39, 5, c);
 }
 
+/* a dark monitor with a green activity line and bars: task manager */
+static void icon_taskmgr(const Frame *f)
+{
+    GfxColor green = gfx_rgb(110, 231, 160);
+    rrect(f, 3, 6, 42, 36, 7, gfx_rgb(86, 100, 128)); /* frame */
+    rrect(f, 5, 8, 38, 32, 6, gfx_rgb(16, 22, 34));   /* screen */
+    rrect(f, 10, 28, 5, 7, 1, gfx_rgb(84, 160, 255)); /* bars */
+    rrect(f, 18, 22, 5, 13, 1, gfx_rgb(84, 160, 255));
+    rrect(f, 26, 26, 5, 9, 1, gfx_rgb(84, 160, 255));
+    line(f, 10, 20, 18, 14, 3, green);                /* activity line */
+    line(f, 18, 14, 27, 19, 3, green);
+    line(f, 27, 19, 38, 11, 3, green);
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -336,6 +350,9 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_SORT:
         icon_sort(&f, t);
+        break;
+    case UI_ICON_TASKMGR:
+        icon_taskmgr(&f);
         break;
     default:
         break;

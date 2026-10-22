@@ -717,7 +717,7 @@ static void taskmgr_open(void)
     win->on_press = tm_press;
     win->on_tick = tm_tick;
     win->on_close = tm_close;
-    win->icon = TASKBAR_ICON_SETTINGS;
+    win->icon = TASKBAR_ICON_TASKMGR;
     TM_WIN = win;
     TAB = TAB_PROCESSES;
     SEL_ID = -1;
@@ -738,6 +738,6 @@ static void taskmgr_open(void)
 const AppInfo APP_TASKMGR = {
     .name = "Task Manager",
     .desc = "Processes and performance",
-    .icon = UI_ICON_SETTINGS,
+    .icon = UI_ICON_TASKMGR,
     .open = taskmgr_open,
 };
