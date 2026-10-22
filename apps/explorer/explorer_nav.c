@@ -111,8 +111,15 @@ void ex_open_item(int row)
     const VfsNode *n = vfs_node(EX_ITEMS[row]);
     if (!n)
         return;
+    int kind = ex_kind_of(n);
     if (n->is_dir)
         ex_go_to(EX_ITEMS[row], 1);
+    else if (kind == FK_TEXT || kind == FK_CODE) /* plain text: Notepad */
+    {
+        char path[UI_EDIT_MAX + 1];
+        vfs_path(EX_ITEMS[row], path, (int)sizeof path);
+        EX_NOTE = notepad_open_file(path); /* NULL: opened (or the question about unsaved text was asked) */
+    }
     else
         EX_NOTE = "No app can open this file yet.";
 }

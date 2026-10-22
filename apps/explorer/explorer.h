@@ -18,6 +18,7 @@
 
 #include "app.h"
 #include "desktop.h"
+#include "notepad.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "ui.h"

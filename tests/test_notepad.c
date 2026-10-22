@@ -81,10 +81,12 @@ int wm_add_button_ex(Window *w, const char *l, UiButtonKind k, UiRect r, int a, 
     (void)w; (void)l; (void)k; (void)r; (void)a; (void)f; (void)u;
     return 0;
 }
+static int STUB_DIALOG; /* 1 = wm_create_dialog gives a window, 0 = "no free window" */
+static Window STUB_DLGW;
 Window *wm_create_dialog(Window *o, const char *t, int x, int y, int w, int h, WmDrawFn d, void *u)
 {
     (void)o; (void)t; (void)x; (void)y; (void)w; (void)h; (void)d; (void)u;
-    return 0;
+    return STUB_DIALOG ? &STUB_DLGW : 0;
 }
 void wm_activate(Window *w) { (void)w; }
 void wm_add_damage(UiRect r) { (void)r; }
@@ -324,6 +326,62 @@ static void test_dialog(void)
     NP_DLG = 0;
 }
 
+/* the File Explorer opens a text file in Notepad (notepad_open_file) */
+static void test_open_from_explorer(void)
+{
+    static Window NW;
+    NP_WIN = &NW; /* Notepad is "open": notepad_app_open() only brings it to the front */
+    NP_CONF = 0;
+    new_document();
+    assert(notepad_open_file("") != 0 && notepad_open_file(0) != 0);
+
+    /* clean text: the file opens at once */
+    assert(notepad_open_file("/Fake/ok.txt") == 0);
+    assert(is("x") && same_str(NP_PATH, "/Fake/ok.txt") && !NP_DIRTY && same_str(NP_NOTE, "Opened"));
+
+    /* a file that is not there: a reason, and the text stays */
+    const char *err = notepad_open_file("/Fake/missing.txt");
+    assert(err && same_str(err, "File not found") && is("x") && same_str(NP_PATH, "/Fake/ok.txt"));
+
+    /* unsaved text: nothing happens until the user agrees; no window for the question = an error */
+    NP_CUR = NP_ANCHOR = NP_LEN; /* opening leaves the caret at the start */
+    type("yz");
+    NP_DIRTY = 1;
+    STUB_DIALOG = 0;
+    assert(notepad_open_file("/Fake/a.txt") != 0 && is("xyz") && NP_DIRTY);
+    STUB_DIALOG = 1;
+    assert(notepad_open_file("/Fake/a.txt") == 0 && NP_CONF == &STUB_DLGW && is("xyz") && NP_DIRTY);
+    on_conf_no(0, 0); /* Cancel: the text stays (the window itself is closed by the window manager) */
+    assert(is("xyz") && NP_DIRTY);
+    NP_CONF = &STUB_DLGW;
+    on_conf_yes(0, 0); /* Discard: now the file opens */
+    assert(is("one\ntwo    three\n") && same_str(NP_PATH, "/Fake/a.txt") && !NP_DIRTY);
+
+    /* the answer applies to the newest request */
+    NP_CUR = NP_ANCHOR = NP_LEN;
+    type("q");
+    NP_DIRTY = 1;
+    assert(notepad_open_file("/Fake/ok.txt") == 0);
+    assert(notepad_open_file("/Fake/a.txt") == 0); /* the question is already on screen: it only changes the target */
+    NP_CONF = &STUB_DLGW;
+    on_conf_yes(0, 0);
+    assert(same_str(NP_PATH, "/Fake/a.txt"));
+
+    NP_CONF = 0; /* a "New" question is on screen, then a file is asked for: the answer must open the file */
+    NP_DIRTY = 1;
+    cmd_new();
+    assert(NP_CONF == &STUB_DLGW && NP_PENDING == NP_ACT_NEW);
+    assert(notepad_open_file("/Fake/ok.txt") == 0 && NP_PENDING == NP_ACT_PATH);
+    on_conf_yes(0, 0);
+    assert(same_str(NP_PATH, "/Fake/ok.txt") && is("x"));
+
+    /* Notepad is not open and no window can be made */
+    NP_WIN = 0;
+    STUB_DIALOG = 0;
+    assert(notepad_open_file("/Fake/a.txt") != 0);
+    NP_WIN = 0;
+}
+
 /* ---- helpers ---- */
 static void reset(void)
 {
@@ -518,6 +576,7 @@ int main(void)
 
     test_files();
     test_dialog();
+    test_open_from_explorer();
 
     printf("notepad tests passed\n");
     return 0;

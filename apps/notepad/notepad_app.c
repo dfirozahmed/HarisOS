@@ -7,6 +7,7 @@
 #include "app.h"
 #include "desktop.h"
 #include "gfx.h"
+#include "notepad.h"
 #include "ntfs.h"
 #include "taskbar.h"
 #include "timer.h"
@@ -1281,10 +1282,12 @@ static void open_path_dialog(int mode)
 enum
 {
     NP_ACT_NEW,
-    NP_ACT_OPEN
+    NP_ACT_OPEN,
+    NP_ACT_PATH /* open the file in NP_PENDING_PATH (asked by another app) */
 };
 static Window *NP_CONF;
 static int NP_PENDING;
+static char NP_PENDING_PATH[UI_EDIT_MAX + 1];
 
 static void conf_draw(Window *w, UiRect body)
 {
@@ -1323,6 +1326,12 @@ static void on_conf_yes(UiButton *b, void *user)
         NP_NOTE = "";
         np_after_change();
     }
+    else if (NP_PENDING == NP_ACT_PATH)
+    {
+        const char *err = open_file(NP_PENDING_PATH);
+        NP_NOTE = err ? err : "Opened";
+        np_after_change();
+    }
     else
     {
         NP_DIRTY = 0; /* the question was answered: Open does not ask again */
@@ -1336,17 +1345,19 @@ static void conf_key(Window *w, const KeyEvent *k)
         wm_close(w); /* no default answer on Enter: discarding must be a deliberate click */
 }
 
-static void ask_discard(int action)
+/* returns 0 if the question could not be shown (no free window) */
+static int ask_discard(int action)
 {
     if (NP_CONF)
     {
+        NP_PENDING = action; /* the newest request is the one the answer applies to */
         wm_activate(NP_CONF);
-        return;
+        return 1;
     }
     int w = 420, h = 190;
     Window *win = open_dialog_window("Notepad", w, h, conf_draw);
     if (!win)
-        return;
+        return 0;
     NP_CONF = win;
     NP_PENDING = action;
     win->on_key = conf_key;
@@ -1356,6 +1367,7 @@ static void ask_discard(int action)
     wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34), anchor,
                      on_conf_no, 0);
     wm_add_button_ex(win, "Discard", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34), anchor, on_conf_yes, 0);
+    return 1;
 }
 
 /* ---- the commands (toolbar buttons and Ctrl+N / O / S) ---- */
@@ -1707,6 +1719,24 @@ static void notepad_app_open(void)
     wm_add_button(win, "Open", UI_BTN_SECONDARY, ui_rect(NP_PAD + 72, 8, 64, 30), on_open, 0);
     wm_add_button(win, "Save", UI_BTN_SECONDARY, ui_rect(NP_PAD + 144, 8, 64, 30), on_save, 0);
     wm_add_button(win, "Save As", UI_BTN_SECONDARY, ui_rect(NP_PAD + 216, 8, 84, 30), on_save_as, 0);
+}
+
+const char *notepad_open_file(const char *path)
+{
+    if (!path || !path[0])
+        return "No file given";
+    notepad_app_open(); /* the window, in front (a new one if none is open) */
+    if (!NP_WIN)
+        return NP_NOTE[0] ? NP_NOTE : "Could not open Notepad";
+    if (NP_DIRTY) /* unsaved text: ask first; the file opens when the user agrees */
+    {
+        copy_str(NP_PENDING_PATH, (int)sizeof NP_PENDING_PATH, path);
+        return ask_discard(NP_ACT_PATH) ? 0 : "Window limit reached - close one first";
+    }
+    const char *err = open_file(path);
+    NP_NOTE = err ? err : "Opened";
+    np_after_change();
+    return err;
 }
 
 const AppInfo APP_NOTEPAD = {
