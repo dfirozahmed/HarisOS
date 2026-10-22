@@ -695,7 +695,7 @@ static void taskmgr_open(void)
         return;
     }
     int W = (int)gfx_width(), H = (int)gfx_height();
-    int w = 520, h = 420;
+    int w = 760, h = 560;
     if (w > W - 20)
         w = W - 20;
     if (h > H - TASKBAR_HEIGHT - 8)
