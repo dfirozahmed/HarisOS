@@ -311,7 +311,7 @@ static void devmgr_app_open(void)
     win->on_press = dm_press;
     win->on_wheel = dm_wheel;
     win->on_close = dm_close;
-    win->icon = TASKBAR_ICON_SETTINGS;
+    win->icon = TASKBAR_ICON_DEVMGR;
     DM_WIN = win;
     desktop_set_status(0);
 
@@ -324,6 +324,6 @@ static void devmgr_app_open(void)
 const AppInfo APP_DEVMGR = {
     .name = "Device Manager",
     .desc = "PCI and input devices",
-    .icon = UI_ICON_FILES,
+    .icon = UI_ICON_DEVMGR,
     .open = devmgr_app_open,
 };

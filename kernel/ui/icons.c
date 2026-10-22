@@ -284,6 +284,23 @@ static void icon_display(const Frame *f)
     }
 }
 
+/* a chip with pins on every side: hardware devices */
+static void icon_devmgr(const Frame *f)
+{
+    GfxColor pin = gfx_rgb(176, 188, 208);
+    for (int i = 0; i < 3; i++)
+    {
+        int p = 15 + i * 9;
+        line(f, p, 4, p, 12, 3, pin);   /* top */
+        line(f, p, 36, p, 44, 3, pin);  /* bottom */
+        line(f, 4, p, 12, p, 3, pin);   /* left */
+        line(f, 36, p, 44, p, 3, pin);  /* right */
+    }
+    rrect(f, 9, 9, 30, 30, 6, gfx_rgb(86, 100, 128));  /* package */
+    rrect(f, 15, 15, 18, 18, 4, gfx_rgb(52, 130, 240)); /* die */
+    rrect(f, 20, 20, 8, 8, 2, gfx_rgb(214, 232, 255));  /* core */
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -375,6 +392,9 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_DISPLAY:
         icon_display(&f);
+        break;
+    case UI_ICON_DEVMGR:
+        icon_devmgr(&f);
         break;
     default:
         break;

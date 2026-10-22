@@ -292,7 +292,8 @@ typedef enum
     UI_ICON_REFRESH,
     UI_ICON_SORT,
     UI_ICON_TASKMGR, /* performance graph */
-    UI_ICON_DISPLAY  /* monitor on a stand */
+    UI_ICON_DISPLAY, /* monitor on a stand */
+    UI_ICON_DEVMGR   /* hardware chip */
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons
