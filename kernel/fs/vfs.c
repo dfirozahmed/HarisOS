@@ -533,7 +533,7 @@ static void ram_info(void *ctx, VfsVolInfo *out)
     out->writable = 1;
 }
 
-static const VfsBackend RAM_BACKEND = {0, 0, 0, 0, 0, 0, 0, ram_info, 0, 0};
+static const VfsBackend RAM_BACKEND = {0, 0, 0, 0, 0, 0, 0, ram_info, 0, 0, 0};
 
 void vfs_init(void)
 {
@@ -896,6 +896,18 @@ int vfs_write(int id, unsigned offset, const void *buf, unsigned len)
     return r < 0 ? fail(r) : r;
 }
 
+int vfs_truncate(int id, unsigned size)
+{
+    const VfsNode *n = vfs_node(id);
+    if (!n || n->is_dir || size >= n->size)
+        return fail(VFS_ERR_ARG);
+    const VfsBackend *b = ops_of(id);
+    if (!b || !b->truncate)
+        return fail(VFS_ERR_UNSUPPORTED);
+    int r = b->truncate(ctx_of(id), &NODES[id], size);
+    return r < 0 ? fail(r) : 0;
+}
+
 /* write all of buf into file `id` from offset 0; 0 or -1 */
 static int write_all(int id, const void *buf, unsigned len)
 {
@@ -913,8 +925,29 @@ static int write_all(int id, const void *buf, unsigned len)
     return 0;
 }
 
+static const char *SAVE_STEP = ""; /* what vfs_save was doing when it failed */
+
+/* Put buf[0,len) into the existing file `id` itself. A longer old file is cut to the new length FIRST: if the drive
+ * refuses that, nothing has been changed yet; writing first would leave the head of the old file overwritten and
+ * its tail still there. (A failure while writing after the cut is still possible: the caller keeps the complete
+ * new text in its temporary file.) */
+static int overwrite_in_place(int id, const void *buf, unsigned len)
+{
+    if (NODES[id].size > len)
+    {
+        SAVE_STEP = "shorten the old file";
+        if (vfs_truncate(id, len) < 0)
+            return 0;
+    }
+    SAVE_STEP = "write over the old file";
+    return write_all(id, buf, len) == 0;
+}
+
+const char *vfs_save_step(void) { return SAVE_STEP; }
+
 int vfs_save(int parent, const char *name, const void *buf, unsigned len)
 {
+    SAVE_STEP = "";
     const VfsNode *p = vfs_node(parent);
     if (!p || !p->is_dir)
         return fail(VFS_ERR_ARG);
@@ -941,13 +974,17 @@ int vfs_save(int parent, const char *name, const void *buf, unsigned len)
             tmp[n++] = *s;
         tmp[n] = 0;
         int stale = find_child(parent, tmp);
+        SAVE_STEP = "remove a leftover .tmp file";
         if (stale >= 0 && vfs_remove(stale) < 0) /* left over from a save that was cut short */
             return -1;
         target = tmp;
     }
     batch(parent, 1);
+    SAVE_STEP = "create the file";
     int id = vfs_add(parent, target, 0, 0);
     int err = 0;
+    if (id >= 0)
+        SAVE_STEP = "write the text";
     if (id < 0 || write_all(id, buf, len) < 0)
     {
         err = vfs_last_error();
@@ -957,7 +994,20 @@ int vfs_save(int parent, const char *name, const void *buf, unsigned len)
     }
     else if (old >= 0)
     {
-        if (vfs_remove(old) < 0 || vfs_rename(id, name) < 0)
+        SAVE_STEP = "delete the old file";
+        int bad = vfs_remove(old) < 0;
+        if (bad && vfs_last_error() == VFS_ERR_UNSUPPORTED && overwrite_in_place(old, buf, len))
+        {
+            vfs_remove(id); /* the text is in the old file now: the temporary copy is not needed */
+            id = old;
+            bad = 0;
+        }
+        else if (!bad)
+        {
+            SAVE_STEP = "rename the new file";
+            bad = vfs_rename(id, name) < 0;
+        }
+        if (bad)
         {
             err = vfs_last_error();
             id = -1; /* the new text is safe in the .tmp file */
@@ -966,5 +1016,6 @@ int vfs_save(int parent, const char *name, const void *buf, unsigned len)
     batch(parent, 0);
     if (id < 0)
         return fail(err);
+    SAVE_STEP = "";
     return id;
 }

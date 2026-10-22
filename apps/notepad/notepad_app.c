@@ -7,7 +7,9 @@
 #include "app.h"
 #include "desktop.h"
 #include "gfx.h"
+#include "ntfs.h"
 #include "taskbar.h"
+#include "timer.h"
 #include "ui.h"
 #include "vfs.h"
 #include "wm.h"
@@ -650,6 +652,82 @@ static const char *vfs_problem(void)
     return vfs_error_text(vfs_last_error());
 }
 
+/* a few words for what a drive refused */
+static const char *short_error(int code)
+{
+    switch (code)
+    {
+    case VFS_ERR_UNSUPPORTED:
+        return "not supported yet";
+    case VFS_ERR_IO:
+        return "disk error";
+    case VFS_ERR_FULL:
+        return "drive full";
+    case VFS_ERR_EXISTS:
+        return "name already used";
+    case VFS_ERR_RO:
+        return "drive locked";
+    case VFS_ERR_NOWRITE:
+        return "drive is read-only";
+    case VFS_ERR_BADNAME:
+        return "bad file name";
+    case VFS_ERR_NOTREADABLE:
+        return "compressed or encrypted file";
+    case VFS_ERR_DIRTY:
+        return "drive needs a check in Windows";
+    default:
+        return vfs_error_text(code);
+    }
+}
+
+/* Why vfs_save failed in folder `parent`: "NTFS: could not delete the old file (not supported yet)" - the file
+ * system and the step say what the drive refused, which a bare "not supported" never could. */
+static const char *save_problem(int parent)
+{
+    static char msg[112];
+    const char *step = vfs_save_step();
+    VfsVolInfo vi;
+    if (!step[0] || vfs_volume_info(vfs_volume_of(parent), &vi) != 0)
+        return vfs_problem();
+    int n = 0;
+    put_str(msg, &n, vi.fs_name[0] ? vi.fs_name : "Drive");
+    if (vfs_last_error() == VFS_ERR_UNSUPPORTED && same_str(vi.fs_name, "NTFS") && ntfs_unsupported_why())
+    {
+        put_str(msg, &n, ": ");
+        put_str(msg, &n, ntfs_unsupported_why()); /* the driver knows the reason: better than "not supported yet" */
+        return msg;
+    }
+    put_str(msg, &n, ": could not ");
+    put_str(msg, &n, step);
+    put_str(msg, &n, " (");
+    put_str(msg, &n, short_error(vfs_last_error()));
+    if (vfs_last_error() == VFS_ERR_UNSUPPORTED && same_str(vi.fs_name, "NTFS") && ntfs_unsupported_line())
+    {
+        put_str(msg, &n, ", ntfs.c:"); /* which limit of the NTFS driver was hit (see ntfs_unsupported_line) */
+        put_dec(msg, &n, (unsigned)ntfs_unsupported_line());
+    }
+    put_str(msg, &n, ")");
+    return msg;
+}
+
+/* Why a file cannot be saved into folder `dir`, as a short sentence, or NULL if it can. Drives are write-locked
+ * until the user unlocks them in the File Explorer, and the RAM Disk and This PC hold no file content at all. */
+static const char *folder_problem(int dir)
+{
+    if (dir == VFS_ROOT)
+        return "Open a drive first: nothing can be saved in This PC";
+    VfsVolInfo vi;
+    if (vfs_volume_info(vfs_volume_of(dir), &vi) != 0)
+        return "Folder not found";
+    if (same_str(vi.fs_name, "RAM"))
+        return "The RAM Disk keeps no file content: pick a real drive";
+    if (!vi.writable)
+        return vfs_error_text(VFS_ERR_NOWRITE);
+    if (vi.lockable && vi.locked)
+        return "Drive is locked: unlock it in File Explorer first";
+    return 0;
+}
+
 /* Replace the text with the file at `path`. Returns NULL, or a sentence saying why not (the text is then untouched). */
 static const char *open_file(const char *path)
 {
@@ -720,34 +798,27 @@ static const char *save_file(const char *path)
     int parent = vfs_lookup(folder);
     if (parent < 0)
         return "Folder not found";
+    const char *why = folder_problem(parent);
+    if (why)
+        return why;
     if (vfs_save(parent, name, NP_BUF, (unsigned)NP_LEN) < 0)
-        return vfs_problem();
+        return save_problem(parent);
     copy_str(NP_PATH, (int)sizeof NP_PATH, path);
     NP_DIRTY = 0;
     return 0;
 }
 
-/* a first suggestion for the path field: the first drive that holds real files */
-static void default_path(char *out, int cap)
-{
-    copy_str(out, cap, "/");
-    for (int i = 0; i < vfs_volume_count(); i++)
-    {
-        VfsVolInfo vi;
-        if (vfs_volume_info(i, &vi) == 0 && vi.writable && !same_str(vi.fs_name, "RAM"))
-        {
-            int n = 0;
-            out[n++] = '/';
-            for (const char *s = vfs_node(vi.node)->name; *s && n < cap - 2; s++)
-                out[n++] = *s;
-            out[n++] = '/';
-            out[n] = 0;
-            return;
-        }
-    }
-}
+/* ---- the Save As / Open dialog: a small file browser ----
+ * The top line shows the folder, "Up" goes to its parent, the list shows what is in it. One click selects
+ * (a file puts its name into the "File name" field), a double click or Enter opens a folder (or, on a file,
+ * does Open / Save). The "File name" field takes a name for the shown folder, or a full path starting with '/'. */
+#define DLG_W 580
+#define DLG_H 480
+#define DLG_M 20 /* margin inside the dialog */
+#define DLG_ROW 26
+#define DLG_MAX_ITEMS 256
+#define DLG_DOUBLE_MS 450
 
-/* ---- the Save As / Open dialog: one path field ---- */
 enum
 {
     NP_DLG_SAVE,
@@ -755,39 +826,184 @@ enum
 };
 static Window *NP_DLG;
 static int NP_DLG_MODE;
-static const char *NP_DLG_ERR;               /* what went wrong, shown under the field (a literal) */
-static char NP_DLG_WARNED[UI_EDIT_MAX + 1];  /* the path the "file exists" warning was shown for */
+static const char *NP_DLG_ERR;              /* what went wrong, shown above the field (a literal) */
+static char NP_DLG_WARNED[UI_EDIT_MAX + 1]; /* the path the "file exists" warning was shown for */
+static int NP_DLG_DIR;                      /* the folder being shown (VFS_ROOT = "This PC", the drives) */
+static int NP_DLG_ITEMS[DLG_MAX_ITEMS];     /* its entries: folders first, then by name */
+static int NP_DLG_N;
+static int NP_DLG_SEL = -1;                 /* selected row (index into NP_DLG_ITEMS), -1 = none */
+static int NP_DLG_TOP;                      /* first visible row */
+static int NP_DLG_LAST_ROW = -1;            /* the row of the last click and when, for the double click */
+static unsigned long long NP_DLG_LAST_MS;
+
+typedef struct
+{
+    UiRect path, list, label, edit;
+} DlgLayout;
+
+/* where things are, from the dialog's content area (the same for drawing and for the mouse) */
+static DlgLayout dlg_layout(UiRect content)
+{
+    UiRect b = ui_rect(content.x + DLG_M, content.y + DLG_M, content.w - 2 * DLG_M, content.h - 2 * DLG_M);
+    DlgLayout l;
+    int list_h = b.h - 148; /* what is left above the name field and the buttons */
+    if (list_h < DLG_ROW)
+        list_h = DLG_ROW;
+    l.path = ui_rect(b.x, b.y, b.w - 90, 30);
+    l.list = ui_rect(b.x, b.y + 42, b.w, list_h);
+    l.label = ui_rect(b.x, l.list.y + l.list.h + 8, b.w, 20);
+    l.edit = ui_rect(b.x, l.label.y + 22, b.w, 34);
+    return l;
+}
+
+static int dlg_rows(const DlgLayout *l)
+{
+    return l->list.h / DLG_ROW;
+}
+
+/* show folder `dir`: read it from the drive again and list it */
+static void dlg_enter(int dir)
+{
+    NP_DLG_DIR = dir;
+    vfs_refresh(dir);
+    NP_DLG_N = vfs_list(dir, NP_DLG_ITEMS, DLG_MAX_ITEMS);
+    if (NP_DLG_N > DLG_MAX_ITEMS)
+        NP_DLG_N = DLG_MAX_ITEMS;
+    NP_DLG_SEL = -1;
+    NP_DLG_TOP = 0;
+    NP_DLG_LAST_ROW = -1;
+    NP_DLG_ERR = 0;
+}
+
+/* the full path of file `name` as the dialog means it: a name starting with '/' is already one */
+static void dlg_full_path(const char *name, char *out, int cap)
+{
+    if (name[0] == '/')
+    {
+        copy_str(out, cap, name);
+        return;
+    }
+    int n = vfs_path(NP_DLG_DIR, out, cap);
+    if (n > 0 && out[n - 1] != '/' && n < cap - 1)
+        out[n++] = '/';
+    for (const char *s = name; *s && n < cap - 1; s++)
+        out[n++] = *s;
+    out[n] = 0;
+}
+
+/* the first drive that holds real files: where a dialog starts when nothing is open */
+static int default_dir(void)
+{
+    int locked = VFS_ROOT; /* a drive that is only locked is better than none: the dialog then says so */
+    for (int i = 0; i < vfs_volume_count(); i++)
+    {
+        VfsVolInfo vi;
+        if (vfs_volume_info(i, &vi) != 0 || !vi.writable || same_str(vi.fs_name, "RAM"))
+            continue;
+        if (!(vi.lockable && vi.locked))
+            return vi.node;
+        if (locked == VFS_ROOT)
+            locked = vi.node;
+    }
+    return locked;
+}
+
+/* "512 B", "12 KB", "3 MB" */
+static void size_text(unsigned size, char *out)
+{
+    int n = 0;
+    if (size < 1024)
+    {
+        put_dec(out, &n, size);
+        put_str(out, &n, " B");
+    }
+    else if (size < 1024u * 1024u)
+    {
+        put_dec(out, &n, size / 1024);
+        put_str(out, &n, " KB");
+    }
+    else
+    {
+        put_dec(out, &n, size / (1024u * 1024u));
+        put_str(out, &n, " MB");
+    }
+}
+
+/* a short remark for a drive in the This PC list: what stops files being saved on it, or NULL */
+static const char *volume_badge(int id)
+{
+    if (!vfs_is_volume_root(id))
+        return 0;
+    VfsVolInfo vi;
+    if (vfs_volume_info(vfs_volume_of(id), &vi) != 0)
+        return 0;
+    if (same_str(vi.fs_name, "RAM"))
+        return "no file content";
+    if (!vi.writable)
+        return "read only";
+    if (vi.lockable && vi.locked)
+        return "locked";
+    return 0;
+}
 
 static void dlg_draw(Window *w, UiRect body)
 {
     const UiTheme *t = ui_theme();
-    body = ui_inset(body, t->pad);
-    ui_text(body.x, body.y, NP_DLG_MODE == NP_DLG_SAVE ? "Save as" : "Open file", UI_TEXT_TITLE);
-    ui_text_color(body.x, body.y + 28, "Type the full path, for example /Drive name/notes.txt", UI_TEXT_SMALL, t->text_dim);
-    ui_edit_draw(ui_rect(body.x, body.y + 54, body.w, 34), &w->edits[0], "/", 1);
-    if (NP_DLG_ERR)
-        ui_text_in_color(ui_rect(body.x, body.y + 94, body.w, 22), NP_DLG_ERR, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->danger);
+    DlgLayout l = dlg_layout(body);
 
-    ui_text_color(body.x, body.y + 124, "Drives", UI_TEXT_SMALL, t->text_dim);
-    for (int i = 0; i < vfs_volume_count() && i < 4; i++)
+    char path[UI_EDIT_MAX + 1];
+    if (NP_DLG_DIR == VFS_ROOT)
+        copy_str(path, (int)sizeof path, "This PC");
+    else
+        vfs_path(NP_DLG_DIR, path, (int)sizeof path);
+    ui_text_in(l.path, path, UI_TEXT_LABEL, UI_ALIGN_LEFT);
+
+    gfx_fill_round_rect(l.list.x, l.list.y, l.list.w, l.list.h, t->radius_s, ui_color(t->surface_alt));
+    gfx_round_rect(l.list.x, l.list.y, l.list.w, l.list.h, t->radius_s, 1, ui_color(t->border));
+    int rows = dlg_rows(&l);
+    if (NP_DLG_N == 0)
+        ui_text_in_color(l.list, "This folder is empty", UI_TEXT_SMALL, UI_ALIGN_CENTER, t->text_dim);
+    for (int r = 0; r < rows && NP_DLG_TOP + r < NP_DLG_N; r++)
     {
-        VfsVolInfo vi;
-        if (vfs_volume_info(i, &vi) != 0)
+        int idx = NP_DLG_TOP + r;
+        const VfsNode *n = vfs_node(NP_DLG_ITEMS[idx]);
+        if (!n)
             continue;
-        char line[VFS_NAME_MAX + 40];
-        int n = 0;
-        line[n++] = '/';
-        for (const char *s = vfs_node(vi.node)->name; *s && n < VFS_NAME_MAX; s++)
-            line[n++] = *s;
-        if (same_str(vi.fs_name, "RAM"))
-            for (const char *s = "   (no file content)"; *s; s++)
-                line[n++] = *s;
-        else if (!vi.writable || vi.locked)
-            for (const char *s = "   (read only)"; *s; s++)
-                line[n++] = *s;
-        line[n] = 0;
-        ui_text_in_color(ui_rect(body.x, body.y + 146 + i * 20, body.w, 20), line, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text);
+        UiRect row = ui_rect(l.list.x + 4, l.list.y + r * DLG_ROW, l.list.w - 12, DLG_ROW);
+        if (idx == NP_DLG_SEL)
+            gfx_fill_rect_alpha(row.x, row.y + 1, row.w, row.h - 2, t->accent.r, t->accent.g, t->accent.b, 90);
+        ui_icon(n->is_dir ? UI_ICON_FILES : UI_ICON_NOTEPAD, row.x + 16, row.y + row.h / 2, 18, t->text);
+        const char *badge = n->is_dir ? volume_badge(NP_DLG_ITEMS[idx]) : 0;
+        ui_text_in(ui_rect(row.x + 34, row.y, row.w - 34 - (n->is_dir ? (badge ? 130 : 0) : 80), row.h), n->name,
+                   UI_TEXT_BODY, UI_ALIGN_LEFT);
+        if (badge)
+            ui_text_in_color(ui_rect(row.x + row.w - 126, row.y, 122, row.h), badge, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
+                             t->warning);
+        if (!n->is_dir)
+        {
+            char sz[16];
+            size_text(n->size, sz);
+            ui_text_in_color(ui_rect(row.x + row.w - 76, row.y, 72, row.h), sz, UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
+        }
     }
+    if (NP_DLG_N > rows && rows > 0) /* a thin scroll thumb */
+    {
+        int thumb = l.list.h * rows / NP_DLG_N;
+        if (thumb < 16)
+            thumb = 16;
+        int y = l.list.y + (l.list.h - thumb) * NP_DLG_TOP / (NP_DLG_N - rows);
+        gfx_fill_round_rect(l.list.x + l.list.w - 6, y, 3, thumb, 1, ui_color(t->border));
+    }
+
+    ui_text_color(l.label.x, l.label.y, "File name", UI_TEXT_SMALL, t->text_dim);
+    const char *hint = NP_DLG_MODE == NP_DLG_SAVE ? folder_problem(NP_DLG_DIR) : 0; /* this folder cannot take a file */
+    if (NP_DLG_ERR)
+        ui_text_in_color(ui_rect(l.label.x + 90, l.label.y, l.label.w - 90, 20), NP_DLG_ERR, UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                         t->danger);
+    else if (hint)
+        ui_text_in_color(ui_rect(l.label.x + 90, l.label.y, l.label.w - 90, 20), hint, UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                         t->warning);
+    ui_edit_draw(l.edit, &w->edits[0], NP_DLG_MODE == NP_DLG_SAVE ? "name.txt" : "file name", 1);
 }
 
 static void np_after_change(void)
@@ -803,13 +1019,15 @@ static void dlg_ok(void)
 {
     if (!NP_DLG)
         return;
-    const char *path = NP_DLG->edits[0].text;
-    const char *err;
-    if (!path[0])
+    const char *name = NP_DLG->edits[0].text;
+    if (!name[0])
     {
-        NP_DLG_ERR = "Type a path first";
+        NP_DLG_ERR = "Type a file name";
         return;
     }
+    char path[UI_EDIT_MAX + 1];
+    dlg_full_path(name, path, (int)sizeof path);
+    const char *err;
     if (NP_DLG_MODE == NP_DLG_SAVE)
     {
         int id = vfs_lookup(path);
@@ -853,21 +1071,103 @@ static void on_dlg_cancel(UiButton *b, void *user)
         wm_close(NP_DLG);
 }
 
+static void on_dlg_up(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    const VfsNode *n = vfs_node(NP_DLG_DIR);
+    if (NP_DLG && n && n->parent >= 0)
+        dlg_enter(n->parent);
+}
+
+/* select row idx: it scrolls into view, and a file's name goes into the field */
+static void dlg_select(int idx)
+{
+    DlgLayout l = dlg_layout(wm_content(NP_DLG));
+    int rows = dlg_rows(&l);
+    if (idx < 0)
+        idx = 0;
+    if (idx > NP_DLG_N - 1)
+        idx = NP_DLG_N - 1;
+    if (idx < 0)
+        return;
+    NP_DLG_SEL = idx;
+    if (idx < NP_DLG_TOP)
+        NP_DLG_TOP = idx;
+    if (idx >= NP_DLG_TOP + rows)
+        NP_DLG_TOP = idx - rows + 1;
+    const VfsNode *n = vfs_node(NP_DLG_ITEMS[idx]);
+    if (n && !n->is_dir)
+        ui_edit_set_text(&NP_DLG->edits[0], n->name);
+    NP_DLG_ERR = 0;
+}
+
 static void dlg_key(Window *w, const KeyEvent *k)
 {
-    if (k->pressed && k->key == KEY_ENTER)
-        dlg_ok();
-    else if (k->pressed && k->key == KEY_ESC)
-        wm_close(w);
-    else if (ui_edit_key(&w->edits[0], k))
+    if (!k->pressed)
+        return;
+    DlgLayout l = dlg_layout(wm_content(w));
+    int rows = dlg_rows(&l);
+    switch (k->key)
     {
-        NP_DLG_ERR = 0; /* the path changed: the old complaint no longer applies */
-        ui_caret_restart();
+    case KEY_ENTER:
+    {
+        const VfsNode *n = NP_DLG_SEL >= 0 ? vfs_node(NP_DLG_ITEMS[NP_DLG_SEL]) : 0;
+        if (n && n->is_dir) /* a folder chosen in the list: go into it */
+            dlg_enter(NP_DLG_ITEMS[NP_DLG_SEL]);
+        else
+            dlg_ok();
+        break;
+    }
+    case KEY_ESC:
+        wm_close(w);
+        break;
+    case KEY_UP:
+        dlg_select(NP_DLG_SEL < 0 ? NP_DLG_N - 1 : NP_DLG_SEL - 1);
+        break;
+    case KEY_DOWN:
+        dlg_select(NP_DLG_SEL + 1);
+        break;
+    case KEY_PAGEUP:
+        dlg_select(NP_DLG_SEL - rows);
+        break;
+    case KEY_PAGEDOWN:
+        dlg_select(NP_DLG_SEL + rows);
+        break;
+    default:
+        if (ui_edit_key(&w->edits[0], k))
+        {
+            NP_DLG_ERR = 0; /* the name changed: the old complaint no longer applies, and Enter means OK */
+            NP_DLG_SEL = -1;
+            ui_caret_restart();
+        }
+        break;
     }
 }
 
 static int dlg_press(Window *w, int x, int y)
 {
+    DlgLayout l = dlg_layout(wm_content(w));
+    if (ui_contains(l.list, x, y))
+    {
+        int idx = NP_DLG_TOP + (y - l.list.y) / DLG_ROW;
+        if ((y - l.list.y) / DLG_ROW >= dlg_rows(&l) || idx >= NP_DLG_N)
+            return 0;
+        unsigned long long now = timer_ms();
+        int dbl = idx == NP_DLG_LAST_ROW && now - NP_DLG_LAST_MS < DLG_DOUBLE_MS;
+        NP_DLG_LAST_ROW = idx;
+        NP_DLG_LAST_MS = now;
+        int id = NP_DLG_ITEMS[idx];
+        dlg_select(idx);
+        if (dbl)
+        {
+            if (vfs_node(id)->is_dir)
+                dlg_enter(id);
+            else
+                dlg_ok();
+        }
+        return 1;
+    }
     UiRect f = w->edits[0].field;
     if (f.w > 0 && ui_contains(f, x, y))
     {
@@ -885,6 +1185,20 @@ static int dlg_drag(Window *w, int x, int y, unsigned buttons)
     ui_caret_restart();
     wm_add_damage(ui_inset(w->edits[0].field, -3));
     return 2;
+}
+
+static int dlg_wheel(Window *w, int steps)
+{
+    DlgLayout l = dlg_layout(wm_content(w));
+    int top = NP_DLG_TOP + steps * 3, max = NP_DLG_N - dlg_rows(&l);
+    if (top > max)
+        top = max;
+    if (top < 0)
+        top = 0;
+    if (top == NP_DLG_TOP)
+        return 0;
+    NP_DLG_TOP = top;
+    return 1;
 }
 
 static void dlg_close(Window *w)
@@ -921,29 +1235,42 @@ static void open_path_dialog(int mode)
         wm_activate(NP_DLG);
         return;
     }
-    int w = 520, h = 340;
+    int w = DLG_W, h = DLG_H;
+    if (w > (int)gfx_width() - 20)
+        w = (int)gfx_width() - 20;
+    if (h > (int)gfx_height() - TASKBAR_HEIGHT - 8)
+        h = (int)gfx_height() - TASKBAR_HEIGHT - 8;
     Window *win = open_dialog_window(mode == NP_DLG_SAVE ? "Save As" : "Open", w, h, dlg_draw);
     if (!win)
         return;
     NP_DLG = win;
     NP_DLG_MODE = mode;
-    NP_DLG_ERR = 0;
     NP_DLG_WARNED[0] = 0;
     win->on_key = dlg_key;
     win->on_press = dlg_press;
     win->on_drag = dlg_drag;
+    win->on_wheel = dlg_wheel;
     win->on_close = dlg_close;
     win->edit_count = 1;
     win->focus = 0;
     win->caret = 1;
-    char start[UI_EDIT_MAX + 1];
+
+    /* start in the folder of the current file, else on the first drive */
+    int id = NP_PATH[0] ? vfs_lookup(NP_PATH) : -1;
+    dlg_enter(id >= 0 && vfs_node(id)->parent >= 0 ? vfs_node(id)->parent : default_dir());
     if (NP_PATH[0])
-        copy_str(start, (int)sizeof start, NP_PATH);
+        ui_edit_set_text(&win->edits[0], path_name(NP_PATH));
     else
-        default_path(start, (int)sizeof start);
-    ui_edit_set_text(&win->edits[0], start);
+        ui_edit_set_text(&win->edits[0], mode == NP_DLG_SAVE ? "untitled.txt" : "");
+    if (id >= 0)
+        for (int i = 0; i < NP_DLG_N; i++) /* the open file is the selected row */
+            if (NP_DLG_ITEMS[i] == id)
+                NP_DLG_SEL = i;
+
     int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
     int anchor = WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM;
+    wm_add_button_ex(win, "Up", UI_BTN_SECONDARY, ui_rect(cw - DLG_M - 80, DLG_M, 80, 30), WM_ANCHOR_RIGHT, on_dlg_up, 0);
+    wm_set_button_icon(win, 0, UI_ICON_ARROW_UP);
     wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34), anchor,
                      on_dlg_cancel, 0);
     wm_add_button_ex(win, mode == NP_DLG_SAVE ? "Save" : "Open", UI_BTN_PRIMARY,

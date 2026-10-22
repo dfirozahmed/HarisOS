@@ -52,12 +52,24 @@ UiRect ui_inset(UiRect r, int a) { return ui_rect(r.x + a, r.y + a, r.w - 2 * a,
 int ui_text_height(UiTextStyle s) { (void)s; return 16; }
 void ui_text_in_color(UiRect r, const char *s, UiTextStyle st, UiAlign al, UiRgb c) { (void)r; (void)s; (void)st; (void)al; (void)c; }
 const UiTheme *ui_theme(void) { return &THEME_STORE; }
+int ntfs_unsupported_line(void) { return 0; }
+const char *ntfs_unsupported_why(void) { return 0; }
 void ui_text(int x, int y, const char *s, UiTextStyle st) { (void)x; (void)y; (void)s; (void)st; }
 void ui_text_color(int x, int y, const char *s, UiTextStyle st, UiRgb c) { (void)x; (void)y; (void)s; (void)st; (void)c; }
 void ui_edit_draw(UiRect r, UiEdit *e, const char *p, int f) { (void)r; (void)e; (void)p; (void)f; }
 int ui_edit_key(UiEdit *e, const KeyEvent *k) { (void)e; (void)k; return 0; }
 int ui_edit_mouse(UiEdit *e, int x, int y, unsigned b) { (void)e; (void)x; (void)y; (void)b; return 0; }
-void ui_edit_set_text(UiEdit *e, const char *s) { (void)e; (void)s; }
+void ui_edit_set_text(UiEdit *e, const char *s)
+{
+    strncpy(e->text, s, UI_EDIT_MAX);
+    e->text[UI_EDIT_MAX] = 0;
+    e->len = e->cursor = e->anchor = (int)strlen(e->text);
+}
+void ui_text_in(UiRect r, const char *s, UiTextStyle st, UiAlign a) { (void)r; (void)s; (void)st; (void)a; }
+void ui_icon(UiIcon i, int x, int y, int size, UiRgb t) { (void)i; (void)x; (void)y; (void)size; (void)t; }
+void wm_set_button_icon(Window *w, int i, UiIcon icon) { (void)w; (void)i; (void)icon; }
+static unsigned long long NOW;
+unsigned long long timer_ms(void) { return NOW; }
 void wm_close(Window *w) { (void)w; }
 int wm_add_button(Window *w, const char *l, UiButtonKind k, UiRect r, UiButtonFn f, void *u)
 {
@@ -148,8 +160,16 @@ static int ff_write(void *ctx, VfsNode *n, unsigned off, const void *buf, unsign
     n->size = f->size;
     return (int)len;
 }
-static void ff_info(void *ctx, VfsVolInfo *out) { (void)ctx; memset(out, 0, sizeof *out); out->writable = 1; }
-static const VfsBackend FAKE = {ff_list, ff_create, ff_remove, ff_rename, 0, ff_read, ff_write, ff_info, 0, 0};
+static int FF_LOCKED;
+static void ff_info(void *ctx, VfsVolInfo *out)
+{
+    (void)ctx;
+    strcpy(out->fs_name, "FAKE");
+    out->writable = 1;
+    out->lockable = 1;
+    out->locked = FF_LOCKED;
+}
+static const VfsBackend FAKE = {ff_list, ff_create, ff_remove, ff_rename, 0, ff_read, ff_write, ff_info, 0, 0, 0};
 
 static void reset(void);
 static void type(const char *s);
@@ -217,6 +237,91 @@ static void test_files(void)
     /* a new document starts empty and untitled */
     new_document();
     assert(is("") && NP_PATH[0] == 0 && !NP_DIRTY && NP_UN == 0);
+}
+
+static void test_dialog(void)
+{
+    static Window DW;
+    NP_DLG = &DW;
+    NP_DLG_MODE = NP_DLG_OPEN;
+    int fake = vfs_volume_node(1);
+    assert(default_dir() == fake); /* the RAM Disk holds no files: the first real drive is the start */
+
+    /* This PC lists the drives; a drive lists its files, sorted */
+    dlg_enter(VFS_ROOT);
+    assert(NP_DLG_N == 2 && NP_DLG_SEL == -1 && NP_DLG_TOP == 0);
+    assert(same_str(vfs_node(NP_DLG_ITEMS[0])->name, "Fake") && same_str(vfs_node(NP_DLG_ITEMS[1])->name, "RAM Disk"));
+    dlg_enter(fake);
+    assert(NP_DLG_N == 7 && same_str(vfs_node(NP_DLG_ITEMS[0])->name, "a.txt"));
+
+    /* the path of a name typed in the dialog */
+    char p[UI_EDIT_MAX + 1];
+    dlg_full_path("x.txt", p, (int)sizeof p);
+    assert(same_str(p, "/Fake/x.txt"));
+    dlg_full_path("/Fake/sub/y.txt", p, (int)sizeof p);
+    assert(same_str(p, "/Fake/sub/y.txt"));
+    NP_DLG_DIR = VFS_ROOT;
+    dlg_full_path("x.txt", p, (int)sizeof p);
+    assert(same_str(p, "/x.txt"));
+    dlg_enter(fake);
+
+    /* selecting rows: clamped, scrolls into view (the stub window shows 4 rows), a file's name fills the field */
+    DlgLayout l = dlg_layout(wm_content(&DW));
+    assert(dlg_rows(&l) == 4);
+    dlg_select(6);
+    assert(NP_DLG_SEL == 6 && NP_DLG_TOP == 3 && same_str(DW.edits[0].text, "utf.txt"));
+    dlg_select(-5);
+    assert(NP_DLG_SEL == 0 && NP_DLG_TOP == 0 && same_str(DW.edits[0].text, "a.txt"));
+    dlg_select(99);
+    assert(NP_DLG_SEL == 6);
+    assert(dlg_wheel(&DW, -5) == 1 && NP_DLG_TOP == 0 && dlg_wheel(&DW, -1) == 0);
+    assert(dlg_wheel(&DW, 5) == 1 && NP_DLG_TOP == 3 && dlg_wheel(&DW, 1) == 0); /* the last page: 7 rows - 4 */
+
+    /* a single click selects; a second click on the same row soon after opens the file */
+    dlg_enter(fake);
+    NP_PATH[0] = 0;
+    int row0 = l.list.y + 5, x = l.list.x + 30;
+    NOW = 1000;
+    assert(dlg_press(&DW, x, row0) == 1 && NP_DLG_SEL == 0 && NP_PATH[0] == 0);
+    NOW = 2000; /* too late for a double click */
+    assert(dlg_press(&DW, x, row0) == 1 && NP_PATH[0] == 0);
+    NOW = 2100;
+    assert(dlg_press(&DW, x, row0) == 1 && same_str(NP_PATH, "/Fake/a.txt") && is("one\ntwo    three\n"));
+
+    /* a double click on a folder goes into it; "Up" goes back */
+    dlg_enter(VFS_ROOT);
+    NOW = 5000;
+    assert(dlg_press(&DW, x, row0) == 1 && NP_DLG_DIR == VFS_ROOT);
+    NOW = 5100;
+    assert(dlg_press(&DW, x, row0) == 1 && NP_DLG_DIR == fake && NP_DLG_N == 7);
+    on_dlg_up(0, 0);
+    assert(NP_DLG_DIR == VFS_ROOT);
+    on_dlg_up(0, 0); /* nothing above This PC */
+    assert(NP_DLG_DIR == VFS_ROOT);
+
+    /* a click outside the rows or below the last one does nothing */
+    dlg_enter(VFS_ROOT);
+    assert(dlg_press(&DW, x, l.list.y + 3 * DLG_ROW + 2) == 0);
+    /* why a folder cannot take a file: This PC, the RAM Disk, and a locked drive each have their own sentence */
+    assert(folder_problem(fake) == 0 && folder_problem(VFS_ROOT) != 0);
+    assert(strstr(folder_problem(VFS_ROOT), "drive") != 0);
+    assert(strstr(folder_problem(vfs_volume_node(0)), "RAM Disk") != 0);
+    assert(volume_badge(vfs_volume_node(0)) != 0 && volume_badge(fake) == 0);
+    FF_LOCKED = 1;
+    assert(strstr(folder_problem(fake), "locked") != 0 && same_str(volume_badge(fake), "locked"));
+    assert(default_dir() == fake); /* only a locked drive: still the best start, the dialog says why */
+    NP_LEN = NP_CUR = NP_ANCHOR = 0;
+    type("x");
+    assert(strstr(save_file("/Fake/never.txt"), "locked") != 0 && vfs_lookup("/Fake/never.txt") < 0);
+    assert(strstr(save_file("/RAM Disk/never.txt"), "RAM Disk") != 0);
+    assert(strstr(save_file("/never.txt"), "drive") != 0);
+    FF_LOCKED = 0;
+    assert(save_file("/Fake/ok.txt") == 0);
+
+    /* the eighth file filled the fake drive: the message names the file system, the step and the reason */
+    const char *msg = save_file("/Fake/zzz.txt");
+    assert(msg && same_str(msg, "FAKE: could not create the file (drive full)"));
+    NP_DLG = 0;
 }
 
 /* ---- helpers ---- */
@@ -412,6 +517,7 @@ int main(void)
     assert(NP_LEN == len_now);
 
     test_files();
+    test_dialog();
 
     printf("notepad tests passed\n");
     return 0;

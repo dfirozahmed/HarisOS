@@ -74,6 +74,25 @@ typedef struct
 /* Scratch space shared by all volumes: the code is not re-entered. Big things stay out of the stack. */
 static NtStream S_MAIN, S_AUX, S_FILE; /* S_FILE: the file being read (kept between calls) */
 static const Ntfs *S_FILE_NT;
+
+/* Every refusal with NTFS_ERR_UNSUPPORTED remembers the source line it came from, so "not supported yet" can be
+ * traced to the exact limit that was hit (see ntfs_unsupported_line). */
+static int UNSUP_LINE;
+static const char *UNSUP_WHY; /* a sentence for the limits that users run into (0 = only the line is known) */
+static int unsup(int line)
+{
+    UNSUP_LINE = line;
+    UNSUP_WHY = 0;
+    return NTFS_ERR_UNSUPPORTED;
+}
+static int unsup_why(int line, const char *why)
+{
+    unsup(line);
+    UNSUP_WHY = why;
+    return NTFS_ERR_UNSUPPORTED;
+}
+int ntfs_unsupported_line(void) { return UNSUP_LINE; }
+const char *ntfs_unsupported_why(void) { return UNSUP_WHY; }
 static unsigned S_FILE_REC = ~0u;
 static u8 REC[4096], REC2[4096];
 static u8 ALBUF[32768];
@@ -1543,7 +1562,7 @@ static int wr_begin(Ntfs *nt)
     {
         u32 fl;
         if (vol_flags(nt, 0, 0, &fl))
-            return nt->wstate = NTFS_ERR_UNSUPPORTED;
+            return nt->wstate = unsup(__LINE__);
         if (fl & (VOL_DIRTY | VOL_RESIZE_LOG | VOL_UPGRADE | VOL_DELETE_USN))
             return nt->wstate = NTFS_ERR_DIRTY;
         if (!log_clean(nt))
@@ -1551,7 +1570,7 @@ static int wr_begin(Ntfs *nt)
         nt->wstate = 1;
     }
     if (bm_load(nt) || mb_load(nt))
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     S_UP.found = 0;
     load_stream(nt, 10, AT_DATA, 0, &S_UP); /* $UpCase; without it only ASCII letters fold */
     if (vol_flags(nt, VOL_DIRTY, 0, 0))
@@ -1677,13 +1696,13 @@ static int idx_open(Ntfs *nt, u32 recno)
     if (!(rd16(DREC + 22) & 2))
         return NTFS_ERR_ARG;
     if (rec_find(DREC, rs, AT_ATTRIBUTE_LIST, 0))
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     u8 *root = rec_find(DREC, rs, AT_INDEX_ROOT, "$I30");
     if (!root || root[8] != 0 || rd32(root + 16) < 32 || rd16(root + 20) + rd32(root + 16) > rd32(root + 4))
         return NTFS_ERR_IO;
     const u8 *v = root + rd16(root + 20);
     if (rd32(v) != AT_FILE_NAME || rd32(v + 4) != 1 || rd32(v + 8) != nt->idx_size)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     IX.rec = recno;
     IX.dirty = 0;
     IX.has_ia = 0;
@@ -1697,7 +1716,7 @@ static int idx_open(Ntfs *nt, u32 recno)
     if (ia)
     {
         if (ia[8] == 0 || rd16(ia + 12) || parse_runs(ia + rd16(ia + 32), ia + rd32(ia + 4), rd64(ia + 16), &IX.ia))
-            return NTFS_ERR_UNSUPPORTED;
+            return unsup(__LINE__);
         IX.ia_size = rd64(ia + 48);
         IX.has_ia = 1;
         if (IX.ia_size % nt->idx_size || IX.ia_size > runs_clusters(&IX.ia) * nt->csize)
@@ -1713,7 +1732,7 @@ static int idx_open(Ntfs *nt, u32 recno)
         {
             IX.ib_res = 0;
             if (rd16(ib + 12) || parse_runs(ib + rd16(ib + 32), ib + rd32(ib + 4), rd64(ib + 16), &IX.ib))
-                return NTFS_ERR_UNSUPPORTED;
+                return unsup(__LINE__);
             IX.ib_size = rd64(ib + 48);
         }
     }
@@ -1793,7 +1812,7 @@ static int idx_new_block_mem(Ntfs *nt, u64 *out)
 {
     u32 rs = nt->rec_size;
     if (nt->csize > nt->idx_size)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     u64 nblocks = IX.has_ia ? IX.ia_size / nt->idx_size : 0;
     for (u64 n = 0; n < nblocks; n++)
     {
@@ -1811,7 +1830,7 @@ static int idx_new_block_mem(Ntfs *nt, u64 *out)
     u32 ncl = nt->idx_size / nt->csize;
     u64 need_bytes = nblocks / 8 + 1;
     if (!IX.ib_res && need_bytes > IX.ib_size)
-        return NTFS_ERR_UNSUPPORTED; /* a non-resident bitmap would have to grow */
+        return unsup(__LINE__); /* a non-resident bitmap would have to grow */
     NEWR.n = 0;
     u64 hint = (IX.has_ia && IX.ia.n && IX.ia.r[IX.ia.n - 1].lcn >= 0) ? (u64)IX.ia.r[IX.ia.n - 1].lcn + IX.ia.r[IX.ia.n - 1].len : nt->hint;
     int r = alloc_clusters(nt, ncl, hint, &NEWR);
@@ -2049,12 +2068,12 @@ static int push_down(Ntfs *nt, Node *root, u64 *blk)
 {
     u32 bs = nt->idx_size;
     if (bs < 2048)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     Node c;
     node_init_block(nt, &c, NB2, 0, nd_leaf(root));
     u32 r0 = nd_ent0(root), body = nd_end(root) - r0, c0 = nd_ent0(&c);
     if (c0 + body > bs)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     copy(NB2 + c0, root->buf + r0, body);
     nd_set_end(&c, c0 + body);
     /* shrink the root first: the new attributes of a folder that had no allocation need its room */
@@ -2196,7 +2215,7 @@ static int ins_entry(Ntfs *nt, int lv, const u8 *E0, u32 elen, s64 fixptr)
             cnt++;
         }
         if (!m || cnt < 3)
-            return NTFS_ERR_UNSUPPORTED;
+            return unsup(__LINE__);
         u32 mlen = e_len(SPL + m), after = m + mlen, endlen = e_len(SPL + p);
         u64 this_vcn = blk_vcn(nt, L->blk);
         /* the promoted entry, pointing at this node (which keeps the left half) */
@@ -2618,6 +2637,62 @@ static int parent_room(Ntfs *nt, u32 dir, const u8 *key)
     return index_room(nt, IX.has_ia ? PDEPTH + 1 : 0);
 }
 
+/* ---- the security id of a new file in a folder whose record has none ----------------------------
+ * Every file points to a security descriptor (who may read / write it) by a number, the "security id" in its
+ * $STANDARD_INFORMATION; a new file gets the id of the folder it is made in. The $STANDARD_INFORMATION of some
+ * folders - the root of many Windows volumes - is the old 48-byte form without that field. Such a folder's
+ * descriptor lives elsewhere and finding or making an entry for it in $Secure is not done here. Instead the new
+ * file gets the id of an ordinary file (else folder) that already lies in the same folder: Windows gave that
+ * one the permissions it inherits from this folder. System, hidden, encrypted and link entries are skipped
+ * (they often have special permissions). The result is a plausible, valid id - but not necessarily the exact
+ * descriptor Windows itself would have chosen for the new file. */
+#define SIB_MAX 48
+static u32 SIB_REC[SIB_MAX];
+static u8 SIB_DIR[SIB_MAX];
+static int SIB_N;
+static u8 SIBREC[4096];
+
+static int sib_collect(const char *name, const NtEntry *e, void *user)
+{
+    (void)user;
+    if (name[0] == '$' || e->recno < 24)
+        return 0;
+    SIB_REC[SIB_N] = e->recno;
+    SIB_DIR[SIB_N++] = e->is_dir;
+    return SIB_N >= SIB_MAX; /* enough candidates: stop listing */
+}
+
+static int sibling_sid(Ntfs *nt, const NtEntry *dir, int is_dir, u32 *sid)
+{
+    SIB_N = 0;
+    ntfs_list(nt, dir, sib_collect, 0); /* it only collects: the volume is not touched from inside the callback */
+    u32 other = 0;
+    for (int i = 0; i < SIB_N; i++)
+    {
+        if (record_read(nt, SIB_REC[i], SIBREC) || rd64(SIBREC + 32)) /* unreadable, or not a base record */
+            continue;
+        u8 *si = rec_find(SIBREC, nt->rec_size, AT_STANDARD_INFORMATION, 0);
+        if (!si || si[8] != 0 || rd32(si + 16) < 72)
+            continue;
+        u32 attrs = rd32(attr_val(si) + 32), s = rd32(attr_val(si) + 52);
+        if (!s || (attrs & (0x2 | 0x4 | 0x400 | 0x4000))) /* hidden, system, reparse point, encrypted */
+            continue;
+        if ((SIB_DIR[i] != 0) == (is_dir != 0))
+        {
+            *sid = s;
+            return 0;
+        }
+        if (!other)
+            other = s;
+    }
+    if (other)
+    {
+        *sid = other;
+        return 0;
+    }
+    return unsup_why(__LINE__, "no ordinary file here to copy permissions from");
+}
+
 /* ---- create ------------------------------------------------------------------------- */
 static int create_inner(Ntfs *nt, const NtEntry *dir, const char *name, int is_dir, NtEntry *out)
 {
@@ -2626,9 +2701,13 @@ static int create_inner(Ntfs *nt, const NtEntry *dir, const char *name, int is_d
     if (r)
         return r;
     u8 *si = rec_find(DREC, rs, AT_STANDARD_INFORMATION, 0);
-    if (!si || si[8] != 0 || rd32(si + 16) < 72)
-        return NTFS_ERR_UNSUPPORTED; /* a folder from before NTFS 3.0: security descriptors would be needed */
-    u32 sid = rd32(attr_val(si) + 52);
+    if (!si || si[8] != 0)
+        return unsup(__LINE__);
+    u32 sid;
+    if (rd32(si + 16) >= 72)
+        sid = rd32(attr_val(si) + 52);
+    else if ((r = sibling_sid(nt, dir, is_dir, &sid)) != 0) /* the old 48-byte form: see above */
+        return r;
     u64 now = now_ft();
     u32 klen = make_key(KNEW, (u64)dir->recno | (u64)rd16(DREC + 16) << 48, name, now, 0, 0, is_dir ? 0x10000000u : 0x20u, 1);
     int found;
@@ -2776,18 +2855,18 @@ static int data_op(Ntfs *nt, NtEntry *e, int is_trunc, u64 offset, const u8 *buf
 {
     u32 rs = nt->rec_size;
     if (e->recno < 24)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     if (record_read(nt, e->recno, FREC))
         return NTFS_ERR_IO;
     if ((rd16(FREC + 22) & 2) || rd64(FREC + 32))
         return NTFS_ERR_ARG;
     if (rec_find(FREC, rs, AT_ATTRIBUTE_LIST, 0))
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     u8 *a = rec_find(FREC, rs, AT_DATA, 0);
     if (!a)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     if (rd16(a + 12) & (FL_COMPRESSED | FL_ENCRYPTED | 0x8000))
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     int res = a[8] == 0;
     u64 size, init, alloc = 0;
     DSR.n = 0;
@@ -2801,7 +2880,7 @@ static int data_op(Ntfs *nt, NtEntry *e, int is_trunc, u64 offset, const u8 *buf
     else
     {
         if (rd64(a + 16) != 0)
-            return NTFS_ERR_UNSUPPORTED;
+            return unsup(__LINE__);
         size = rd64(a + 48);
         init = rd64(a + 56);
         alloc = rd64(a + 40);
@@ -2809,7 +2888,7 @@ static int data_op(Ntfs *nt, NtEntry *e, int is_trunc, u64 offset, const u8 *buf
             return NTFS_ERR_IO;
         for (int i = 0; i < DSR.n; i++)
             if (DSR.r[i].lcn < 0)
-                return NTFS_ERR_UNSUPPORTED; /* sparse */
+                return unsup(__LINE__); /* sparse */
         if (runs_clusters(&DSR) * nt->csize < alloc || alloc < size || init > size)
             return NTFS_ERR_IO;
     }
@@ -2934,7 +3013,7 @@ static int names_of_file(Ntfs *nt, u32 *parent, u32 *klens)
     u8 *fa[MAX_NAMES];
     int n = fn_attrs(FREC, nt->rec_size, fa, MAX_NAMES);
     if (n < 1 || n > MAX_NAMES)
-        return NTFS_ERR_UNSUPPORTED; /* no name, or hard links */
+        return unsup(__LINE__); /* no name, or hard links */
     for (int i = 0; i < n; i++)
     {
         u32 kl = rd32(fa[i] + 16);
@@ -2946,7 +3025,7 @@ static int names_of_file(Ntfs *nt, u32 *parent, u32 *klens)
         if (i == 0)
             *parent = p;
         else if (p != *parent)
-            return NTFS_ERR_UNSUPPORTED; /* a hard link in another folder */
+            return unsup(__LINE__); /* a hard link in another folder */
     }
     return n;
 }
@@ -2955,11 +3034,11 @@ static int delete_inner(Ntfs *nt, const NtEntry *e)
 {
     u32 rs = nt->rec_size;
     if (e->recno < 24)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     if (record_read(nt, e->recno, FREC))
         return NTFS_ERR_IO;
     if (rd64(FREC + 32) || rec_find(FREC, rs, AT_ATTRIBUTE_LIST, 0))
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     u32 parent, kl[MAX_NAMES];
     int n = names_of_file(nt, &parent, kl);
     if (n < 0)
@@ -3044,12 +3123,12 @@ static int move_inner(Ntfs *nt, NtEntry *e, long long new_dir, const char *name)
 {
     u32 rs = nt->rec_size;
     if (e->recno < 24)
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     int r;
     if (record_read(nt, e->recno, FREC))
         return NTFS_ERR_IO;
     if (rd64(FREC + 32) || rec_find(FREC, rs, AT_ATTRIBUTE_LIST, 0))
-        return NTFS_ERR_UNSUPPORTED;
+        return unsup(__LINE__);
     u32 old_parent, kl[MAX_NAMES];
     int n = names_of_file(nt, &old_parent, kl);
     if (n < 0)

@@ -7,6 +7,7 @@
 #include "blk.h"
 #include "fat32.h"
 #include "fatimg.h"
+#include "ntfs.h"
 #include "exfatimg.h"
 #include "ntfsimg.h"
 #include "exfatcheck.h"
@@ -308,6 +309,35 @@ int main(void)
     CHECK(vfs_lookup("/TESTVOL (sata0)/Documents/SHORT.TXT") == note);
     CHECK(check_image(0) == 0);
 
+    /* ---- vfs_save (Notepad): a new file, then replaced by shorter and by longer text ---- */
+    {
+        int docs2 = vfs_lookup("/TESTVOL (sata0)/Documents");
+        CHECK(docs2 > 0);
+        static char big[40000];
+        for (int i = 0; i < (int)sizeof big; i++)
+            big[i] = (char)('a' + i % 26);
+        int s1 = vfs_save(docs2, "saved.txt", "hello world", 11);
+        CHECK(s1 > 0 && vfs_node(s1)->size == 11);
+        char back[64] = {0};
+        CHECK(vfs_read(s1, 0, back, sizeof back) == 11 && memcmp(back, "hello world", 11) == 0);
+        CHECK(check_image(0) == 0);
+        int s2 = vfs_save(docs2, "saved.txt", "hi", 2);                   /* shorter */
+        CHECK(s2 > 0 && vfs_node(s2)->size == 2 && vfs_lookup("/TESTVOL (sata0)/Documents/saved.txt") == s2);
+        CHECK(vfs_lookup("/TESTVOL (sata0)/Documents/saved.txt.tmp") == -1);
+        memset(back, 0, sizeof back);
+        CHECK(vfs_read(s2, 0, back, sizeof back) == 2 && memcmp(back, "hi", 2) == 0);
+        CHECK(check_image(0) == 0);
+        int s3 = vfs_save(docs2, "saved.txt", big, sizeof big);           /* longer: several clusters */
+        CHECK(s3 > 0 && vfs_node(s3)->size == sizeof big);
+        static char got[40000];
+        CHECK(vfs_read(s3, 0, got, sizeof got) == (int)sizeof got && memcmp(got, big, sizeof big) == 0);
+        CHECK(check_image(0) == 0);
+        CHECK(vfs_refresh(docs2) == 0);                                   /* the same after reading the folder again */
+        int s4 = vfs_lookup("/TESTVOL (sata0)/Documents/saved.txt");
+        CHECK(s4 > 0 && vfs_node(s4)->size == sizeof big && vfs_lookup("/TESTVOL (sata0)/Documents/saved.txt.tmp") == -1);
+        CHECK(vfs_save(docs2, "empty.txt", "", 0) > 0 && check_image(0) == 0);
+    }
+
     /* ---- the RAM Disk and the drives do not mix ---- */
     int ram = vfs_lookup("/RAM Disk/Documents");
     CHECK(ram > 0);
@@ -422,6 +452,19 @@ int main(void)
         int moved_out = vfs_move(in2, a);                                                     /* exFAT -> FAT32 (copy + delete) */
         CHECK(moved_out > 0 && vfs_node(moved_out)->vol == 1 && same_content_buf(moved_out, NT_BIG, sizeof NT_BIG));
         CHECK(vfs_lookup("/EXVOL (nvme7)/renamed copy.bin") == -1);
+        {   /* Notepad's vfs_save on exFAT: new, shorter, longer */
+            static char xbig[70000];
+            for (int i = 0; i < (int)sizeof xbig; i++)
+                xbig[i] = (char)('a' + i % 26);
+            int x1 = vfs_save(ef, "note.txt", "hello world", 11);
+            CHECK(x1 > 0 && same_content_buf(x1, (const unsigned char *)"hello world", 11));
+            int x2 = vfs_save(ef, "note.txt", "hi", 2);
+            CHECK(x2 > 0 && vfs_node(x2)->size == 2 && same_content_buf(x2, (const unsigned char *)"hi", 2));
+            int x3 = vfs_save(ef, "note.txt", xbig, sizeof xbig);
+            CHECK(x3 > 0 && vfs_node(x3)->size == sizeof xbig && same_content_buf(x3, (const unsigned char *)xbig, sizeof xbig));
+            CHECK(vfs_refresh(ef) == 0 && vfs_lookup("/EXVOL (nvme7)/New Folder/note.txt.tmp") == -1);
+            CHECK(xfsck(&EXX) == 0);
+        }
         CHECK(vfs_remove(ef) > 0 && vfs_lookup("/EXVOL (nvme7)/New Folder") == -1);
         CHECK(xfsck(&EXX) == 0 && check_image(0) == 0);
         vfs_set_locked(3, 1);
@@ -476,6 +519,109 @@ int main(void)
         CHECK(vfs_remove(c3) > 0 && vfs_remove(cd) > 0);
         CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0 && check_image(0) == 0);
         CHECK(vfs_refresh(nw) == 0 && vfs_lookup("/NTTEST (nvme8)/hello.txt") > 0);
+        /* Notepad's vfs_save on NTFS: a new resident file, shorter and longer text over it (it becomes non-resident) */
+        {
+            static char nbig[70000];
+            for (int i = 0; i < (int)sizeof nbig; i++)
+                nbig[i] = (char)('a' + i % 26);
+            int n1 = vfs_save(nw, "notes.txt", "hello world", 11);
+            CHECK(n1 > 0 && vfs_node(n1)->size == 11 && same_content_buf(n1, (const unsigned char *)"hello world", 11));
+            CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+            int n2 = vfs_save(nw, "notes.txt", "hi", 2);
+            CHECK(n2 > 0 && vfs_node(n2)->size == 2 && same_content_buf(n2, (const unsigned char *)"hi", 2));
+            CHECK(vfs_lookup("/NTTEST (nvme8)/notes.txt.tmp") == -1);
+            CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+            int n3 = vfs_save(nw, "notes.txt", nbig, sizeof nbig);
+            CHECK(n3 > 0 && vfs_node(n3)->size == sizeof nbig && same_content_buf(n3, (const unsigned char *)nbig, sizeof nbig));
+            CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+            int n4 = vfs_save(nw, "notes.txt", "short again", 11);
+            CHECK(n4 > 0 && vfs_node(n4)->size == 11 && same_content_buf(n4, (const unsigned char *)"short again", 11));
+            CHECK(vfs_save(nw, "empty.txt", "", 0) > 0);
+            CHECK(vfs_refresh(nw) == 0 && vfs_lookup("/NTTEST (nvme8)/notes.txt.tmp") == -1);
+            CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+        }
+        {   /* A folder with the old 48-byte $STANDARD_INFORMATION (no security id; the root of many Windows volumes): a
+             * new file there takes the id of an ordinary sibling. The record is patched in the image: the value length
+             * of the attribute goes from 72 to 48 (the attribute keeps its size, so the record stays valid). */
+            unsigned long long mft_lcn;
+            memcpy(&mft_lcn, NTWIMG + 0x30, 8);
+            #define NT_REC_AT(n) (NTWIMG + mft_lcn * NT_CS + (unsigned long long)(n) * NT_REC)
+            #define NT_SI_OF(rec, out) do { unsigned short o_; memcpy(&o_, (rec) + 20, 2); (out) = 0; \
+                for (;;) { unsigned t_, l_; memcpy(&t_, (rec) + o_, 4); if (t_ == 0xFFFFFFFFu) break; memcpy(&l_, (rec) + o_ + 4, 4); \
+                    if (t_ == 0x10) { (out) = (rec) + o_; break; } o_ = (unsigned short)(o_ + l_); } } while (0)
+            unsigned char *si5;
+            NT_SI_OF(NT_REC_AT(5), si5);
+            CHECK(si5 != 0);
+            unsigned len72, len48 = 48;
+            memcpy(&len72, si5 + 16, 4);
+            CHECK(len72 == 72);
+            memcpy(si5 + 16, &len48, 4);
+            int sf = vfs_save(nw, "rootfile.txt", "root text", 9);
+            CHECK(sf > 0 && vfs_node(sf)->size == 9 && same_content_buf(sf, (const unsigned char *)"root text", 9));
+            int sd = vfs_add(nw, "RootFolder", 1, 0);                        /* a folder takes the id of a sibling folder */
+            CHECK(sd > 0);
+            memcpy(si5 + 16, &len72, 4);                                       /* the checker sees an ordinary record again */
+            unsigned rec_f, rec_d, sid_f, sid_d, sid_h, sid_nf;
+            unsigned char *sif, *sid_attr, *sih, *sinf;
+            memcpy(&rec_f, vfs_node(sf)->fs, 4);
+            memcpy(&rec_d, vfs_node(sd)->fs, 4);
+            NT_SI_OF(NT_REC_AT(rec_f), sif);
+            NT_SI_OF(NT_REC_AT(rec_d), sid_attr);
+            NT_SI_OF(NT_REC_AT(5 + 0), sih); (void)sih;
+            unsigned short vo;
+            memcpy(&vo, sif + 20, 2);
+            memcpy(&sid_f, sif + vo + 52, 4);
+            memcpy(&vo, sid_attr + 20, 2);
+            memcpy(&sid_d, sid_attr + vo + 52, 4);
+            unsigned rec_h;
+            int hello = vfs_lookup("/NTTEST (nvme8)/hello.txt");
+            CHECK(hello > 0);
+            memcpy(&rec_h, vfs_node(hello)->fs, 4);
+            NT_SI_OF(NT_REC_AT(rec_h), sih);
+            memcpy(&vo, sih + 20, 2);
+            memcpy(&sid_h, sih + vo + 52, 4);
+            CHECK(sid_f == sid_h && sid_f != 0);                              /* the id of a file that was already there */
+            int docs_nt = vfs_lookup("/NTTEST (nvme8)/Folder");
+            if (docs_nt > 0)
+            {
+                unsigned rec_n;
+                memcpy(&rec_n, vfs_node(docs_nt)->fs, 4);
+                NT_SI_OF(NT_REC_AT(rec_n), sinf);
+                memcpy(&vo, sinf + 20, 2);
+                memcpy(&sid_nf, sinf + vo + 52, 4);
+                CHECK(sid_d == sid_nf && sid_d != 0);                         /* ... and a folder the id of a folder */
+            }
+            CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+            /* an old-format folder with nothing in it: nothing to copy from, so the save is refused with a reason */
+            int empty_dir = vfs_add(nw, "EmptyOld", 1, 0);
+            CHECK(empty_dir > 0);
+            unsigned rec_e;
+            unsigned char *sie;
+            memcpy(&rec_e, vfs_node(empty_dir)->fs, 4);
+            NT_SI_OF(NT_REC_AT(rec_e), sie);
+            memcpy(sie + 16, &len48, 4);
+            CHECK(vfs_save(empty_dir, "x.txt", "x", 1) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);
+            CHECK(ntfs_unsupported_why() != 0 && strstr(ntfs_unsupported_why(), "ordinary file") != 0);
+            memcpy(sie + 16, &len72, 4);
+            CHECK(vfs_lookup("/NTTEST (nvme8)/EmptyOld/x.txt") < 0);
+            CHECK(vfs_remove(empty_dir) > 0 && vfs_remove(sd) > 0 && vfs_remove(sf) > 0);
+            CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+            #undef NT_REC_AT
+            #undef NT_SI_OF
+        }
+        {   /* a file NTFS cannot delete, shorten or write (it has an attribute list): the save fails, the old file is
+             * untouched and the new text is kept in a .tmp file */
+            int al = vfs_lookup("/NTTEST (nvme8)/attrlist.bin");
+            CHECK(al > 0);
+            unsigned al_size = vfs_node(al)->size;
+            CHECK(vfs_save(nw, "attrlist.bin", "x", 1) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);
+            CHECK(strcmp(vfs_save_step(), "shorten the old file") == 0 || strcmp(vfs_save_step(), "write over the old file") == 0);
+            CHECK(vfs_node(al)->size == al_size);
+            int altmp = vfs_lookup("/NTTEST (nvme8)/attrlist.bin.tmp");
+            CHECK(altmp > 0 && same_content_buf(altmp, (const unsigned char *)"x", 1));
+            CHECK(vfs_remove(altmp) > 0);
+            CHECK(nck_check(NTWIMG, NT_CLUSTERS - 1, RES, 1, 1) == 0);
+        }
         CHECK(vfs_remove(vfs_lookup("/NTTEST (nvme8)/attrlist.bin")) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);   /* not supported yet */
         vfs_set_locked(5, 1);
     }

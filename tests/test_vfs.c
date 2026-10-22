@@ -44,7 +44,25 @@ static int ff_create(void *ctx, VfsNode *parent, const char *name, int is_dir, u
         }
     return VFS_ERR_FULL;
 }
-static int ff_remove(void *ctx, const VfsNode *n) { (void)ctx; FF[n->fs[0]].used = 0; return 0; }
+static int FF_NODELETE, FF_NOTRUNC; /* the drive cannot delete ordinary files / cannot shorten files */
+static int ff_remove(void *ctx, const VfsNode *n)
+{
+    (void)ctx;
+    const char *nm = FF[n->fs[0]].name;
+    if (FF_NODELETE && strlen(nm) > 4 && strcmp(nm + strlen(nm) - 4, ".tmp") != 0)
+        return VFS_ERR_UNSUPPORTED;
+    FF[n->fs[0]].used = 0;
+    return 0;
+}
+static int ff_truncate(void *ctx, VfsNode *n, unsigned size)
+{
+    (void)ctx;
+    if (FF_NOTRUNC)
+        return VFS_ERR_UNSUPPORTED;
+    FF[n->fs[0]].size = size;
+    n->size = size;
+    return 0;
+}
 static int ff_rename(void *ctx, VfsNode *n, const char *name) { (void)ctx; strcpy(FF[n->fs[0]].name, name); return 0; }
 static int ff_read(void *ctx, const VfsNode *n, unsigned off, void *buf, unsigned len)
 {
@@ -70,7 +88,7 @@ static int ff_write(void *ctx, VfsNode *n, unsigned off, const void *buf, unsign
     return (int)len;
 }
 static void ff_info(void *ctx, VfsVolInfo *out) { (void)ctx; memset(out, 0, sizeof *out); out->writable = 1; }
-static const VfsBackend FAKE = {ff_list, ff_create, ff_remove, ff_rename, 0, ff_read, ff_write, ff_info, 0, 0};
+static const VfsBackend FAKE = {ff_list, ff_create, ff_remove, ff_rename, 0, ff_read, ff_write, ff_info, 0, 0, ff_truncate};
 
 static int ff_count(void)
 {
@@ -122,6 +140,30 @@ static void test_save(void)
     CHECK(stale > 0 && vfs_write(stale, 0, "old", 3) == 3);
     int f = vfs_save(root, "a.txt", "fresh", 5);
     CHECK(f > 0 && vfs_lookup("/Fake/a.txt.tmp") < 0 && ff_count() == 2);
+
+    /* a drive that cannot delete that file (NTFS: hard links ...) but can shorten it: the text goes over the old file */
+    FF_NODELETE = 1;
+    int old = vfs_lookup("/Fake/a.txt");
+    int g1 = vfs_save(root, "a.txt", "tiny", 4);                              /* shorter: written, then cut */
+    CHECK(g1 == old && vfs_node(g1)->size == 4 && vfs_lookup("/Fake/a.txt.tmp") < 0 && ff_count() == 2);
+    CHECK(vfs_read(g1, 0, buf, sizeof buf) == 4 && memcmp(buf, "tiny", 4) == 0);
+    int g2 = vfs_save(root, "a.txt", "a longer text than before", 25);       /* longer */
+    CHECK(g2 == old && vfs_node(g2)->size == 25 && ff_count() == 2);
+    CHECK(vfs_read(g2, 0, buf, sizeof buf) == 25 && memcmp(buf, "a longer text than before", 25) == 0);
+    CHECK(vfs_truncate(g2, 25) == -1 && vfs_last_error() == VFS_ERR_ARG);     /* only shortens */
+    /* ... and one that can neither delete nor shorten: a longer text still fits over the old one, a shorter one is
+     * refused before anything is touched, and the new text stays safe in the .tmp file */
+    FF_NOTRUNC = 1;
+    CHECK(vfs_save(root, "a.txt", "a longer text than before, longer still", 39) == old);
+    CHECK(vfs_save(root, "a.txt", "short", 5) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);
+    CHECK(strcmp(vfs_save_step(), "shorten the old file") == 0);
+    CHECK(vfs_node(old)->size == 39 && vfs_read(old, 0, buf, sizeof buf) == 39 &&
+          memcmp(buf, "a longer text than before, longer still", 39) == 0);   /* the old file is intact */
+    int tmp = vfs_lookup("/Fake/a.txt.tmp");
+    CHECK(tmp > 0 && vfs_read(tmp, 0, buf, sizeof buf) == 5 && memcmp(buf, "short", 5) == 0);
+    FF_NOTRUNC = 0;
+    FF_NODELETE = 0;
+    CHECK(vfs_save(root, "a.txt", "ok", 2) > 0 && vfs_lookup("/Fake/a.txt.tmp") < 0 && ff_count() == 2);
 
     /* refused: the RAM Disk has no file content, a file is not a folder, a bad name, a name that is a folder */
     CHECK(vfs_save(ram, "x.txt", "x", 1) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);

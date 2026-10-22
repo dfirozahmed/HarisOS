@@ -163,6 +163,19 @@ static int fat_be_write(void *ctx, VfsNode *n, unsigned offset, const void *buf,
     return r;
 }
 
+static int fat_be_truncate(void *ctx, VfsNode *n, unsigned size)
+{
+    FatEntry e;
+    GET(FatEntry, n, &e);
+    int r = fat_shrink(&((Drive *)ctx)->u.fat, &e, size);
+    if (r >= 0)
+    {
+        SET(FatEntry, n, &e);
+        n->size = e.size;
+    }
+    return r;
+}
+
 static void be_batch(void *ctx, int on) { fat_batch(&((Drive *)ctx)->u.fat, on); }
 
 /* the write lock is the partition's own (see blk_set_locked) */
@@ -224,7 +237,8 @@ static int be_set_locked(void *ctx, int locked)
 }
 
 static const VfsBackend FAT_BACKEND = {fat_be_list, fat_be_create, fat_be_remove, fat_be_rename, fat_be_move,
-                                       fat_be_read, fat_be_write,   fat_be_info,   be_set_locked, be_batch};
+                                       fat_be_read, fat_be_write,   fat_be_info,   be_set_locked, be_batch,
+                                       fat_be_truncate};
 
 /* ====================== exFAT (read and write) ====================== */
 static void ex_dir(const Drive *v, const VfsNode *n, ExEntry *e)
@@ -357,7 +371,7 @@ static void ex_be_info(void *ctx, VfsVolInfo *out)
 }
 
 static const VfsBackend EXFAT_BACKEND = {ex_be_list,  ex_be_create, ex_be_remove, ex_be_rename, ex_be_move,
-                                         ex_be_read,  ex_be_write,  ex_be_info,   be_set_locked, ex_be_batch};
+                                         ex_be_read,  ex_be_write,  ex_be_info,   be_set_locked, ex_be_batch, 0};
 
 /* ====================== NTFS (read and write) ====================== */
 /* NTFS_ERR_* are the same numbers as VFS_ERR_*, except that a dirty volume has a code of its own */
@@ -447,6 +461,19 @@ static int nt_be_write(void *ctx, VfsNode *n, unsigned offset, const void *buf, 
     return nt_err(r);
 }
 
+static int nt_be_truncate(void *ctx, VfsNode *n, unsigned size)
+{
+    NtEntry e;
+    GET(NtEntry, n, &e);
+    int r = ntfs_truncate(&((Drive *)ctx)->u.nt, &e, size);
+    if (r >= 0)
+    {
+        SET(NtEntry, n, &e);
+        n->size = e.size;
+    }
+    return nt_err(r);
+}
+
 static void nt_be_info(void *ctx, VfsVolInfo *out)
 {
     Drive *v = (Drive *)ctx;
@@ -460,7 +487,8 @@ static void nt_be_info(void *ctx, VfsVolInfo *out)
 }
 
 static const VfsBackend NTFS_BACKEND = {nt_be_list, nt_be_create, nt_be_remove, nt_be_rename, nt_be_move,
-                                        nt_be_read, nt_be_write,  nt_be_info,   be_set_locked, 0};
+                                        nt_be_read, nt_be_write,  nt_be_info,   be_set_locked, 0,
+                                        nt_be_truncate};
 
 /* ====================== finding the volumes ====================== */
 /* "HARISOS (nvme0p1)": the volume label, else the partition's name, else "Local Disk" ("USB Drive" on a stick) */

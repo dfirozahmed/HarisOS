@@ -26,6 +26,10 @@
  *   - files and folders that have an $ATTRIBUTE_LIST, compressed, encrypted or sparse files, the system files
  *     (records below 24), files with more than one hard link;
  *   - new names are ASCII only (existing non-ASCII names are kept and sorted correctly);
+ *   - a new file takes the security id of the folder it is made in. A folder with the old 48-byte
+ *     $STANDARD_INFORMATION has none (the root of many Windows volumes): then the id of an ordinary file (else
+ *     folder) in the same folder is used, a valid but not necessarily Windows' own choice; a folder without such
+ *     an entry refuses (NTFS_ERR_UNSUPPORTED, ntfs_unsupported_why());
  *   - the MFT does not grow: when its bitmap has no free record, creating fails with NTFS_ERR_FULL;
  *   - a record whose attributes do not fit in the MFT record (a very fragmented file) fails with NTFS_ERR_FULL;
  *   - a folder's index can only grow when a cluster is not bigger than an index block, and (with a non-resident index
@@ -47,6 +51,11 @@
 #define NTFS_ERR_BADNAME -6     /* empty, too long, not ASCII, or has characters Windows does not allow */
 #define NTFS_ERR_ARG -7
 #define NTFS_ERR_UNSUPPORTED -8 /* see "Limits of writing" above */
+
+/* The line of ntfs.c that gave the last NTFS_ERR_UNSUPPORTED (0 = none yet): says which limit was hit. */
+int ntfs_unsupported_line(void);
+/* A short sentence for the last NTFS_ERR_UNSUPPORTED when it is a limit people run into, else NULL. */
+const char *ntfs_unsupported_why(void);
 #define NTFS_ERR_DIRTY -9       /* the volume was not shut down cleanly (or a write failed): run chkdsk in Windows */
 
 typedef struct

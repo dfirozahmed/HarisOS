@@ -75,6 +75,7 @@ typedef struct VfsBackend
     void (*info)(void *ctx, VfsVolInfo *out);
     int (*set_locked)(void *ctx, int locked);
     void (*batch)(void *ctx, int on); /* on = 1: a run of changes starts (skip flushing), 0: it ends (flush) */
+    int (*truncate)(void *ctx, VfsNode *n, unsigned size); /* shorten a file (never grows it); updates n->size; may be NULL */
 } VfsBackend;
 
 /* Empty tree (just the root, no volumes), then the RAM Disk with demo content. vfs_reset() alone gives
@@ -162,11 +163,20 @@ int vfs_read(int id, unsigned offset, void *buf, unsigned len);
  * Returns the count written or -1 (RAM-disk files have no content: VFS_ERR_UNSUPPORTED). */
 int vfs_write(int id, unsigned offset, const void *buf, unsigned len);
 
+/* Make file `id` (on a drive) `size` bytes long by cutting off the end. 0, or -1 (VFS_ERR_UNSUPPORTED if the
+ * drive cannot, VFS_ERR_ARG if `size` is not smaller than the file). */
+int vfs_truncate(int id, unsigned size);
+
 /* Create file `name` in folder `parent` (on a drive) with exactly buf[0,len) as its content, or replace the
  * file of that name. Returns the file's id or -1. A replaced file is only deleted after the new content was
  * written in full (to "name.tmp" first), so a failure keeps the old file; if that last step fails the text is
- * left in "name.tmp". */
+ * left in "name.tmp". A drive that cannot delete the old file (NTFS: hard links ...) but can shorten it gets the
+ * new text written over the old file instead (the id of the old file is returned). */
 int vfs_save(int parent, const char *name, const void *buf, unsigned len);
+/* After vfs_save returned -1: the step that failed ("create the file", "write the text", "delete the old file",
+ * "rename the new file"), "" if it failed before any (bad name, not a folder ...). With vfs_last_error() this says
+ * exactly what a drive refused. */
+const char *vfs_save_step(void);
 
 /* 1 if `id` is `ancestor` or lies below it. */
 int vfs_is_under(int id, int ancestor);
