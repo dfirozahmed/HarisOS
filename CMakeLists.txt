@@ -63,6 +63,8 @@ set(KERNEL_SOURCES
     kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
     kernel/core/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
     kernel/core/fault_fmt.c         # CPU exceptions: report text (host-tested)
+    kernel/core/task.c              # kernel threads (cooperative): task table, round-robin scheduler, boot self test
+    kernel/core/task_ctx.c          # kernel threads: the register-saving context switch
     kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)

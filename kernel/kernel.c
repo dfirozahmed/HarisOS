@@ -22,6 +22,7 @@
 #include "power.h"
 #include "rtc.h"
 #include "storage.h"
+#include "task.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "vfs.h"
@@ -150,6 +151,15 @@ void kernel_main(const BootInfo *info)
 
     timer_init(); /* needed for double-click */
     idle_init();  /* 1 ms LAPIC tick so the loop can sleep (hlt) when idle; see idle.h */
+
+    /* Kernel threads: this loop becomes task 0. The boot self test switches between two test threads; a broken
+     * context switch would corrupt memory later in confusing ways, so stop now (the crash screen shows #UD). */
+    if (pmm_ok)
+    {
+        task_init();
+        if (task_selftest() != 0)
+            __builtin_trap();
+    }
 
     {
         unsigned apic_ids[ACPI_MAX_CPUS]; /* for the Task Manager's CPU page; needs timer_init (TSC speed) */
