@@ -170,6 +170,9 @@ void ui_buttons_draw(const UiButtonSet *s);
 /* Feed the mouse state. Fires on_hover / on_leave / on_press / on_click.
  * Returns 1 if a button's look changed (hover/press), so you should redraw. */
 int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons);
+/* Same, but says how much to redraw: 0 = nothing changed, 1 = redraw the whole window (a click or another
+ * callback ran, which may have changed anything), 2 = only a hover / press highlight changed: redraw *dirty. */
+int ui_buttons_pointer_dirty(UiButtonSet *s, int x, int y, unsigned buttons, UiRect *dirty);
 /* Union of all button rectangles (to clear before a partial redraw). */
 UiRect ui_buttons_bounds(const UiButtonSet *s);
 

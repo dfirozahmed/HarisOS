@@ -15,6 +15,7 @@ static int wheel_steps, wheel_ret;
 static int on_wheel_cb(Window*w,int steps){ (void)w; wheel_steps+=steps; return wheel_ret; }
 static int hov_calls, hov_x, hov_y, rp_calls, rp_x;
 static int tick_calls, tick_ret;
+static void on_btn_cb(UiButton*b,void*u){ (void)b; (void)u; }
 static int on_tick_cb(Window*w){ (void)w; tick_calls++; return tick_ret; }
 static int on_hover_cb(Window*w,int x,int y){ (void)w; hov_calls++; hov_x=x; hov_y=y; return 0; }
 static int on_rpress_cb(Window*w,int x,int y){ (void)w; (void)y; rp_calls++; rp_x=x; return 0; }
@@ -133,6 +134,25 @@ int main(void){
     tick_ret=1;
     wm_minimize(w); tick_calls=0; wm_tick(); assert(tick_calls==0);   /* minimized windows are skipped */
     wm_activate(w);
+  }
+  /* buttons: a hover or press highlight redraws only the button; a click or any callback redraws the window */
+  {
+    UiButtonSet s; UiButton a=UI_BUTTON("A",UI_BTN_SECONDARY,0,0), b=UI_BUTTON("B",UI_BTN_SECONDARY,0,0);
+    UiRect d={0,0,0,0};
+    ui_buttons_init(&s);
+    a.r=ui_rect(10,10,60,30); b.r=ui_rect(100,10,60,30);
+    ui_buttons_add(&s,&a); ui_buttons_add(&s,&b);
+    assert(ui_buttons_pointer_dirty(&s,500,500,0,&d)==0);                       /* nowhere near: nothing */
+    assert(ui_buttons_pointer_dirty(&s,20,20,0,&d)==2);                         /* enter A */
+    assert(d.x<=10 && d.y<=10 && d.x+d.w>=70 && d.y+d.h>=40 && d.x+d.w<100);   /* covers A, not B */
+    assert(ui_buttons_pointer_dirty(&s,20,21,0,&d)==0);                         /* still on A */
+    assert(ui_buttons_pointer_dirty(&s,110,20,0,&d)==2);                        /* A -> B: both */
+    assert(d.x<=10 && d.x+d.w>=160);
+    assert(ui_buttons_pointer_dirty(&s,110,20,1,&d)==2);                        /* press B (no on_press) */
+    assert(ui_buttons_pointer_dirty(&s,110,20,0,&d)==1);                        /* release on B = click: all */
+    b.on_hover=on_btn_cb; a.on_hover=on_btn_cb;
+    assert(ui_buttons_pointer_dirty(&s,20,20,0,&d)==1);                         /* a hover callback may change anything */
+    assert(ui_buttons_pointer(&s,500,500,0)==1);                                 /* the old call: any change is 1 */
   }
   /* damage: overlapping areas become separate non-overlapping rectangles that cover exactly their union */
   {

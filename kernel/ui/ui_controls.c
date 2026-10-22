@@ -159,9 +159,25 @@ static void buttons_fire(UiButton *b, UiButtonFn fn)
         fn(b, b->user);
 }
 
-int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons)
+/* Grow the dirty area by a button, with room for its shadow (blur 4, offset 2) and outline. */
+static void dirty_add(UiRect *d, int *have, const UiButton *b)
 {
-    int changed = 0;
+    int x0 = b->r.x - 8, y0 = b->r.y - 8, x1 = b->r.x + b->r.w + 8, y1 = b->r.y + b->r.h + 8;
+    if (*have)
+    {
+        if (d->x < x0) x0 = d->x;
+        if (d->y < y0) y0 = d->y;
+        if (d->x + d->w > x1) x1 = d->x + d->w;
+        if (d->y + d->h > y1) y1 = d->y + d->h;
+    }
+    *d = ui_rect(x0, y0, x1 - x0, y1 - y0);
+    *have = 1;
+}
+
+int ui_buttons_pointer_dirty(UiButtonSet *s, int x, int y, unsigned buttons, UiRect *dirty)
+{
+    int changed = 0, precise = 1, have = 0;
+    UiRect d = ui_rect(0, 0, 0, 0);
     int over = buttons_hit(s, x, y);
     int down = (buttons & 1) != 0, was_down = (s->last_buttons & 1) != 0;
     s->last_buttons = buttons;
@@ -172,15 +188,28 @@ int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons)
         s->hover = over;
         changed = 1;
         if (old >= 0 && old < s->count)
+        {
+            dirty_add(&d, &have, s->items[old]);
+            if (s->items[old]->on_leave)
+                precise = 0; /* a callback may change anything: redraw it all */
             buttons_fire(s->items[old], s->items[old]->on_leave);
+        }
         if (over >= 0 && s->hover == over) /* a callback may have changed things */
+        {
+            dirty_add(&d, &have, s->items[over]);
+            if (s->items[over]->on_hover)
+                precise = 0;
             buttons_fire(s->items[over], s->items[over]->on_hover);
+        }
     }
 
     if (down && !was_down && over >= 0)
     {
         s->pressed = over;
         changed = 1;
+        dirty_add(&d, &have, s->items[over]);
+        if (s->items[over]->on_press)
+            precise = 0;
         buttons_fire(s->items[over], s->items[over]->on_press);
     }
     else if (!down && was_down && s->pressed >= 0)
@@ -188,10 +217,28 @@ int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons)
         int p = s->pressed;
         s->pressed = -1;
         changed = 1;
-        if (p < s->count && p == over) /* released on the same button = a click */
+        if (p < s->count)
+        {
+            dirty_add(&d, &have, s->items[p]);
+            if (p == over) /* released on the same button = a click: the app reacts, redraw it all */
+                precise = 0;
+        }
+        else
+            precise = 0;
+        if (p < s->count && p == over)
             buttons_fire(s->items[p], s->items[p]->on_click);
     }
-    return changed;
+    if (!changed)
+        return 0;
+    if (!precise || !have || !dirty)
+        return 1;
+    *dirty = d;
+    return 2;
+}
+
+int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons)
+{
+    return ui_buttons_pointer_dirty(s, x, y, buttons, 0) != 0;
 }
 
 void ui_progress(UiRect r, int percent)

@@ -461,8 +461,12 @@ int wm_pointer(int x, int y, unsigned buttons)
     {
         Window *w = WM_Z[i];
         int hit = (w == target);
-        if (ui_buttons_pointer(&w->set, hit ? x : -1, hit ? y : -1, buttons))
+        UiRect dirty;
+        int r = ui_buttons_pointer_dirty(&w->set, hit ? x : -1, hit ? y : -1, buttons, &dirty);
+        if (r == 1)
             wm_damage_window_internal(w);
+        else if (r == 2)
+            wm_add_damage(dirty); /* just a hover or press highlight */
         if (WM_ZN == 0 || wm_z_index_internal(w) < 0) /* a click handler closed it */
             break;
     }
