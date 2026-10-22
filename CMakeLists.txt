@@ -61,6 +61,8 @@ set(KERNEL_SOURCES
     kernel/memory/pmm.c
     kernel/memory/heap.c            # kernel heap: kmalloc / kfree on top of the page allocator
     kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
+    kernel/core/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
+    kernel/core/fault_fmt.c         # CPU exceptions: report text (host-tested)
     kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)

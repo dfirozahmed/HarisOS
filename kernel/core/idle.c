@@ -1,5 +1,6 @@
 /* HarisOS idle: see include/idle.h. */
 #include "idle.h"
+#include "fault.h"
 #include "io.h"
 #include "timer.h"
 
@@ -40,8 +41,9 @@ typedef struct
     unsigned long long base;
 } __attribute__((packed)) DescPtr;
 
-/* null, 64-bit code (0x08), data (0x10) */
-static unsigned long long GDT[3] = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
+/* null, 64-bit code (0x08), data (0x10), TSS (0x18, a 16-byte descriptor: two slots; filled in idle_init) */
+#define SEL_TSS 0x18
+static unsigned long long GDT[5] = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
 static IdtEntry IDT[IDT_COUNT];
 
 static volatile unsigned *LAPIC;
@@ -52,11 +54,10 @@ static int READY;
  *   timer     : acknowledge the tick (write the LAPIC EOI register) and return
  *   other IRQ : same (an unexpected device interrupt must not stay "in service")
  *   spurious  : return without EOI (the APIC says none is in service)
- *   fault     : a CPU exception (vectors 0..31) is a bug: stop here instead of running on */
+ * A CPU exception (vectors 0..31) is a bug: fault.c reports it and stops (see fault.h). */
 unsigned long long idle_lapic_eoi; /* address of the LAPIC EOI register, read by the handlers */
 void idle_isr_timer(void);
 void idle_isr_spurious(void);
-void idle_isr_fault(void);
 
 __asm__(".text\n"
         ".p2align 4\n"
@@ -70,13 +71,7 @@ __asm__(".text\n"
         ".p2align 4\n"
         ".globl idle_isr_spurious\n"
         "idle_isr_spurious:\n"
-        "    iretq\n"
-        ".p2align 4\n"
-        ".globl idle_isr_fault\n"
-        "idle_isr_fault:\n"
-        "    cli\n"
-        "1:  hlt\n"
-        "    jmp 1b\n");
+        "    iretq\n");
 
 static unsigned long long rdmsr(unsigned msr)
 {
@@ -119,8 +114,10 @@ static void gdt_load(void)
                      "movw %%ax, %%ds\n\t"
                      "movw %%ax, %%es\n\t"
                      "movw %%ax, %%ss\n\t"
+                     "movw %1, %%ax\n\t"
+                     "ltr %%ax\n\t" /* the TSS gives the double fault its own stack */
                      :
-                     : "m"(p)
+                     : "m"(p), "i"(SEL_TSS)
                      : "rax", "memory");
 }
 
@@ -165,9 +162,11 @@ int idle_init(void)
     LAPIC = (volatile unsigned *)addr;
     idle_lapic_eoi = addr + LAPIC_EOI;
 
+    fault_tss_descriptor(&GDT[SEL_TSS / 8]);
     gdt_load();
     for (int i = 0; i < IDT_COUNT; i++)
-        idt_set(i, i < 32 ? idle_isr_fault : idle_isr_timer);
+        idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_timer);
+    IDT[8].ist = 1; /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
     idt_set(VEC_SPURIOUS, idle_isr_spurious);
     idt_load();
 

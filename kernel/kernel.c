@@ -8,6 +8,7 @@
 #include "display.h"
 #include "exfat.h"
 #include "fbwc.h"
+#include "fault.h"
 #include "fat32.h"
 #include "acpi.h"
 #include "gfx.h"
@@ -59,6 +60,7 @@ static unsigned long long nt_clock(void)
 
 void kernel_main(const BootInfo *info)
 {
+    fault_init(info->framebuffer, info->width, info->height, info->pitch, info->red_mask_mode); /* crash screen */
     gfx_init(info->framebuffer, info->width, info->height,
              info->pitch, info->red_mask_mode);
 
