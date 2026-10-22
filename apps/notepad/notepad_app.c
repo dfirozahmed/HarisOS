@@ -129,13 +129,46 @@ static UiRect status_rect(UiRect body)
     return ui_rect(body.x + NP_PAD, body.y + body.h - NP_STATUS_H - 4, body.w - 2 * NP_PAD, NP_STATUS_H);
 }
 
+/* Width in pixels of the `count` characters at buffer offset `from`. Measured in pieces of NP_LINE_MAX
+ * characters, so a line of any length is handled (the font functions need a 0-terminated copy). */
+static int span_w(int from, int count)
+{
+    char tmp[NP_LINE_MAX + 1];
+    int w = 0;
+    while (count > 0)
+    {
+        int n = count < NP_LINE_MAX ? count : NP_LINE_MAX;
+        copy_text(from, n, tmp);
+        w += gfx_text_w(np_font(), tmp);
+        from += n;
+        count -= n;
+    }
+    return w;
+}
+
+/* How many characters of the line at `ls` (length `len`) fit completely into `px` pixels from its left edge. */
+static int cols_in(int ls, int len, int px)
+{
+    char tmp[NP_LINE_MAX + 1];
+    int col = 0;
+    while (col < len && px > 0)
+    {
+        int n = len - col < NP_LINE_MAX ? len - col : NP_LINE_MAX;
+        copy_text(ls + col, n, tmp);
+        int fit = gfx_text_fit(np_font(), tmp, px);
+        col += fit;
+        if (fit < n)
+            break;
+        px -= gfx_text_w(np_font(), tmp);
+    }
+    return col;
+}
+
 /* x position of the caret inside a line, in pixels from the line's left edge */
 static int caret_x(void)
 {
-    char tmp[NP_LINE_MAX + 1];
     int ls = line_start(NP_CUR);
-    copy_text(ls, NP_CUR - ls, tmp);
-    return gfx_text_w(np_font(), tmp);
+    return span_w(ls, NP_CUR - ls);
 }
 
 /* scroll so that the caret is visible (when NP_FOLLOW is set); `in` is the text area inside its padding */
@@ -152,10 +185,17 @@ static void follow(UiRect in)
     if (cur_line >= NP_TOP + NP_ROWS)
         NP_TOP = cur_line - NP_ROWS + 1;
     int cx = caret_x();
+    /* Scrolling sideways repaints the whole text area, so it jumps: the caret lands a quarter of the width from
+     * the edge it just left, and the next keys inside that room need no scrolling (one repaint per many keys
+     * instead of one per key). */
     if (cx < NP_HSCROLL)
-        NP_HSCROLL = cx;
-    if (cx + 2 > NP_HSCROLL + in.w)
-        NP_HSCROLL = cx + 2 - in.w;
+    {
+        NP_HSCROLL = cx - in.w * 3 / 4;
+        if (NP_HSCROLL < 0)
+            NP_HSCROLL = 0;
+    }
+    else if (cx + 2 > NP_HSCROLL + in.w)
+        NP_HSCROLL = cx - in.w / 4;
     NP_FOLLOW = 0;
 }
 
@@ -190,10 +230,20 @@ static void np_draw(Window *w, UiRect body)
     int lh = np_line_h();
     UiRect ta = text_area(body);
 
-    gfx_fill_round_rect(ta.x, ta.y, ta.w, ta.h, t->radius_s, ui_color(t->surface_alt));
-    gfx_round_rect(ta.x, ta.y, ta.w, ta.h, t->radius_s, 1, ui_color(t->border));
-
     UiRect in = ui_inset(ta, NP_PAD);
+
+    /* The rounded, anti-aliased box is slow to paint. When the redraw is only inside the straight part (a caret
+     * blink, typing, scrolling), a plain rectangle gives the same picture. */
+    GfxClip cl = gfx_get_clip();
+    UiRect safe = ui_inset(ta, t->radius_s + 2);
+    if (cl.x0 >= safe.x && cl.y0 >= safe.y && cl.x1 <= safe.x + safe.w && cl.y1 <= safe.y + safe.h)
+        gfx_fill_rect(safe.x, safe.y, safe.w, safe.h, ui_color(t->surface_alt));
+    else
+    {
+        gfx_fill_round_rect(ta.x, ta.y, ta.w, ta.h, t->radius_s, ui_color(t->surface_alt));
+        gfx_round_rect(ta.x, ta.y, ta.w, ta.h, t->radius_s, 1, ui_color(t->border));
+    }
+
     NP_ROWS = in.h / lh;
     if (NP_ROWS < 1)
         NP_ROWS = 1;
@@ -208,7 +258,7 @@ static void np_draw(Window *w, UiRect body)
 
     GfxClip saved = gfx_get_clip();
     gfx_clip_intersect(in.x, in.y, in.w, in.h); /* not ui_clip(): that would drop the window manager's clip */
-    GfxClip cl = gfx_get_clip(); /* a partial redraw (caret blink) only needs the rows it touches */
+    /* a partial redraw (caret blink) only needs the rows it touches: see cl above */
     GfxColor ink = ui_color(t->text);
     int p = line_offset(NP_TOP);
     NP_CARET = ui_rect(0, 0, 0, 0);
@@ -221,9 +271,15 @@ static void np_draw(Window *w, UiRect body)
             NP_CARET = ui_rect(in.x - NP_HSCROLL + caret_x(), y, 2, lh - 4);
         if (y + lh >= cl.y0 && y <= cl.y1)
         {
+            /* only the characters that are on screen: skip those left of the scroll position, stop at the right edge */
             char tmp[NP_LINE_MAX + 1];
-            copy_text(p, e - p, tmp);
-            gfx_text(f, in.x - NP_HSCROLL, y, tmp, ink);
+            int first = cols_in(p, e - p, NP_HSCROLL);
+            int x0 = span_w(p, first);
+            copy_text(p + first, e - p - first, tmp);
+            int shown = gfx_text_fit(f, tmp, in.w + NP_HSCROLL - x0 + 8) + 1; /* +1: a letter cut by the edge */
+            if (shown < NP_LINE_MAX)
+                tmp[shown] = 0;
+            gfx_text(f, in.x - NP_HSCROLL + x0, y, tmp, ink);
             if (is_cur && NP_BLINK)
                 gfx_fill_rect(NP_CARET.x, NP_CARET.y, NP_CARET.w, NP_CARET.h, ui_color(t->accent));
         }
@@ -367,9 +423,7 @@ static int np_press(Window *w, int x, int y)
     if (line > line_count() - 1)
         line = line_count() - 1;
     int ls = line_offset(line);
-    char tmp[NP_LINE_MAX + 1];
-    copy_text(ls, line_end(ls) - ls, tmp);
-    int col = gfx_text_fit(np_font(), tmp, x - in.x + NP_HSCROLL + 3); /* +3: nearer half of a letter wins */
+    int col = cols_in(ls, line_end(ls) - ls, x - in.x + NP_HSCROLL + 3); /* +3: nearer half of a letter wins */
     NP_CUR = ls + col;
     NP_DESIRED = col;
     NP_FOLLOW = 1;
