@@ -830,6 +830,9 @@ static int NP_DLG_MODE;
 static const char *NP_DLG_ERR;              /* what went wrong, shown above the field (a literal) */
 static char NP_DLG_WARNED[UI_EDIT_MAX + 1]; /* the path the "file exists" warning was shown for */
 static int NP_DLG_DIR;                      /* the folder being shown (VFS_ROOT = "This PC", the drives) */
+static int NP_AFTER = -1;                   /* an NP_ACT_*: what to do once this dialog has saved (the "Save" answer of the
+                                             * unsaved-changes question for an untitled text); -1 = nothing */
+static void run_action(int action);
 static int NP_DLG_ITEMS[DLG_MAX_ITEMS];     /* its entries: folders first, then by name */
 static int NP_DLG_N;
 static int NP_DLG_SEL = -1;                 /* selected row (index into NP_DLG_ITEMS), -1 = none */
@@ -1053,8 +1056,11 @@ static void dlg_ok(void)
         return;
     }
     NP_NOTE = NP_DLG_MODE == NP_DLG_SAVE ? "Saved" : "Opened";
-    wm_close(NP_DLG);
+    int after = NP_DLG_MODE == NP_DLG_SAVE ? NP_AFTER : -1;
+    wm_close(NP_DLG); /* (this forgets NP_AFTER, like a Cancel does) */
     np_after_change();
+    if (after >= 0)
+        run_action(after); /* saved: now what the user was doing (New, Open, close ...) */
 }
 
 static void on_dlg_ok(UiButton *b, void *user)
@@ -1206,6 +1212,7 @@ static void dlg_close(Window *w)
 {
     (void)w;
     NP_DLG = 0;
+    NP_AFTER = -1; /* closed without saving (Cancel): the pending New / Open / close is dropped */
 }
 
 /* put a dialog of w x h over the middle of the Notepad window */
@@ -1295,7 +1302,8 @@ static void conf_draw(Window *w, UiRect body)
     (void)w;
     const UiTheme *t = ui_theme();
     body = ui_inset(body, t->pad);
-    ui_text(body.x, body.y, NP_PENDING == NP_ACT_CLOSE ? "Close without saving?" : "Discard unsaved changes?", UI_TEXT_TITLE);
+    ui_text(body.x, body.y, NP_PENDING == NP_ACT_CLOSE ? "Save changes before closing?" : "Save your changes first?",
+            UI_TEXT_TITLE);
     ui_text_color(body.x, body.y + 32, "The text has changes that were not saved.", UI_TEXT_BODY, t->text_dim);
 }
 
@@ -1313,36 +1321,64 @@ static void on_conf_no(UiButton *b, void *user)
         wm_close(NP_CONF);
 }
 
-static void on_conf_yes(UiButton *b, void *user)
+/* carry out what the unsaved-changes question was about (the text is saved or given up: NP_DIRTY is off) */
+static void run_action(int action)
 {
-    (void)b;
-    (void)user;
-    if (NP_CONF)
-        wm_close(NP_CONF);
     if (!NP_WIN)
         return;
-    if (NP_PENDING == NP_ACT_NEW)
+    NP_DIRTY = 0;
+    if (action == NP_ACT_NEW)
     {
         new_document();
         NP_NOTE = "";
         np_after_change();
     }
-    else if (NP_PENDING == NP_ACT_CLOSE)
-    {
-        NP_DIRTY = 0; /* the question was answered: closing does not ask again */
+    else if (action == NP_ACT_CLOSE)
         wm_close(NP_WIN);
-    }
-    else if (NP_PENDING == NP_ACT_PATH)
+    else if (action == NP_ACT_PATH)
     {
         const char *err = open_file(NP_PENDING_PATH);
         NP_NOTE = err ? err : "Opened";
         np_after_change();
     }
     else
-    {
-        NP_DIRTY = 0; /* the question was answered: Open does not ask again */
         open_path_dialog(NP_DLG_OPEN);
+}
+
+/* "Don't save" */
+static void on_conf_yes(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    if (NP_CONF)
+        wm_close(NP_CONF);
+    run_action(NP_PENDING);
+}
+
+/* "Save": a named file is saved at once, an untitled text goes through the Save As dialog; the action then
+ * follows. If saving fails the message is shown and nothing else happens: the text is still there. */
+static void on_conf_save(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    int action = NP_PENDING;
+    if (NP_CONF)
+        wm_close(NP_CONF);
+    if (!NP_WIN)
+        return;
+    if (!NP_PATH[0])
+    {
+        if (NP_DLG)
+            wm_close(NP_DLG); /* another path dialog is open (an Open one, say): this one is for saving */
+        open_path_dialog(NP_DLG_SAVE);
+        NP_AFTER = NP_DLG ? action : -1; /* continue when the dialog has saved (dlg_ok) */
+        return;
     }
+    const char *err = save_file(NP_PATH);
+    NP_NOTE = err ? err : "Saved";
+    np_after_change();
+    if (!err)
+        run_action(action);
 }
 
 static void conf_key(Window *w, const KeyEvent *k)
@@ -1370,9 +1406,11 @@ static int ask_discard(int action)
     win->on_close = conf_close;
     int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
     int anchor = WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM;
-    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34), anchor,
-                     on_conf_no, 0);
-    wm_add_button_ex(win, "Discard", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34), anchor, on_conf_yes, 0);
+    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 120 - 10 - 100, ch - 20 - 34, 100, 34),
+                     anchor, on_conf_no, 0);
+    wm_add_button_ex(win, "Don't save", UI_BTN_DANGER, ui_rect(cw - 20 - 100 - 10 - 120, ch - 20 - 34, 120, 34), anchor,
+                     on_conf_yes, 0);
+    wm_add_button_ex(win, "Save", UI_BTN_PRIMARY, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34), anchor, on_conf_save, 0);
     return 1;
 }
 

@@ -71,7 +71,12 @@ void wm_set_button_icon(Window *w, int i, UiIcon icon) { (void)w; (void)i; (void
 static unsigned long long NOW;
 unsigned long long timer_ms(void) { return NOW; }
 static Window *STUB_CLOSED; /* the last window wm_close() was asked to close */
-void wm_close(Window *w) { STUB_CLOSED = w; }
+void wm_close(Window *w)
+{
+    STUB_CLOSED = w;
+    if (w && w->on_close)
+        w->on_close(w); /* like the real window manager: the app learns that its window is gone */
+}
 int wm_add_button(Window *w, const char *l, UiButtonKind k, UiRect r, UiButtonFn f, void *u)
 {
     (void)w; (void)l; (void)k; (void)r; (void)f; (void)u;
@@ -410,6 +415,89 @@ static void test_close_request(void)
     NP_DIRTY = 0;
 }
 
+/* the "Save" answer of the unsaved-changes question */
+static void test_save_answer(void)
+{
+    static Window NW;
+    NP_WIN = &NW;
+    NP_CONF = 0;
+    NP_DLG = 0;
+    NP_AFTER = -1;
+    STUB_DIALOG = 1;
+    STUB_CLOSED = 0;
+    const char *gone[] = {"utf.txt", "bin.dat", "tabs.txt", "over.txt", "limit.txt"}; /* make room on the full fake drive */
+    for (int i = 0; i < 5; i++)
+    {
+        int id = vfs_lookup(i == 0 ? "/Fake/utf.txt" : i == 1 ? "/Fake/bin.dat" : i == 2 ? "/Fake/tabs.txt" : i == 3 ? "/Fake/over.txt" : "/Fake/limit.txt");
+        if (id > 0)
+            vfs_remove(id);
+        (void)gone;
+    }
+
+    /* a named file: Save writes it, then the file that was asked for opens */
+    assert(open_file("/Fake/ok.txt") == 0);
+    NP_CUR = NP_ANCHOR = NP_LEN;
+    type("++");
+    NP_DIRTY = 1;
+    assert(notepad_open_file("/Fake/a.txt") == 0 && NP_CONF == &STUB_DLGW && NP_PENDING == NP_ACT_PATH);
+    on_conf_save(0, 0);
+    int ok = vfs_lookup("/Fake/ok.txt");
+    unsigned char back[16] = {0};
+    assert(ok > 0 && vfs_read(ok, 0, back, sizeof back) == 3 && memcmp(back, "x++", 3) == 0);
+    assert(same_str(NP_PATH, "/Fake/a.txt") && is("one\ntwo    three\n") && !NP_DIRTY);
+
+    /* saving fails: the message shows, the text stays, the file is not opened */
+    NP_PATH[0] = 0;
+    copy_str(NP_PATH, (int)sizeof NP_PATH, "/RAM Disk/x.txt");
+    NP_CUR = NP_ANCHOR = NP_LEN;
+    type("!");
+    NP_DIRTY = 1;
+    NP_CONF = 0;
+    assert(notepad_open_file("/Fake/ok.txt") == 0);
+    NP_NOTE = "";
+    on_conf_save(0, 0);
+    assert(NP_NOTE[0] && NP_DIRTY && is("one\ntwo    three\n!") && same_str(NP_PATH, "/RAM Disk/x.txt"));
+
+    /* an untitled text: Save opens the Save As dialog; closing the window follows once it has saved */
+    new_document();
+    type("draft");
+    NP_DIRTY = 1;
+    NP_CONF = 0;
+    STUB_CLOSED = 0;
+    assert(np_close_request(&NW) == 1 && NP_PENDING == NP_ACT_CLOSE);
+    on_conf_save(0, 0);
+    assert(NP_DLG == &STUB_DLGW && NP_DLG_MODE == NP_DLG_SAVE && NP_AFTER == NP_ACT_CLOSE && STUB_CLOSED != &NW);
+    dlg_enter(vfs_volume_node(1));
+    ui_edit_set_text(&STUB_DLGW.edits[0], "draft.txt");
+    dlg_ok();
+    int d = vfs_lookup("/Fake/draft.txt");
+    assert(d > 0 && vfs_node(d)->size == 5 && same_str(NP_PATH, "/Fake/draft.txt") && !NP_DIRTY);
+    assert(STUB_CLOSED == &NW && NP_AFTER == -1);
+
+    /* the same, but the dialog is cancelled: nothing follows */
+    new_document();
+    type("again");
+    NP_DIRTY = 1;
+    NP_CONF = 0;
+    STUB_CLOSED = 0;
+    assert(np_close_request(&NW) == 1);
+    on_conf_save(0, 0);
+    assert(NP_AFTER == NP_ACT_CLOSE);
+    dlg_close(&STUB_DLGW); /* Cancel */
+    assert(NP_AFTER == -1 && NP_DIRTY && STUB_CLOSED != &NW);
+
+    /* no window for the Save As dialog: nothing is left pending */
+    NP_CONF = 0;
+    assert(np_close_request(&NW) == 1);
+    STUB_DIALOG = 0;
+    NP_DLG = 0;
+    on_conf_save(0, 0);
+    assert(NP_AFTER == -1 && NP_DIRTY);
+    NP_WIN = 0;
+    NP_DIRTY = 0;
+    STUB_DIALOG = 0;
+}
+
 /* ---- helpers ---- */
 static void reset(void)
 {
@@ -606,6 +694,7 @@ int main(void)
     test_dialog();
     test_open_from_explorer();
     test_close_request();
+    test_save_answer();
 
     printf("notepad tests passed\n");
     return 0;
