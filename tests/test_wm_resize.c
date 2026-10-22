@@ -22,6 +22,9 @@ static void on_btn_cb(UiButton*b,void*u){ (void)b; (void)u; }
 static int on_tick_cb(Window*w){ (void)w; tick_calls++; return tick_ret; }
 static int on_hover_cb(Window*w,int x,int y){ (void)w; hov_calls++; hov_x=x; hov_y=y; return 0; }
 static int on_rpress_cb(Window*w,int x,int y){ (void)w; (void)y; rp_calls++; rp_x=x; return 0; }
+static int close_req_calls, close_req_veto, closed_calls;
+static int on_close_req_cb(Window*w){ (void)w; close_req_calls++; return close_req_veto; }
+static void on_closed_cb(Window*w){ (void)w; closed_calls++; }
 int main(void){
   int W=1024,H=640; unsigned*fb=calloc(W*H,4);
   ui_set_theme(&ui_theme_dark); gfx_init(fb,W,H,W,1);
@@ -201,6 +204,30 @@ int main(void){
     n=wm_take_damage_rects(r,WM_DAMAGE_MAX); assert(n>=1 && n<=WM_DAMAGE_MAX);
     wm_add_damage(ui_rect(10,10,20,20)); wm_add_damage(ui_rect(500,300,20,20));
     { UiRect b; assert(wm_take_damage(&b) && b.x==10 && b.y==10 && b.w==510 && b.h==310); }
+  }
+  /* close request: a window may refuse a close the user asked for; wm_close() never asks */
+  {
+    int before=wm_count();
+    Window*c=wm_create("Closer",300,300,200,150,draw,0);
+    assert(wm_count()==before+1);
+    assert(wm_request_close(c)==1 && wm_count()==before);                 /* no hook: it closes */
+    assert(wm_request_close(c)==0);                                       /* already closed: nothing */
+    c=wm_create("Closer",300,300,200,150,draw,0);
+    c->on_close_request=on_close_req_cb; c->on_close=on_closed_cb;
+    close_req_calls=0; closed_calls=0; close_req_veto=1;
+    assert(wm_request_close(c)==0 && wm_count()==before+1 && close_req_calls==1 && closed_calls==0);
+    /* the title bar's close button asks too (press and release on it) */
+    int bx=c->r.x+c->r.w-22, by=c->r.y+ui_theme()->titlebar_h/2;
+    ptr(bx,by,1); ptr(bx,by,0);
+    assert(close_req_calls==2 && wm_count()==before+1 && closed_calls==0);
+    close_req_veto=0;                                                     /* now it agrees */
+    ptr(bx,by,1); ptr(bx,by,0);
+    assert(close_req_calls==3 && wm_count()==before && closed_calls==1);
+    c=wm_create("Closer",300,300,200,150,draw,0);
+    c->on_close_request=on_close_req_cb; c->on_close=on_closed_cb;
+    close_req_calls=0; closed_calls=0; close_req_veto=1;
+    wm_close(c);                                                          /* the program closes it: not asked */
+    assert(close_req_calls==0 && closed_calls==1 && wm_count()==before);
   }
   printf("wm resize tests passed\n");
   return 0;

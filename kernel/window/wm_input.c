@@ -490,7 +490,7 @@ int wm_pointer(int x, int y, unsigned buttons)
         HOVER_CONTENT = 0;
 
     if (to_close)
-        wm_close(to_close);
+        wm_request_close(to_close); /* the close button: the window may say no (unsaved work) */
     else if (to_min)
         wm_minimize(to_min);
     else if (to_max)

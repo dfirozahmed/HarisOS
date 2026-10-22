@@ -148,6 +148,16 @@ void wm_close(Window *w)
         wm_damage_window_internal(WM_Z[t]); /* the next window becomes focused */
 }
 
+int wm_request_close(Window *w)
+{
+    if (!w || wm_z_index_internal(w) < 0)
+        return 0;
+    if (w->on_close_request && w->on_close_request(w))
+        return 0; /* it stays open (it may close itself later) */
+    wm_close(w);
+    return 1;
+}
+
 static void raise_z(Window *w)
 {
     int zi = w ? wm_z_index_internal(w) : -1;

@@ -101,7 +101,7 @@ int desktop_key(const KeyEvent *k)
         else if ((k->mods & KMOD_CTRL) && (k->mods & KMOD_ALT) && (k->key == KEY_UP || k->key == KEY_DOWN))
             gfx_set_brightness(gfx_brightness() + (k->key == KEY_UP ? 10 : -10)); /* Ctrl+Alt+Up / Down: brightness */
         else if ((k->mods & KMOD_ALT) && k->key == KEY_F4)
-            wm_close(wm_top()); /* Alt+F4: close the focused window */
+            wm_request_close(wm_top()); /* Alt+F4: close the focused window (it may say no) */
         else if ((k->mods & KMOD_ALT) && k->key == KEY_TAB)
             cycle_windows((k->mods & KMOD_SHIFT) != 0);
         else if (k->key == KEY_F11)

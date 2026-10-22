@@ -104,7 +104,7 @@ static void activate(int row)
         wm_set_maximized(w, !w->maximized);
         break;
     case 2:
-        wm_close(w);
+        wm_request_close(w); /* "Close window" in the taskbar menu: the window may say no */
         break;
     default:
         break;

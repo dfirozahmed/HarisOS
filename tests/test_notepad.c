@@ -70,7 +70,8 @@ void ui_icon(UiIcon i, int x, int y, int size, UiRgb t) { (void)i; (void)x; (voi
 void wm_set_button_icon(Window *w, int i, UiIcon icon) { (void)w; (void)i; (void)icon; }
 static unsigned long long NOW;
 unsigned long long timer_ms(void) { return NOW; }
-void wm_close(Window *w) { (void)w; }
+static Window *STUB_CLOSED; /* the last window wm_close() was asked to close */
+void wm_close(Window *w) { STUB_CLOSED = w; }
 int wm_add_button(Window *w, const char *l, UiButtonKind k, UiRect r, UiButtonFn f, void *u)
 {
     (void)w; (void)l; (void)k; (void)r; (void)f; (void)u;
@@ -382,6 +383,33 @@ static void test_open_from_explorer(void)
     NP_WIN = 0;
 }
 
+/* the close button / Alt+F4 with unsaved text (np_close_request) */
+static void test_close_request(void)
+{
+    static Window NW;
+    NP_WIN = &NW;
+    NP_CONF = 0;
+    STUB_DIALOG = 1;
+    STUB_CLOSED = 0;
+    new_document();
+    assert(np_close_request(&NW) == 0);                       /* nothing unsaved: it closes */
+    NP_DIRTY = 1;
+    assert(np_close_request(&NW) == 1 && NP_CONF == &STUB_DLGW && NP_PENDING == NP_ACT_CLOSE);
+    on_conf_no(0, 0);                                          /* Cancel: the window and the text stay */
+    assert(NP_DIRTY && NP_WIN == &NW && STUB_CLOSED == &STUB_DLGW);
+    STUB_CLOSED = 0;
+    NP_CONF = &STUB_DLGW;
+    on_conf_yes(0, 0);                                         /* Discard: now the window closes, without asking again */
+    assert(!NP_DIRTY && STUB_CLOSED == &NW);
+    NP_DIRTY = 1;                                              /* no window for the question: keep the text, say why */
+    NP_CONF = 0;
+    STUB_DIALOG = 0;
+    NP_NOTE = "";
+    assert(np_close_request(&NW) == 1 && NP_DIRTY && NP_NOTE[0]);
+    NP_WIN = 0;
+    NP_DIRTY = 0;
+}
+
 /* ---- helpers ---- */
 static void reset(void)
 {
@@ -577,6 +605,7 @@ int main(void)
     test_files();
     test_dialog();
     test_open_from_explorer();
+    test_close_request();
 
     printf("notepad tests passed\n");
     return 0;

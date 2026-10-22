@@ -47,6 +47,7 @@ typedef struct Window
     char title[WM_TITLE_MAX];
     WmDrawFn on_draw;                                    /* may be NULL */
     void (*on_close)(struct Window *w);                  /* called just before the window is closed (may be NULL) */
+    int (*on_close_request)(struct Window *w);           /* the USER asked to close it (close button, Alt+F4, the taskbar menu): return 1 to keep it open, e.g. while it asks about unsaved work, then call wm_close() later; 0 or NULL = close. Not called by wm_close() itself (may be NULL) */
     void (*on_key)(struct Window *w, const KeyEvent *k); /* key press / release while focused (may be NULL) */
     int (*on_press)(struct Window *w, int x, int y);     /* left press inside the window below the title bar; return 1 if it changed what is shown (the whole window is redrawn), or 2 if only an area it has already passed to wm_add_damage() changed (may be NULL) */
     int (*on_drag)(struct Window *w, int x, int y, unsigned buttons); /* called while the left button stays down after an on_press (and once when it is released, buttons & 1 == 0); return 1 if it changed what is shown (the whole window is redrawn), or 2 if only an area it has already passed to wm_add_damage() changed (may be NULL) */
@@ -75,6 +76,9 @@ Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, 
  * keeps working normally. The dialog is not in the taskbar and closes with its owner. */
 Window *wm_create_dialog(Window *owner, const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
 void wm_close(Window *w);
+/* Close because the user asked: first asks the window (on_close_request). Returns 1 if it was closed, 0 if the
+ * window wanted to stay open. wm_close() closes without asking. */
+int wm_request_close(Window *w);
 void wm_raise(Window *w);
 
 /* Add a button; rect is relative to the content area. -1 = window is full. */

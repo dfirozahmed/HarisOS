@@ -1283,7 +1283,8 @@ enum
 {
     NP_ACT_NEW,
     NP_ACT_OPEN,
-    NP_ACT_PATH /* open the file in NP_PENDING_PATH (asked by another app) */
+    NP_ACT_PATH, /* open the file in NP_PENDING_PATH (asked by another app) */
+    NP_ACT_CLOSE /* the user closed the window */
 };
 static Window *NP_CONF;
 static int NP_PENDING;
@@ -1294,7 +1295,7 @@ static void conf_draw(Window *w, UiRect body)
     (void)w;
     const UiTheme *t = ui_theme();
     body = ui_inset(body, t->pad);
-    ui_text(body.x, body.y, "Discard unsaved changes?", UI_TEXT_TITLE);
+    ui_text(body.x, body.y, NP_PENDING == NP_ACT_CLOSE ? "Close without saving?" : "Discard unsaved changes?", UI_TEXT_TITLE);
     ui_text_color(body.x, body.y + 32, "The text has changes that were not saved.", UI_TEXT_BODY, t->text_dim);
 }
 
@@ -1325,6 +1326,11 @@ static void on_conf_yes(UiButton *b, void *user)
         new_document();
         NP_NOTE = "";
         np_after_change();
+    }
+    else if (NP_PENDING == NP_ACT_CLOSE)
+    {
+        NP_DIRTY = 0; /* the question was answered: closing does not ask again */
+        wm_close(NP_WIN);
     }
     else if (NP_PENDING == NP_ACT_PATH)
     {
@@ -1669,6 +1675,17 @@ static int np_tick(Window *w)
     return 2;
 }
 
+/* the close button, Alt+F4 or the taskbar menu: with unsaved text the window stays and asks first */
+static int np_close_request(Window *w)
+{
+    (void)w;
+    if (!NP_DIRTY)
+        return 0;
+    if (!ask_discard(NP_ACT_CLOSE))
+        NP_NOTE = "Window limit reached - close one first"; /* it cannot ask: keep the text rather than lose it */
+    return 1;
+}
+
 static void np_close(Window *w)
 {
     (void)w;
@@ -1708,6 +1725,7 @@ static void notepad_app_open(void)
     win->on_wheel = np_wheel;
     win->on_tick = np_tick;
     win->on_close = np_close;
+    win->on_close_request = np_close_request;
     win->icon = TASKBAR_ICON_NOTEPAD;
     wm_set_min_size(win, 330, 230);
     NP_WIN = win;
