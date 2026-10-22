@@ -6,6 +6,131 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
+/* ---- a tiny in-memory drive, to test vfs_write / vfs_save ---- */
+typedef struct
+{
+    int used;
+    char name[VFS_NAME_MAX];
+    unsigned char data[256];
+    unsigned size;
+} FFile;
+static FFile FF[8];
+static int FF_FULL; /* 1 = every write fails with "drive full" */
+
+static int ff_list(void *ctx, int dir)
+{
+    (void)ctx;
+    for (int i = 0; i < 8; i++)
+        if (FF[i].used)
+        {
+            unsigned char fs[VFS_FS_BYTES] = {(unsigned char)i};
+            vfs_attach(dir, FF[i].name, 0, FF[i].size, fs);
+        }
+    return 0;
+}
+static int ff_create(void *ctx, VfsNode *parent, const char *name, int is_dir, unsigned char *fs_out)
+{
+    (void)ctx; (void)parent;
+    if (is_dir)
+        return VFS_ERR_UNSUPPORTED;
+    for (int i = 0; i < 8; i++)
+        if (!FF[i].used)
+        {
+            memset(&FF[i], 0, sizeof FF[i]);
+            FF[i].used = 1;
+            strcpy(FF[i].name, name);
+            fs_out[0] = (unsigned char)i;
+            return 0;
+        }
+    return VFS_ERR_FULL;
+}
+static int ff_remove(void *ctx, const VfsNode *n) { (void)ctx; FF[n->fs[0]].used = 0; return 0; }
+static int ff_rename(void *ctx, VfsNode *n, const char *name) { (void)ctx; strcpy(FF[n->fs[0]].name, name); return 0; }
+static int ff_read(void *ctx, const VfsNode *n, unsigned off, void *buf, unsigned len)
+{
+    (void)ctx;
+    const FFile *f = &FF[n->fs[0]];
+    if (off >= f->size)
+        return 0;
+    if (len > f->size - off)
+        len = f->size - off;
+    memcpy(buf, f->data + off, len);
+    return (int)len;
+}
+static int ff_write(void *ctx, VfsNode *n, unsigned off, const void *buf, unsigned len)
+{
+    (void)ctx;
+    FFile *f = &FF[n->fs[0]];
+    if (FF_FULL || off + len > sizeof f->data)
+        return VFS_ERR_FULL;
+    memcpy(f->data + off, buf, len);
+    if (off + len > f->size)
+        f->size = off + len;
+    n->size = f->size;
+    return (int)len;
+}
+static void ff_info(void *ctx, VfsVolInfo *out) { (void)ctx; memset(out, 0, sizeof *out); out->writable = 1; }
+static const VfsBackend FAKE = {ff_list, ff_create, ff_remove, ff_rename, 0, ff_read, ff_write, ff_info, 0, 0};
+
+static int ff_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < 8; i++)
+        n += FF[i].used;
+    return n;
+}
+
+static void test_save(void)
+{
+    vfs_init();
+    int ram = vfs_volume_node(0);
+    CHECK(vfs_mount(&FAKE, 0, "Fake") == 1);
+    int root = vfs_volume_node(1);
+    char buf[300];
+
+    /* a new file */
+    int a = vfs_save(root, "a.txt", "hello", 5);
+    CHECK(a > 0 && vfs_node(a)->size == 5 && ff_count() == 1);
+    CHECK(vfs_read(a, 0, buf, sizeof buf) == 5 && memcmp(buf, "hello", 5) == 0);
+
+    /* replacing it with shorter text: no leftover bytes, no leftover temporary file */
+    int b = vfs_save(root, "a.txt", "hi", 2);
+    CHECK(b > 0 && vfs_node(b)->size == 2 && ff_count() == 1 && vfs_lookup("/Fake/a.txt") == b);
+    CHECK(vfs_read(b, 0, buf, sizeof buf) == 2 && memcmp(buf, "hi", 2) == 0);
+    CHECK(vfs_lookup("/Fake/a.txt.tmp") < 0);
+
+    /* longer text, and an empty file */
+    int c = vfs_save(root, "a.txt", "0123456789", 10);
+    CHECK(c > 0 && vfs_node(c)->size == 10 && ff_count() == 1);
+    int e = vfs_save(root, "empty.txt", "", 0);
+    CHECK(e > 0 && vfs_node(e)->size == 0 && ff_count() == 2);
+
+    /* a drive that is full: the old file survives, a new file is not left half-written */
+    FF_FULL = 1;
+    CHECK(vfs_save(root, "a.txt", "zzzz", 4) == -1 && vfs_last_error() == VFS_ERR_FULL);
+    int keep = vfs_lookup("/Fake/a.txt");
+    CHECK(keep > 0 && vfs_node(keep)->size == 10 && vfs_lookup("/Fake/a.txt.tmp") < 0 && ff_count() == 2);
+    CHECK(vfs_read(keep, 0, buf, sizeof buf) == 10 && memcmp(buf, "0123456789", 10) == 0);
+    CHECK(vfs_save(root, "b.txt", "data", 4) == -1 && vfs_lookup("/Fake/b.txt") < 0 && ff_count() == 2);
+    FF_FULL = 0;
+
+    /* a text bigger than the drive allows */
+    CHECK(vfs_save(root, "big.txt", buf, 300) == -1 && vfs_lookup("/Fake/big.txt") < 0 && ff_count() == 2);
+
+    /* a leftover .tmp from an earlier cut-short save is replaced */
+    int stale = vfs_add(root, "a.txt.tmp", 0, 0);
+    CHECK(stale > 0 && vfs_write(stale, 0, "old", 3) == 3);
+    int f = vfs_save(root, "a.txt", "fresh", 5);
+    CHECK(f > 0 && vfs_lookup("/Fake/a.txt.tmp") < 0 && ff_count() == 2);
+
+    /* refused: the RAM Disk has no file content, a file is not a folder, a bad name, a name that is a folder */
+    CHECK(vfs_save(ram, "x.txt", "x", 1) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);
+    CHECK(vfs_save(f, "x.txt", "x", 1) == -1 && vfs_last_error() == VFS_ERR_ARG);
+    CHECK(vfs_save(root, "a/b.txt", "x", 1) == -1 && vfs_last_error() == VFS_ERR_BADNAME);
+    CHECK(vfs_write(vfs_lookup("/RAM Disk/readme.txt"), 0, "x", 1) == -1 && vfs_last_error() == VFS_ERR_UNSUPPORTED);
+    CHECK(vfs_write(root, 0, "x", 1) == -1 && vfs_last_error() == VFS_ERR_ARG);
+}
+
 int main(void)
 {
     vfs_reset();
@@ -175,6 +300,8 @@ int main(void)
     CHECK(vfs_rename(vfs_volume_node(0), "x") == -1 && vfs_remove(vfs_volume_node(0)) == -1);  /* a drive stays */
     CHECK(vfs_volume_of(vfs_lookup("/RAM Disk/Music/intro.wav")) == 0 && vfs_volume_of(VFS_ROOT) == -1);
     CHECK(vfs_count() < VFS_MAX_NODES);
+
+    test_save();
 
     if (fails) { printf("%d check(s) failed\n", fails); return 1; }
     printf("vfs tests passed\n");

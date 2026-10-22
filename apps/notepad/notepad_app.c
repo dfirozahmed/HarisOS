@@ -1,4 +1,4 @@
-/* Notepad app, steps 1-2: a plain-text editor that lives in memory (no files yet).
+/* Notepad app: a plain-text editor with selection, undo / redo and New / Open / Save / Save As (Ctrl+N / O / S).
  * Typing, Enter, Tab (4 spaces), Backspace / Delete, arrows, Home / End, PageUp / PageDown, mouse click
  * to place the caret, mouse wheel to scroll. Selection: Shift + movement keys, mouse drag, Ctrl+A; Ctrl+C / X / V
  * (also Ctrl+Insert, Shift+Delete, Shift+Insert) with the shared HarisUI clipboard.
@@ -9,10 +9,12 @@
 #include "gfx.h"
 #include "taskbar.h"
 #include "ui.h"
+#include "vfs.h"
 #include "wm.h"
 
 #define NP_MAX 16384 /* bytes of text */
 #define NP_PAD 8
+#define NP_TOOL_H 46 /* the row of buttons above the text */
 #define NP_STATUS_H 22
 #define NP_LINE_MAX 511 /* characters of one line that are measured / drawn */
 #define NP_TAB 4
@@ -29,6 +31,9 @@ static int NP_FOLLOW;  /* 1 = scroll so that the caret is visible at the next dr
 static int NP_ANCHOR;  /* the other end of the selection; NP_ANCHOR == NP_CUR means nothing is selected */
 static int NP_SELECTING; /* the left button went down in the text and is still held: dragging selects */
 static int NP_BLINK = 1;
+static char NP_PATH[UI_EDIT_MAX + 1]; /* the file the text came from or was saved to; "" = untitled */
+static int NP_DIRTY;                  /* the text has changes that were not saved */
+static const char *NP_NOTE = "";      /* a short message at the right of the status bar (a literal) */
 static UiRect NP_CARET; /* where the caret was drawn (screen), w = 0 if it is scrolled out of view */
 
 /* ---- text buffer ---- */
@@ -295,8 +300,8 @@ static int np_line_h(void)
 
 static UiRect text_area(UiRect body)
 {
-    return ui_rect(body.x + NP_PAD, body.y + NP_PAD, body.w - 2 * NP_PAD,
-                   body.h - NP_PAD - NP_STATUS_H - 6 - NP_PAD / 2);
+    return ui_rect(body.x + NP_PAD, body.y + NP_TOOL_H, body.w - 2 * NP_PAD,
+                   body.h - NP_TOOL_H - NP_STATUS_H - 6 - NP_PAD / 2);
 }
 
 static UiRect status_rect(UiRect body)
@@ -489,6 +494,8 @@ static void np_draw(Window *w, UiRect body)
         put_str(st, &n, " selected");
     }
     ui_text_in_color(status_rect(body), st, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
+    if (NP_NOTE[0])
+        ui_text_in_color(status_rect(body), NP_NOTE, UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
 }
 
 /* ---- input ---- */
@@ -562,6 +569,511 @@ static void paste(void)
         insert_text(text, len); /* one undo step, whatever its size */
 }
 
+/* ---- files: New / Open / Save / Save As ----
+ * Text is plain ASCII (the font has no other letters). A file is found by its full path in the virtual file
+ * system, e.g. "/HARISOS (nvme0p1)/notes.txt". Only a drive can hold content: the RAM Disk's files are just
+ * names. Opening turns Tab into spaces and drops carriage returns (so Windows line endings become '\n'). */
+
+static void copy_str(char *dst, int cap, const char *src)
+{
+    int n = 0;
+    while (src[n] && n < cap - 1)
+    {
+        dst[n] = src[n];
+        n++;
+    }
+    dst[n] = 0;
+}
+
+static int same_str(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+
+/* the file name part of a path ("" for a path that ends with '/') */
+static const char *path_name(const char *path)
+{
+    const char *name = path;
+    for (const char *s = path; *s; s++)
+        if (*s == '/')
+            name = s + 1;
+    return name;
+}
+
+/* "name* - Notepad": a star while there are changes that were not saved */
+static void np_title(Window *w)
+{
+    char t[WM_TITLE_MAX];
+    int n = 0;
+    const char *name = NP_PATH[0] ? path_name(NP_PATH) : "Untitled";
+    int len = 0;
+    while (name[len])
+        len++;
+    if (len > 16)
+        len = 14;
+    for (int i = 0; i < len; i++)
+        t[n++] = name[i];
+    if (name[len]) /* cut: show that there is more */
+    {
+        t[n++] = '.';
+        t[n++] = '.';
+    }
+    if (NP_DIRTY)
+        t[n++] = '*';
+    for (const char *s = " - Notepad"; *s; s++)
+        t[n++] = *s;
+    t[n] = 0;
+    if (same_str(t, w->title))
+        return;
+    copy_str(w->title, WM_TITLE_MAX, t);
+    wm_add_damage(ui_rect(w->r.x, w->r.y, w->r.w, ui_theme()->titlebar_h));
+}
+
+static void new_document(void)
+{
+    NP_LEN = NP_CUR = NP_ANCHOR = 0;
+    NP_UN = NP_UPOS = 0;
+    NP_LASTKIND = NP_KIND_NONE;
+    NP_TOP = NP_HSCROLL = 0;
+    NP_DESIRED = 0;
+    NP_PATH[0] = 0;
+    NP_DIRTY = 0;
+    NP_FOLLOW = 1;
+}
+
+static const char *vfs_problem(void)
+{
+    if (vfs_last_error() == VFS_ERR_UNSUPPORTED)
+        return "Files cannot be stored here (RAM Disk / This PC)";
+    return vfs_error_text(vfs_last_error());
+}
+
+/* Replace the text with the file at `path`. Returns NULL, or a sentence saying why not (the text is then untouched). */
+static const char *open_file(const char *path)
+{
+    static unsigned char raw[NP_MAX];
+    int id = vfs_lookup(path);
+    if (id < 0)
+        return "File not found";
+    const VfsNode *n = vfs_node(id);
+    if (n->is_dir)
+        return "That is a folder, not a file";
+    if (n->size > NP_MAX)
+        return "File is too large (the limit is 16384 bytes)";
+    unsigned size = n->size, done = 0;
+    while (done < size)
+    {
+        int r = vfs_read(id, done, raw + done, size - done);
+        if (r < 0)
+            return vfs_problem();
+        if (r == 0)
+            break;
+        done += (unsigned)r;
+    }
+    int out = 0;
+    for (unsigned i = 0; i < done; i++)
+    {
+        unsigned char c = raw[i];
+        if (c == '\t')
+            out += NP_TAB;
+        else if (c == '\n' || (c >= 32 && c < 127))
+            out++;
+        else if (c != '\r')
+            return "Only plain ASCII text can be opened";
+    }
+    if (out > NP_MAX)
+        return "File is too large (the limit is 16384 bytes)";
+    new_document();
+    for (unsigned i = 0; i < done; i++)
+    {
+        unsigned char c = raw[i];
+        if (c == '\t')
+            for (int k = 0; k < NP_TAB; k++)
+                NP_BUF[NP_LEN++] = ' ';
+        else if (c != '\r')
+            NP_BUF[NP_LEN++] = (char)c;
+    }
+    copy_str(NP_PATH, (int)sizeof NP_PATH, path);
+    return 0;
+}
+
+/* Save the text as the file at `path` (an existing file is replaced). NULL, or why not. */
+static const char *save_file(const char *path)
+{
+    const char *name = path_name(path);
+    if (path[0] != '/')
+        return "The path must start with /";
+    if (!name[0])
+        return "Type a file name after the folder";
+    char folder[UI_EDIT_MAX + 1];
+    int flen = (int)(name - path) - 1; /* without the '/' before the name */
+    if (flen == 0)
+        copy_str(folder, (int)sizeof folder, "/");
+    else
+    {
+        for (int i = 0; i < flen; i++)
+            folder[i] = path[i];
+        folder[flen] = 0;
+    }
+    int parent = vfs_lookup(folder);
+    if (parent < 0)
+        return "Folder not found";
+    if (vfs_save(parent, name, NP_BUF, (unsigned)NP_LEN) < 0)
+        return vfs_problem();
+    copy_str(NP_PATH, (int)sizeof NP_PATH, path);
+    NP_DIRTY = 0;
+    return 0;
+}
+
+/* a first suggestion for the path field: the first drive that holds real files */
+static void default_path(char *out, int cap)
+{
+    copy_str(out, cap, "/");
+    for (int i = 0; i < vfs_volume_count(); i++)
+    {
+        VfsVolInfo vi;
+        if (vfs_volume_info(i, &vi) == 0 && vi.writable && !same_str(vi.fs_name, "RAM"))
+        {
+            int n = 0;
+            out[n++] = '/';
+            for (const char *s = vfs_node(vi.node)->name; *s && n < cap - 2; s++)
+                out[n++] = *s;
+            out[n++] = '/';
+            out[n] = 0;
+            return;
+        }
+    }
+}
+
+/* ---- the Save As / Open dialog: one path field ---- */
+enum
+{
+    NP_DLG_SAVE,
+    NP_DLG_OPEN
+};
+static Window *NP_DLG;
+static int NP_DLG_MODE;
+static const char *NP_DLG_ERR;               /* what went wrong, shown under the field (a literal) */
+static char NP_DLG_WARNED[UI_EDIT_MAX + 1];  /* the path the "file exists" warning was shown for */
+
+static void dlg_draw(Window *w, UiRect body)
+{
+    const UiTheme *t = ui_theme();
+    body = ui_inset(body, t->pad);
+    ui_text(body.x, body.y, NP_DLG_MODE == NP_DLG_SAVE ? "Save as" : "Open file", UI_TEXT_TITLE);
+    ui_text_color(body.x, body.y + 28, "Type the full path, for example /Drive name/notes.txt", UI_TEXT_SMALL, t->text_dim);
+    ui_edit_draw(ui_rect(body.x, body.y + 54, body.w, 34), &w->edits[0], "/", 1);
+    if (NP_DLG_ERR)
+        ui_text_in_color(ui_rect(body.x, body.y + 94, body.w, 22), NP_DLG_ERR, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->danger);
+
+    ui_text_color(body.x, body.y + 124, "Drives", UI_TEXT_SMALL, t->text_dim);
+    for (int i = 0; i < vfs_volume_count() && i < 4; i++)
+    {
+        VfsVolInfo vi;
+        if (vfs_volume_info(i, &vi) != 0)
+            continue;
+        char line[VFS_NAME_MAX + 40];
+        int n = 0;
+        line[n++] = '/';
+        for (const char *s = vfs_node(vi.node)->name; *s && n < VFS_NAME_MAX; s++)
+            line[n++] = *s;
+        if (same_str(vi.fs_name, "RAM"))
+            for (const char *s = "   (no file content)"; *s; s++)
+                line[n++] = *s;
+        else if (!vi.writable || vi.locked)
+            for (const char *s = "   (read only)"; *s; s++)
+                line[n++] = *s;
+        line[n] = 0;
+        ui_text_in_color(ui_rect(body.x, body.y + 146 + i * 20, body.w, 20), line, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text);
+    }
+}
+
+static void np_after_change(void)
+{
+    if (NP_WIN)
+    {
+        np_title(NP_WIN);
+        wm_add_damage(NP_WIN->r); /* the text was replaced or the file name changed */
+    }
+}
+
+static void dlg_ok(void)
+{
+    if (!NP_DLG)
+        return;
+    const char *path = NP_DLG->edits[0].text;
+    const char *err;
+    if (!path[0])
+    {
+        NP_DLG_ERR = "Type a path first";
+        return;
+    }
+    if (NP_DLG_MODE == NP_DLG_SAVE)
+    {
+        int id = vfs_lookup(path);
+        if (id >= 0 && vfs_node(id)->is_dir)
+        {
+            NP_DLG_ERR = "That is a folder: add a file name";
+            return;
+        }
+        if (id >= 0 && !same_str(path, NP_PATH) && !same_str(path, NP_DLG_WARNED)) /* asked once before replacing another file */
+        {
+            copy_str(NP_DLG_WARNED, (int)sizeof NP_DLG_WARNED, path);
+            NP_DLG_ERR = "This file exists. Press Save again to replace it";
+            return;
+        }
+        err = save_file(path);
+    }
+    else
+        err = open_file(path);
+    if (err)
+    {
+        NP_DLG_ERR = err;
+        return;
+    }
+    NP_NOTE = NP_DLG_MODE == NP_DLG_SAVE ? "Saved" : "Opened";
+    wm_close(NP_DLG);
+    np_after_change();
+}
+
+static void on_dlg_ok(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    dlg_ok();
+}
+
+static void on_dlg_cancel(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    if (NP_DLG)
+        wm_close(NP_DLG);
+}
+
+static void dlg_key(Window *w, const KeyEvent *k)
+{
+    if (k->pressed && k->key == KEY_ENTER)
+        dlg_ok();
+    else if (k->pressed && k->key == KEY_ESC)
+        wm_close(w);
+    else if (ui_edit_key(&w->edits[0], k))
+    {
+        NP_DLG_ERR = 0; /* the path changed: the old complaint no longer applies */
+        ui_caret_restart();
+    }
+}
+
+static int dlg_press(Window *w, int x, int y)
+{
+    UiRect f = w->edits[0].field;
+    if (f.w > 0 && ui_contains(f, x, y))
+    {
+        ui_edit_mouse(&w->edits[0], x, y, 1);
+        ui_caret_restart();
+        return 1;
+    }
+    return 0;
+}
+
+static int dlg_drag(Window *w, int x, int y, unsigned buttons)
+{
+    if (!w->edits[0].dragging || !ui_edit_mouse(&w->edits[0], x, y, buttons))
+        return 0;
+    ui_caret_restart();
+    wm_add_damage(ui_inset(w->edits[0].field, -3));
+    return 2;
+}
+
+static void dlg_close(Window *w)
+{
+    (void)w;
+    NP_DLG = 0;
+}
+
+/* put a dialog of w x h over the middle of the Notepad window */
+static Window *open_dialog_window(const char *title, int w, int h, WmDrawFn draw)
+{
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int x = NP_WIN->r.x + (NP_WIN->r.w - w) / 2, y = NP_WIN->r.y + (NP_WIN->r.h - h) / 2;
+    if (x + w > W)
+        x = W - w;
+    if (y + h > H - TASKBAR_HEIGHT)
+        y = H - TASKBAR_HEIGHT - h;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    Window *win = wm_create_dialog(NP_WIN, title, x, y, w, h, draw, 0);
+    if (!win)
+        NP_NOTE = "Window limit reached - close one first";
+    return win;
+}
+
+static void open_path_dialog(int mode)
+{
+    if (!NP_WIN)
+        return;
+    if (NP_DLG)
+    {
+        wm_activate(NP_DLG);
+        return;
+    }
+    int w = 520, h = 340;
+    Window *win = open_dialog_window(mode == NP_DLG_SAVE ? "Save As" : "Open", w, h, dlg_draw);
+    if (!win)
+        return;
+    NP_DLG = win;
+    NP_DLG_MODE = mode;
+    NP_DLG_ERR = 0;
+    NP_DLG_WARNED[0] = 0;
+    win->on_key = dlg_key;
+    win->on_press = dlg_press;
+    win->on_drag = dlg_drag;
+    win->on_close = dlg_close;
+    win->edit_count = 1;
+    win->focus = 0;
+    win->caret = 1;
+    char start[UI_EDIT_MAX + 1];
+    if (NP_PATH[0])
+        copy_str(start, (int)sizeof start, NP_PATH);
+    else
+        default_path(start, (int)sizeof start);
+    ui_edit_set_text(&win->edits[0], start);
+    int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
+    int anchor = WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM;
+    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34), anchor,
+                     on_dlg_cancel, 0);
+    wm_add_button_ex(win, mode == NP_DLG_SAVE ? "Save" : "Open", UI_BTN_PRIMARY,
+                     ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34), anchor, on_dlg_ok, 0);
+}
+
+/* ---- "discard unsaved changes?" ---- */
+enum
+{
+    NP_ACT_NEW,
+    NP_ACT_OPEN
+};
+static Window *NP_CONF;
+static int NP_PENDING;
+
+static void conf_draw(Window *w, UiRect body)
+{
+    (void)w;
+    const UiTheme *t = ui_theme();
+    body = ui_inset(body, t->pad);
+    ui_text(body.x, body.y, "Discard unsaved changes?", UI_TEXT_TITLE);
+    ui_text_color(body.x, body.y + 32, "The text has changes that were not saved.", UI_TEXT_BODY, t->text_dim);
+}
+
+static void conf_close(Window *w)
+{
+    (void)w;
+    NP_CONF = 0;
+}
+
+static void on_conf_no(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    if (NP_CONF)
+        wm_close(NP_CONF);
+}
+
+static void on_conf_yes(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    if (NP_CONF)
+        wm_close(NP_CONF);
+    if (!NP_WIN)
+        return;
+    if (NP_PENDING == NP_ACT_NEW)
+    {
+        new_document();
+        NP_NOTE = "";
+        np_after_change();
+    }
+    else
+    {
+        NP_DIRTY = 0; /* the question was answered: Open does not ask again */
+        open_path_dialog(NP_DLG_OPEN);
+    }
+}
+
+static void conf_key(Window *w, const KeyEvent *k)
+{
+    if (k->pressed && k->key == KEY_ESC)
+        wm_close(w); /* no default answer on Enter: discarding must be a deliberate click */
+}
+
+static void ask_discard(int action)
+{
+    if (NP_CONF)
+    {
+        wm_activate(NP_CONF);
+        return;
+    }
+    int w = 420, h = 190;
+    Window *win = open_dialog_window("Notepad", w, h, conf_draw);
+    if (!win)
+        return;
+    NP_CONF = win;
+    NP_PENDING = action;
+    win->on_key = conf_key;
+    win->on_close = conf_close;
+    int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
+    int anchor = WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM;
+    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34), anchor,
+                     on_conf_no, 0);
+    wm_add_button_ex(win, "Discard", UI_BTN_DANGER, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34), anchor, on_conf_yes, 0);
+}
+
+/* ---- the commands (toolbar buttons and Ctrl+N / O / S) ---- */
+static void cmd_new(void)
+{
+    if (NP_DIRTY)
+        ask_discard(NP_ACT_NEW);
+    else
+    {
+        new_document();
+        NP_NOTE = "";
+        np_after_change();
+    }
+}
+
+static void cmd_open(void)
+{
+    if (NP_DIRTY)
+        ask_discard(NP_ACT_OPEN);
+    else
+        open_path_dialog(NP_DLG_OPEN);
+}
+
+static void cmd_save(void)
+{
+    if (!NP_PATH[0])
+    {
+        open_path_dialog(NP_DLG_SAVE);
+        return;
+    }
+    const char *err = save_file(NP_PATH);
+    NP_NOTE = err ? err : "Saved";
+    np_after_change();
+}
+
+static void cmd_save_as(void)
+{
+    open_path_dialog(NP_DLG_SAVE);
+}
+
+static void on_new(UiButton *b, void *user) { (void)b; (void)user; cmd_new(); }
+static void on_open(UiButton *b, void *user) { (void)b; (void)user; cmd_open(); }
+static void on_save(UiButton *b, void *user) { (void)b; (void)user; cmd_save(); }
+static void on_save_as(UiButton *b, void *user) { (void)b; (void)user; cmd_save_as(); }
+
 static void np_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed)
@@ -569,7 +1081,10 @@ static void np_key(Window *w, const KeyEvent *k)
         wm_key_partial(); /* a release changes nothing: no redraw at all */
         return;
     }
+    NP_NOTE = ""; /* a message stays until the next key */
     unsigned edits_before = NP_EDITS;
+    int upos_before = NP_UPOS;
+    int full = 0; /* the key opened a dialog or replaced the text: redraw the whole window */
     int vertical = 0;
     int motion = 0; /* a key that only moves the caret: with Shift it extends the selection */
     int keep_anchor = 0;
@@ -611,6 +1126,21 @@ static void np_key(Window *w, const KeyEvent *k)
             redo();
             keep_anchor = 1;
             old_lines = -1;
+            break;
+        case 'n':
+            cmd_new();
+            full = 1;
+            break;
+        case 'o':
+            cmd_open();
+            full = 1;
+            break;
+        case 's':
+            if (shift)
+                cmd_save_as();
+            else
+                cmd_save();
+            full = 1;
             break;
         default:
             break;
@@ -702,8 +1232,13 @@ static void np_key(Window *w, const KeyEvent *k)
     ui_caret_restart();
     NP_BLINK = 1;
 
+    if (NP_EDITS != edits_before || NP_UPOS != upos_before)
+        NP_DIRTY = 1; /* undo / redo count too: whether the text is back to the saved state is not tracked */
+    np_title(w);      /* the star in the title bar (damages only the title bar) */
+
     mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll);
-    wm_key_partial();
+    if (!full)
+        wm_key_partial();
 }
 
 /* buffer offset of the character nearest to the screen point (x, y); a point outside the text area counts as
@@ -835,10 +1370,16 @@ static void notepad_app_open(void)
     win->on_tick = np_tick;
     win->on_close = np_close;
     win->icon = TASKBAR_ICON_NOTEPAD;
-    wm_set_min_size(win, 320, 220);
+    wm_set_min_size(win, 330, 230);
     NP_WIN = win;
     desktop_set_status(0);
     NP_FOLLOW = 1;
+    np_title(win);
+
+    wm_add_button(win, "New", UI_BTN_SECONDARY, ui_rect(NP_PAD, 8, 64, 30), on_new, 0);
+    wm_add_button(win, "Open", UI_BTN_SECONDARY, ui_rect(NP_PAD + 72, 8, 64, 30), on_open, 0);
+    wm_add_button(win, "Save", UI_BTN_SECONDARY, ui_rect(NP_PAD + 144, 8, 64, 30), on_save, 0);
+    wm_add_button(win, "Save As", UI_BTN_SECONDARY, ui_rect(NP_PAD + 216, 8, 84, 30), on_save_as, 0);
 }
 
 const AppInfo APP_NOTEPAD = {

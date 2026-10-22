@@ -881,3 +881,90 @@ int vfs_read(int id, unsigned offset, void *buf, unsigned len)
     int r = b->read(ctx_of(id), n, offset, buf, len);
     return r < 0 ? fail(r) : r;
 }
+
+int vfs_write(int id, unsigned offset, const void *buf, unsigned len)
+{
+    const VfsNode *n = vfs_node(id);
+    if (!n || n->is_dir)
+        return fail(VFS_ERR_ARG);
+    const VfsBackend *b = ops_of(id);
+    if (!b)
+        return fail(VFS_ERR_UNSUPPORTED); /* RAM-disk files have no content */
+    if (!b->write)
+        return fail(VFS_ERR_NOWRITE);
+    int r = b->write(ctx_of(id), &NODES[id], offset, buf, len);
+    return r < 0 ? fail(r) : r;
+}
+
+/* write all of buf into file `id` from offset 0; 0 or -1 */
+static int write_all(int id, const void *buf, unsigned len)
+{
+    const unsigned char *p = (const unsigned char *)buf;
+    unsigned done = 0;
+    while (done < len)
+    {
+        int r = vfs_write(id, done, p + done, len - done);
+        if (r < 0)
+            return -1;
+        if (r == 0)
+            return fail(VFS_ERR_IO); /* no progress: do not loop forever */
+        done += (unsigned)r;
+    }
+    return 0;
+}
+
+int vfs_save(int parent, const char *name, const void *buf, unsigned len)
+{
+    const VfsNode *p = vfs_node(parent);
+    if (!p || !p->is_dir)
+        return fail(VFS_ERR_ARG);
+    if (name_len(name) < 0)
+        return fail(VFS_ERR_BADNAME);
+    if (!ops_of(parent))
+        return fail(VFS_ERR_UNSUPPORTED);
+    ensure_loaded(parent);
+    int old = find_child(parent, name);
+    if (old >= 0 && NODES[old].is_dir)
+        return fail(VFS_ERR_EXISTS);
+
+    /* A new file is simply created and filled. An existing one cannot be shortened (the drives have no
+     * truncate), so the new content goes to a temporary file first; the old file is deleted and the
+     * temporary one renamed only after all of it was written - a full or failing drive never costs the old text. */
+    char tmp[VFS_NAME_MAX];
+    const char *target = name;
+    if (old >= 0)
+    {
+        int n = 0;
+        for (const char *s = name; *s && n < VFS_NAME_MAX - 6; s++)
+            tmp[n++] = *s;
+        for (const char *s = ".tmp"; *s; s++)
+            tmp[n++] = *s;
+        tmp[n] = 0;
+        int stale = find_child(parent, tmp);
+        if (stale >= 0 && vfs_remove(stale) < 0) /* left over from a save that was cut short */
+            return -1;
+        target = tmp;
+    }
+    batch(parent, 1);
+    int id = vfs_add(parent, target, 0, 0);
+    int err = 0;
+    if (id < 0 || write_all(id, buf, len) < 0)
+    {
+        err = vfs_last_error();
+        if (id >= 0)
+            vfs_remove(id); /* do not leave a half-written file behind */
+        id = -1;
+    }
+    else if (old >= 0)
+    {
+        if (vfs_remove(old) < 0 || vfs_rename(id, name) < 0)
+        {
+            err = vfs_last_error();
+            id = -1; /* the new text is safe in the .tmp file */
+        }
+    }
+    batch(parent, 0);
+    if (id < 0)
+        return fail(err);
+    return id;
+}

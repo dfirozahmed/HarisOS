@@ -158,6 +158,16 @@ int vfs_move(int id, int dest);
 /* Read bytes of a file on a drive. Returns the count (0 at the end) or -1 (RAM-disk files have no content). */
 int vfs_read(int id, unsigned offset, void *buf, unsigned len);
 
+/* Write bytes of a file on a drive at `offset` (the file grows when written past its end; it never shrinks).
+ * Returns the count written or -1 (RAM-disk files have no content: VFS_ERR_UNSUPPORTED). */
+int vfs_write(int id, unsigned offset, const void *buf, unsigned len);
+
+/* Create file `name` in folder `parent` (on a drive) with exactly buf[0,len) as its content, or replace the
+ * file of that name. Returns the file's id or -1. A replaced file is only deleted after the new content was
+ * written in full (to "name.tmp" first), so a failure keeps the old file; if that last step fails the text is
+ * left in "name.tmp". */
+int vfs_save(int parent, const char *name, const void *buf, unsigned len);
+
 /* 1 if `id` is `ancestor` or lies below it. */
 int vfs_is_under(int id, int ancestor);
 

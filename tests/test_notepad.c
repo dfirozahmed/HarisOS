@@ -52,6 +52,28 @@ UiRect ui_inset(UiRect r, int a) { return ui_rect(r.x + a, r.y + a, r.w - 2 * a,
 int ui_text_height(UiTextStyle s) { (void)s; return 16; }
 void ui_text_in_color(UiRect r, const char *s, UiTextStyle st, UiAlign al, UiRgb c) { (void)r; (void)s; (void)st; (void)al; (void)c; }
 const UiTheme *ui_theme(void) { return &THEME_STORE; }
+void ui_text(int x, int y, const char *s, UiTextStyle st) { (void)x; (void)y; (void)s; (void)st; }
+void ui_text_color(int x, int y, const char *s, UiTextStyle st, UiRgb c) { (void)x; (void)y; (void)s; (void)st; (void)c; }
+void ui_edit_draw(UiRect r, UiEdit *e, const char *p, int f) { (void)r; (void)e; (void)p; (void)f; }
+int ui_edit_key(UiEdit *e, const KeyEvent *k) { (void)e; (void)k; return 0; }
+int ui_edit_mouse(UiEdit *e, int x, int y, unsigned b) { (void)e; (void)x; (void)y; (void)b; return 0; }
+void ui_edit_set_text(UiEdit *e, const char *s) { (void)e; (void)s; }
+void wm_close(Window *w) { (void)w; }
+int wm_add_button(Window *w, const char *l, UiButtonKind k, UiRect r, UiButtonFn f, void *u)
+{
+    (void)w; (void)l; (void)k; (void)r; (void)f; (void)u;
+    return 0;
+}
+int wm_add_button_ex(Window *w, const char *l, UiButtonKind k, UiRect r, int a, UiButtonFn f, void *u)
+{
+    (void)w; (void)l; (void)k; (void)r; (void)a; (void)f; (void)u;
+    return 0;
+}
+Window *wm_create_dialog(Window *o, const char *t, int x, int y, int w, int h, WmDrawFn d, void *u)
+{
+    (void)o; (void)t; (void)x; (void)y; (void)w; (void)h; (void)d; (void)u;
+    return 0;
+}
 void wm_activate(Window *w) { (void)w; }
 void wm_add_damage(UiRect r) { (void)r; }
 UiRect wm_content(const Window *w) { (void)w; return ui_rect(0, 0, 400, 300); }
@@ -63,6 +85,139 @@ Window *wm_create(const char *t, int x, int y, int w, int h, WmDrawFn d, void *u
 void wm_invalidate(void) {}
 void wm_key_partial(void) {}
 void wm_set_min_size(Window *w, int a, int b) { (void)w; (void)a; (void)b; }
+
+/* ---- a tiny in-memory drive for the file tests ---- */
+typedef struct
+{
+    int used;
+    char name[VFS_NAME_MAX];
+    unsigned char data[NP_MAX + 64];
+    unsigned size;
+} FFile;
+static FFile FF[8];
+
+static int ff_list(void *ctx, int dir)
+{
+    (void)ctx;
+    for (int i = 0; i < 8; i++)
+        if (FF[i].used)
+        {
+            unsigned char fs[VFS_FS_BYTES] = {(unsigned char)i};
+            vfs_attach(dir, FF[i].name, 0, FF[i].size, fs);
+        }
+    return 0;
+}
+static int ff_create(void *ctx, VfsNode *parent, const char *name, int is_dir, unsigned char *fs_out)
+{
+    (void)ctx; (void)parent;
+    if (is_dir)
+        return VFS_ERR_UNSUPPORTED;
+    for (int i = 0; i < 8; i++)
+        if (!FF[i].used)
+        {
+            memset(&FF[i], 0, sizeof FF[i]);
+            FF[i].used = 1;
+            strcpy(FF[i].name, name);
+            fs_out[0] = (unsigned char)i;
+            return 0;
+        }
+    return VFS_ERR_FULL;
+}
+static int ff_remove(void *ctx, const VfsNode *n) { (void)ctx; FF[n->fs[0]].used = 0; return 0; }
+static int ff_rename(void *ctx, VfsNode *n, const char *name) { (void)ctx; strcpy(FF[n->fs[0]].name, name); return 0; }
+static int ff_read(void *ctx, const VfsNode *n, unsigned off, void *buf, unsigned len)
+{
+    (void)ctx;
+    const FFile *f = &FF[n->fs[0]];
+    if (off >= f->size)
+        return 0;
+    if (len > f->size - off)
+        len = f->size - off;
+    memcpy(buf, f->data + off, len);
+    return (int)len;
+}
+static int ff_write(void *ctx, VfsNode *n, unsigned off, const void *buf, unsigned len)
+{
+    (void)ctx;
+    FFile *f = &FF[n->fs[0]];
+    if (off + len > sizeof f->data)
+        return VFS_ERR_FULL;
+    memcpy(f->data + off, buf, len);
+    if (off + len > f->size)
+        f->size = off + len;
+    n->size = f->size;
+    return (int)len;
+}
+static void ff_info(void *ctx, VfsVolInfo *out) { (void)ctx; memset(out, 0, sizeof *out); out->writable = 1; }
+static const VfsBackend FAKE = {ff_list, ff_create, ff_remove, ff_rename, 0, ff_read, ff_write, ff_info, 0, 0};
+
+static void reset(void);
+static void type(const char *s);
+static int is(const char *expect);
+
+static void put_file(const char *name, const void *data, unsigned len)
+{
+    int id = vfs_save(vfs_volume_node(1), name, data, len);
+    assert(id > 0);
+}
+
+static void test_files(void)
+{
+    vfs_init();
+    assert(vfs_mount(&FAKE, 0, "Fake") == 1);
+    reset();
+    NP_PATH[0] = 0;
+
+    /* save a new file, then a changed text over it: exactly the text, one file */
+    type("hello\nworld");
+    assert(save_file("/Fake/note.txt") == 0 && !NP_DIRTY && same_str(NP_PATH, "/Fake/note.txt"));
+    int id = vfs_lookup("/Fake/note.txt");
+    assert(id > 0 && vfs_node(id)->size == 11 && memcmp(FF[0].data, "hello\nworld", 11) == 0);
+    NP_CUR = NP_ANCHOR = 0;
+    insert_text("X", 1);
+    NP_DIRTY = 1;
+    assert(save_file("/Fake/note.txt") == 0);
+    id = vfs_lookup("/Fake/note.txt");
+    assert(vfs_node(id)->size == 12 && vfs_lookup("/Fake/note.txt.tmp") < 0);
+
+    /* path problems give a sentence and change nothing */
+    assert(save_file("Fake/x.txt") != 0);
+    assert(save_file("/Fake/") != 0);
+    assert(save_file("/Nowhere/x.txt") != 0);
+    assert(save_file("/RAM Disk/x.txt") != 0 && vfs_lookup("/RAM Disk/x.txt") < 0);
+    assert(save_file("/x.txt") != 0);
+
+    /* open: the text is replaced, undo history and state start over */
+    put_file("a.txt", "one\r\ntwo\tthree\r\n", 16);
+    assert(open_file("/Fake/a.txt") == 0);
+    assert(is("one\ntwo    three\n") && !NP_DIRTY && NP_UN == 0 && NP_CUR == 0 && same_str(NP_PATH, "/Fake/a.txt"));
+    undo();
+    assert(is("one\ntwo    three\n")); /* nothing to undo after opening */
+
+    /* open refusals keep the current text */
+    put_file("bin.dat", "ab\x01" "cd", 5);
+    put_file("utf.txt", "caf\xC3\xA9", 5);
+    assert(open_file("/Fake/bin.dat") != 0 && open_file("/Fake/utf.txt") != 0);
+    assert(open_file("/Fake/missing.txt") != 0 && open_file("/Fake") != 0);
+    assert(open_file("/RAM Disk/readme.txt") != 0);
+    assert(is("one\ntwo    three\n") && same_str(NP_PATH, "/Fake/a.txt"));
+
+    /* a file of exactly the limit opens, one byte more does not; a Tab that grows it over the limit is refused */
+    static char big[NP_MAX + 1];
+    memset(big, 'a', sizeof big);
+    put_file("limit.txt", big, NP_MAX);
+    assert(open_file("/Fake/limit.txt") == 0 && NP_LEN == NP_MAX);
+    put_file("over.txt", big, NP_MAX + 1);
+    assert(open_file("/Fake/over.txt") != 0 && NP_LEN == NP_MAX);
+    memset(big, 'a', NP_MAX);
+    big[0] = '\t';
+    put_file("tabs.txt", big, NP_MAX);
+    assert(open_file("/Fake/tabs.txt") != 0 && NP_LEN == NP_MAX);
+
+    /* a new document starts empty and untitled */
+    new_document();
+    assert(is("") && NP_PATH[0] == 0 && !NP_DIRTY && NP_UN == 0);
+}
 
 /* ---- helpers ---- */
 static void reset(void)
@@ -255,6 +410,8 @@ int main(void)
     assert(NP_LEN == len_now - 1);
     redo();
     assert(NP_LEN == len_now);
+
+    test_files();
 
     printf("notepad tests passed\n");
     return 0;
