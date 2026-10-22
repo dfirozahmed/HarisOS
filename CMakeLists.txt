@@ -264,7 +264,7 @@ endif()
 
 if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
     add_custom_target(run
-        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -accel whpx
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -accel tcg
                 -drive if=pflash,format=raw,unit=0,readonly=on,file=${FW_CODE}
                 -drive if=pflash,format=raw,unit=1,file=${CMAKE_BINARY_DIR}/ovmf_vars.fd
                 -drive format=raw,file=fat:rw:esp
@@ -275,7 +275,7 @@ if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
         USES_TERMINAL VERBATIM)
 elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
     add_custom_target(run
-        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -accel whpx
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -accel tcg
                 -bios ${FW_CODE}
                 -drive format=raw,file=fat:rw:esp
                 -nic none
