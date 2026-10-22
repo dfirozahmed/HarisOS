@@ -210,7 +210,7 @@ static void display_app_open(void)
     win->on_press = ds_press;
     win->on_drag = ds_drag;
     win->on_close = ds_close;
-    win->icon = TASKBAR_ICON_SETTINGS;
+    win->icon = TASKBAR_ICON_DISPLAY;
     wm_set_resizable(win, 0);
     DS_WIN = win;
     desktop_set_status(0);
@@ -223,6 +223,6 @@ static void display_app_open(void)
 const AppInfo APP_DISPLAY = {
     .name = "Display Settings",
     .desc = "Brightness and adapter",
-    .icon = UI_ICON_SETTINGS,
+    .icon = UI_ICON_DISPLAY,
     .open = display_app_open,
 };

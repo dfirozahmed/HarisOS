@@ -146,6 +146,8 @@ static UiIcon app_icon(TaskbarIcon i)
         return UI_ICON_LOGO;
     case TASKBAR_ICON_TASKMGR:
         return UI_ICON_TASKMGR;
+    case TASKBAR_ICON_DISPLAY:
+        return UI_ICON_DISPLAY;
     default:
         return UI_ICON_BROWSER;
     }

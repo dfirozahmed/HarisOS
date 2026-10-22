@@ -265,6 +265,25 @@ static void icon_taskmgr(const Frame *f)
     line(f, 27, 19, 38, 11, 3, green);
 }
 
+/* a blue-screen monitor on a stand with a sun: display settings */
+static void icon_display(const Frame *f)
+{
+    GfxColor white = gfx_rgb(255, 255, 255);
+    rrect(f, 20, 36, 8, 6, 1, gfx_rgb(86, 100, 128));  /* neck */
+    rrect(f, 12, 41, 24, 4, 2, gfx_rgb(86, 100, 128)); /* base */
+    rrect(f, 3, 5, 42, 32, 6, gfx_rgb(86, 100, 128));  /* frame */
+    gfx_fill_round_rect_gradient(px(f, 5), py(f, 7), pl(f, 38), pl(f, 28), pl(f, 5),
+                                 gfx_rgb(104, 168, 255), gfx_rgb(48, 112, 240)); /* screen */
+    int cx = q(f, 24), cy = qy(f, 21);
+    gfx_fill_circle_q(cx, cy, len_q(f, 5), white, 255); /* sun */
+    for (int i = 0; i < 8; i++)                         /* rays */
+    {
+        int a = len_q(f, 8), b = len_q(f, 11);
+        gfx_line_q(cx + DIR8[i][0] * a / 256, cy + DIR8[i][1] * a / 256,
+                   cx + DIR8[i][0] * b / 256, cy + DIR8[i][1] * b / 256, len_q(f, 2), white, 255);
+    }
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -353,6 +372,9 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_TASKMGR:
         icon_taskmgr(&f);
+        break;
+    case UI_ICON_DISPLAY:
+        icon_display(&f);
         break;
     default:
         break;
