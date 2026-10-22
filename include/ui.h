@@ -293,7 +293,12 @@ typedef enum
     UI_ICON_SORT,
     UI_ICON_TASKMGR, /* performance graph */
     UI_ICON_DISPLAY, /* monitor on a stand */
-    UI_ICON_DEVMGR   /* hardware chip */
+    UI_ICON_DEVMGR,  /* hardware chip */
+    UI_ICON_LIST,    /* rows with bullets */
+    UI_ICON_CHART,   /* line graph */
+    UI_ICON_MEMORY,  /* RAM module */
+    UI_ICON_CPU,     /* processor, outline */
+    UI_ICON_DISK     /* drive */
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

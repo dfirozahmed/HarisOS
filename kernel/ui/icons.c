@@ -301,6 +301,60 @@ static void icon_devmgr(const Frame *f)
     rrect(f, 20, 20, 8, 8, 2, gfx_rgb(214, 232, 255));  /* core */
 }
 
+/* three rows, each a bullet and a bar: a process list */
+static void icon_list(const Frame *f, GfxColor c)
+{
+    for (int i = 0; i < 3; i++)
+    {
+        int y = 11 + i * 13;
+        gfx_fill_circle_q(q(f, 8), qy(f, y), len_q(f, 3), c, 255);
+        line(f, 17, y, 42, y, 5, c);
+    }
+}
+
+/* axes with a rising line: performance graph */
+static void icon_chart(const Frame *f, GfxColor c)
+{
+    line(f, 7, 6, 7, 41, 4, c);
+    line(f, 7, 41, 43, 41, 4, c);
+    line(f, 13, 32, 22, 22, 4, c);
+    line(f, 22, 22, 30, 28, 4, c);
+    line(f, 30, 28, 41, 11, 4, c);
+}
+
+/* a RAM module: board, three chips and a row of contacts */
+static void icon_memory(const Frame *f, GfxColor c)
+{
+    gfx_round_rect(px(f, 3), py(f, 10), pl(f, 42), pl(f, 24), pl(f, 4), f->s >= 30 ? 3 : 1, c);
+    for (int i = 0; i < 3; i++)
+        rrect(f, 9 + i * 12, 16, 8, 10, 2, c);
+    for (int i = 0; i < 6; i++)
+        rrect(f, 6 + i * 7, 37, 4, 6, 1, c);
+}
+
+/* a processor: square package, inner die and pins on every side */
+static void icon_cpu(const Frame *f, GfxColor c)
+{
+    for (int i = 0; i < 3; i++)
+    {
+        int p = 17 + i * 7;
+        line(f, p, 4, p, 11, 3, c);
+        line(f, p, 37, p, 44, 3, c);
+        line(f, 4, p, 11, p, 3, c);
+        line(f, 37, p, 44, p, 3, c);
+    }
+    gfx_round_rect(px(f, 10), py(f, 10), pl(f, 28), pl(f, 28), pl(f, 5), f->s >= 30 ? 3 : 1, c);
+    rrect(f, 18, 18, 12, 12, 2, c);
+}
+
+/* a drive: body with a platter ring and an activity light */
+static void icon_disk(const Frame *f, GfxColor c)
+{
+    gfx_round_rect(px(f, 4), py(f, 8), pl(f, 40), pl(f, 32), pl(f, 6), f->s >= 30 ? 3 : 1, c);
+    gfx_ring_q(q(f, 18), qy(f, 24), len_q(f, 8), len_q(f, 3), c, 255);
+    gfx_fill_circle_q(q(f, 36), qy(f, 32), len_q(f, 3), c, 255);
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -395,6 +449,21 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_DEVMGR:
         icon_devmgr(&f);
+        break;
+    case UI_ICON_LIST:
+        icon_list(&f, t);
+        break;
+    case UI_ICON_CHART:
+        icon_chart(&f, t);
+        break;
+    case UI_ICON_MEMORY:
+        icon_memory(&f, t);
+        break;
+    case UI_ICON_CPU:
+        icon_cpu(&f, t);
+        break;
+    case UI_ICON_DISK:
+        icon_disk(&f, t);
         break;
     default:
         break;

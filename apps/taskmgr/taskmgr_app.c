@@ -37,6 +37,7 @@ enum
     TAB_COUNT
 };
 static const char *const TAB_NAME[TAB_COUNT] = {"Processes", "Performance"};
+static const UiIcon TAB_ICON[TAB_COUNT] = {UI_ICON_LIST, UI_ICON_CHART};
 
 enum
 {
@@ -46,6 +47,7 @@ enum
     PERF_COUNT
 };
 static const char *const PERF_NAME[PERF_COUNT] = {"Memory", "CPU", "Disk"};
+static const UiIcon PERF_ICON[PERF_COUNT] = {UI_ICON_MEMORY, UI_ICON_CPU, UI_ICON_DISK};
 
 static Window *TM_WIN;
 static int TAB;
@@ -128,7 +130,16 @@ static void draw_tabs(UiRect body)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 40);
             gfx_fill_rect(r.x + 8, r.y + r.h - 3, r.w - 16, 3, ui_color(t->accent));
         }
-        ui_text_in_color(r, TAB_NAME[i], UI_TEXT_LABEL, UI_ALIGN_CENTER, i == TAB ? t->text : t->text_dim);
+        UiRgb fg = i == TAB ? t->text : t->text_dim;
+        /* icon + label as one group, centered in the tab */
+        int isz = 18, gap = 8;
+        int gw = isz + gap + ui_text_width(TAB_NAME[i], UI_TEXT_LABEL);
+        int gx = r.x + (r.w - gw) / 2;
+        if (gx < r.x + 4)
+            gx = r.x + 4;
+        ui_icon(TAB_ICON[i], gx + isz / 2, r.y + (r.h - 3) / 2, isz, fg);
+        ui_text_in_color(ui_rect(gx + isz + gap, r.y, r.x + r.w - (gx + isz + gap), r.h), TAB_NAME[i],
+                         UI_TEXT_LABEL, UI_ALIGN_LEFT, fg);
     }
 }
 
@@ -541,8 +552,11 @@ static void draw_performance(UiRect body)
         UiRect r = side_rect(body, i);
         if (i == PERF)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 40);
-        ui_text_in_color(ui_rect(r.x + 10, r.y, r.w - 10, r.h), PERF_NAME[i], UI_TEXT_BODY, UI_ALIGN_LEFT,
-                         i == PERF ? t->text : t->text_dim);
+        UiRgb fg = i == PERF ? t->text : t->text_dim;
+        int isz = 20;
+        ui_icon(PERF_ICON[i], r.x + 10 + isz / 2, r.y + r.h / 2, isz, fg);
+        ui_text_in_color(ui_rect(r.x + 10 + isz + 8, r.y, r.w - (10 + isz + 8), r.h), PERF_NAME[i],
+                         UI_TEXT_BODY, UI_ALIGN_LEFT, fg);
     }
     UiRect pane = pane_rect(body);
     if (PERF == PERF_MEMORY)
