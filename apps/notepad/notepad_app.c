@@ -1,6 +1,8 @@
-/* Notepad app, step 1: a plain-text editor that lives in memory (no files yet).
+/* Notepad app, steps 1-2: a plain-text editor that lives in memory (no files yet).
  * Typing, Enter, Tab (4 spaces), Backspace / Delete, arrows, Home / End, PageUp / PageDown, mouse click
- * to place the caret, mouse wheel to scroll. The text is one flat buffer; a line ends at '\n'.
+ * to place the caret, mouse wheel to scroll. Selection: Shift + movement keys, mouse drag, Ctrl+A; Ctrl+C / X / V
+ * (also Ctrl+Insert, Shift+Delete, Shift+Insert) with the shared HarisUI clipboard.
+ * The text is one flat buffer; a line ends at '\n'.
  * An app uses only public headers (ui.h, wm.h, desktop.h, gfx.h) - never desktop_internal.h. */
 #include "app.h"
 #include "desktop.h"
@@ -24,6 +26,8 @@ static int NP_TOP;     /* first visible line */
 static int NP_HSCROLL; /* pixels the text is scrolled to the left */
 static int NP_ROWS = 1; /* visible rows at the last draw (for PageUp / PageDown) */
 static int NP_FOLLOW;  /* 1 = scroll so that the caret is visible at the next draw */
+static int NP_ANCHOR;  /* the other end of the selection; NP_ANCHOR == NP_CUR means nothing is selected */
+static int NP_SELECTING; /* the left button went down in the text and is still held: dragging selects */
 static int NP_BLINK = 1;
 static UiRect NP_CARET; /* where the caret was drawn (screen), w = 0 if it is scrolled out of view */
 
@@ -104,6 +108,29 @@ static void delete_at(int p)
     for (int i = p; i < NP_LEN - 1; i++)
         NP_BUF[i] = NP_BUF[i + 1];
     NP_LEN--;
+}
+
+/* the selection [*a, *b); returns 0 if nothing is selected */
+static int sel_range(int *a, int *b)
+{
+    if (NP_ANCHOR == NP_CUR)
+        return 0;
+    *a = NP_ANCHOR < NP_CUR ? NP_ANCHOR : NP_CUR;
+    *b = NP_ANCHOR < NP_CUR ? NP_CUR : NP_ANCHOR;
+    return 1;
+}
+
+/* remove the selected text and put the caret where it was; returns 0 if nothing was selected */
+static int delete_selection(void)
+{
+    int a, b;
+    if (!sel_range(&a, &b))
+        return 0;
+    for (int i = a; i < NP_LEN - (b - a); i++)
+        NP_BUF[i] = NP_BUF[i + (b - a)];
+    NP_LEN -= b - a;
+    NP_CUR = NP_ANCHOR = a;
+    return 1;
 }
 
 /* ---- layout ---- */
@@ -260,6 +287,7 @@ static void np_draw(Window *w, UiRect body)
     gfx_clip_intersect(in.x, in.y, in.w, in.h); /* not ui_clip(): that would drop the window manager's clip */
     /* a partial redraw (caret blink) only needs the rows it touches: see cl above */
     GfxColor ink = ui_color(t->text);
+    int sel_a = 0, sel_b = 0, has_sel = sel_range(&sel_a, &sel_b);
     int p = line_offset(NP_TOP);
     NP_CARET = ui_rect(0, 0, 0, 0);
     for (int row = 0; row < NP_ROWS + 1 && p <= NP_LEN; row++)
@@ -271,6 +299,14 @@ static void np_draw(Window *w, UiRect body)
             NP_CARET = ui_rect(in.x - NP_HSCROLL + caret_x(), y, 2, lh - 4);
         if (y + lh >= cl.y0 && y <= cl.y1)
         {
+            if (has_sel && sel_b > p && sel_a <= e) /* selected part of this line (and its line break) */
+            {
+                int from = sel_a > p ? sel_a : p, to = sel_b < e ? sel_b : e;
+                int hx = in.x - NP_HSCROLL + span_w(p, from - p);
+                int hw = span_w(p, to - p) - span_w(p, from - p) + (sel_b > e ? 6 : 0); /* +6: the selected line break */
+                if (hw > 0)
+                    gfx_fill_rect_alpha(hx, in.y + row * lh, hw, lh, t->accent.r, t->accent.g, t->accent.b, 90);
+            }
             /* only the characters that are on screen: skip those left of the scroll position, stop at the right edge */
             char tmp[NP_LINE_MAX + 1];
             int first = cols_in(p, e - p, NP_HSCROLL);
@@ -298,6 +334,12 @@ static void np_draw(Window *w, UiRect body)
     put_dec(st, &n, (unsigned)NP_LEN);
     put_str(st, &n, " / ");
     put_dec(st, &n, NP_MAX);
+    if (has_sel)
+    {
+        put_str(st, &n, "     ");
+        put_dec(st, &n, (unsigned)(sel_b - sel_a));
+        put_str(st, &n, " selected");
+    }
     ui_text_in_color(status_rect(body), st, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
 }
 
@@ -311,20 +353,30 @@ static void goto_line_col(int line, int col)
     NP_CUR = ls + (col < len ? col : len);
 }
 
+/* the first and last line the selection (or just the caret) touches */
+static void sel_lines(int *lo, int *hi)
+{
+    int a = line_of(NP_CUR), b = line_of(NP_ANCHOR);
+    *lo = a < b ? a : b;
+    *hi = a < b ? b : a;
+}
+
 /* Tell the window manager what really changed (after a key or a click), so it does not redraw the whole
- * window: the status bar always, and either the rows between the old and the new caret line, or (if the
- * text scrolled or the number of lines changed, so the rows below moved) the whole text area. */
-static void mark_changed(Window *w, int old_line, int old_lines, int old_top, int old_hscroll)
+ * window: the status bar always, and either the rows from the first to the last line the caret or the
+ * selection touched before and after, or (if the text scrolled or the number of lines changed, so the rows
+ * below moved) the whole text area. */
+static void mark_changed(Window *w, int old_lo, int old_hi, int old_lines, int old_top, int old_hscroll)
 {
     UiRect body = wm_content(w);
     UiRect in = ui_inset(text_area(body), NP_PAD);
     follow(in);
-    int new_line = line_of(NP_CUR);
+    int new_lo, new_hi;
+    sel_lines(&new_lo, &new_hi);
     UiRect rows = in;
     if (NP_TOP == old_top && NP_HSCROLL == old_hscroll && line_count() == old_lines)
     {
-        int a = old_line < new_line ? old_line : new_line;
-        int b = old_line < new_line ? new_line : old_line;
+        int a = old_lo < new_lo ? old_lo : new_lo;
+        int b = old_hi > new_hi ? old_hi : new_hi;
         if (a < NP_TOP)
             a = NP_TOP;
         if (b > NP_TOP + NP_ROWS - 1)
@@ -336,6 +388,34 @@ static void mark_changed(Window *w, int old_line, int old_lines, int old_top, in
     wm_add_damage(status_rect(body));
 }
 
+static void copy_selection(void)
+{
+    int a, b;
+    if (sel_range(&a, &b))
+        ui_clipboard_set(NP_BUF + a, b - a);
+}
+
+/* paste the clipboard at the caret over the selection: '\r' and other control characters are dropped, a Tab becomes spaces */
+static void paste(void)
+{
+    static char clip[NP_MAX + 1];
+    int n = ui_clipboard_get(clip, (int)sizeof clip);
+    if (n == 0)
+        return;
+    delete_selection();
+    for (int i = 0; i < n; i++)
+    {
+        unsigned char c = (unsigned char)clip[i];
+        if (c == '\n')
+            insert_char('\n');
+        else if (c == '\t')
+            for (int k = 0; k < NP_TAB; k++)
+                insert_char(' ');
+        else if (c >= 32 && c < 127)
+            insert_char((char)c);
+    }
+}
+
 static void np_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed)
@@ -344,70 +424,142 @@ static void np_key(Window *w, const KeyEvent *k)
         return;
     }
     int vertical = 0;
-    int old_lines = line_count(), old_line = line_of(NP_CUR);
+    int motion = 0; /* a key that only moves the caret: with Shift it extends the selection */
+    int select_all = 0;
+    int shift = (k->mods & KMOD_SHIFT) != 0, ctrl = (k->mods & KMOD_CTRL) != 0;
+    int old_lines = line_count(), old_lo, old_hi;
+    sel_lines(&old_lo, &old_hi);
     int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
+    int sa = 0, sb = 0, has_sel = sel_range(&sa, &sb);
 
-    switch (k->key)
+    if (ctrl)
     {
-    case KEY_LEFT:
-        if (NP_CUR > 0)
-            NP_CUR--;
-        break;
-    case KEY_RIGHT:
-        if (NP_CUR < NP_LEN)
-            NP_CUR++;
-        break;
-    case KEY_UP:
-    case KEY_DOWN:
-    case KEY_PAGEUP:
-    case KEY_PAGEDOWN:
-    {
-        int step = (k->key == KEY_UP || k->key == KEY_DOWN) ? 1 : NP_ROWS;
-        int dir = (k->key == KEY_UP || k->key == KEY_PAGEUP) ? -1 : 1;
-        int line = line_of(NP_CUR) + dir * step;
-        if (line < 0)
-            line = 0;
-        if (line > line_count() - 1)
-            line = line_count() - 1;
-        goto_line_col(line, NP_DESIRED);
-        vertical = 1;
-        break;
+        switch (k->key)
+        {
+        case 'a':
+            NP_ANCHOR = 0;
+            NP_CUR = NP_LEN;
+            select_all = 1;
+            break;
+        case 'c':
+        case KEY_INSERT:
+            copy_selection();
+            break;
+        case 'x':
+            copy_selection();
+            delete_selection();
+            break;
+        case 'v':
+            paste();
+            break;
+        default:
+            break;
+        }
     }
-    case KEY_HOME:
-        NP_CUR = line_start(NP_CUR);
-        break;
-    case KEY_END:
-        NP_CUR = line_end(NP_CUR);
-        break;
-    case KEY_BACKSPACE:
-        if (NP_CUR > 0)
-            delete_at(--NP_CUR);
-        break;
-    case KEY_DELETE:
-        if (NP_CUR < NP_LEN)
-            delete_at(NP_CUR);
-        break;
-    case KEY_ENTER:
-        insert_char('\n');
-        break;
-    case KEY_TAB:
-        for (int i = 0; i < NP_TAB; i++)
-            insert_char(' ');
-        break;
-    default:
-        if (k->ch >= 32 && k->ch < 127 && !(k->mods & (KMOD_CTRL | KMOD_ALT)))
-            insert_char((char)k->ch);
-        break;
+    else
+    {
+        switch (k->key)
+        {
+        case KEY_LEFT:
+            motion = 1;
+            if (has_sel && !shift)
+                NP_CUR = sa; /* the selection collapses to its start */
+            else if (NP_CUR > 0)
+                NP_CUR--;
+            break;
+        case KEY_RIGHT:
+            motion = 1;
+            if (has_sel && !shift)
+                NP_CUR = sb;
+            else if (NP_CUR < NP_LEN)
+                NP_CUR++;
+            break;
+        case KEY_UP:
+        case KEY_DOWN:
+        case KEY_PAGEUP:
+        case KEY_PAGEDOWN:
+        {
+            int step = (k->key == KEY_UP || k->key == KEY_DOWN) ? 1 : NP_ROWS;
+            int dir = (k->key == KEY_UP || k->key == KEY_PAGEUP) ? -1 : 1;
+            int line = line_of(NP_CUR) + dir * step;
+            if (line < 0)
+                line = 0;
+            if (line > line_count() - 1)
+                line = line_count() - 1;
+            goto_line_col(line, NP_DESIRED);
+            vertical = 1;
+            motion = 1;
+            break;
+        }
+        case KEY_HOME:
+            NP_CUR = line_start(NP_CUR);
+            motion = 1;
+            break;
+        case KEY_END:
+            NP_CUR = line_end(NP_CUR);
+            motion = 1;
+            break;
+        case KEY_BACKSPACE:
+            if (!delete_selection() && NP_CUR > 0)
+                delete_at(--NP_CUR);
+            break;
+        case KEY_DELETE:
+            if (shift) /* Shift+Delete = cut */
+            {
+                copy_selection();
+                delete_selection();
+            }
+            else if (!delete_selection() && NP_CUR < NP_LEN)
+                delete_at(NP_CUR);
+            break;
+        case KEY_INSERT:
+            if (shift) /* Shift+Insert = paste */
+                paste();
+            break;
+        case KEY_ENTER:
+            delete_selection();
+            insert_char('\n');
+            break;
+        case KEY_TAB:
+            delete_selection();
+            for (int i = 0; i < NP_TAB; i++)
+                insert_char(' ');
+            break;
+        default:
+            if (k->ch >= 32 && k->ch < 127 && !(k->mods & KMOD_ALT))
+            {
+                delete_selection();
+                insert_char((char)k->ch);
+            }
+            break;
+        }
     }
 
+    if (!(motion && shift) && !select_all)
+        NP_ANCHOR = NP_CUR; /* no selection, unless Shift extended it */
     if (!vertical)
         NP_DESIRED = NP_CUR - line_start(NP_CUR);
     NP_FOLLOW = 1;
     ui_caret_restart();
     NP_BLINK = 1;
 
-    mark_changed(w, old_line, old_lines, old_top, old_hscroll);
+    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll);
     wm_key_partial();
+}
+
+/* buffer offset of the character nearest to the screen point (x, y); a point outside the text area counts as
+ * the nearest row / column */
+static int pos_at(UiRect in, int x, int y)
+{
+    int dy = y - in.y, lh = np_line_h();
+    int row = dy >= 0 ? dy / lh : -((-dy + lh - 1) / lh);
+    int line = NP_TOP + row;
+    if (line > line_count() - 1)
+        line = line_count() - 1;
+    if (line < 0)
+        line = 0;
+    int ls = line_offset(line);
+    return ls + cols_in(ls, line_end(ls) - ls, x - in.x + NP_HSCROLL + 3); /* +3: nearer half of a letter wins */
 }
 
 static int np_press(Window *w, int x, int y)
@@ -417,20 +569,42 @@ static int np_press(Window *w, int x, int y)
     if (!ui_contains(in, x, y))
         return 0;
 
-    int old_line = line_of(NP_CUR), old_lines = line_count();
+    int old_lo, old_hi;
+    sel_lines(&old_lo, &old_hi);
+    int old_lines = line_count();
     int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
-    int line = NP_TOP + (y - in.y) / np_line_h();
-    if (line > line_count() - 1)
-        line = line_count() - 1;
-    int ls = line_offset(line);
-    int col = cols_in(ls, line_end(ls) - ls, x - in.x + NP_HSCROLL + 3); /* +3: nearer half of a letter wins */
-    NP_CUR = ls + col;
-    NP_DESIRED = col;
+    NP_CUR = NP_ANCHOR = pos_at(in, x, y);
+    NP_SELECTING = 1; /* dragging from here selects */
+    NP_DESIRED = NP_CUR - line_start(NP_CUR);
     NP_FOLLOW = 1;
     ui_caret_restart();
     NP_BLINK = 1;
-    mark_changed(w, old_line, old_lines, old_top, old_hscroll);
-    return 2; /* the damage is already marked: only the old / new caret rows and the status bar are redrawn */
+    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll);
+    return 2; /* the damage is already marked: only the touched rows and the status bar are redrawn */
+}
+
+static int np_drag(Window *w, int x, int y, unsigned buttons)
+{
+    if (!(buttons & 1))
+    {
+        NP_SELECTING = 0;
+        return 0;
+    }
+    if (!NP_SELECTING)
+        return 0;
+    UiRect in = ui_inset(text_area(wm_content(w)), NP_PAD);
+    int pos = pos_at(in, x, y);
+    if (pos == NP_CUR)
+        return 0;
+    int old_lo, old_hi;
+    sel_lines(&old_lo, &old_hi);
+    int old_lines = line_count();
+    int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
+    NP_CUR = pos; /* the anchor stays where the press was */
+    NP_DESIRED = NP_CUR - line_start(NP_CUR);
+    NP_FOLLOW = 1;
+    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll);
+    return 2;
 }
 
 static int np_wheel(Window *w, int steps)
@@ -465,6 +639,7 @@ static void np_close(Window *w)
 {
     (void)w;
     NP_WIN = 0;
+    NP_SELECTING = 0;
 }
 
 static void notepad_app_open(void)
@@ -495,6 +670,7 @@ static void notepad_app_open(void)
     }
     win->on_key = np_key;
     win->on_press = np_press;
+    win->on_drag = np_drag;
     win->on_wheel = np_wheel;
     win->on_tick = np_tick;
     win->on_close = np_close;

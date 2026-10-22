@@ -84,15 +84,16 @@ static int word_right(const UiEdit *e, int i)
 }
 
 /* ---- shared clipboard ---------------------------------------- */
-static char CLIP[UI_EDIT_MAX + 1];
+#define CLIP_MAX 16384 /* Notepad copies whole blocks of text; the single-line inputs only paste what fits their own buffer */
+static char CLIP[CLIP_MAX + 1];
 static int CLIP_LEN;
 
 void ui_clipboard_set(const char *s, int len)
 {
     if (len < 0)
         len = 0;
-    if (len > UI_EDIT_MAX)
-        len = UI_EDIT_MAX;
+    if (len > CLIP_MAX)
+        len = CLIP_MAX;
     for (int i = 0; i < len; i++)
         CLIP[i] = s[i];
     CLIP[len] = 0;
