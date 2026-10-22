@@ -2309,6 +2309,12 @@ static void np_close(Window *w)
     (void)w;
     NP_WIN = 0;
     NP_SELECTING = 0;
+    NP_BAR = 0; /* the next window starts clean: no text, no file name, no undo history, no find bar */
+    NP_FOCUS = 0;
+    NP_BAR_DRAG = 0;
+    NP_AFTER = -1;
+    NP_NOTE = "";
+    new_document();
 }
 
 static void notepad_app_open(void)

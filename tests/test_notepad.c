@@ -799,6 +799,43 @@ static void test_find(void)
     NP_WIN = 0;
 }
 
+/* closing the window forgets everything: "Don't save" and then opening Notepad again must start empty */
+static void test_close_clears(void)
+{
+    static Window NW;
+    NW.on_close = np_close; /* like the window made by notepad_app_open */
+    NP_WIN = &NW;
+    NP_CONF = 0;
+    NP_DLG = 0;
+    STUB_DIALOG = 1;
+    reset();
+    NP_PATH[0] = 0;
+    copy_str(NP_PATH, (int)sizeof NP_PATH, "/Fake/a.txt");
+    type("unsaved words");
+    NP_DIRTY = 1;
+    assert(np_close_request(&NW) == 1 && NP_PENDING == NP_ACT_CLOSE);
+    on_conf_yes(0, 0);                                         /* "Don't save" */
+    assert(NP_WIN == 0 && is("") && NP_LEN == 0 && NP_PATH[0] == 0 && !NP_DIRTY && NP_UN == 0 && NP_UPOS == 0);
+    assert(NP_CUR == 0 && NP_ANCHOR == 0 && NP_TOP == 0 && !NP_BAR && NP_FOCUS == 0);
+    /* a saved text is forgotten too (the window is closed with no question) */
+    NP_WIN = &NW;
+    type("saved text");
+    copy_str(NP_PATH, (int)sizeof NP_PATH, "/Fake/a.txt");
+    NP_DIRTY = 0;
+    assert(np_close_request(&NW) == 0);
+    wm_close(&NW);
+    assert(is("") && NP_PATH[0] == 0);
+    /* the find bar is closed with the window; a pending "after saving" action is dropped */
+    NP_WIN = &NW;
+    NP_BAR = 1;
+    NP_FOCUS = 1;
+    NP_AFTER = NP_ACT_CLOSE;
+    wm_close(&NW);
+    assert(!NP_BAR && NP_FOCUS == 0 && NP_AFTER == -1);
+    STUB_DIALOG = 0;
+    NP_WIN = 0;
+}
+
 /* ---- helpers ---- */
 static void reset(void)
 {
@@ -998,6 +1035,7 @@ int main(void)
     test_save_answer();
     test_wrap();
     test_find();
+    test_close_clears();
 
     printf("notepad tests passed\n");
     return 0;
