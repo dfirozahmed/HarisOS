@@ -3,12 +3,66 @@
 #include "../apps/notepad/notepad_app.c"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#define T_MAX 16384 /* the text limit most tests run with (NP_LIMIT is set to it in main) */
+
+/* ---- the kernel heap, on the host: counts the blocks that are out, and can be made to run out of memory ---- */
+static long HEAP_BLOCKS;          /* blocks given out and not freed */
+static long long HEAP_BYTES;      /* their total size */
+static long long HEAP_BUDGET = -1; /* -1 = unlimited; else the most bytes that may be out at once */
+typedef struct { unsigned long long size; } HHdr;
+void *kmalloc(unsigned long long size)
+{
+    if (HEAP_BUDGET >= 0 && HEAP_BYTES + (long long)size > HEAP_BUDGET)
+        return 0;
+    HHdr *h = malloc(sizeof *h + size + 16);
+    if (!h)
+        return 0;
+    h->size = size;
+    HEAP_BLOCKS++;
+    HEAP_BYTES += (long long)size;
+    return (char *)h + 16;
+}
+void kfree(void *p)
+{
+    if (!p)
+        return;
+    HHdr *h = (HHdr *)((char *)p - 16);
+    HEAP_BLOCKS--;
+    HEAP_BYTES -= (long long)h->size;
+    free(h);
+}
+void *krealloc(void *p, unsigned long long size)
+{
+    if (!p)
+        return kmalloc(size);
+    HHdr *old = (HHdr *)((char *)p - 16);
+    void *q = kmalloc(size);
+    if (!q)
+        return 0;
+    memcpy(q, p, (size_t)(old->size < size ? old->size : size));
+    kfree(p);
+    return q;
+}
+void *kcalloc(unsigned long long n, unsigned long long size)
+{
+    void *p = kmalloc(n * size);
+    if (p)
+        memset(p, 0, (size_t)(n * size));
+    return p;
+}
+unsigned long long heap_block_size(const void *p) { return p ? ((HHdr *)((char *)p - 16))->size : 0; }
+int heap_init(void) { return 0; }
+void heap_stats(HeapStats *s) { memset(s, 0, sizeof *s); }
+int heap_check(void) { return 0; }
 
 /* ---- stubs (defined after the include, so the compiler checks them against the real prototypes) ---- */
 static UiTheme THEME_STORE;
-static char CLIP_STORE[NP_MAX + 1];
+static char CLIP_STORE[2 * 1024 * 1024 + 1];
 static int CLIP_N;
+static int CLIP_CAP = 2 * 1024 * 1024; /* the longest text the clipboard takes (lower it to test "too large") */
 void desktop_set_status(const char *s) { (void)s; }
 void gfx_clip_intersect(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
 void gfx_fill_rect(int x, int y, int w, int h, GfxColor c) { (void)x; (void)y; (void)w; (void)h; (void)c; }
@@ -32,10 +86,18 @@ int gfx_text_fit(const Font *f, const char *s, int max_w)
 int gfx_text_w(const Font *f, const char *s) { (void)f; return (int)strlen(s) * 8; }
 void ui_caret_restart(void) {}
 int ui_caret_visible(void) { return 1; }
-void ui_clipboard_set(const char *s, int len)
+int ui_clipboard_set(const char *s, int len)
 {
+    if (len > CLIP_CAP)
+        return 0;
     memcpy(CLIP_STORE, s, (size_t)len);
     CLIP_N = len;
+    return 1;
+}
+const char *ui_clipboard_text(int *len)
+{
+    *len = CLIP_N;
+    return CLIP_STORE;
 }
 int ui_clipboard_get(char *out, int cap)
 {
@@ -130,7 +192,7 @@ typedef struct
 {
     int used;
     char name[VFS_NAME_MAX];
-    unsigned char data[NP_MAX + 64];
+    unsigned char data[400000];
     unsigned size;
 } FFile;
 static FFile FF[8];
@@ -201,6 +263,7 @@ static const VfsBackend FAKE = {ff_list, ff_create, ff_remove, ff_rename, 0, ff_
 static void reset(void);
 static void type(const char *s);
 static int is(const char *expect);
+static void end_run(void);
 
 static void put_file(const char *name, const void *data, unsigned len)
 {
@@ -250,16 +313,16 @@ static void test_files(void)
     assert(is("one\ntwo    three\n") && same_str(NP_PATH, "/Fake/a.txt"));
 
     /* a file of exactly the limit opens, one byte more does not; a Tab that grows it over the limit is refused */
-    static char big[NP_MAX + 1];
+    static char big[T_MAX + 1];
     memset(big, 'a', sizeof big);
-    put_file("limit.txt", big, NP_MAX);
-    assert(open_file("/Fake/limit.txt") == 0 && NP_LEN == NP_MAX);
-    put_file("over.txt", big, NP_MAX + 1);
-    assert(open_file("/Fake/over.txt") != 0 && NP_LEN == NP_MAX);
-    memset(big, 'a', NP_MAX);
+    put_file("limit.txt", big, T_MAX);
+    assert(open_file("/Fake/limit.txt") == 0 && NP_LEN == T_MAX);
+    put_file("over.txt", big, T_MAX + 1);
+    assert(open_file("/Fake/over.txt") != 0 && NP_LEN == T_MAX);
+    memset(big, 'a', T_MAX);
     big[0] = '\t';
-    put_file("tabs.txt", big, NP_MAX);
-    assert(open_file("/Fake/tabs.txt") != 0 && NP_LEN == NP_MAX);
+    put_file("tabs.txt", big, T_MAX);
+    assert(open_file("/Fake/tabs.txt") != 0 && NP_LEN == T_MAX);
 
     /* a new document starts empty and untitled */
     new_document();
@@ -522,6 +585,7 @@ static void set_text(const char *s)
 {
     reset();
     NP_LEN = (int)strlen(s);
+    assert(buf_reserve(NP_LEN + 1));
     memcpy(NP_BUF, s, (size_t)NP_LEN);
     NP_CUR = NP_ANCHOR = 0;
     NP_TOP = NP_HSCROLL = 0;
@@ -713,7 +777,7 @@ static void test_find(void)
     set_find("fox", "cat");
     do_replace_all(&NW);
     assert(is("The quick brown cat. the QUICK cat. the end") && same_str(NP_NOTE, "2 replaced") && NP_DIRTY);
-    assert(NP_CUR == 0 && !sel_range(&(int){0}, &(int){0}) && NP_FOCUS == 0);
+    assert(NP_CUR == 16 && !sel_range(&(int){0}, &(int){0}) && NP_FOCUS == 0); /* at the first change */
     undo();
     assert(is(txt));
     redo();
@@ -732,16 +796,18 @@ static void test_find(void)
     do_replace_all(&NW);
     assert(is("abc") && same_str(NP_NOTE, "Not found"));
     /* the result must fit */
-    NP_LEN = NP_MAX - 1;
+    assert(buf_reserve(T_MAX));
+    NP_LEN = T_MAX - 1;
     memset(NP_BUF, 'a', (size_t)NP_LEN);
     NP_CUR = NP_ANCHOR = 0;
     set_find("a", "bb");
     do_replace_all(&NW);
-    assert(NP_LEN == NP_MAX - 1 && NP_BUF[0] == 'a' && strstr(NP_NOTE, "too long"));
+    assert(NP_LEN == T_MAX - 1 && NP_BUF[0] == 'a' && strstr(NP_NOTE, "too long"));
     set_text("one two");
     set_find("one", "a much longer replacement");
     assert(do_find(0));
-    NP_LEN = NP_MAX - 2;                                 /* pretend the buffer is nearly full */
+    assert(buf_reserve(T_MAX));
+    NP_LEN = T_MAX - 2;                                 /* pretend the buffer is nearly full */
     memset(NP_BUF + 7, 'x', (size_t)(NP_LEN - 7));
     do_replace(&NW);
     assert(strstr(NP_NOTE, "too long") && NP_BUF[0] == 'o');
@@ -836,6 +902,204 @@ static void test_close_clears(void)
     NP_WIN = 0;
 }
 
+/* the text and the undo history live in the heap and grow; limits and a heap that runs out of memory */
+static void test_big_text(void)
+{
+    static Window NW;
+    NP_WIN = &NW;
+    NP_LIMIT = 8 * 1024 * 1024;
+    NP_CONF = 0;
+    NP_DLG = 0;
+    NP_BAR = 0;
+    NP_FOCUS = 0;
+    new_document();
+    long blocks0 = HEAP_BLOCKS;
+    assert(NP_BUF == NP_EMPTY && NP_CAP == 0 && NP_POOL == 0);
+
+    /* a 3 MB text: far over the old 16 KB limit; one undo step; undo and redo give the same bytes */
+    int big = 3 * 1024 * 1024;
+    char *src = malloc((size_t)big);
+    for (int i = 0; i < big; i++)
+        src[i] = (i % 61 == 60) ? '\n' : (char)('a' + i % 26);
+    insert_text(src, big);
+    assert(NP_LEN == big && NP_CAP >= big && memcmp(NP_BUF, src, (size_t)big) == 0 && NP_UN == 1);
+    undo();
+    assert(NP_LEN == 0);
+    redo();
+    assert(NP_LEN == big && memcmp(NP_BUF, src, (size_t)big) == 0);
+
+    /* typing in the middle of it, selecting, finding, replacing: the same code on a big text */
+    NP_CUR = NP_ANCHOR = big / 2;
+    type("MIDDLE");
+    assert(NP_LEN == big + 6 && memcmp(NP_BUF + big / 2, "MIDDLE", 6) == 0);
+    set_find("MIDDLE", "-");
+    NP_MATCH_CASE = 1;
+    NP_CUR = NP_ANCHOR = 0;
+    assert(do_find(0) && sel_is(big / 2, big / 2 + 6));
+    do_replace_all(&NW);
+    assert(NP_LEN == big + 1 && NP_BUF[big / 2] == '-');
+    undo();
+    assert(NP_LEN == big + 6 && memcmp(NP_BUF + big / 2, "MIDDLE", 6) == 0);
+    NP_MATCH_CASE = 0;
+
+    /* the history is capped at 4 MB: a bigger single change is made, but cannot be undone, and the old history goes */
+    NP_CUR = NP_ANCHOR = NP_LEN; /* (the undo gave the selection of "MIDDLE" back) */
+    type("x");
+    assert(NP_UN > 1);
+    int more_n = 4 * 1024 * 1024 + 512 * 1024; /* more than the history may hold */
+    char *more = malloc((size_t)more_n);
+    memset(more, 'm', (size_t)more_n);
+    NP_CUR = NP_ANCHOR = NP_LEN;
+    insert_text(more, more_n);
+    assert(NP_LEN == big + 7 + more_n&& NP_UN == 0 && same_str(NP_NOTE, "Too large to undo"));
+    NP_NOTE = "";
+    type("y");
+    assert(NP_UN == 1 && NP_BUF[NP_LEN - 1] == 'y');
+    undo();
+    assert(NP_BUF[NP_LEN - 1] == 'm');
+    free(more);
+    free(src);
+
+    /* closing gives everything back to the heap */
+    new_document();
+    assert(HEAP_BLOCKS == blocks0 && NP_BUF == NP_EMPTY && NP_POOL == 0);
+
+    /* typing a character at a time grows the block by doubling: few blocks, nothing leaked */
+    for (int i = 0; i < 20000; i++)
+        type("z");
+    assert(NP_LEN == 20000 && NP_CAP >= 20000 && NP_CAP < 80000 && HEAP_BLOCKS - blocks0 == 2); /* the text and the pool */
+    new_document();
+    assert(HEAP_BLOCKS == blocks0);
+
+    /* the limit: the text stops at NP_LIMIT and says so */
+    NP_LIMIT = 1000;
+    char kb[2000];
+    memset(kb, 'k', sizeof kb);
+    insert_text(kb, 2000);
+    assert(NP_LEN == 1000 && strstr(NP_NOTE, "full"));
+    NP_NOTE = "";
+    type("more");
+    assert(NP_LEN == 1000 && strstr(NP_NOTE, "full"));
+    new_document();
+
+    /* a heap that runs out of memory: the edit takes what fits, nothing is damaged, the history is dropped not broken */
+    NP_LIMIT = 8 * 1024 * 1024;
+    NP_NOTE = "";
+    type("start");
+    long long used = HEAP_BYTES;
+    HEAP_BUDGET = used; /* no new memory at all */
+    char hundred_k[100000];
+    memset(hundred_k, 'h', sizeof hundred_k);
+    insert_text(hundred_k, sizeof hundred_k);
+    assert(NP_LEN <= NP_CAP && NP_LEN > 5 && NP_LEN < 100005 && strstr(NP_NOTE, "full"));
+    assert(NP_BUF[0] == 's' && NP_BUF[NP_LEN - 1] == 'h');
+    for (int i = 0; i < 50; i++)
+        type("t"); /* the buffer may be full; this must not crash or run over */
+    assert(NP_LEN <= NP_CAP);
+    undo(); /* whatever history there is stays usable */
+    assert(NP_LEN <= NP_CAP);
+    HEAP_BUDGET = -1;
+    new_document();
+    assert(HEAP_BLOCKS == blocks0);
+
+    /* no heap memory at all (the page allocator never started): a short text still works in the fallback block */
+    HEAP_BUDGET = 0;
+    NP_NOTE = "";
+    type("hello");
+    assert(is("hello") && NP_BUF == NP_FALLBACK && NP_CAP == 4096);
+    char *pad = malloc(5000);
+    memset(pad, 'f', 5000);
+    insert_text(pad, 5000);
+    assert(NP_LEN == 4096 && strstr(NP_NOTE, "full") && NP_BUF[0] == 'h' && NP_BUF[4095] == 'f');
+    HEAP_BUDGET = -1; /* memory is there again: the text moves to the heap and keeps its content */
+    type("!");
+    assert(NP_BUF != NP_FALLBACK && NP_LEN == 4097 && NP_BUF[0] == 'h' && NP_BUF[4096] == '!' && NP_BUF[4095] == 'f');
+    free(pad);
+    new_document();
+    assert(HEAP_BLOCKS == blocks0 && NP_BUF == NP_EMPTY);
+
+    /* the undo pool alone cannot grow: edits still work, the old history is forgotten */
+    type("abc");
+    end_run();
+    HEAP_BUDGET = HEAP_BYTES; /* the pool is at its size and may not grow */
+    for (int i = 0; i < 3000; i++)
+    {
+        end_run();
+        type("k"); /* every one a separate record, so the pool fills */
+    }
+    assert(NP_LEN == 3003 && NP_UN > 0);
+    undo();
+    assert(NP_LEN == 3002);
+    HEAP_BUDGET = -1;
+    new_document();
+
+    /* opening a big file: read, checked and loaded; a file over the limit, or a heap without memory, leaves the text alone */
+    static char file[390000];
+    for (int i = 0; i < (int)sizeof file; i++)
+        file[i] = (i % 80 == 79) ? '\n' : (char)('A' + i % 26);
+    put_file("big.txt", file, sizeof file);
+    assert(open_file("/Fake/big.txt") == 0 && NP_LEN == (int)sizeof file && memcmp(NP_BUF, file, sizeof file) == 0);
+    assert(same_str(NP_PATH, "/Fake/big.txt") && NP_UN == 0 && !NP_DIRTY);
+    type("Q");
+    undo();
+    assert(NP_LEN == (int)sizeof file && NP_CAP >= NP_LEN);
+    long blocks_open = HEAP_BLOCKS;
+    NP_LIMIT = 1000;
+    assert(open_file("/Fake/big.txt") != 0 && strstr(open_file("/Fake/big.txt"), "too large") && HEAP_BLOCKS == blocks_open);
+    NP_LIMIT = 8 * 1024 * 1024;
+    HEAP_BUDGET = HEAP_BYTES + 100000; /* room for the temporary copy but not for the text after it */
+    assert(open_file("/Fake/big.txt") != 0 && same_str(open_file("/Fake/big.txt"), "Out of memory"));
+    HEAP_BUDGET = HEAP_BYTES;
+    assert(open_file("/Fake/big.txt") != 0);
+    assert(NP_LEN == (int)sizeof file && HEAP_BLOCKS == blocks_open);       /* the open text is untouched, nothing leaked */
+    HEAP_BUDGET = -1;
+    new_document();
+    assert(HEAP_BLOCKS == blocks0);
+    {   /* a file that is not text is refused after it was read: the temporary copy is freed */
+        static char bin[50000];
+        memset(bin, 'b', sizeof bin);
+        bin[40000] = 1;
+        put_file("bin2.dat", bin, sizeof bin);
+        assert(open_file("/Fake/bin2.dat") != 0 && HEAP_BLOCKS == blocks0);
+    }
+
+    /* paste and copy of big texts: the clipboard text is used where it is; Tab and CR are handled; too big to copy = not cut */
+    static char clip[200000];
+    int cn = 0;
+    for (int i = 0; i < 50000; i++)
+    {
+        clip[cn++] = 'p';
+        clip[cn++] = '\t';
+        clip[cn++] = '\r';
+        clip[cn++] = '\n';
+    }
+    memcpy(CLIP_STORE, clip, (size_t)cn);
+    CLIP_N = cn;
+    paste();
+    assert(NP_LEN == 50000 * (1 + NP_TAB + 1) && NP_BUF[0] == 'p' && NP_BUF[1] == ' ' && NP_BUF[1 + NP_TAB] == '\n');
+    NP_ANCHOR = 0;
+    NP_CUR = NP_LEN;
+    CLIP_CAP = 100; /* the clipboard takes only a short text */
+    int len_before = NP_LEN;
+    NP_NOTE = "";
+    assert(copy_selection() == 0 && same_str(NP_NOTE, "Too large to copy"));
+    KeyEvent cutk = {'x', 0, 1, KMOD_CTRL};
+    np_key(&NW, &cutk);
+    assert(NP_LEN == len_before);                                           /* the cut did not delete what could not be copied */
+    CLIP_CAP = 2 * 1024 * 1024;
+    NP_ANCHOR = 0; /* (the failed cut ended the selection, as every key does) */
+    NP_CUR = NP_LEN;
+    np_key(&NW, &cutk);
+    assert(NP_LEN == 0 && CLIP_N == len_before);
+    paste();
+    assert(NP_LEN == len_before);                                           /* what was cut comes back */
+    new_document();
+    assert(HEAP_BLOCKS == blocks0);
+
+    NP_LIMIT = T_MAX; /* the rest of the tests use the old size */
+    NP_WIN = 0;
+}
+
 /* ---- helpers ---- */
 static void reset(void)
 {
@@ -860,6 +1124,8 @@ static void end_run(void) { NP_LASTKIND = NP_KIND_NONE; } /* what a movement key
 
 int main(void)
 {
+    NP_LIMIT = T_MAX; /* the old fixed size: the limit tests below rely on it */
+
     /* typing in a row is one undo step */
     reset();
     type("hello");
@@ -960,14 +1226,15 @@ int main(void)
 
     /* the buffer limit: a paste is cut to what fits and still undoes cleanly */
     reset();
-    for (int i = 0; i < NP_MAX - 2; i++)
+    assert(buf_reserve(T_MAX));
+    for (int i = 0; i < T_MAX - 2; i++)
         NP_BUF[i] = 'a';
-    NP_LEN = NP_MAX - 2;
+    NP_LEN = T_MAX - 2;
     NP_CUR = NP_ANCHOR = NP_LEN;
     insert_text("12345", 5);
-    assert(NP_LEN == NP_MAX && NP_BUF[NP_MAX - 1] == '2');
+    assert(NP_LEN == T_MAX && NP_BUF[T_MAX - 1] == '2');
     undo();
-    assert(NP_LEN == NP_MAX - 2);
+    assert(NP_LEN == T_MAX - 2);
 
     /* random edits: undo everything gives the empty text, redo everything gives the final text */
     unsigned seed = 12345;
@@ -1002,7 +1269,7 @@ int main(void)
                 insert_text("zz", 2);
             }
         }
-        static char final_text[NP_MAX + 1];
+        static char final_text[T_MAX + 1];
         int final_len = NP_LEN;
         memcpy(final_text, NP_BUF, (size_t)NP_LEN);
         while (NP_UPOS > 0)
@@ -1036,6 +1303,7 @@ int main(void)
     test_wrap();
     test_find();
     test_close_clears();
+    test_big_text();
 
     printf("notepad tests passed\n");
     return 0;

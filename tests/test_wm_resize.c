@@ -9,6 +9,9 @@
 unsigned long long timer_ms(void){return 0;}
 int timer_ready(void){return 0;}
 void timer_init(void){}
+#include <stdlib.h>
+void *kmalloc(unsigned long long n){ return malloc((size_t)n); } /* the clipboard (ui_edit.c) keeps its text in the kernel heap */
+void kfree(void *p){ free(p); }
 static void draw(Window*w,UiRect b){ ui_text(b.x+16,b.y+16,"Resizable window",UI_TEXT_HEADING); (void)w; }
 static void ptr(int x,int y,unsigned b){ wm_pointer(x,y,b); }
 static int wheel_steps, wheel_ret;

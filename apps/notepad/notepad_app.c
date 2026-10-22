@@ -5,11 +5,13 @@
  * Find and replace: Ctrl+F / Ctrl+H or the Find button open a bar with a Find and a Replace field (Enter = next,
  * Shift+Enter = previous, F3 / Shift+F3 from anywhere, "Aa" = match case, All = one undo step).
  * Word wrap: the Wrap button or Alt+Z. What is shown is a list of rows: lines, or pieces of a line with wrap (Row).
- * The text is one flat buffer; a line ends at '\n'.
+ * The text is one flat buffer in a block of the kernel heap (heap.h) that grows with it, up to 16 MB (a short text
+ * still works if the heap has no memory). A line ends at '\n'.
  * An app uses only public headers (ui.h, wm.h, desktop.h, gfx.h) - never desktop_internal.h. */
 #include "app.h"
 #include "desktop.h"
 #include "gfx.h"
+#include "heap.h"
 #include "notepad.h"
 #include "ntfs.h"
 #include "taskbar.h"
@@ -18,7 +20,8 @@
 #include "vfs.h"
 #include "wm.h"
 
-#define NP_MAX 16384 /* bytes of text */
+#define NP_HARD_MAX (16 * 1024 * 1024) /* the most text there can be, in bytes */
+#define NP_UNDO_MAX (4 * 1024 * 1024) /* the most the undo history may hold, in bytes */
 #define NP_PAD 8
 #define NP_TOOL_H 46 /* the row of buttons above the text */
 #define NP_BAR_H 80  /* the find bar (two rows of fields) when it is shown */
@@ -27,7 +30,11 @@
 #define NP_TAB 4
 
 static Window *NP_WIN;
-static char NP_BUF[NP_MAX];
+static char NP_EMPTY[1];
+static char NP_FALLBACK[4096]; /* the text of a short document if the heap has no memory at all (no page allocator) */
+static char *NP_BUF = NP_EMPTY; /* the text: a block of the kernel heap (NP_EMPTY while there is none) */
+static int NP_CAP;               /* the size of that block */
+static int NP_LIMIT = NP_HARD_MAX; /* the text may grow up to this (the tests lower it) */
 static int NP_LEN;
 static int NP_CUR;     /* caret: 0..NP_LEN */
 static int NP_DESIRED; /* column the Up / Down keys try to keep */
@@ -96,7 +103,6 @@ static void copy_text(int from, int count, char *out)
  * row, or pressing Backspace / Delete in a row, grows the previous record instead of making a new one, so
  * one Ctrl+Z takes back a whole run. When the records or the pool are full the oldest are forgotten. */
 #define NP_UNDO_OPS 256
-#define NP_UNDO_POOL 40960 /* worst case for one record: the whole text deleted (16384) + a whole text pasted */
 #define NP_RUN_MAX 200     /* a record of a typing run stops growing here */
 
 enum
@@ -115,11 +121,64 @@ typedef struct
 } UndoOp;
 
 static UndoOp NP_UNDO[NP_UNDO_OPS];
-static char NP_POOL[NP_UNDO_POOL];
+static char *NP_POOL;  /* the texts of the records, in a heap block that grows (at most NP_UNDO_MAX) */
+static int NP_POOL_CAP;
 static int NP_UN;   /* records in NP_UNDO */
 static int NP_UPOS; /* the first NP_UPOS can be undone, the rest redone */
 static int NP_LASTKIND; /* kind of the last edit, while nothing else happened (for merging a run) */
 static unsigned NP_EDITS; /* counts edits: a key handler can tell whether the key changed the text */
+
+/* ---- the text buffer and the undo pool: blocks of the kernel heap (heap.h) that grow as needed ---- */
+static int buf_on_heap(void)
+{
+    return NP_BUF != NP_EMPTY && NP_BUF != NP_FALLBACK;
+}
+
+static void buf_release(void)
+{
+    if (buf_on_heap())
+        kfree(NP_BUF);
+    NP_BUF = NP_EMPTY;
+    NP_CAP = 0;
+}
+
+/* Room for `need` bytes of text (the block doubles when it is full). 0 if that is over NP_LIMIT or the heap has no
+ * memory; nothing changes then. */
+static int buf_reserve(int need)
+{
+    if (need <= NP_CAP)
+        return 1;
+    if (need > NP_LIMIT)
+        return 0;
+    long long cap = NP_CAP < 4096 ? 4096 : NP_CAP;
+    while (cap < need)
+        cap *= 2;
+    if (cap > NP_LIMIT)
+        cap = NP_LIMIT;
+    for (;;) /* the doubled size, and if the heap cannot give that, just what is needed */
+    {
+        char *nb = buf_on_heap() ? krealloc(NP_BUF, (unsigned long long)cap) : kmalloc((unsigned long long)cap);
+        if (nb)
+        {
+            if (!buf_on_heap()) /* leaving the fallback block (or the empty one): take the text along */
+                for (int i = 0; i < NP_LEN; i++)
+                    nb[i] = NP_BUF[i];
+            NP_BUF = nb;
+            NP_CAP = (int)cap;
+            return 1;
+        }
+        if (cap == need)
+            break;
+        cap = need;
+    }
+    if (NP_BUF == NP_EMPTY && need <= (int)sizeof NP_FALLBACK) /* no heap memory: a short text still has a place */
+    {
+        NP_BUF = NP_FALLBACK;
+        NP_CAP = (int)sizeof NP_FALLBACK;
+        return 1;
+    }
+    return 0;
+}
 
 static int pool_used(void)
 {
@@ -157,16 +216,70 @@ static void drop_oldest(void)
     NP_UPOS--;
 }
 
+/* Room for `extra` more bytes at the end of the pool (it grows like the text buffer). The oldest records are forgotten
+ * while the history would be over NP_UNDO_MAX, has too many records, or the heap cannot give the room. 0 only if
+ * even an empty history is too small. */
+static int pool_reserve(int extra)
+{
+    for (;;)
+    {
+        int need = pool_used() + extra;
+        if (NP_UN == NP_UNDO_OPS || need > NP_UNDO_MAX)
+        {
+            if (NP_UN == 0)
+                return 0;
+            drop_oldest();
+            continue;
+        }
+        if (need <= NP_POOL_CAP)
+            return 1;
+        long long cap = NP_POOL_CAP < 4096 ? 4096 : NP_POOL_CAP;
+        while (cap < need)
+            cap *= 2;
+        if (cap > NP_UNDO_MAX)
+            cap = NP_UNDO_MAX;
+        char *np = 0;
+        for (;;)
+        {
+            np = NP_POOL ? krealloc(NP_POOL, (unsigned long long)cap) : kmalloc((unsigned long long)cap);
+            if (np || cap == need)
+                break;
+            cap = need;
+        }
+        if (np)
+        {
+            NP_POOL = np;
+            NP_POOL_CAP = (int)cap;
+            return 1;
+        }
+        if (NP_UN == 0)
+            return 0;
+        drop_oldest(); /* the heap is short of memory: forget history rather than fail */
+    }
+}
+
 /* Replace the dl characters at pos by ins[0,il). `kind` says whether this may join the previous record. The
  * caret ends after the new text. */
 static void edit_replace(int pos, int dl, const char *ins, int il, int kind)
 {
-    if (il > NP_MAX - (NP_LEN - dl)) /* the buffer is full: take what fits */
-        il = NP_MAX - (NP_LEN - dl);
+    int wanted = il;
+    if (il > NP_LIMIT - (NP_LEN - dl)) /* the text is at its limit: take what fits */
+        il = NP_LIMIT - (NP_LEN - dl);
     if (il < 0)
         il = 0;
+    if (!buf_reserve(NP_LEN - dl + il)) /* the heap has no more memory: take what fits in the block there is */
+    {
+        il = NP_CAP - (NP_LEN - dl);
+        if (il < 0)
+            il = 0;
+    }
+    int cut = il < wanted; /* not everything fits: said at the end, so that no other message hides it */
     if (dl == 0 && il == 0)
+    {
+        if (cut)
+            NP_NOTE = "The text is full: not everything fit";
         return;
+    }
     int cur_before = NP_CUR, anchor_before = NP_ANCHOR;
 
     int merged = 0;
@@ -174,7 +287,7 @@ static void edit_replace(int pos, int dl, const char *ins, int il, int kind)
     {
         UndoOp *o = &NP_UNDO[NP_UN - 1];
         int end = pool_used();
-        if (o->dl + o->il + dl + il <= NP_RUN_MAX && end + dl + il <= NP_UNDO_POOL)
+        if (o->dl + o->il + dl + il <= NP_RUN_MAX && end + dl + il <= NP_POOL_CAP)
         {
             if (kind == NP_KIND_TYPE && o->dl == 0 && pos == o->pos + o->il)
             {
@@ -205,27 +318,37 @@ static void edit_replace(int pos, int dl, const char *ins, int il, int kind)
     if (!merged)
     {
         NP_UN = NP_UPOS; /* a new edit ends the redo history */
-        while (NP_UN > 0 && (NP_UN == NP_UNDO_OPS || pool_used() + dl + il > NP_UNDO_POOL))
-            drop_oldest();
-        UndoOp *o = &NP_UNDO[NP_UN];
-        o->pos = pos;
-        o->dl = dl;
-        o->il = il;
-        o->off = pool_used();
-        o->cur_before = cur_before;
-        o->anchor_before = anchor_before;
-        for (int i = 0; i < dl; i++)
-            NP_POOL[o->off + i] = NP_BUF[pos + i];
-        for (int i = 0; i < il; i++)
-            NP_POOL[o->off + dl + i] = ins[i];
-        NP_UN++;
-        NP_UPOS++;
+        if (!pool_reserve(dl + il))
+        {
+            /* too big for the history: the edit is made without a record, and the history is forgotten (its records
+             * describe a text that this change makes different) */
+            NP_UN = NP_UPOS = 0;
+            NP_NOTE = "Too large to undo";
+        }
+        else
+        {
+            UndoOp *o = &NP_UNDO[NP_UN];
+            o->pos = pos;
+            o->dl = dl;
+            o->il = il;
+            o->off = pool_used();
+            o->cur_before = cur_before;
+            o->anchor_before = anchor_before;
+            for (int i = 0; i < dl; i++)
+                NP_POOL[o->off + i] = NP_BUF[pos + i];
+            for (int i = 0; i < il; i++)
+                NP_POOL[o->off + dl + i] = ins[i];
+            NP_UN++;
+            NP_UPOS++;
+        }
     }
 
     raw_replace(pos, dl, ins, il);
     NP_CUR = NP_ANCHOR = pos + il;
     NP_LASTKIND = kind;
     NP_EDITS++;
+    if (cut)
+        NP_NOTE = "The text is full: not everything fit";
 }
 
 static void undo(void)
@@ -650,8 +773,7 @@ static void np_draw(Window *w, UiRect body)
     put_dec(st, &n, (unsigned)(NP_CUR - line_start(NP_CUR)) + 1);
     put_str(st, &n, "     ");
     put_dec(st, &n, (unsigned)NP_LEN);
-    put_str(st, &n, " / ");
-    put_dec(st, &n, NP_MAX);
+    put_str(st, &n, " bytes");
     if (has_sel)
     {
         put_str(st, &n, "     ");
@@ -714,30 +836,59 @@ static void mark_changed(Window *w, int old_lo, int old_hi, int old_lines, int o
     wm_add_damage(status_rect(body));
 }
 
-static void copy_selection(void)
+/* 1 if a selection was copied; a text too big for the clipboard says so and copies nothing */
+static int copy_selection(void)
 {
     int a, b;
-    if (sel_range(&a, &b))
-        ui_clipboard_set(NP_BUF + a, b - a);
+    if (!sel_range(&a, &b))
+        return 0;
+    if (!ui_clipboard_set(NP_BUF + a, b - a))
+    {
+        NP_NOTE = "Too large to copy";
+        return 0;
+    }
+    return 1;
 }
 
-/* paste the clipboard at the caret over the selection: '\r' and other control characters are dropped, a Tab becomes spaces */
-static void paste(void)
+/* What of the clipboard text can be pasted: '\n' and printable ASCII stay, a Tab becomes spaces, '\r' and other control
+ * characters are dropped. Writes into out (if not NULL) and returns the length; stops at cap. */
+static int filter_clip(const char *clip, int n, char *out, int cap)
 {
-    static char clip[NP_MAX + 1], text[NP_MAX + 1];
-    int n = ui_clipboard_get(clip, (int)sizeof clip);
-    int len = 0;
-    for (int i = 0; i < n && len < NP_MAX; i++)
+    int o = 0;
+    for (int i = 0; i < n && o < cap; i++)
     {
         unsigned char c = (unsigned char)clip[i];
         if (c == '\n' || (c >= 32 && c < 127))
-            text[len++] = (char)c;
+        {
+            if (out)
+                out[o] = (char)c;
+            o++;
+        }
         else if (c == '\t')
-            for (int k = 0; k < NP_TAB && len < NP_MAX; k++)
-                text[len++] = ' ';
+            for (int k = 0; k < NP_TAB && o < cap; k++, o++)
+                if (out)
+                    out[o] = ' ';
     }
-    if (len > 0)
-        insert_text(text, len); /* one undo step, whatever its size */
+    return o;
+}
+
+/* paste the clipboard at the caret, over the selection */
+static void paste(void)
+{
+    int n;
+    const char *clip = ui_clipboard_text(&n); /* the clipboard's own memory: a big text is not copied twice */
+    int len = filter_clip(clip, n, 0, NP_LIMIT);
+    if (len == 0)
+        return;
+    char *text = kmalloc((unsigned long long)len);
+    if (!text)
+    {
+        NP_NOTE = "Out of memory";
+        return;
+    }
+    filter_clip(clip, n, text, len);
+    insert_text(text, len); /* one undo step, whatever its size */
+    kfree(text);
 }
 
 /* ---- files: New / Open / Save / Save As ----
@@ -804,6 +955,11 @@ static void np_title(Window *w)
 
 static void new_document(void)
 {
+    buf_release(); /* the memory goes back to the heap */
+    if (NP_POOL)
+        kfree(NP_POOL);
+    NP_POOL = 0;
+    NP_POOL_CAP = 0;
     NP_LEN = NP_CUR = NP_ANCHOR = 0;
     NP_UN = NP_UPOS = 0;
     NP_LASTKIND = NP_KIND_NONE;
@@ -897,29 +1053,35 @@ static const char *folder_problem(int dir)
     return 0;
 }
 
-/* Replace the text with the file at `path`. Returns NULL, or a sentence saying why not (the text is then untouched). */
+/* Replace the text with the file at `path`. Returns NULL, or a sentence saying why not (the text is then untouched).
+ * The file is read into a temporary block of the heap and checked first; only then does it replace the text. */
 static const char *open_file(const char *path)
 {
-    static unsigned char raw[NP_MAX];
     int id = vfs_lookup(path);
     if (id < 0)
         return "File not found";
     const VfsNode *n = vfs_node(id);
     if (n->is_dir)
         return "That is a folder, not a file";
-    if (n->size > NP_MAX)
-        return "File is too large (the limit is 16384 bytes)";
+    if (n->size > (unsigned)NP_LIMIT)
+        return "File is too large (the limit is 16 MB)";
     unsigned size = n->size, done = 0;
+    unsigned char *raw = size ? kmalloc(size) : 0;
+    if (size && !raw)
+        return "Out of memory";
     while (done < size)
     {
         int r = vfs_read(id, done, raw + done, size - done);
         if (r < 0)
+        {
+            kfree(raw);
             return vfs_problem();
+        }
         if (r == 0)
             break;
         done += (unsigned)r;
     }
-    int out = 0;
+    long long out = 0; /* the length of the text: Tab becomes spaces, carriage returns go */
     for (unsigned i = 0; i < done; i++)
     {
         unsigned char c = raw[i];
@@ -928,19 +1090,39 @@ static const char *open_file(const char *path)
         else if (c == '\n' || (c >= 32 && c < 127))
             out++;
         else if (c != '\r')
+        {
+            kfree(raw);
             return "Only plain ASCII text can be opened";
+        }
     }
-    if (out > NP_MAX)
-        return "File is too large (the limit is 16384 bytes)";
-    new_document();
+    if (out > NP_LIMIT)
+    {
+        kfree(raw);
+        return "File is too large (the limit is 16 MB)";
+    }
+    char *text = out ? kmalloc((unsigned long long)out) : 0;
+    if (out && !text)
+    {
+        kfree(raw);
+        return "Out of memory";
+    }
+    int len = 0;
     for (unsigned i = 0; i < done; i++)
     {
         unsigned char c = raw[i];
         if (c == '\t')
             for (int k = 0; k < NP_TAB; k++)
-                NP_BUF[NP_LEN++] = ' ';
+                text[len++] = ' ';
         else if (c != '\r')
-            NP_BUF[NP_LEN++] = (char)c;
+            text[len++] = (char)c;
+    }
+    kfree(raw);
+    new_document(); /* frees the old text and the undo history */
+    if (text) /* the new block becomes the text buffer */
+    {
+        NP_BUF = text;
+        NP_CAP = len;
+        NP_LEN = len;
     }
     copy_str(NP_PATH, (int)sizeof NP_PATH, path);
     return 0;
@@ -1760,7 +1942,7 @@ static void do_replace(Window *w)
     int a = 0, b = 0;
     if (n && sel_range(&a, &b) && b - a == n && match_at(a, NP_FIND.text, n)) /* the selection is a match: replace it */
     {
-        if (NP_LEN - n + rn > NP_MAX)
+        if (NP_LEN - n + rn > NP_LIMIT)
         {
             NP_NOTE = "The text would get too long";
             return;
@@ -1776,46 +1958,62 @@ static void do_replace(Window *w)
 
 static void do_replace_all(Window *w)
 {
-    static char out[NP_MAX + 1];
-    int n = NP_FIND.len, rn = NP_REPL.len, olen = 0, count = 0;
+    int n = NP_FIND.len, rn = NP_REPL.len, which;
     if (n == 0)
     {
         NP_NOTE = "Type what to find";
         return;
     }
-    for (int i = 0; i < NP_LEN;)
-    {
-        if (match_at(i, NP_FIND.text, n))
-        {
-            if (olen + rn > NP_MAX)
-            {
-                NP_NOTE = "The text would get too long";
-                return;
-            }
-            for (int k = 0; k < rn; k++)
-                out[olen++] = NP_REPL.text[k];
-            i += n;
-            count++;
-        }
-        else
-        {
-            if (olen >= NP_MAX)
-            {
-                NP_NOTE = "The text would get too long";
-                return;
-            }
-            out[olen++] = NP_BUF[i++];
-        }
-    }
+    int count = count_matches(n, -1, &which);
     if (count == 0)
     {
         NP_NOTE = "Not found";
         return;
     }
-    edit_replace(0, NP_LEN, out, olen, NP_KIND_NONE); /* the whole text in one step: one Ctrl+Z takes it all back */
-    NP_CUR = NP_ANCHOR = 0;
-    NP_TOP = NP_HSCROLL = 0;
-    NP_DESIRED = 0;
+    long long olen = (long long)NP_LEN + (long long)count * (rn - n); /* the length of the whole result */
+    if (olen > NP_LIMIT)
+    {
+        NP_NOTE = "The text would get too long";
+        return;
+    }
+    /* Only the part from the first match to the end of the last one changes: that part is replaced as one record
+     * (not the whole text, which would fill the undo history on a big text). */
+    int first = -1, last_end = 0;
+    for (int i = 0; i + n <= NP_LEN;)
+    {
+        if (match_at(i, NP_FIND.text, n))
+        {
+            if (first < 0)
+                first = i;
+            last_end = i + n;
+            i += n;
+        }
+        else
+            i++;
+    }
+    long long span = (long long)(last_end - first) + (long long)count * (rn - n); /* its length after the change */
+    char *out = kmalloc(span > 0 ? (unsigned long long)span : 1);
+    if (!out)
+    {
+        NP_NOTE = "Out of memory";
+        return;
+    }
+    int o = 0;
+    for (int i = first; i < last_end;)
+    {
+        if (match_at(i, NP_FIND.text, n))
+        {
+            for (int k = 0; k < rn; k++)
+                out[o++] = NP_REPL.text[k];
+            i += n;
+        }
+        else
+            out[o++] = NP_BUF[i++];
+    }
+    edit_replace(first, last_end - first, out, o, NP_KIND_NONE); /* one record: one Ctrl+Z takes it all back */
+    kfree(out);
+    NP_CUR = NP_ANCHOR = first; /* the view goes to the first change */
+    NP_DESIRED = col_in_row();
     NP_FOCUS = 0; /* the keyboard goes back to the text, so that Ctrl+Z undoes this */
     replaced(w);
     int k = 0;
@@ -2033,8 +2231,8 @@ static void np_key(Window *w, const KeyEvent *k)
             copy_selection();
             break;
         case 'x':
-            copy_selection();
-            delete_selection();
+            if (copy_selection()) /* a text the clipboard cannot take is not cut */
+                delete_selection();
             break;
         case 'v':
             paste();
@@ -2123,8 +2321,8 @@ static void np_key(Window *w, const KeyEvent *k)
         case KEY_DELETE:
             if (shift) /* Shift+Delete = cut */
             {
-                copy_selection();
-                delete_selection();
+                if (copy_selection())
+                    delete_selection();
             }
             else if (!delete_selection() && NP_CUR < NP_LEN)
                 edit_replace(NP_CUR, 1, 0, 0, NP_KIND_FWD);

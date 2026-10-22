@@ -1,5 +1,6 @@
 /* HarisUI: Single-line text editor (selection, clipboard, undo, mouse) and blinking caret. */
 #include "ui_internal.h"
+#include "heap.h"
 #include "timer.h"
 
 #define DOUBLE_CLICK_MS 450
@@ -84,29 +85,56 @@ static int word_right(const UiEdit *e, int i)
 }
 
 /* ---- shared clipboard ---------------------------------------- */
-#define CLIP_MAX 16384 /* Notepad copies whole blocks of text; the single-line inputs only paste what fits their own buffer */
-static char CLIP[CLIP_MAX + 1];
+/* The text lives in a block of the kernel heap (so Notepad can copy a whole big document). If the heap has no memory,
+ * a short text still fits CLIP_SMALL, which is what the single-line inputs need. */
+#define CLIP_MAX (16 * 1024 * 1024)
+static char CLIP_SMALL[UI_EDIT_MAX + 1];
+static char *CLIP_HEAP; /* the copied text, or NULL when CLIP_SMALL holds it */
 static int CLIP_LEN;
 
-void ui_clipboard_set(const char *s, int len)
+int ui_clipboard_set(const char *s, int len)
 {
     if (len < 0)
         len = 0;
     if (len > CLIP_MAX)
-        len = CLIP_MAX;
+        return 0;
+    char *nb = kmalloc((unsigned long long)len + 1); /* the old text stays until this one is safely copied */
+    if (nb)
+    {
+        for (int i = 0; i < len; i++)
+            nb[i] = s[i];
+        nb[len] = 0;
+        kfree(CLIP_HEAP);
+        CLIP_HEAP = nb;
+        CLIP_LEN = len;
+        return 1;
+    }
+    if (len > UI_EDIT_MAX)
+        return 0; /* no memory, and too long for the small buffer: the clipboard is left as it was */
     for (int i = 0; i < len; i++)
-        CLIP[i] = s[i];
-    CLIP[len] = 0;
+        CLIP_SMALL[i] = s[i];
+    CLIP_SMALL[len] = 0;
+    kfree(CLIP_HEAP);
+    CLIP_HEAP = 0;
     CLIP_LEN = len;
+    return 1;
+}
+
+const char *ui_clipboard_text(int *len)
+{
+    *len = CLIP_LEN;
+    return CLIP_HEAP ? CLIP_HEAP : CLIP_SMALL;
 }
 
 int ui_clipboard_get(char *out, int cap)
 {
     if (cap <= 0)
         return 0;
-    int n = CLIP_LEN < cap - 1 ? CLIP_LEN : cap - 1;
+    int len;
+    const char *src = ui_clipboard_text(&len);
+    int n = len < cap - 1 ? len : cap - 1;
     for (int i = 0; i < n; i++)
-        out[i] = CLIP[i];
+        out[i] = src[i];
     out[n] = 0;
     return n;
 }

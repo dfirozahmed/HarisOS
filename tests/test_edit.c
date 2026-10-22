@@ -3,7 +3,13 @@
 #include "timer.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* the kernel heap, on the host (the clipboard keeps its text there); KMALLOC_FAIL makes it run out of memory */
+static int KMALLOC_FAIL;
+void *kmalloc(unsigned long long n) { return KMALLOC_FAIL ? 0 : malloc((size_t)n); }
+void kfree(void *p) { free(p); }
 
 /* ---- stubs ---- */
 static UiTheme THEME_STORE;
@@ -212,6 +218,31 @@ int main(void)
     char tmp[32];
     ui_clipboard_get(tmp, sizeof tmp);
     assert(strcmp(tmp, "locked") == 0);
+
+    /* the clipboard keeps big texts (it lives in the heap) and says when it cannot */
+    {
+        static char big[300000], back[300000];
+        memset(big, 'q', sizeof big);
+        assert(ui_clipboard_set(big, (int)sizeof big) == 1);
+        int n;
+        const char *t = ui_clipboard_text(&n);
+        assert(n == (int)sizeof big && memcmp(t, big, sizeof big) == 0);
+        assert(ui_clipboard_get(back, (int)sizeof back) == (int)sizeof back - 1 && back[0] == 'q');
+        assert(ui_clipboard_get(tmp, 5) == 4 && strcmp(tmp, "qqqq") == 0);        /* a small receiver gets a piece */
+        assert(ui_clipboard_set("short text", 10) == 1);                          /* a new text replaces it */
+        t = ui_clipboard_text(&n);
+        assert(n == 10 && strcmp(t, "short text") == 0);
+        KMALLOC_FAIL = 1;                                                          /* no heap memory: short texts still work */
+        assert(ui_clipboard_set("fits", 4) == 1);
+        t = ui_clipboard_text(&n);
+        assert(n == 4 && strcmp(t, "fits") == 0);
+        assert(ui_clipboard_set(big, (int)sizeof big) == 0);                       /* a long one is refused, the old text stays */
+        t = ui_clipboard_text(&n);
+        assert(n == 4 && strcmp(t, "fits") == 0);
+        KMALLOC_FAIL = 0;
+        assert(ui_clipboard_set(big, 16 * 1024 * 1024 + 1) == 0);                  /* over the clipboard's own limit */
+        assert(ui_clipboard_set("", 0) == 1 && ui_clipboard_text(&n) && n == 0);
+    }
 
     /* password: no copy, no word jumps */
     fresh();

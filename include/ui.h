@@ -251,8 +251,10 @@ int ui_edit_selection(const UiEdit *e, int *from, int *to); /* returns 1 and the
 int ui_edit_insert(UiEdit *e, const char *s);        /* type a string at the cursor; returns how many characters went in */
 
 /* Shared clipboard (plain text) */
-void ui_clipboard_set(const char *s, int len);
+/* The clipboard keeps up to 16 MiB (in the kernel heap). set: 1 = copied, 0 = too long / no memory (the old text stays). */
+int ui_clipboard_set(const char *s, int len);
 int ui_clipboard_get(char *out, int cap);            /* copies up to cap-1 chars, returns the length */
+const char *ui_clipboard_text(int *len);             /* the whole text without copying it (valid until the next set) */
 
 /* ---- blinking caret ----------------------------------------------
  * The caret of a focused UiEdit blinks (visible 530 ms, hidden 530 ms). ui_edit_draw()
