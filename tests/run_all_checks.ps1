@@ -16,6 +16,7 @@ try {
         @('Graphics regression tests', 'tests/run_gfx_tests.sh'),
         @('Font regression tests', 'tests/run_font_tests.sh'),
         @('Text input tests', 'tests/run_edit_tests.sh'),
+        @('Kernel heap tests', 'tests/run_heap_tests.sh'),
         @('Notepad tests', 'tests/run_notepad_tests.sh'),
         @('Window manager tests', 'tests/run_wm_tests.sh'),
         @('Power tests', 'tests/run_power_tests.sh'),

@@ -343,8 +343,9 @@ static void draw_memory(UiRect pane)
     col[PMM_TAG_GRAPHICS] = t->accent;
     col[PMM_TAG_USB] = t->success;
     col[PMM_TAG_STORAGE] = t->warning;
+    col[PMM_TAG_HEAP] = t->text;
     col[PMM_TAG_OTHER] = t->danger;
-    static const char *const name[MEM_PARTS] = {"Other", "System tables", "Graphics buffers", "USB", "Storage", "Free"};
+    static const char *const name[MEM_PARTS] = {"Other", "System tables", "Graphics buffers", "USB", "Storage", "Kernel heap", "Free"};
 
     UiRect bar = ui_rect(pane.x, g.y + g.h + 30, pane.w, 14);
     gfx_fill_round_rect(bar.x, bar.y, bar.w, bar.h, 4, ui_color(t->surface_alt));
@@ -360,7 +361,7 @@ static void draw_memory(UiRect pane)
 
     int y = bar.y + bar.h + 14;
     static const int order[MEM_PARTS] = {PMM_TAG_GRAPHICS, PMM_TAG_SYSTEM, PMM_TAG_USB, PMM_TAG_STORAGE,
-                                         PMM_TAG_OTHER, MEM_FREE};
+                                         PMM_TAG_HEAP, PMM_TAG_OTHER, MEM_FREE};
     for (int k = 0; k < MEM_PARTS; k++)
     {
         int i = order[k];

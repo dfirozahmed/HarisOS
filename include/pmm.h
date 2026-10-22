@@ -26,6 +26,7 @@ typedef enum
     PMM_TAG_GRAPHICS, /* back buffer and wallpaper cache */
     PMM_TAG_USB,      /* USB controller rings and transfer buffers */
     PMM_TAG_STORAGE,  /* AHCI / NVMe queues and bounce buffers */
+    PMM_TAG_HEAP,     /* the kernel heap (heap.h) */
     PMM_TAG_COUNT
 } PmmTag;
 

@@ -59,6 +59,7 @@ set(KERNEL_SOURCES
     boot/efi_entry.c            # UEFI entry: collects BootInfo, calls kernel_main
     kernel/kernel.c
     kernel/memory/pmm.c
+    kernel/memory/heap.c            # kernel heap: kmalloc / kfree on top of the page allocator
     kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
     kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
