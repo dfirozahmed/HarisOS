@@ -61,6 +61,13 @@ static void halt_forever(void)
 
 void desktop_power_action(int restart)
 {
+    /* a window with unsaved work asks the user first (and stays open): do not power off under its question; the user
+     * answers it and chooses Shut down / Restart again */
+    if (!wm_confirm_close_all())
+    {
+        wm_invalidate();
+        return;
+    }
     const char *line = restart ? "Restarting..." : "Shutting down...";
     for (int frame = 0; frame < 8; frame++) /* about 0.7 s: long enough to see, short enough not to annoy */
     {

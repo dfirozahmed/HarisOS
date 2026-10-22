@@ -79,6 +79,10 @@ void wm_close(Window *w);
 /* Close because the user asked: first asks the window (on_close_request). Returns 1 if it was closed, 0 if the
  * window wanted to stay open. wm_close() closes without asking. */
 int wm_request_close(Window *w);
+/* Before shutting the computer down: asks every window (its on_close_request) whether it may be closed, without
+ * closing any. The first one that wants to stay open (it is asking the user about unsaved work) is brought to the
+ * front and 0 is returned: do not shut down yet. 1 = nobody objected. */
+int wm_confirm_close_all(void);
 void wm_raise(Window *w);
 
 /* Add a button; rect is relative to the content area. -1 = window is full. */

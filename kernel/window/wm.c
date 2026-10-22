@@ -158,6 +158,22 @@ int wm_request_close(Window *w)
     return 1;
 }
 
+int wm_confirm_close_all(void)
+{
+    for (int i = 0; i < WM_ZN; i++)
+    {
+        Window *w = WM_Z[i];
+        if (w->dialog || !w->on_close_request)
+            continue;
+        if (w->on_close_request(w)) /* it wants to stay: it is asking the user about unsaved work */
+        {
+            wm_activate(w); /* in front (and restored), so its question is seen */
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void raise_z(Window *w)
 {
     int zi = w ? wm_z_index_internal(w) : -1;

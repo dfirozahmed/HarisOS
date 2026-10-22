@@ -229,6 +229,24 @@ int main(void){
     wm_close(c);                                                          /* the program closes it: not asked */
     assert(close_req_calls==0 && closed_calls==1 && wm_count()==before);
   }
+  /* before shutting down: every window is asked, none is closed, the first one that objects comes to the front */
+  {
+    int before=wm_count();
+    assert(wm_confirm_close_all()==1);                                    /* nobody objects (the earlier windows have no hook) */
+    Window*a=wm_create("A",300,300,200,150,draw,0);
+    Window*b=wm_create("B",340,320,200,150,draw,0);
+    Window*d=wm_create_dialog(b,"Dialog",360,340,100,80,draw,0);          /* a dialog is never asked */
+    a->on_close_request=on_close_req_cb; b->on_close_request=on_close_req_cb; d->on_close_request=on_close_req_cb;
+    close_req_calls=0; close_req_veto=0;
+    assert(wm_confirm_close_all()==1 && close_req_calls==2 && wm_count()==before+3);   /* a and b, not the dialog */
+    close_req_calls=0; close_req_veto=1;
+    wm_minimize(a);
+    assert(wm_confirm_close_all()==0 && close_req_calls==1);              /* stops at the first objection */
+    assert(!a->minimized && wm_top()==a);                                 /* ... which is restored and in front */
+    assert(wm_count()==before+3);                                         /* nothing was closed */
+    wm_close(d); wm_close(a); wm_close(b);
+    assert(wm_count()==before);
+  }
   printf("wm resize tests passed\n");
   return 0;
 }
