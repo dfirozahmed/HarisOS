@@ -298,7 +298,8 @@ typedef enum
     UI_ICON_CHART,   /* line graph */
     UI_ICON_MEMORY,  /* RAM module */
     UI_ICON_CPU,     /* processor, outline */
-    UI_ICON_DISK     /* drive */
+    UI_ICON_DISK,    /* drive */
+    UI_ICON_NOTEPAD  /* page with text lines */
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

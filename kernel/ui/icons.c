@@ -226,6 +226,18 @@ static void icon_trash(const Frame *f, GfxColor c)
     line(f, 28, 22, 28, 36, 3, c);
 }
 
+/* a page with a blue top band and lines of text: Notepad */
+static void icon_notepad(const Frame *f)
+{
+    rrect(f, 8, 4, 32, 40, 5, gfx_rgb(246, 248, 252)); /* page */
+    rrect(f, 8, 4, 32, 10, 5, gfx_rgb(64, 132, 240));  /* top band */
+    rrect(f, 8, 9, 32, 5, 1, gfx_rgb(64, 132, 240));   /* square the band's lower corners */
+    GfxColor ink = gfx_rgb(120, 130, 150);
+    line(f, 14, 21, 34, 21, 3, ink);
+    line(f, 14, 28, 34, 28, 3, ink);
+    line(f, 14, 35, 26, 35, 3, ink);
+}
+
 /* three quarters of a circle (8 steps of 45 degrees, top-right gap) with an arrow head at the top */
 static void icon_refresh(const Frame *f, GfxColor c)
 {
@@ -464,6 +476,9 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_DISK:
         icon_disk(&f, t);
+        break;
+    case UI_ICON_NOTEPAD:
+        icon_notepad(&f);
         break;
     default:
         break;

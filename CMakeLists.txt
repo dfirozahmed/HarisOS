@@ -136,7 +136,8 @@ set(KERNEL_SOURCES
     apps/explorer/explorer_input.c    # File Explorer: mouse and keyboard
     apps/devmgr/devmgr_app.c        # Device Manager app
     apps/display/display_app.c      # Display Settings app: brightness slider
-    apps/taskmgr/taskmgr_app.c)     # Task Manager app: processes and performance
+    apps/taskmgr/taskmgr_app.c      # Task Manager app: processes and performance
+    apps/notepad/notepad_app.c)     # Notepad app: plain-text editor
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h ${CMAKE_SOURCE_DIR}/apps/explorer/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)

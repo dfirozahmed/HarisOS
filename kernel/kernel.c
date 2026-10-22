@@ -200,7 +200,10 @@ void kernel_main(const BootInfo *info)
             worked = 1;
         }
         KeyEvent ke;
-        while (gfx_ready() && keyboard_poll(&ke))
+        /* At most a few events per pass: a USB key release only arrives through mouse_poll() above. If handling
+         * one key press (a redraw) takes longer than the 33 ms repeat rate, a loop without this limit would
+         * produce repeats forever and never see the release. */
+        for (int nkeys = 0; nkeys < 4 && gfx_ready() && keyboard_poll(&ke); nkeys++)
         {
             desktop_key(&ke);
             worked = 1;
