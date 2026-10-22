@@ -2,6 +2,9 @@
  * Typing, Enter, Tab (4 spaces), Backspace / Delete, arrows, Home / End, PageUp / PageDown, mouse click
  * to place the caret, mouse wheel to scroll. Selection: Shift + movement keys, mouse drag, Ctrl+A; Ctrl+C / X / V
  * (also Ctrl+Insert, Shift+Delete, Shift+Insert) with the shared HarisUI clipboard.
+ * Find and replace: Ctrl+F / Ctrl+H or the Find button open a bar with a Find and a Replace field (Enter = next,
+ * Shift+Enter = previous, F3 / Shift+F3 from anywhere, "Aa" = match case, All = one undo step).
+ * Word wrap: the Wrap button or Alt+Z. What is shown is a list of rows: lines, or pieces of a line with wrap (Row).
  * The text is one flat buffer; a line ends at '\n'.
  * An app uses only public headers (ui.h, wm.h, desktop.h, gfx.h) - never desktop_internal.h. */
 #include "app.h"
@@ -18,6 +21,7 @@
 #define NP_MAX 16384 /* bytes of text */
 #define NP_PAD 8
 #define NP_TOOL_H 46 /* the row of buttons above the text */
+#define NP_BAR_H 80  /* the find bar (two rows of fields) when it is shown */
 #define NP_STATUS_H 22
 #define NP_LINE_MAX 511 /* characters of one line that are measured / drawn */
 #define NP_TAB 4
@@ -34,6 +38,16 @@ static int NP_FOLLOW;  /* 1 = scroll so that the caret is visible at the next dr
 static int NP_ANCHOR;  /* the other end of the selection; NP_ANCHOR == NP_CUR means nothing is selected */
 static int NP_SELECTING; /* the left button went down in the text and is still held: dragging selects */
 static int NP_BLINK = 1;
+static int NP_WRAP;  /* word wrap is on */
+static int NP_WRAPW; /* the width in pixels the rows are wrapped to (see set_geometry) */
+static int NP_WRAP_BTN; /* index of the "Wrap" toolbar button (it shows the state by its color) */
+static int NP_BAR;        /* the find bar is shown */
+static int NP_FOCUS;      /* where the keyboard is: 0 = the text, 1 = the Find field, 2 = the Replace field */
+static int NP_BAR_DRAG;   /* the left button went down in a field of the bar: dragging selects there */
+static int NP_MATCH_CASE; /* "Aa": upper and lower case count as different */
+static int NP_FIND_BTN;   /* index of the "Find" toolbar button */
+static UiEdit NP_FIND, NP_REPL;
+static char NP_NOTE_BUF[48]; /* text for NP_NOTE that is made at run time ("3 of 7") */
 static char NP_PATH[UI_EDIT_MAX + 1]; /* the file the text came from or was saved to; "" = untitled */
 static int NP_DIRTY;                  /* the text has changes that were not saved */
 static const char *NP_NOTE = "";      /* a short message at the right of the status bar (a literal) */
@@ -52,30 +66,6 @@ static int line_end(int p)
 {
     while (p < NP_LEN && NP_BUF[p] != '\n')
         p++;
-    return p;
-}
-
-static int line_count(void)
-{
-    int n = 1;
-    for (int i = 0; i < NP_LEN; i++)
-        if (NP_BUF[i] == '\n')
-            n++;
-    return n;
-}
-
-/* buffer offset where line number `line` (0-based) starts; past the last line it gives the last one */
-static int line_offset(int line)
-{
-    int p = 0;
-    while (line > 0)
-    {
-        int e = line_end(p);
-        if (e >= NP_LEN)
-            break;
-        p = e + 1;
-        line--;
-    }
     return p;
 }
 
@@ -303,8 +293,8 @@ static int np_line_h(void)
 
 static UiRect text_area(UiRect body)
 {
-    return ui_rect(body.x + NP_PAD, body.y + NP_TOOL_H, body.w - 2 * NP_PAD,
-                   body.h - NP_TOOL_H - NP_STATUS_H - 6 - NP_PAD / 2);
+    int top = NP_TOOL_H + (NP_BAR ? NP_BAR_H : 0);
+    return ui_rect(body.x + NP_PAD, body.y + top, body.w - 2 * NP_PAD, body.h - top - NP_STATUS_H - 6 - NP_PAD / 2);
 }
 
 static UiRect status_rect(UiRect body)
@@ -347,11 +337,130 @@ static int cols_in(int ls, int len, int px)
     return col;
 }
 
-/* x position of the caret inside a line, in pixels from the line's left edge */
+/* ---- rows ----
+ * The text is shown in rows. Without word wrap a row is a line (up to the '\n'). With it a line is cut into rows no
+ * wider than NP_WRAPW pixels: after the last space that fits, or inside a word that is too long for a row. A row is
+ * the characters [start, end) of the buffer; `lend` is where its line ends. A row that is not the last of its line
+ * ends where the next one starts (a "soft" break); the caret cannot be shown at that offset on this row (it is
+ * the start of the next one), so the last caret position of such a row is end - 1. */
+typedef struct
+{
+    int start, end, lend;
+} Row;
+
+static int seg_end(int s, int lend)
+{
+    if (!NP_WRAP || NP_WRAPW < 16)
+        return lend;
+    int n = cols_in(s, lend - s, NP_WRAPW);
+    if (s + n >= lend)
+        return lend;
+    if (n < 1)
+        n = 1; /* a letter wider than the row still gets a row of its own */
+    if (NP_BUF[s + n] == ' ')
+        return s + n + 1; /* the word ends exactly at the edge: the space hangs over it */
+    for (int i = s + n - 1; i > s; i--)
+        if (NP_BUF[i] == ' ')
+            return i + 1;
+    return s + n; /* no space: break inside the word */
+}
+
+static void row_set(Row *r, int s, int lend)
+{
+    r->start = s;
+    r->lend = lend;
+    r->end = seg_end(s, lend);
+}
+
+static void row_first(Row *r)
+{
+    row_set(r, 0, line_end(0));
+}
+
+/* step to the next row; 0 (and *r unchanged) if r is the last one */
+static int row_next(Row *r)
+{
+    if (r->end < r->lend)
+    {
+        row_set(r, r->end, r->lend);
+        return 1;
+    }
+    if (r->end >= NP_LEN)
+        return 0;
+    int s = r->end + 1;
+    row_set(r, s, line_end(s));
+    return 1;
+}
+
+static int row_soft(const Row *r)
+{
+    return r->end < r->lend;
+}
+
+/* the last offset the caret can have on this row */
+static int row_last_pos(const Row *r)
+{
+    return r->end - (row_soft(r) ? 1 : 0);
+}
+
+/* the index of the row the caret at offset pos is on (and the row in *r) */
+static int row_find(int pos, Row *r)
+{
+    int i = 0;
+    row_first(r);
+    for (;;)
+    {
+        if (pos < r->end || (pos == r->end && !row_soft(r)))
+            return i;
+        if (!row_next(r))
+            return i;
+        i++;
+    }
+}
+
+/* row number `index` into *r; past the end it gives the last row. Returns the number of the row it gave. */
+static int row_at(int index, Row *r)
+{
+    int i = 0;
+    row_first(r);
+    while (i < index && row_next(r))
+        i++;
+    return i;
+}
+
+static int row_count(void)
+{
+    Row r;
+    int n = 1;
+    row_first(&r);
+    while (row_next(&r))
+        n++;
+    return n;
+}
+
+/* the width the rows are wrapped to: the text area, a little less for the caret (set before any row is used) */
+static void set_geometry(UiRect body)
+{
+    UiRect in = ui_inset(text_area(body), NP_PAD);
+    NP_WRAPW = in.w - 4;
+    if (NP_WRAPW < 24)
+        NP_WRAPW = 24;
+}
+
+/* x position of the caret inside its row, in pixels from the row's left edge */
 static int caret_x(void)
 {
-    int ls = line_start(NP_CUR);
-    return span_w(ls, NP_CUR - ls);
+    Row r;
+    row_find(NP_CUR, &r);
+    return span_w(r.start, NP_CUR - r.start);
+}
+
+/* the caret's column in its row (what Up / Down try to keep) */
+static int col_in_row(void)
+{
+    Row r;
+    row_find(NP_CUR, &r);
+    return NP_CUR - r.start;
 }
 
 /* scroll so that the caret is visible (when NP_FOLLOW is set); `in` is the text area inside its padding */
@@ -362,11 +471,18 @@ static void follow(UiRect in)
     NP_ROWS = in.h / np_line_h();
     if (NP_ROWS < 1)
         NP_ROWS = 1;
-    int cur_line = line_of(NP_CUR);
-    if (cur_line < NP_TOP)
-        NP_TOP = cur_line;
-    if (cur_line >= NP_TOP + NP_ROWS)
-        NP_TOP = cur_line - NP_ROWS + 1;
+    Row r;
+    int cur_row = row_find(NP_CUR, &r);
+    if (cur_row < NP_TOP)
+        NP_TOP = cur_row;
+    if (cur_row >= NP_TOP + NP_ROWS)
+        NP_TOP = cur_row - NP_ROWS + 1;
+    if (NP_WRAP)
+    {
+        NP_HSCROLL = 0; /* wrapped text never needs scrolling sideways */
+        NP_FOLLOW = 0;
+        return;
+    }
     int cx = caret_x();
     /* Scrolling sideways repaints the whole text area, so it jumps: the caret lands a quarter of the width from
      * the edge it just left, and the next keys inside that room need no scrolling (one repaint per many keys
@@ -405,6 +521,45 @@ static void put_str(char *s, int *n, const char *t)
     s[*n] = 0;
 }
 
+/* ---- the find bar: a Find and a Replace field with their buttons, under the toolbar ---- */
+typedef struct
+{
+    UiRect bar, find_f, repl_f, prev, next, mcase, close, repl, all;
+} BarLayout;
+
+static BarLayout bar_layout(UiRect body)
+{
+    BarLayout l;
+    l.bar = ui_rect(body.x + NP_PAD, body.y + NP_TOOL_H, body.w - 2 * NP_PAD, NP_BAR_H);
+    int right = l.bar.x + l.bar.w;
+    l.close = ui_rect(right - 34, l.bar.y, 34, 34);
+    l.mcase = ui_rect(l.close.x - 8 - 44, l.bar.y, 44, 34);
+    l.next = ui_rect(l.mcase.x - 8 - 60, l.bar.y, 60, 34);
+    l.prev = ui_rect(l.next.x - 8 - 60, l.bar.y, 60, 34);
+    int fw = l.prev.x - 8 - l.bar.x;
+    if (fw < 60)
+        fw = 60;
+    int y2 = l.bar.y + 40;
+    l.find_f = ui_rect(l.bar.x, l.bar.y, fw, 34);
+    l.repl_f = ui_rect(l.bar.x, y2, fw, 34);
+    l.repl = ui_rect(l.prev.x, y2, 82, 34);
+    l.all = ui_rect(l.repl.x + 82 + 8, y2, 52, 34);
+    return l;
+}
+
+static void bar_draw(UiRect body)
+{
+    BarLayout l = bar_layout(body);
+    ui_edit_draw(l.find_f, &NP_FIND, "Find", NP_FOCUS == 1);
+    ui_edit_draw(l.repl_f, &NP_REPL, "Replace with", NP_FOCUS == 2);
+    ui_button(l.prev, "Prev", UI_BTN_SECONDARY, UI_STATE_NORMAL);
+    ui_button(l.next, "Next", UI_BTN_SECONDARY, UI_STATE_NORMAL);
+    ui_button(l.mcase, "Aa", NP_MATCH_CASE ? UI_BTN_PRIMARY : UI_BTN_SECONDARY, UI_STATE_NORMAL); /* match case */
+    ui_button_icon(l.close, "", UI_ICON_CLOSE, UI_BTN_GHOST, UI_STATE_NORMAL);
+    ui_button(l.repl, "Replace", UI_BTN_SECONDARY, UI_STATE_NORMAL);
+    ui_button(l.all, "All", UI_BTN_SECONDARY, UI_STATE_NORMAL);
+}
+
 static void np_draw(Window *w, UiRect body)
 {
     (void)w;
@@ -431,8 +586,10 @@ static void np_draw(Window *w, UiRect body)
     if (NP_ROWS < 1)
         NP_ROWS = 1;
 
-    int total = line_count();
-    int cur_line = line_of(NP_CUR);
+    set_geometry(body);
+    int total = row_count();
+    Row cur;
+    int cur_row = row_find(NP_CUR, &cur);
     follow(in);
     if (NP_TOP > total - 1)
         NP_TOP = total - 1;
@@ -444,22 +601,24 @@ static void np_draw(Window *w, UiRect body)
     /* a partial redraw (caret blink) only needs the rows it touches: see cl above */
     GfxColor ink = ui_color(t->text);
     int sel_a = 0, sel_b = 0, has_sel = sel_range(&sel_a, &sel_b);
-    int p = line_offset(NP_TOP);
+    Row rw;
+    row_at(NP_TOP, &rw);
     NP_CARET = ui_rect(0, 0, 0, 0);
-    for (int row = 0; row < NP_ROWS + 1 && p <= NP_LEN; row++)
+    for (int row = 0; row < NP_ROWS + 1; row++)
     {
-        int e = line_end(p);
+        int p = rw.start, e = rw.end;
         int y = in.y + row * lh + 2;
-        int is_cur = NP_TOP + row == cur_line;
+        int is_cur = NP_TOP + row == cur_row;
         if (is_cur)
             NP_CARET = ui_rect(in.x - NP_HSCROLL + caret_x(), y, 2, lh - 4);
         if (y + lh >= cl.y0 && y <= cl.y1)
         {
-            if (has_sel && sel_b > p && sel_a <= e) /* selected part of this line (and its line break) */
+            if (has_sel && sel_b > p && sel_a <= e && !(row_soft(&rw) && sel_a == e)) /* selected part of this row (and its line break) */
             {
                 int from = sel_a > p ? sel_a : p, to = sel_b < e ? sel_b : e;
+                int ext = (sel_b > e && !row_soft(&rw)) ? 6 : 0; /* +6: the selected line break */
                 int hx = in.x - NP_HSCROLL + span_w(p, from - p);
-                int hw = span_w(p, to - p) - span_w(p, from - p) + (sel_b > e ? 6 : 0); /* +6: the selected line break */
+                int hw = span_w(p, to - p) - span_w(p, from - p) + ext;
                 if (hw > 0)
                     gfx_fill_rect_alpha(hx, in.y + row * lh, hw, lh, t->accent.r, t->accent.g, t->accent.b, 90);
             }
@@ -472,18 +631,21 @@ static void np_draw(Window *w, UiRect body)
             if (shown < NP_LINE_MAX)
                 tmp[shown] = 0;
             gfx_text(f, in.x - NP_HSCROLL + x0, y, tmp, ink);
-            if (is_cur && NP_BLINK)
+            if (is_cur && NP_BLINK && NP_FOCUS == 0)
                 gfx_fill_rect(NP_CARET.x, NP_CARET.y, NP_CARET.w, NP_CARET.h, ui_color(t->accent));
         }
-        p = e + 1;
+        if (!row_next(&rw))
+            break;
     }
     gfx_restore_clip(saved);
+    if (NP_BAR)
+        bar_draw(body);
 
     /* status bar: line, column and how full the buffer is */
     char st[64];
     int n = 0;
     put_str(st, &n, "Ln ");
-    put_dec(st, &n, (unsigned)cur_line + 1);
+    put_dec(st, &n, (unsigned)line_of(NP_CUR) + 1); /* the line of the text, not the row it is shown in */
     put_str(st, &n, ", Col ");
     put_dec(st, &n, (unsigned)(NP_CUR - line_start(NP_CUR)) + 1);
     put_str(st, &n, "     ");
@@ -503,38 +665,44 @@ static void np_draw(Window *w, UiRect body)
 
 /* ---- input ---- */
 
-/* put the caret on line `line` at column `col` (clamped to the line) */
-static void goto_line_col(int line, int col)
+/* put the caret on row `index` at column `col` (clamped to the row) */
+static void goto_row_col(int index, int col)
 {
-    int ls = line_offset(line);
-    int len = line_end(ls) - ls;
-    NP_CUR = ls + (col < len ? col : len);
+    Row r;
+    row_at(index, &r);
+    int len = row_last_pos(&r) - r.start;
+    NP_CUR = r.start + (col < len ? col : len);
 }
 
-/* the first and last line the selection (or just the caret) touches */
+/* the first and last row the selection (or just the caret) touches */
 static void sel_lines(int *lo, int *hi)
 {
-    int a = line_of(NP_CUR), b = line_of(NP_ANCHOR);
+    Row r;
+    int a = row_find(NP_CUR, &r), b = row_find(NP_ANCHOR, &r);
     *lo = a < b ? a : b;
     *hi = a < b ? b : a;
 }
 
 /* Tell the window manager what really changed (after a key or a click), so it does not redraw the whole
- * window: the status bar always, and either the rows from the first to the last line the caret or the
- * selection touched before and after, or (if the text scrolled or the number of lines changed, so the rows
- * below moved) the whole text area. */
-static void mark_changed(Window *w, int old_lo, int old_hi, int old_lines, int old_top, int old_hscroll)
+ * window: the status bar always, and either the rows from the first to the last row the caret or the
+ * selection touched before and after, or (if the text scrolled or the number of rows changed, so the rows
+ * below moved) the whole text area. With word wrap an edit can also move words from row to row, so after an
+ * edit everything from the first touched row to the bottom is redrawn. */
+static void mark_changed(Window *w, int old_lo, int old_hi, int old_lines, int old_top, int old_hscroll, int edited)
 {
     UiRect body = wm_content(w);
     UiRect in = ui_inset(text_area(body), NP_PAD);
+    set_geometry(body);
     follow(in);
     int new_lo, new_hi;
     sel_lines(&new_lo, &new_hi);
     UiRect rows = in;
-    if (NP_TOP == old_top && NP_HSCROLL == old_hscroll && line_count() == old_lines)
+    if (NP_TOP == old_top && NP_HSCROLL == old_hscroll && row_count() == old_lines)
     {
         int a = old_lo < new_lo ? old_lo : new_lo;
         int b = old_hi > new_hi ? old_hi : new_hi;
+        if (edited && NP_WRAP)
+            b = NP_TOP + NP_ROWS - 1;
         if (a < NP_TOP)
             a = NP_TOP;
         if (b > NP_TOP + NP_ROWS - 1)
@@ -1452,10 +1620,376 @@ static void cmd_save_as(void)
     open_path_dialog(NP_DLG_SAVE);
 }
 
+/* turn word wrap on or off; the row at the top of the view stays where it is */
+static void cmd_wrap(void)
+{
+    if (NP_WIN)
+        set_geometry(wm_content(NP_WIN));
+    Row top, r;
+    row_at(NP_TOP, &top);
+    int p = top.start;
+    NP_WRAP = !NP_WRAP;
+    NP_HSCROLL = 0;
+    NP_TOP = row_find(p, &r);
+    NP_FOLLOW = 1;
+    if (NP_WIN)
+        NP_WIN->btn[NP_WRAP_BTN].kind = NP_WRAP ? UI_BTN_PRIMARY : UI_BTN_SECONDARY; /* the button shows the state */
+}
+
 static void on_new(UiButton *b, void *user) { (void)b; (void)user; cmd_new(); }
 static void on_open(UiButton *b, void *user) { (void)b; (void)user; cmd_open(); }
 static void on_save(UiButton *b, void *user) { (void)b; (void)user; cmd_save(); }
 static void on_save_as(UiButton *b, void *user) { (void)b; (void)user; cmd_save_as(); }
+static void on_wrap(UiButton *b, void *user) { (void)b; (void)user; cmd_wrap(); }
+
+/* ---- find and replace ----
+ * The pattern is NP_FIND (one line, ASCII). Matching ignores upper / lower case unless "Aa" is on. Find Next starts
+ * at the end of the selection (the caret if nothing is selected), Prev at its start, both continue from the other
+ * end of the text. A found match becomes the selection, so typing replaces it. Replace changes the selected match
+ * (if the selection is one) and finds the next; All replaces every match left to right as ONE undo step. */
+static int lc(int c)
+{
+    return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+static int match_at(int i, const char *pat, int n)
+{
+    if (i < 0 || n <= 0 || i + n > NP_LEN)
+        return 0;
+    for (int k = 0; k < n; k++)
+    {
+        int a = (unsigned char)NP_BUF[i + k], b = (unsigned char)pat[k];
+        if (NP_MATCH_CASE ? a != b : lc(a) != lc(b))
+            return 0;
+    }
+    return 1;
+}
+
+/* the first match at or after `from`, continuing from the top; -1 if none */
+static int find_forward(int from, int n)
+{
+    for (int i = from < 0 ? 0 : from; i + n <= NP_LEN; i++)
+        if (match_at(i, NP_FIND.text, n))
+            return i;
+    for (int i = 0; i < from && i + n <= NP_LEN; i++)
+        if (match_at(i, NP_FIND.text, n))
+            return i;
+    return -1;
+}
+
+/* the last match starting before `before`, continuing from the end; -1 if none */
+static int find_backward(int before, int n)
+{
+    for (int i = (before - 1 < NP_LEN - n ? before - 1 : NP_LEN - n); i >= 0; i--)
+        if (match_at(i, NP_FIND.text, n))
+            return i;
+    for (int i = NP_LEN - n; i >= before && i >= 0; i--)
+        if (match_at(i, NP_FIND.text, n))
+            return i;
+    return -1;
+}
+
+/* how many matches there are (left to right, not overlapping), and the number of the one starting at `at` */
+static int count_matches(int n, int at, int *which)
+{
+    int total = 0;
+    *which = 0;
+    for (int i = 0; i + n <= NP_LEN;)
+    {
+        if (match_at(i, NP_FIND.text, n))
+        {
+            total++;
+            if (i == at)
+                *which = total;
+            i += n;
+        }
+        else
+            i++;
+    }
+    return total;
+}
+
+static void select_match(int i, int n)
+{
+    NP_ANCHOR = i;
+    NP_CUR = i + n;
+    NP_DESIRED = col_in_row();
+    NP_FOLLOW = 1;
+    NP_LASTKIND = NP_KIND_NONE;
+    ui_caret_restart();
+}
+
+/* Find Next / Prev: selects the match and says "3 of 7"; 0 if there is none */
+static int do_find(int backwards)
+{
+    int n = NP_FIND.len;
+    if (n == 0)
+    {
+        NP_NOTE = "Type what to find";
+        return 0;
+    }
+    int a = 0, b = 0, has = sel_range(&a, &b);
+    int from = backwards ? (has ? a : NP_CUR) : (has ? b : NP_CUR);
+    int i = backwards ? find_backward(from, n) : find_forward(from, n);
+    if (i < 0)
+    {
+        NP_NOTE = "Not found";
+        return 0;
+    }
+    select_match(i, n);
+    int which, total = count_matches(n, i, &which), k = 0;
+    put_dec(NP_NOTE_BUF, &k, (unsigned)which);
+    put_str(NP_NOTE_BUF, &k, " of ");
+    put_dec(NP_NOTE_BUF, &k, (unsigned)total);
+    NP_NOTE = NP_NOTE_BUF;
+    return 1;
+}
+
+/* the text was changed by Replace: the star in the title (edit_replace already keeps the undo history) */
+static void replaced(Window *w)
+{
+    NP_DIRTY = 1;
+    NP_FOLLOW = 1;
+    if (w)
+        np_title(w);
+}
+
+static void do_replace(Window *w)
+{
+    int n = NP_FIND.len, rn = NP_REPL.len;
+    int a = 0, b = 0;
+    if (n && sel_range(&a, &b) && b - a == n && match_at(a, NP_FIND.text, n)) /* the selection is a match: replace it */
+    {
+        if (NP_LEN - n + rn > NP_MAX)
+        {
+            NP_NOTE = "The text would get too long";
+            return;
+        }
+        edit_replace(a, n, NP_REPL.text, rn, NP_KIND_NONE);
+        replaced(w);
+        if (!do_find(0))
+            NP_NOTE = "Replaced - no more matches";
+    }
+    else
+        do_find(0);
+}
+
+static void do_replace_all(Window *w)
+{
+    static char out[NP_MAX + 1];
+    int n = NP_FIND.len, rn = NP_REPL.len, olen = 0, count = 0;
+    if (n == 0)
+    {
+        NP_NOTE = "Type what to find";
+        return;
+    }
+    for (int i = 0; i < NP_LEN;)
+    {
+        if (match_at(i, NP_FIND.text, n))
+        {
+            if (olen + rn > NP_MAX)
+            {
+                NP_NOTE = "The text would get too long";
+                return;
+            }
+            for (int k = 0; k < rn; k++)
+                out[olen++] = NP_REPL.text[k];
+            i += n;
+            count++;
+        }
+        else
+        {
+            if (olen >= NP_MAX)
+            {
+                NP_NOTE = "The text would get too long";
+                return;
+            }
+            out[olen++] = NP_BUF[i++];
+        }
+    }
+    if (count == 0)
+    {
+        NP_NOTE = "Not found";
+        return;
+    }
+    edit_replace(0, NP_LEN, out, olen, NP_KIND_NONE); /* the whole text in one step: one Ctrl+Z takes it all back */
+    NP_CUR = NP_ANCHOR = 0;
+    NP_TOP = NP_HSCROLL = 0;
+    NP_DESIRED = 0;
+    NP_FOCUS = 0; /* the keyboard goes back to the text, so that Ctrl+Z undoes this */
+    replaced(w);
+    int k = 0;
+    put_dec(NP_NOTE_BUF, &k, (unsigned)count);
+    put_str(NP_NOTE_BUF, &k, " replaced");
+    NP_NOTE = NP_NOTE_BUF;
+}
+
+static void bar_set_button(Window *w)
+{
+    if (w)
+        w->btn[NP_FIND_BTN].kind = NP_BAR ? UI_BTN_PRIMARY : UI_BTN_SECONDARY; /* the toolbar button shows the state */
+}
+
+/* show the bar with the keyboard in the Find (1) or Replace (2) field; a one-line selection becomes the pattern */
+static void bar_open(Window *w, int focus)
+{
+    int a = 0, b = 0;
+    if (focus == 1 && sel_range(&a, &b) && b - a <= 60)
+    {
+        char s[64];
+        int n = 0, ok = 1;
+        for (int i = a; i < b; i++)
+        {
+            if (NP_BUF[i] == '\n')
+                ok = 0;
+            s[n++] = NP_BUF[i];
+        }
+        s[n] = 0;
+        if (ok)
+            ui_edit_set_text(&NP_FIND, s);
+    }
+    NP_BAR = 1;
+    NP_FOCUS = focus;
+    NP_FOLLOW = 1; /* the text area got shorter: keep the caret in view */
+    ui_edit_select_all(focus == 1 ? &NP_FIND : &NP_REPL);
+    ui_caret_restart();
+    bar_set_button(w);
+    if (w)
+        wm_add_damage(w->r);
+}
+
+static void bar_close(Window *w)
+{
+    NP_BAR = 0;
+    NP_FOCUS = 0;
+    NP_BAR_DRAG = 0;
+    NP_FOLLOW = 1;
+    bar_set_button(w);
+    if (w)
+        wm_add_damage(w->r);
+}
+
+/* after Find / Replace changed the selection or the text: redraw the text area and the status line */
+static void find_damage(Window *w)
+{
+    UiRect body = wm_content(w);
+    wm_add_damage(ui_inset(text_area(body), NP_PAD));
+    wm_add_damage(status_rect(body));
+}
+
+/* Keys for the find bar and the find shortcuts. 0 = not handled; 1 = handled, damage is marked; 2 = handled, redraw
+ * the whole window (the bar appeared or went away). */
+static int find_key(Window *w, const KeyEvent *k)
+{
+    int ctrl = (k->mods & KMOD_CTRL) != 0, shift = (k->mods & KMOD_SHIFT) != 0;
+    if (ctrl && k->key == 'f')
+    {
+        bar_open(w, 1);
+        return 2;
+    }
+    if (ctrl && k->key == 'h')
+    {
+        bar_open(w, 2);
+        return 2;
+    }
+    if (k->key == KEY_F3) /* Find Next / Prev from anywhere; with no pattern yet it opens the bar */
+    {
+        if (!NP_FIND.len)
+        {
+            bar_open(w, 1);
+            return 2;
+        }
+        set_geometry(wm_content(w));
+        do_find(shift);
+        find_damage(w);
+        return 1;
+    }
+    if (!NP_BAR || NP_FOCUS == 0)
+        return 0;
+
+    UiEdit *e = NP_FOCUS == 1 ? &NP_FIND : &NP_REPL;
+    switch (k->key)
+    {
+    case KEY_ESC:
+        bar_close(w);
+        return 2;
+    case KEY_TAB:
+        NP_FOCUS = NP_FOCUS == 1 ? 2 : 1;
+        ui_edit_select_all(NP_FOCUS == 1 ? &NP_FIND : &NP_REPL);
+        ui_caret_restart();
+        wm_add_damage(bar_layout(wm_content(w)).bar);
+        return 1;
+    case KEY_ENTER:
+        set_geometry(wm_content(w));
+        if (NP_FOCUS == 1)
+            do_find(shift);
+        else
+            do_replace(w);
+        find_damage(w);
+        wm_add_damage(bar_layout(wm_content(w)).bar);
+        return 1;
+    default:
+        break;
+    }
+    if (ui_edit_key(e, k))
+    {
+        NP_NOTE = "";
+        ui_caret_restart();
+        wm_add_damage(bar_layout(wm_content(w)).bar);
+        wm_add_damage(status_rect(wm_content(w)));
+        return 1;
+    }
+    /* Ctrl+Z Y A C X V are the field's own (they must not undo the text when the field has nothing to undo); other
+     * chords (Ctrl+S, Alt+Z ...) go on to the text, plain keys the field did not use are dropped */
+    if (ctrl && (k->key == 'z' || k->key == 'y' || k->key == 'a' || k->key == 'c' || k->key == 'x' || k->key == 'v'))
+        return 1;
+    return (ctrl || (k->mods & KMOD_ALT)) ? 0 : 1;
+}
+
+/* a click on the bar: 0 = not on it; 1 = handled (the window is redrawn) */
+static int bar_press(Window *w, int x, int y)
+{
+    if (!NP_BAR)
+        return 0;
+    BarLayout l = bar_layout(wm_content(w));
+    if (!ui_contains(l.bar, x, y))
+        return 0;
+    set_geometry(wm_content(w));
+    NP_NOTE = "";
+    if (ui_contains(l.find_f, x, y) || ui_contains(l.repl_f, x, y))
+    {
+        NP_FOCUS = ui_contains(l.find_f, x, y) ? 1 : 2;
+        ui_edit_mouse(NP_FOCUS == 1 ? &NP_FIND : &NP_REPL, x, y, 1);
+        NP_BAR_DRAG = 1; /* dragging selects inside the field */
+        ui_caret_restart();
+    }
+    else if (ui_contains(l.prev, x, y))
+        do_find(1);
+    else if (ui_contains(l.next, x, y))
+        do_find(0);
+    else if (ui_contains(l.mcase, x, y))
+        NP_MATCH_CASE = !NP_MATCH_CASE;
+    else if (ui_contains(l.close, x, y))
+        bar_close(w);
+    else if (ui_contains(l.repl, x, y))
+        do_replace(w);
+    else if (ui_contains(l.all, x, y))
+        do_replace_all(w);
+    return 1;
+}
+
+/* the toolbar's Find button: show the bar, or hide it */
+static void cmd_find(void)
+{
+    if (!NP_WIN)
+        return;
+    if (NP_BAR)
+        bar_close(NP_WIN);
+    else
+        bar_open(NP_WIN, 1);
+}
+
+static void on_find(UiButton *b, void *user) { (void)b; (void)user; cmd_find(); }
 
 static void np_key(Window *w, const KeyEvent *k)
 {
@@ -1465,6 +1999,13 @@ static void np_key(Window *w, const KeyEvent *k)
         return;
     }
     NP_NOTE = ""; /* a message stays until the next key */
+    int fk = find_key(w, k); /* Ctrl+F / H, F3, and every key while the keyboard is in the find bar */
+    if (fk)
+    {
+        if (fk == 1)
+            wm_key_partial();
+        return;
+    }
     unsigned edits_before = NP_EDITS;
     int upos_before = NP_UPOS;
     int full = 0; /* the key opened a dialog or replaced the text: redraw the whole window */
@@ -1472,7 +2013,8 @@ static void np_key(Window *w, const KeyEvent *k)
     int motion = 0; /* a key that only moves the caret: with Shift it extends the selection */
     int keep_anchor = 0;
     int shift = (k->mods & KMOD_SHIFT) != 0, ctrl = (k->mods & KMOD_CTRL) != 0;
-    int old_lines = line_count(), old_lo, old_hi;
+    set_geometry(wm_content(w));
+    int old_lines = row_count(), old_lo, old_hi;
     sel_lines(&old_lo, &old_hi);
     int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
     int sa = 0, sb = 0, has_sel = sel_range(&sa, &sb);
@@ -1554,24 +2096,26 @@ static void np_key(Window *w, const KeyEvent *k)
         {
             int step = (k->key == KEY_UP || k->key == KEY_DOWN) ? 1 : NP_ROWS;
             int dir = (k->key == KEY_UP || k->key == KEY_PAGEUP) ? -1 : 1;
-            int line = line_of(NP_CUR) + dir * step;
+            Row cr;
+            int line = row_find(NP_CUR, &cr) + dir * step;
             if (line < 0)
                 line = 0;
-            if (line > line_count() - 1)
-                line = line_count() - 1;
-            goto_line_col(line, NP_DESIRED);
+            if (line > row_count() - 1)
+                line = row_count() - 1;
+            goto_row_col(line, NP_DESIRED);
             vertical = 1;
             motion = 1;
             break;
         }
         case KEY_HOME:
-            NP_CUR = line_start(NP_CUR);
-            motion = 1;
-            break;
         case KEY_END:
-            NP_CUR = line_end(NP_CUR);
+        {
+            Row hr;
+            row_find(NP_CUR, &hr); /* the start / end of the row (of the line, without word wrap) */
+            NP_CUR = k->key == KEY_HOME ? hr.start : row_last_pos(&hr);
             motion = 1;
             break;
+        }
         case KEY_BACKSPACE:
             if (!delete_selection() && NP_CUR > 0)
                 edit_replace(NP_CUR - 1, 1, 0, 0, NP_KIND_BACK);
@@ -1596,7 +2140,12 @@ static void np_key(Window *w, const KeyEvent *k)
             insert_text("    ", NP_TAB);
             break;
         default:
-            if (k->ch >= 32 && k->ch < 127 && !(k->mods & KMOD_ALT))
+            if ((k->mods & KMOD_ALT) && k->key == 'z') /* Alt+Z: word wrap on / off, as in Windows Notepad */
+            {
+                cmd_wrap();
+                full = 1;
+            }
+            else if (k->ch >= 32 && k->ch < 127 && !(k->mods & KMOD_ALT))
             {
                 char c = (char)k->ch;
                 insert_text(&c, 1);
@@ -1610,7 +2159,7 @@ static void np_key(Window *w, const KeyEvent *k)
     if (!(motion && shift) && !keep_anchor)
         NP_ANCHOR = NP_CUR; /* no selection, unless Shift extended it */
     if (!vertical)
-        NP_DESIRED = NP_CUR - line_start(NP_CUR);
+        NP_DESIRED = col_in_row();
     NP_FOLLOW = 1;
     ui_caret_restart();
     NP_BLINK = 1;
@@ -1619,7 +2168,7 @@ static void np_key(Window *w, const KeyEvent *k)
         NP_DIRTY = 1; /* undo / redo count too: whether the text is back to the saved state is not tracked */
     np_title(w);      /* the star in the title bar (damages only the title bar) */
 
-    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll);
+    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll, NP_EDITS != edits_before || NP_UPOS != upos_before);
     if (!full)
         wm_key_partial();
 }
@@ -1631,38 +2180,61 @@ static int pos_at(UiRect in, int x, int y)
     int dy = y - in.y, lh = np_line_h();
     int row = dy >= 0 ? dy / lh : -((-dy + lh - 1) / lh);
     int line = NP_TOP + row;
-    if (line > line_count() - 1)
-        line = line_count() - 1;
+    if (line > row_count() - 1)
+        line = row_count() - 1;
     if (line < 0)
         line = 0;
-    int ls = line_offset(line);
-    return ls + cols_in(ls, line_end(ls) - ls, x - in.x + NP_HSCROLL + 3); /* +3: nearer half of a letter wins */
+    Row r;
+    row_at(line, &r);
+    int col = cols_in(r.start, r.end - r.start, x - in.x + NP_HSCROLL + 3); /* +3: nearer half of a letter wins */
+    int pos = r.start + col;
+    return pos > row_last_pos(&r) ? row_last_pos(&r) : pos; /* not past the end of a wrapped row: that is the next row */
 }
 
 static int np_press(Window *w, int x, int y)
 {
+    int on_bar = bar_press(w, x, y);
+    if (on_bar)
+        return on_bar;
     UiRect body = wm_content(w);
     UiRect in = ui_inset(text_area(body), NP_PAD);
     if (!ui_contains(in, x, y))
         return 0;
+    int left_bar = NP_FOCUS != 0; /* the keyboard comes back to the text: the bar loses its caret */
+    NP_FOCUS = 0;
 
+    set_geometry(body);
     int old_lo, old_hi;
     sel_lines(&old_lo, &old_hi);
-    int old_lines = line_count();
+    int old_lines = row_count();
     int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
     NP_CUR = NP_ANCHOR = pos_at(in, x, y);
     NP_SELECTING = 1; /* dragging from here selects */
     NP_LASTKIND = NP_KIND_NONE; /* clicking ends a typing run */
-    NP_DESIRED = NP_CUR - line_start(NP_CUR);
+    NP_DESIRED = col_in_row();
     NP_FOLLOW = 1;
     ui_caret_restart();
     NP_BLINK = 1;
-    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll);
-    return 2; /* the damage is already marked: only the touched rows and the status bar are redrawn */
+    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll, 0);
+    return left_bar ? 1 : 2; /* 2: the damage is already marked, only the touched rows and the status bar are redrawn */
 }
 
 static int np_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (NP_BAR_DRAG) /* selecting inside a field of the find bar */
+    {
+        UiEdit *e = NP_FOCUS == 2 ? &NP_REPL : &NP_FIND;
+        if (!(buttons & 1))
+        {
+            NP_BAR_DRAG = 0;
+            return 0;
+        }
+        if (!ui_edit_mouse(e, x, y, buttons))
+            return 0;
+        ui_caret_restart();
+        wm_add_damage(ui_inset(e->field, -3));
+        return 2;
+    }
     if (!(buttons & 1))
     {
         NP_SELECTING = 0;
@@ -1670,26 +2242,28 @@ static int np_drag(Window *w, int x, int y, unsigned buttons)
     }
     if (!NP_SELECTING)
         return 0;
+    set_geometry(wm_content(w));
     UiRect in = ui_inset(text_area(wm_content(w)), NP_PAD);
     int pos = pos_at(in, x, y);
     if (pos == NP_CUR)
         return 0;
     int old_lo, old_hi;
     sel_lines(&old_lo, &old_hi);
-    int old_lines = line_count();
+    int old_lines = row_count();
     int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
     NP_CUR = pos; /* the anchor stays where the press was */
-    NP_DESIRED = NP_CUR - line_start(NP_CUR);
+    NP_DESIRED = col_in_row();
     NP_FOLLOW = 1;
-    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll);
+    mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll, 0);
     return 2;
 }
 
 static int np_wheel(Window *w, int steps)
 {
+    set_geometry(wm_content(w));
     int top = NP_TOP + steps * 3;
-    if (top > line_count() - 1)
-        top = line_count() - 1;
+    if (top > row_count() - 1)
+        top = row_count() - 1;
     if (top < 0)
         top = 0;
     if (top == NP_TOP)
@@ -1707,6 +2281,12 @@ static int np_tick(Window *w)
     if (vis == NP_BLINK)
         return 0;
     NP_BLINK = vis;
+    if (NP_BAR && NP_FOCUS != 0) /* the caret is in a field of the find bar */
+    {
+        UiEdit *fe = NP_FOCUS == 2 ? &NP_REPL : &NP_FIND;
+        wm_add_damage(ui_inset(fe->field, -3));
+        return 2;
+    }
     if (NP_CARET.w == 0)
         return 0;
     wm_add_damage(ui_rect(NP_CARET.x - 1, NP_CARET.y - 1, NP_CARET.w + 2, NP_CARET.h + 2)); /* just the caret, not the window */
@@ -1765,7 +2345,7 @@ static void notepad_app_open(void)
     win->on_close = np_close;
     win->on_close_request = np_close_request;
     win->icon = TASKBAR_ICON_NOTEPAD;
-    wm_set_min_size(win, 330, 230);
+    wm_set_min_size(win, 470, 300);
     NP_WIN = win;
     desktop_set_status(0);
     NP_FOLLOW = 1;
@@ -1775,6 +2355,16 @@ static void notepad_app_open(void)
     wm_add_button(win, "Open", UI_BTN_SECONDARY, ui_rect(NP_PAD + 72, 8, 64, 30), on_open, 0);
     wm_add_button(win, "Save", UI_BTN_SECONDARY, ui_rect(NP_PAD + 144, 8, 64, 30), on_save, 0);
     wm_add_button(win, "Save As", UI_BTN_SECONDARY, ui_rect(NP_PAD + 216, 8, 84, 30), on_save_as, 0);
+    NP_WRAP_BTN = wm_add_button(win, "Wrap", UI_BTN_SECONDARY, ui_rect(NP_PAD + 308, 8, 64, 30), on_wrap, 0);
+    if (NP_WRAP_BTN < 0)
+        NP_WRAP_BTN = 0;
+    win->btn[NP_WRAP_BTN].kind = NP_WRAP ? UI_BTN_PRIMARY : UI_BTN_SECONDARY;
+    NP_FIND_BTN = wm_add_button(win, "Find", UI_BTN_SECONDARY, ui_rect(NP_PAD + 380, 8, 64, 30), on_find, 0);
+    if (NP_FIND_BTN < 0)
+        NP_FIND_BTN = 0;
+    NP_BAR = 0; /* a new window starts without the find bar */
+    NP_FOCUS = 0;
+    NP_BAR_DRAG = 0;
 }
 
 const char *notepad_open_file(const char *path)

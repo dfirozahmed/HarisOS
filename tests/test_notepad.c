@@ -57,7 +57,26 @@ const char *ntfs_unsupported_why(void) { return 0; }
 void ui_text(int x, int y, const char *s, UiTextStyle st) { (void)x; (void)y; (void)s; (void)st; }
 void ui_text_color(int x, int y, const char *s, UiTextStyle st, UiRgb c) { (void)x; (void)y; (void)s; (void)st; (void)c; }
 void ui_edit_draw(UiRect r, UiEdit *e, const char *p, int f) { (void)r; (void)e; (void)p; (void)f; }
-int ui_edit_key(UiEdit *e, const KeyEvent *k) { (void)e; (void)k; return 0; }
+int ui_edit_key(UiEdit *e, const KeyEvent *k) /* a field that types printable keys and handles Backspace */
+{
+    if (k->pressed && k->ch >= 32 && k->ch < 127 && !(k->mods & KMOD_CTRL) && e->len < UI_EDIT_MAX)
+    {
+        e->text[e->len++] = (char)k->ch;
+        e->text[e->len] = 0;
+        e->cursor = e->anchor = e->len;
+        return 1;
+    }
+    if (k->pressed && k->key == KEY_BACKSPACE && e->len > 0)
+    {
+        e->text[--e->len] = 0;
+        e->cursor = e->anchor = e->len;
+        return 1;
+    }
+    return 0;
+}
+void ui_edit_select_all(UiEdit *e) { e->anchor = 0; e->cursor = e->len; }
+void ui_button(UiRect r, const char *l, UiButtonKind k, UiState s) { (void)r; (void)l; (void)k; (void)s; }
+void ui_button_icon(UiRect r, const char *l, int i, UiButtonKind k, UiState s) { (void)r; (void)l; (void)i; (void)k; (void)s; }
 int ui_edit_mouse(UiEdit *e, int x, int y, unsigned b) { (void)e; (void)x; (void)y; (void)b; return 0; }
 void ui_edit_set_text(UiEdit *e, const char *s)
 {
@@ -498,6 +517,288 @@ static void test_save_answer(void)
     STUB_DIALOG = 0;
 }
 
+/* word wrap: how a line is cut into rows, and the caret, keys, clicks and the toggle working on rows */
+static void set_text(const char *s)
+{
+    reset();
+    NP_LEN = (int)strlen(s);
+    memcpy(NP_BUF, s, (size_t)NP_LEN);
+    NP_CUR = NP_ANCHOR = 0;
+    NP_TOP = NP_HSCROLL = 0;
+}
+
+static void expect_rows(int n, const int *starts)
+{
+    Row r;
+    row_first(&r);
+    for (int i = 0; i < n; i++)
+    {
+        assert(r.start == starts[i]);
+        assert(row_next(&r) == (i < n - 1));
+    }
+    assert(row_count() == n);
+}
+
+static void test_wrap(void)
+{
+    static Window NW;
+    NP_WIN = &NW;
+    NP_WRAP = 1;
+    NP_WRAPW = 80; /* 10 characters of 8 pixels */
+
+    /* a space that fits ends the row; the next row starts after it */
+    set_text("hello world foo");
+    expect_rows(2, (int[]){0, 6});
+    Row r;
+    assert(row_find(5, &r) == 0 && row_find(6, &r) == 1 && r.start == 6 && row_find(15, &r) == 1);
+    row_first(&r);
+    assert(row_soft(&r) && row_last_pos(&r) == 5);       /* the caret stays before the space that ends the row */
+    /* a long word is cut inside; a word that ends exactly at the edge lets its space hang over */
+    set_text("abcdefghijklmnopqrstuvwxyz");
+    expect_rows(3, (int[]){0, 10, 20});
+    set_text("abcdefghij klm");
+    expect_rows(2, (int[]){0, 11});
+    /* line breaks stay: empty lines are rows, a short line is one row */
+    set_text("ab\n\ncd");
+    expect_rows(3, (int[]){0, 3, 4});
+    set_text("");
+    expect_rows(1, (int[]){0});
+    set_text("aaaa bbbb cccc\nz");
+    expect_rows(3, (int[]){0, 10, 15});
+    /* without wrap rows are lines again, whatever the width */
+    NP_WRAP = 0;
+    set_text("hello world foo bar baz");
+    assert(row_count() == 1);
+    set_text("one\ntwo\nthree");
+    expect_rows(3, (int[]){0, 4, 8});
+    NP_WRAP = 1;
+
+    /* keys: the stub window is 400 wide, so a row is 45 characters; 30 words of 5 make rows of 9 words */
+    NP_WRAPW = 0; /* np_key sets the real width itself */
+    char text[151];
+    for (int i = 0; i < 30; i++)
+        memcpy(text + i * 5, "word ", 5);
+    text[150] = 0;
+    set_text(text);
+    set_geometry(wm_content(&NW));
+    assert(row_count() == 4);
+    NP_CUR = NP_ANCHOR = 3;
+    NP_DESIRED = 3;
+    KeyEvent down = {KEY_DOWN, 0, 1, 0}, up = {KEY_UP, 0, 1, 0}, home = {KEY_HOME, 0, 1, 0}, end = {KEY_END, 0, 1, 0};
+    np_key(&NW, &down);
+    assert(NP_CUR == 48);                                /* the same column, one row down */
+    np_key(&NW, &end);
+    assert(NP_CUR == 89);                                /* before the space that ends the row, not at the next row's start */
+    np_key(&NW, &home);
+    assert(NP_CUR == 45);
+    np_key(&NW, &up);
+    assert(NP_CUR == 0);                                 /* column 0 of the row above (Home put the caret at column 0) */
+    KeyEvent right = {KEY_RIGHT, 0, 1, 0};
+    NP_CUR = NP_ANCHOR = 44;
+    np_key(&NW, &right);
+    assert(NP_CUR == 45 && col_in_row() == 0);           /* over the soft break onto the next row */
+    KeyEvent pgdn = {KEY_PAGEDOWN, 0, 1, 0};
+    NP_ROWS = 2;
+    NP_CUR = NP_ANCHOR = 2;
+    NP_DESIRED = 2;
+    np_key(&NW, &pgdn);
+    assert(NP_CUR == 92);
+
+    /* a click right of a wrapped row puts the caret on that row's last position, not on the next row */
+    set_text(text);
+    set_geometry(wm_content(&NW));
+    UiRect in = ui_inset(text_area(wm_content(&NW)), NP_PAD);
+    assert(pos_at(in, in.x + 10000, in.y + 2) == 44);
+    assert(pos_at(in, in.x + 10000, in.y + np_line_h() + 2) == 89);
+    assert(pos_at(in, in.x + 3, in.y + np_line_h() + 2) == 45);
+    assert(pos_at(in, in.x + 10000, in.y + 3 * np_line_h() + 2) == 150); /* the last row ends the text: the caret may be after its last character */
+    NP_WRAP = 0;
+    set_geometry(wm_content(&NW));
+    assert(pos_at(in, in.x + 10000, in.y + 2) == 150);                  /* without wrap: the end of the line */
+    NP_WRAP = 1;
+
+    /* typing makes words move between rows; the row count follows */
+    set_text("aaaa bbbb cccc dddd");
+    set_geometry(wm_content(&NW));
+    NP_WRAPW = 80;
+    assert(row_count() == 2);
+    NP_CUR = NP_ANCHOR = 0;
+    insert_text("xxxxxx", 6);                           /* "xxxxxxaaaa bbbb cccc dddd": the last word no longer fits the second row */
+    assert(row_count() == 3);
+    undo();
+    assert(row_count() == 2);
+
+    /* the toggle: the first row of the view stays the same text, the button color follows */
+    set_text(text);
+    NP_WRAP = 0;
+    NP_TOP = 0;
+    NW.btn_count = 0;
+    cmd_wrap();
+    assert(NP_WRAP == 1 && NP_HSCROLL == 0 && NW.btn[NP_WRAP_BTN].kind == UI_BTN_PRIMARY);
+    set_geometry(wm_content(&NW));
+    NP_TOP = 2;                                          /* the third row starts at 90 */
+    NP_HSCROLL = 0;
+    cmd_wrap();
+    assert(NP_WRAP == 0 && NP_TOP == 0 && NW.btn[NP_WRAP_BTN].kind == UI_BTN_SECONDARY);
+    NP_WRAP = 0;
+    NP_WIN = 0;
+}
+
+/* find and replace */
+static void set_find(const char *s, const char *repl)
+{
+    ui_edit_set_text(&NP_FIND, s);
+    ui_edit_set_text(&NP_REPL, repl);
+}
+
+static int sel_is(int a, int b)
+{
+    int x = 0, y = 0;
+    return sel_range(&x, &y) && x == a && y == b;
+}
+
+static void test_find(void)
+{
+    static Window NW;
+    NP_WIN = &NW;
+    NP_WRAP = 0;
+    NP_BAR = 0;
+    NP_FOCUS = 0;
+    NP_MATCH_CASE = 0;
+    set_geometry(wm_content(&NW));
+    const char *txt = "The quick brown fox. the QUICK fox. the end";
+    set_text(txt);
+
+    /* Find Next goes through the matches, wraps at the end; Prev goes back and wraps at the start */
+    set_find("the", "");
+    assert(do_find(0) && sel_is(0, 3) && same_str(NP_NOTE, "1 of 3"));
+    assert(do_find(0) && sel_is(21, 24) && same_str(NP_NOTE, "2 of 3"));
+    assert(do_find(0) && sel_is(36, 39) && same_str(NP_NOTE, "3 of 3"));
+    assert(do_find(0) && sel_is(0, 3) && same_str(NP_NOTE, "1 of 3"));         /* wrapped */
+    assert(do_find(1) && sel_is(36, 39) && same_str(NP_NOTE, "3 of 3"));       /* Prev from the first one wraps */
+    assert(do_find(1) && sel_is(21, 24));
+    /* match case */
+    NP_MATCH_CASE = 1;
+    set_text(txt);
+    assert(do_find(0) && sel_is(21, 24) && same_str(NP_NOTE, "1 of 2"));
+    NP_MATCH_CASE = 0;
+    /* nothing found, nothing typed */
+    set_find("zzz", "");
+    set_text(txt);
+    assert(!do_find(0) && same_str(NP_NOTE, "Not found") && !sel_range(&(int){0}, &(int){0}));
+    set_find("", "");
+    assert(!do_find(0) && same_str(NP_NOTE, "Type what to find"));
+
+    /* Replace: the selected match is replaced, the next one is selected; undo takes it back */
+    set_text(txt);
+    set_find("the", "a");
+    assert(do_find(0));                                  /* "The" at 0 */
+    do_replace(&NW);
+    assert(is("a quick brown fox. the QUICK fox. the end") && NP_DIRTY);
+    assert(sel_is(19, 22));                              /* the next "the" is selected now */
+    do_replace(&NW);
+    do_replace(&NW);
+    assert(is("a quick brown fox. a QUICK fox. a end"));
+    assert(same_str(NP_NOTE, "Replaced - no more matches"));
+    undo();
+    assert(is("a quick brown fox. a QUICK fox. the end"));
+    /* with no match selected Replace only finds */
+    set_text(txt);
+    NP_DIRTY = 0;
+    do_replace(&NW);
+    assert(is(txt) && sel_is(0, 3) && !NP_DIRTY);
+
+    /* Replace All: every match, one undo step; counts non-overlapping matches */
+    set_text(txt);
+    set_find("fox", "cat");
+    do_replace_all(&NW);
+    assert(is("The quick brown cat. the QUICK cat. the end") && same_str(NP_NOTE, "2 replaced") && NP_DIRTY);
+    assert(NP_CUR == 0 && !sel_range(&(int){0}, &(int){0}) && NP_FOCUS == 0);
+    undo();
+    assert(is(txt));
+    redo();
+    assert(is("The quick brown cat. the QUICK cat. the end"));
+    undo();
+    set_text("aaaa");
+    set_find("aa", "b");
+    do_replace_all(&NW);
+    assert(is("bb") && same_str(NP_NOTE, "2 replaced"));
+    set_text("a b a");
+    set_find("a", "");
+    do_replace_all(&NW);
+    assert(is(" b ")); /* an empty replacement deletes the matches */
+    set_text("abc");
+    set_find("x", "y");
+    do_replace_all(&NW);
+    assert(is("abc") && same_str(NP_NOTE, "Not found"));
+    /* the result must fit */
+    NP_LEN = NP_MAX - 1;
+    memset(NP_BUF, 'a', (size_t)NP_LEN);
+    NP_CUR = NP_ANCHOR = 0;
+    set_find("a", "bb");
+    do_replace_all(&NW);
+    assert(NP_LEN == NP_MAX - 1 && NP_BUF[0] == 'a' && strstr(NP_NOTE, "too long"));
+    set_text("one two");
+    set_find("one", "a much longer replacement");
+    assert(do_find(0));
+    NP_LEN = NP_MAX - 2;                                 /* pretend the buffer is nearly full */
+    memset(NP_BUF + 7, 'x', (size_t)(NP_LEN - 7));
+    do_replace(&NW);
+    assert(strstr(NP_NOTE, "too long") && NP_BUF[0] == 'o');
+
+    /* the bar: open, prefill from a selection, keys go to the fields */
+    set_text(txt);
+    NP_ANCHOR = 4;
+    NP_CUR = 9;                                          /* "quick" */
+    KeyEvent ctrl_f = {'f', 0, 1, KMOD_CTRL}, esc = {KEY_ESC, 0, 1, 0}, enter = {KEY_ENTER, 0, 1, 0}, tab = {KEY_TAB, 0, 1, 0};
+    KeyEvent f3 = {KEY_F3, 0, 1, 0}, sf3 = {KEY_F3, 0, 1, KMOD_SHIFT}, ctrl_h = {'h', 0, 1, KMOD_CTRL};
+    UiRect ta_closed = text_area(wm_content(&NW));
+    assert(find_key(&NW, &ctrl_f) == 2 && NP_BAR && NP_FOCUS == 1 && same_str(NP_FIND.text, "quick"));
+    assert(text_area(wm_content(&NW)).h == ta_closed.h - NP_BAR_H);          /* the text area gives room to the bar */
+    assert(find_key(&NW, &enter) == 1 && sel_is(25, 30));                      /* Enter: the next match after the selection */
+    assert(find_key(&NW, &enter) == 1 && sel_is(4, 9));                        /* ... wrapping to the top */
+    assert(find_key(&NW, &(KeyEvent){KEY_ENTER, 0, 1, KMOD_SHIFT}) == 1 && sel_is(25, 30));  /* Shift+Enter: back, wrapping to the end */
+    assert(find_key(&NW, &tab) == 1 && NP_FOCUS == 2 && find_key(&NW, &tab) == 1 && NP_FOCUS == 1);
+    /* typing goes to the field, never to the text */
+    int len = NP_LEN;
+    np_key(&NW, &(KeyEvent){'z', 'z', 1, 0});
+    assert(NP_LEN == len && same_str(NP_FIND.text, "quickz"));
+    np_key(&NW, &(KeyEvent){KEY_BACKSPACE, 0, 1, 0});
+    assert(same_str(NP_FIND.text, "quick"));
+    assert(find_key(&NW, &(KeyEvent){'z', 0, 1, KMOD_CTRL}) == 1);             /* Ctrl+Z is the field's: the text is not undone */
+    assert(find_key(&NW, &ctrl_h) == 2 && NP_FOCUS == 2);
+    assert(find_key(&NW, &esc) == 2 && !NP_BAR && NP_FOCUS == 0);
+    assert(text_area(wm_content(&NW)).h == ta_closed.h);
+    /* F3 / Shift+F3 work with the bar closed; with no pattern they open it */
+    NP_ANCHOR = NP_CUR = 0;
+    assert(find_key(&NW, &f3) == 1 && sel_is(4, 9));
+    assert(find_key(&NW, &sf3) == 1 && sel_is(25, 30));
+    set_find("", "");
+    assert(find_key(&NW, &f3) == 2 && NP_BAR);
+    find_key(&NW, &esc);
+
+    /* the mouse: the buttons of the bar */
+    set_find("quick", "slow");
+    set_text(txt);
+    bar_open(&NW, 1);
+    BarLayout l = bar_layout(wm_content(&NW));
+    #define CLICK(r) bar_press(&NW, (r).x + 2, (r).y + 2)
+    assert(CLICK(l.next) == 1 && sel_is(4, 9));
+    assert(CLICK(l.next) == 1 && sel_is(25, 30));
+    assert(CLICK(l.prev) == 1 && sel_is(4, 9));
+    assert(CLICK(l.repl) == 1 && is("The slow brown fox. the QUICK fox. the end") && sel_is(24, 29));
+    assert(CLICK(l.mcase) == 1 && NP_MATCH_CASE);
+    assert(CLICK(l.mcase) == 1 && !NP_MATCH_CASE);
+    assert(CLICK(l.all) == 1 && is("The slow brown fox. the slow fox. the end") && NP_FOCUS == 0);
+    assert(CLICK(l.repl_f) == 1 && NP_FOCUS == 2 && NP_BAR_DRAG);
+    assert(CLICK(l.find_f) == 1 && NP_FOCUS == 1);
+    assert(bar_press(&NW, l.bar.x + 2, l.bar.y + l.bar.h + 20) == 0);          /* below the bar: not a bar click */
+    assert(CLICK(l.close) == 1 && !NP_BAR);
+    assert(bar_press(&NW, l.next.x + 2, l.next.y + 2) == 0);                   /* the bar is gone: nothing to click */
+    #undef CLICK
+    NP_WIN = 0;
+}
+
 /* ---- helpers ---- */
 static void reset(void)
 {
@@ -695,6 +996,8 @@ int main(void)
     test_open_from_explorer();
     test_close_request();
     test_save_answer();
+    test_wrap();
+    test_find();
 
     printf("notepad tests passed\n");
     return 0;
