@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* the heap brackets its calls with preempt_disable / preempt_enable; the counter lives in task.c in the kernel */
+volatile int preempt_count;
+
 /* ---- the page allocator, on the host ---- */
 typedef struct
 {
@@ -287,6 +290,8 @@ int main(void)
     heap_stats(&s);
     assert(s.used_blocks == 0 && s.free_blocks == s.arenas);  /* everything merged: one free block per arena */
     assert(s.arenas == 1 && PAGES_OUT == 64);                  /* ... and the extra arenas were given back */
+
+    assert(preempt_count == 0); /* every public call released its preemption lock again */
 
     printf("heap tests passed (%llu page requests, %llu releases)\n", ALLOC_CALLS, FREE_CALLS);
     return 0;

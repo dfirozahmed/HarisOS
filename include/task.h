@@ -7,12 +7,20 @@
  *   task_sleep_ms(10);                    other threads run for at least that long
  *   task_exit();                          end the calling thread (also happens when fn returns)
  *
- * "Cooperative" means a thread only changes when it calls task_yield / task_sleep_ms / task_exit; nothing takes
- * the CPU away (that is the next step: a timer interrupt that calls the scheduler). So the heap, the drivers
- * and the window manager need no locks yet, as long as no thread yields in the middle of using them.
+ * Two kinds of threads:
+ *   normal       (task_create)            changes only when it calls task_yield / task_sleep_ms / task_exit. Runs
+ *                                         with interrupts off, like the main loop. Needs no locks.
+ *   preemptible  (TASK_PREEMPTIBLE flag)  the 1 ms timer interrupt (task_tick) takes the CPU away after
+ *                                         TASK_SLICE_TICKS ticks, so a thread that never yields cannot hang the
+ *                                         system. It may be stopped anywhere, so it may only use code that is
+ *                                         safe for that: its own data, the kernel heap (it brackets itself with
+ *                                         preempt_disable, see preempt.h), and its own locks. NOT the window
+ *                                         manager, graphics or the drivers, which belong to the main loop.
  *
- * Task 0 is the main loop. It is never put to sleep or ended, so some thread can always run: there is no
- * idle thread yet (the main loop still halts the CPU itself, see idle.h).
+ * Task 0 is the main loop. It is never preempted, never put to sleep and never ended, so the GUI code needs no
+ * locks and some thread can always run (there is no idle thread: the main loop halts the CPU itself, see idle.h).
+ * Preemptible threads therefore get the CPU when the main loop calls task_yield (it does that while
+ * task_others_ready() says someone wants to run), and give it back by the timer or by yielding.
  *
  * How a switch works (task_ctx.c): the callee-saved registers of the thread that leaves are pushed on its own stack,
  * the stack pointer is saved in its Task, the other thread's stack pointer is loaded and its registers are popped.
@@ -25,6 +33,9 @@
 #define TASK_MAX 16
 #define TASK_STACK_SIZE (32 * 1024)
 #define TASK_NAME_MAX 16
+
+#define TASK_PREEMPTIBLE 1  /* flag for task_create_flags */
+#define TASK_SLICE_TICKS 5  /* a preemptible thread runs this many 1 ms timer ticks before the next thread gets a turn */
 
 typedef void (*TaskFn)(void *arg);
 
@@ -39,7 +50,14 @@ typedef enum
 
 int task_init(void);
 int task_create(const char *name, TaskFn fn, void *arg);
+int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags);
 void task_yield(void);
+
+/* Called by the timer interrupt (idle.c) on every tick, with interrupts off: switches away from a preemptible thread
+ * whose slice is over, unless preempt_disable() is in force. Does nothing for normal threads and the main loop. */
+void task_tick(void);
+/* 1 if some thread other than the running one could run now (the main loop yields instead of halting then). */
+int task_others_ready(void);
 void task_sleep_ms(unsigned ms);
 __attribute__((noreturn)) void task_exit(void);
 
@@ -51,6 +69,9 @@ unsigned long long task_switches(void);
 
 /* Quick check at boot: starts two threads that take turns, 0 = they did. Needs task_init and a working heap. */
 int task_selftest(void);
+/* Starts a preemptible thread that never yields and checks that the timer interrupt takes the CPU away from it.
+ * 0 = it did. Needs the LAPIC tick (idle_ready()). Never hangs: the thread stops by itself after ~20 ms. */
+int task_selftest_preempt(void);
 
 /* ---- for task.c and task_ctx.c ---- */
 /* Saves the callee-saved registers on the current stack, stores the stack pointer in *save_rsp, continues on

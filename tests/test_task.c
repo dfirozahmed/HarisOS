@@ -1,6 +1,8 @@
 /* Host test for the kernel threads (kernel/core/task.c + task_ctx.c): the real context switch runs here, on stacks
  * made by task_create(). The heap and the clock are replaced by host versions so the test can find leaks and move time. */
 #include "task.h"
+#include "irq.h"
+#include "preempt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,10 +10,15 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
-/* ---- heap and clock ---- */
+/* ---- heap, clock, interrupt flag ---- */
+volatile int host_if = 1; /* irq.h (HARIS_HOST): the interrupt flag of this pretend CPU */
+
 static int BLOCKS_OUT;
 static int ALLOC_FAIL;
 static unsigned long long NOW_US = 1000000;
+static unsigned long long TIME_STEP; /* the clock moves this much on every timer_us() call */
+static int TICK_EVERY;               /* > 0: every N-th timer_us() call acts like a timer interrupt (task_tick) */
+static int TICK_CALLS, IN_TICK;
 
 void *kmalloc(unsigned long long size)
 {
@@ -29,7 +36,22 @@ void kfree(void *p)
     free(p);
 }
 
-unsigned long long timer_us(void) { return NOW_US; }
+/* A spinning thread calls this over and over, so a "tick" injected here hits it at an arbitrary point, like a real
+ * interrupt. IN_TICK stops the scheduler's own timer_us() call from ticking again. */
+unsigned long long timer_us(void)
+{
+    NOW_US += TIME_STEP;
+    if (TICK_EVERY && !IN_TICK && ++TICK_CALLS % TICK_EVERY == 0)
+    {
+        IN_TICK = 1;
+        task_tick();
+        IN_TICK = 0;
+    }
+    return NOW_US;
+}
+
+int timer_ready(void) { return 1; }
+int idle_ready(void) { return 1; }
 
 /* ---- workers (they must not call printf: only plain code runs on these small stacks) ---- */
 static int LOG[256];
@@ -202,6 +224,37 @@ static void sleep_worker(void *arg)
 
 static void quick_worker(void *arg) { (*(volatile int *)arg)++; }
 
+/* ---- timer tick behaviour (task_tick called by hand) ---- */
+static volatile int TK_IF_NORMAL = -1, TK_IF_PREEMPT = -1;
+static volatile int TK_NORMAL_OK, TK_P1, TK_P2, TK_P3;
+
+static void tick_normal_worker(void *arg)
+{
+    (void)arg;
+    TK_IF_NORMAL = host_if;
+    unsigned long long s0 = task_switches();
+    for (int i = 0; i < 50; i++)
+        task_tick();
+    TK_NORMAL_OK = task_switches() == s0; /* a normal thread is never taken off the CPU by a tick */
+}
+
+static void tick_preempt_worker(void *arg)
+{
+    (void)arg;
+    TK_IF_PREEMPT = host_if;
+    unsigned long long s0 = task_switches();
+    for (int i = 0; i < TASK_SLICE_TICKS - 1; i++)
+        task_tick();
+    TK_P1 = task_switches() == s0; /* the slice is not over yet */
+    preempt_disable();
+    for (int i = 0; i < 20; i++)
+        task_tick();
+    TK_P2 = task_switches() == s0; /* ... and while the lock is held, no number of ticks switches */
+    preempt_enable();
+    task_tick(); /* the last tick of the slice: the main thread gets the CPU here */
+    TK_P3 = 1;   /* reached only after we were switched back in */
+}
+
 static void drain(void)
 {
     for (int i = 0; i < 50 && task_count() > 1; i++)
@@ -302,6 +355,57 @@ int main(void)
     }
     CHECK(ran == 10 * (TASK_MAX - 1));
     CHECK(BLOCKS_OUT == 0);
+
+    /* ---- the timer tick ---- */
+    /* the main loop is never preempted, whatever the tick count */
+    unsigned long long sw = task_switches();
+    for (int i = 0; i < 100; i++)
+        task_tick();
+    CHECK(task_switches() == sw && task_current() == 0);
+
+    /* a normal thread: ticks do nothing, and it starts with interrupts off like the main loop */
+    task_create("TICKN", tick_normal_worker, 0);
+    task_yield();
+    CHECK(TK_IF_NORMAL == 0);
+    CHECK(TK_NORMAL_OK);
+    drain();
+
+    /* a preemptible thread: starts with interrupts on, loses the CPU exactly at the end of its slice, not before,
+     * and not while preempt_disable() holds */
+    CHECK(host_if == 1);
+    task_create_flags("TICKP", tick_preempt_worker, 0, TASK_PREEMPTIBLE);
+    task_yield(); /* runs until its slice ends: the tick switches back to us */
+    CHECK(host_if == 1); /* our own interrupt state came back */
+    CHECK(TK_IF_PREEMPT == 1);
+    CHECK(TK_P1 && TK_P2);
+    CHECK(!TK_P3); /* it was stopped inside its last task_tick() */
+    CHECK(task_current() == 0 && preempt_count == 0);
+    CHECK(task_others_ready()); /* it is ready to continue */
+    drain();
+    CHECK(TK_P3);
+    CHECK(!task_others_ready());
+
+    /* a sleeper counts as "ready" only once its time has come */
+    int sl = task_create("SLP", sleep_worker, 0);
+    CHECK(sl > 0 && task_others_ready()); /* ready (not started yet) */
+    SLEEP_DONE = 0;
+    task_yield();
+    CHECK(task_state(sl) == TASK_SLEEPING && !task_others_ready());
+    NOW_US += 6000;
+    CHECK(task_others_ready());
+    drain();
+    CHECK(SLEEP_DONE);
+
+    /* the boot self test of the preemption: with a tick source it passes; without one it reports failure, not a hang */
+    TIME_STEP = 5;
+    TICK_EVERY = 0;
+    CHECK(task_selftest_preempt() == -3);
+    TICK_EVERY = 50;
+    CHECK(task_selftest_preempt() == 0);
+    TICK_EVERY = 0;
+    TIME_STEP = 0;
+    CHECK(BLOCKS_OUT == 0 && task_count() == 1);
+    CHECK(preempt_count == 0 && host_if == 1);
 
     /* the same self test the kernel runs at boot */
     CHECK(task_selftest() == 0);

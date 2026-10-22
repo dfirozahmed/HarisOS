@@ -49,20 +49,61 @@ static IdtEntry IDT[IDT_COUNT];
 static volatile unsigned *LAPIC;
 static int READY;
 
-/* The interrupt handlers are plain assembly: they run between any two instructions of the kernel,
- * so they must not touch anything but the registers they save (no SSE, no C code).
- *   timer     : acknowledge the tick (write the LAPIC EOI register) and return
- *   other IRQ : same (an unexpected device interrupt must not stay "in service")
+/* The interrupt handlers are assembly: they run between any two instructions of the kernel, so they save every
+ * register that the code they call (or they themselves) may change.
+ *   timer     : acknowledge the tick (LAPIC EOI register), then call task_tick(), which may switch to another
+ *               thread (see task.h). Saves the registers a C function may change: rax rcx rdx r8-r11 and xmm0-5
+ *               (the Microsoft x64 ABI keeps the others itself, and so does the context switch).
+ *   other IRQ : only the EOI (an unexpected device interrupt must not stay "in service")
  *   spurious  : return without EOI (the APIC says none is in service)
  * A CPU exception (vectors 0..31) is a bug: fault.c reports it and stops (see fault.h). */
 unsigned long long idle_lapic_eoi; /* address of the LAPIC EOI register, read by the handlers */
 void idle_isr_timer(void);
+void idle_isr_other(void);
 void idle_isr_spurious(void);
 
+/* Stack alignment in idle_isr_timer: the CPU aligns RSP to 16 and pushes 5 qwords (40 bytes) -> RSP is 8 mod 16;
+ * 7 pushes (56) -> 0 mod 16; then 128 bytes = 32 shadow space for the call + 96 for xmm0-5, still 0 mod 16. */
 __asm__(".text\n"
         ".p2align 4\n"
         ".globl idle_isr_timer\n"
         "idle_isr_timer:\n"
+        "    pushq %rax\n"
+        "    pushq %rcx\n"
+        "    pushq %rdx\n"
+        "    pushq %r8\n"
+        "    pushq %r9\n"
+        "    pushq %r10\n"
+        "    pushq %r11\n"
+        "    subq $128, %rsp\n"
+        "    movups %xmm0, 32(%rsp)\n"
+        "    movups %xmm1, 48(%rsp)\n"
+        "    movups %xmm2, 64(%rsp)\n"
+        "    movups %xmm3, 80(%rsp)\n"
+        "    movups %xmm4, 96(%rsp)\n"
+        "    movups %xmm5, 112(%rsp)\n"
+        "    movq idle_lapic_eoi(%rip), %rax\n" /* EOI first: task_tick may not come back for a long time */
+        "    movl $0, (%rax)\n"
+        "    cld\n"
+        "    call task_tick\n"
+        "    movups 32(%rsp), %xmm0\n"
+        "    movups 48(%rsp), %xmm1\n"
+        "    movups 64(%rsp), %xmm2\n"
+        "    movups 80(%rsp), %xmm3\n"
+        "    movups 96(%rsp), %xmm4\n"
+        "    movups 112(%rsp), %xmm5\n"
+        "    addq $128, %rsp\n"
+        "    popq %r11\n"
+        "    popq %r10\n"
+        "    popq %r9\n"
+        "    popq %r8\n"
+        "    popq %rdx\n"
+        "    popq %rcx\n"
+        "    popq %rax\n"
+        "    iretq\n"
+        ".p2align 4\n"
+        ".globl idle_isr_other\n"
+        "idle_isr_other:\n"
         "    pushq %rax\n"
         "    movq idle_lapic_eoi(%rip), %rax\n"
         "    movl $0, (%rax)\n"
@@ -165,7 +206,8 @@ int idle_init(void)
     fault_tss_descriptor(&GDT[SEL_TSS / 8]);
     gdt_load();
     for (int i = 0; i < IDT_COUNT; i++)
-        idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_timer);
+        idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
+    idt_set(VEC_TIMER, idle_isr_timer);
     IDT[8].ist = 1; /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
     idt_set(VEC_SPURIOUS, idle_isr_spurious);
     idt_load();

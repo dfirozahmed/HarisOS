@@ -14,9 +14,13 @@
  *
  * Under UEFI physical memory is identity mapped, so the addresses the page allocator returns are pointers.
  * No libc: copying and zeroing go word by word through volatile pointers (a plain loop could be turned by the
- * compiler into a call to memcpy / memset, which this freestanding build does not have). */
+ * compiler into a call to memcpy / memset, which this freestanding build does not have).
+ *
+ * Threads: a preemptible thread can be stopped by the timer anywhere, so every public call (at the end of this file)
+ * runs inside preempt_disable() / preempt_enable() (include/preempt.h). The *_nl ("no lock") functions do the work. */
 #include "heap.h"
 #include "pmm.h"
+#include "preempt.h"
 
 typedef unsigned long long u64;
 
@@ -182,14 +186,14 @@ static u64 block_need(u64 size)
     return need < MIN_BLOCK ? MIN_BLOCK : need;
 }
 
-int heap_init(void)
+static int heap_init_nl(void)
 {
     if (NARENAS > 0)
         return 0;
     return grow(MIN_BLOCK) ? 0 : -1;
 }
 
-void *kmalloc(u64 size)
+static void *kmalloc_nl(u64 size)
 {
     if (size > MAX_REQUEST)
         return 0;
@@ -238,7 +242,7 @@ static Block *used_block(const void *p)
     return b;
 }
 
-void kfree(void *p)
+static void kfree_nl(void *p)
 {
     if (!p)
         return;
@@ -278,7 +282,7 @@ void kfree(void *p)
     list_insert(b);
 }
 
-void *krealloc(void *p, u64 size)
+static void *krealloc_nl(void *p, u64 size)
 {
     if (!p)
         return kmalloc(size);
@@ -325,7 +329,7 @@ u64 heap_block_size(const void *p)
     return b ? bsize(b) - HDR : 0;
 }
 
-void heap_stats(HeapStats *out)
+static void heap_stats_nl(HeapStats *out)
 {
     out->arena_bytes = out->used_bytes = out->free_bytes = out->used_blocks = out->free_blocks = out->largest_free = 0;
     out->arenas = (u64)NARENAS;
@@ -351,7 +355,7 @@ void heap_stats(HeapStats *out)
     }
 }
 
-int heap_check(void)
+static int heap_check_nl(void)
 {
     u64 free_seen = 0;
     for (int i = 0; i < NARENAS; i++)
@@ -398,4 +402,51 @@ int heap_check(void)
         last = b;
     }
     return listed == free_seen ? 0 : 8;
+}
+
+/* ---- public entry points: the work above, with the timer interrupt not allowed to switch threads meanwhile ---- */
+int heap_init(void)
+{
+    preempt_disable();
+    int r = heap_init_nl();
+    preempt_enable();
+    return r;
+}
+
+void *kmalloc(u64 size)
+{
+    preempt_disable();
+    void *p = kmalloc_nl(size);
+    preempt_enable();
+    return p;
+}
+
+void kfree(void *p)
+{
+    preempt_disable();
+    kfree_nl(p);
+    preempt_enable();
+}
+
+void *krealloc(void *p, u64 size)
+{
+    preempt_disable();
+    void *q = krealloc_nl(p, size);
+    preempt_enable();
+    return q;
+}
+
+void heap_stats(HeapStats *out)
+{
+    preempt_disable();
+    heap_stats_nl(out);
+    preempt_enable();
+}
+
+int heap_check(void)
+{
+    preempt_disable();
+    int r = heap_check_nl();
+    preempt_enable();
+    return r;
 }

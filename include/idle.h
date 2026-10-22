@@ -8,6 +8,8 @@
  * The CPU wakes on every 1 ms LAPIC timer tick, the loop polls the devices once more and
  * sleeps again, so mouse / USB / I2C drivers stay polled and need no interrupt of their own.
  *
+ * The tick also calls task_tick() (task.h), which is how a preemptible kernel thread loses the CPU.
+ *
  * If the local APIC cannot be used (missing, or already in x2APIC mode) idle_init() returns -1
  * and idle_wait() only does "pause": everything works as before, just without the sleep.
  * ============================================================ */

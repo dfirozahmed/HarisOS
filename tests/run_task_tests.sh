@@ -6,7 +6,7 @@ OUT=${TMPDIR:-/tmp}/harisos-task-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 # The real context switch runs on the host, so this needs an x86_64 compiler using the Microsoft x64 ABI
 # (MSYS2 UCRT64 clang), the same ABI the kernel is built for.
-"$CC" -std=c11 -Wall -Wextra -Werror -O1 -I"$ROOT/include" \
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 -DHARIS_HOST -I"$ROOT/include" \
   "$ROOT/tests/test_task.c" \
   "$ROOT/kernel/core/task.c" \
   "$ROOT/kernel/core/task_ctx.c" \

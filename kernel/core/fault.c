@@ -1,6 +1,6 @@
 /* HarisOS CPU exception handling: see include/fault.h. */
 #include "fault.h"
-#include "io.h"
+#include "serial.h"
 
 #if defined(__x86_64__)
 
@@ -103,37 +103,6 @@ void fault_tss_descriptor(unsigned long long out[2])
 }
 
 /* ---- output --------------------------------------------------- */
-enum { COM1 = 0x3F8 };
-
-static void serial_init(void)
-{
-    io_out8(COM1 + 1, 0x00); /* no serial interrupts */
-    io_out8(COM1 + 3, 0x80); /* DLAB on: set the baud rate divisor */
-    io_out8(COM1 + 0, 0x01); /* 115200 baud */
-    io_out8(COM1 + 1, 0x00);
-    io_out8(COM1 + 3, 0x03); /* 8 bits, no parity, 1 stop bit */
-    io_out8(COM1 + 2, 0xC7); /* FIFO on */
-    io_out8(COM1 + 4, 0x0B);
-}
-
-static void serial_put(char c)
-{
-    /* Bounded wait: without a UART the line-status port reads 0xFF or 0, and we must never hang here. */
-    for (int i = 0; i < 100000 && !(io_in8(COM1 + 5) & 0x20); i++)
-        __asm__ volatile("pause");
-    io_out8(COM1, (unsigned char)c);
-}
-
-static void serial_text(const char *s)
-{
-    for (; *s; s++)
-    {
-        if (*s == '\n')
-            serial_put('\r');
-        serial_put(*s);
-    }
-}
-
 /* 5x7 glyphs, upper case only (the report is upper case). One row per byte, bit 4 = leftmost pixel. */
 static const char GLYPH_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#=:-./()_";
 static const unsigned char GLYPHS[][7] = {
@@ -237,7 +206,7 @@ __attribute__((noreturn)) void fault_dispatch(FaultFrame *f)
     fault_format(text, sizeof(text), f, cr2);
 
     serial_init();
-    serial_text(text); /* first: the serial port is the most robust output */
+    serial_puts(text); /* first: the serial port is the most robust output */
     if (FB)
         screen_text(text);
 

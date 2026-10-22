@@ -21,6 +21,7 @@
 #include "pmm.h"
 #include "power.h"
 #include "rtc.h"
+#include "serial.h"
 #include "storage.h"
 #include "task.h"
 #include "taskbar.h"
@@ -152,12 +153,23 @@ void kernel_main(const BootInfo *info)
     timer_init(); /* needed for double-click */
     idle_init();  /* 1 ms LAPIC tick so the loop can sleep (hlt) when idle; see idle.h */
 
-    /* Kernel threads: this loop becomes task 0. The boot self test switches between two test threads; a broken
-     * context switch would corrupt memory later in confusing ways, so stop now (the crash screen shows #UD). */
+    /* Kernel threads: this loop becomes task 0. The boot self test switches between test threads and checks that the
+     * timer interrupt can take the CPU from one that never yields. A broken context switch or interrupt handler would
+     * corrupt memory later in confusing ways, so stop now (the crash screen shows #UD). The result goes to COM1. */
     if (pmm_ok)
     {
+        serial_init();
         task_init();
-        if (task_selftest() != 0)
+        int st = task_selftest();
+        int sp = st == 0 ? task_selftest_preempt() : 0;
+        serial_puts("HARISOS: thread self test ");
+        serial_puts(st == 0 && sp == 0 ? "ok" : "FAILED");
+        serial_puts(" (switch ");
+        serial_putd(st);
+        serial_puts(", preempt ");
+        serial_putd(sp);
+        serial_puts(")\n");
+        if (st != 0 || sp != 0)
             __builtin_trap();
     }
 
@@ -233,10 +245,13 @@ void kernel_main(const BootInfo *info)
         }
         if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
             worked = 1;
+        int others = task_others_ready();
+        if (others)
+            task_yield(); /* preemptible kernel threads run until their slice ends or they yield (see task.h) */
         unsigned long long pass_end = timer_us();
         cpuload_add_busy(pass_end - pass_start); /* everything except the sleep below is CPU time (see cpuload.h) */
         cpuload_poll(pass_end);
-        if (!worked)
+        if (!worked && !others)
             idle_wait(); /* nothing to do: halt until the next 1 ms tick */
     }
 }
