@@ -255,6 +255,31 @@ static void goto_line_col(int line, int col)
     NP_CUR = ls + (col < len ? col : len);
 }
 
+/* Tell the window manager what really changed (after a key or a click), so it does not redraw the whole
+ * window: the status bar always, and either the rows between the old and the new caret line, or (if the
+ * text scrolled or the number of lines changed, so the rows below moved) the whole text area. */
+static void mark_changed(Window *w, int old_line, int old_lines, int old_top, int old_hscroll)
+{
+    UiRect body = wm_content(w);
+    UiRect in = ui_inset(text_area(body), NP_PAD);
+    follow(in);
+    int new_line = line_of(NP_CUR);
+    UiRect rows = in;
+    if (NP_TOP == old_top && NP_HSCROLL == old_hscroll && line_count() == old_lines)
+    {
+        int a = old_line < new_line ? old_line : new_line;
+        int b = old_line < new_line ? new_line : old_line;
+        if (a < NP_TOP)
+            a = NP_TOP;
+        if (b > NP_TOP + NP_ROWS - 1)
+            b = NP_TOP + NP_ROWS - 1;
+        rows = ui_rect(in.x, in.y + (a - NP_TOP) * np_line_h(), in.w, (b - a + 1) * np_line_h());
+    }
+    if (rows.h > 0)
+        wm_add_damage(rows);
+    wm_add_damage(status_rect(body));
+}
+
 static void np_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed)
@@ -325,27 +350,7 @@ static void np_key(Window *w, const KeyEvent *k)
     ui_caret_restart();
     NP_BLINK = 1;
 
-    /* Tell the window manager what really changed, so it does not redraw the whole window per key: the status
-     * bar always, and either the rows between the old and the new caret line, or (if the text scrolled or the
-     * number of lines changed, so the rows below moved) the whole text area. */
-    UiRect body = wm_content(w);
-    UiRect in = ui_inset(text_area(body), NP_PAD);
-    follow(in);
-    int new_line = line_of(NP_CUR);
-    UiRect rows = in;
-    if (NP_TOP == old_top && NP_HSCROLL == old_hscroll && line_count() == old_lines)
-    {
-        int a = old_line < new_line ? old_line : new_line;
-        int b = old_line < new_line ? new_line : old_line;
-        if (a < NP_TOP)
-            a = NP_TOP;
-        if (b > NP_TOP + NP_ROWS - 1)
-            b = NP_TOP + NP_ROWS - 1;
-        rows = ui_rect(in.x, in.y + (a - NP_TOP) * np_line_h(), in.w, (b - a + 1) * np_line_h());
-    }
-    if (rows.h > 0)
-        wm_add_damage(rows);
-    wm_add_damage(status_rect(body));
+    mark_changed(w, old_line, old_lines, old_top, old_hscroll);
     wm_key_partial();
 }
 
@@ -356,6 +361,8 @@ static int np_press(Window *w, int x, int y)
     if (!ui_contains(in, x, y))
         return 0;
 
+    int old_line = line_of(NP_CUR), old_lines = line_count();
+    int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
     int line = NP_TOP + (y - in.y) / np_line_h();
     if (line > line_count() - 1)
         line = line_count() - 1;
@@ -368,12 +375,12 @@ static int np_press(Window *w, int x, int y)
     NP_FOLLOW = 1;
     ui_caret_restart();
     NP_BLINK = 1;
-    return 1;
+    mark_changed(w, old_line, old_lines, old_top, old_hscroll);
+    return 2; /* the damage is already marked: only the old / new caret rows and the status bar are redrawn */
 }
 
 static int np_wheel(Window *w, int steps)
 {
-    (void)w;
     int top = NP_TOP + steps * 3;
     if (top > line_count() - 1)
         top = line_count() - 1;
@@ -382,7 +389,8 @@ static int np_wheel(Window *w, int steps)
     if (top == NP_TOP)
         return 0;
     NP_TOP = top;
-    return 1;
+    wm_add_damage(ui_inset(text_area(wm_content(w)), NP_PAD)); /* only the text moved, not the frame or the status bar */
+    return 2;
 }
 
 /* the caret blinks: redraw the window when it appears or disappears */

@@ -48,7 +48,7 @@ typedef struct Window
     WmDrawFn on_draw;                                    /* may be NULL */
     void (*on_close)(struct Window *w);                  /* called just before the window is closed (may be NULL) */
     void (*on_key)(struct Window *w, const KeyEvent *k); /* key press / release while focused (may be NULL) */
-    int (*on_press)(struct Window *w, int x, int y);     /* left press inside the window below the title bar; return 1 if it changed what is shown (may be NULL) */
+    int (*on_press)(struct Window *w, int x, int y);     /* left press inside the window below the title bar; return 1 if it changed what is shown (the whole window is redrawn), or 2 if only an area it has already passed to wm_add_damage() changed (may be NULL) */
     int (*on_drag)(struct Window *w, int x, int y, unsigned buttons); /* called while the left button stays down after an on_press (and once when it is released, buttons & 1 == 0); return 1 if it changed what is shown (the whole window is redrawn), or 2 if only an area it has already passed to wm_add_damage() changed (may be NULL) */
     int (*on_wheel)(struct Window *w, int steps);        /* mouse wheel over the window (steps: + = down, like MouseState.wheel); return 1 if it changed what is shown (may be NULL) */
     int (*on_rpress)(struct Window *w, int x, int y);    /* right button went down inside the window below the title bar (the window is raised first); return 1 if it changed what is shown (the whole window is redrawn), or 2 if it changed only an area it has already passed to wm_add_damage() (may be NULL) */

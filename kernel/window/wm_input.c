@@ -310,7 +310,8 @@ int wm_pointer(int x, int y, unsigned buttons)
                 MAX_PRESSED = w;
             else if (!in_titlebar(w, x, y))
             {
-                if (w->on_press && w->on_press(w, x, y))
+                /* 1 = redraw the whole window; 2 = the handler marked its own area with wm_add_damage() */
+                if (w->on_press && w->on_press(w, x, y) == 1)
                     wm_damage_window_internal(w);
                 if (w->on_drag)
                     PRESS_WIN = w;
