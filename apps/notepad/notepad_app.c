@@ -91,23 +91,164 @@ static void copy_text(int from, int count, char *out)
     out[count] = 0;
 }
 
-static int insert_char(char c)
+/* ---- editing and undo ----
+ * Every change of the text is one "replace": the `dl` characters at `pos` are replaced by `il` new ones
+ * (typing = dl 0, deleting = il 0). An Undo record holds the position, both texts (in one pool) and where the
+ * caret / selection was, so undo and redo are the same replace run backwards or forwards. Typing letters in a
+ * row, or pressing Backspace / Delete in a row, grows the previous record instead of making a new one, so
+ * one Ctrl+Z takes back a whole run. When the records or the pool are full the oldest are forgotten. */
+#define NP_UNDO_OPS 256
+#define NP_UNDO_POOL 40960 /* worst case for one record: the whole text deleted (16384) + a whole text pasted */
+#define NP_RUN_MAX 200     /* a record of a typing run stops growing here */
+
+enum
 {
-    if (NP_LEN >= NP_MAX)
-        return 0;
-    for (int i = NP_LEN; i > NP_CUR; i--)
-        NP_BUF[i] = NP_BUF[i - 1];
-    NP_BUF[NP_CUR++] = c;
-    NP_LEN++;
-    return 1;
+    NP_KIND_NONE,
+    NP_KIND_TYPE, /* a letter typed at the caret */
+    NP_KIND_BACK, /* Backspace */
+    NP_KIND_FWD   /* Delete */
+};
+
+typedef struct
+{
+    int pos, dl, il;           /* replaced dl characters at pos by il characters */
+    int off;                   /* start of the deleted text in the pool; the inserted text follows it */
+    int cur_before, anchor_before;
+} UndoOp;
+
+static UndoOp NP_UNDO[NP_UNDO_OPS];
+static char NP_POOL[NP_UNDO_POOL];
+static int NP_UN;   /* records in NP_UNDO */
+static int NP_UPOS; /* the first NP_UPOS can be undone, the rest redone */
+static int NP_LASTKIND; /* kind of the last edit, while nothing else happened (for merging a run) */
+static unsigned NP_EDITS; /* counts edits: a key handler can tell whether the key changed the text */
+
+static int pool_used(void)
+{
+    return NP_UN ? NP_UNDO[NP_UN - 1].off + NP_UNDO[NP_UN - 1].dl + NP_UNDO[NP_UN - 1].il : 0;
 }
 
-/* delete the character at offset p */
-static void delete_at(int p)
+/* the text becomes: [0,pos) + t[0,il) + the old text from pos+dl on */
+static void raw_replace(int pos, int dl, const char *t, int il)
 {
-    for (int i = p; i < NP_LEN - 1; i++)
-        NP_BUF[i] = NP_BUF[i + 1];
-    NP_LEN--;
+    int delta = il - dl;
+    if (delta > 0)
+        for (int i = NP_LEN - 1; i >= pos + dl; i--)
+            NP_BUF[i + delta] = NP_BUF[i];
+    else if (delta < 0)
+        for (int i = pos + dl; i < NP_LEN; i++)
+            NP_BUF[i + delta] = NP_BUF[i];
+    for (int i = 0; i < il; i++)
+        NP_BUF[pos + i] = t[i];
+    NP_LEN += delta;
+}
+
+/* forget the oldest record */
+static void drop_oldest(void)
+{
+    int size = NP_UNDO[0].dl + NP_UNDO[0].il;
+    int used = pool_used();
+    for (int i = 0; i < used - size; i++)
+        NP_POOL[i] = NP_POOL[i + size];
+    for (int i = 1; i < NP_UN; i++)
+    {
+        NP_UNDO[i - 1] = NP_UNDO[i];
+        NP_UNDO[i - 1].off -= size;
+    }
+    NP_UN--;
+    NP_UPOS--;
+}
+
+/* Replace the dl characters at pos by ins[0,il). `kind` says whether this may join the previous record. The
+ * caret ends after the new text. */
+static void edit_replace(int pos, int dl, const char *ins, int il, int kind)
+{
+    if (il > NP_MAX - (NP_LEN - dl)) /* the buffer is full: take what fits */
+        il = NP_MAX - (NP_LEN - dl);
+    if (il < 0)
+        il = 0;
+    if (dl == 0 && il == 0)
+        return;
+    int cur_before = NP_CUR, anchor_before = NP_ANCHOR;
+
+    int merged = 0;
+    if (kind && kind == NP_LASTKIND && NP_UPOS == NP_UN && NP_UN > 0)
+    {
+        UndoOp *o = &NP_UNDO[NP_UN - 1];
+        int end = pool_used();
+        if (o->dl + o->il + dl + il <= NP_RUN_MAX && end + dl + il <= NP_UNDO_POOL)
+        {
+            if (kind == NP_KIND_TYPE && o->dl == 0 && pos == o->pos + o->il)
+            {
+                for (int i = 0; i < il; i++)
+                    NP_POOL[end + i] = ins[i];
+                o->il += il;
+                merged = 1;
+            }
+            else if (kind == NP_KIND_BACK && o->il == 0 && pos + dl == o->pos)
+            {
+                for (int i = end - 1; i >= o->off; i--) /* the earlier characters go in front */
+                    NP_POOL[i + dl] = NP_POOL[i];
+                for (int i = 0; i < dl; i++)
+                    NP_POOL[o->off + i] = NP_BUF[pos + i];
+                o->pos = pos;
+                o->dl += dl;
+                merged = 1;
+            }
+            else if (kind == NP_KIND_FWD && o->il == 0 && pos == o->pos)
+            {
+                for (int i = 0; i < dl; i++)
+                    NP_POOL[end + i] = NP_BUF[pos + i];
+                o->dl += dl;
+                merged = 1;
+            }
+        }
+    }
+    if (!merged)
+    {
+        NP_UN = NP_UPOS; /* a new edit ends the redo history */
+        while (NP_UN > 0 && (NP_UN == NP_UNDO_OPS || pool_used() + dl + il > NP_UNDO_POOL))
+            drop_oldest();
+        UndoOp *o = &NP_UNDO[NP_UN];
+        o->pos = pos;
+        o->dl = dl;
+        o->il = il;
+        o->off = pool_used();
+        o->cur_before = cur_before;
+        o->anchor_before = anchor_before;
+        for (int i = 0; i < dl; i++)
+            NP_POOL[o->off + i] = NP_BUF[pos + i];
+        for (int i = 0; i < il; i++)
+            NP_POOL[o->off + dl + i] = ins[i];
+        NP_UN++;
+        NP_UPOS++;
+    }
+
+    raw_replace(pos, dl, ins, il);
+    NP_CUR = NP_ANCHOR = pos + il;
+    NP_LASTKIND = kind;
+    NP_EDITS++;
+}
+
+static void undo(void)
+{
+    if (NP_UPOS == 0)
+        return;
+    const UndoOp *o = &NP_UNDO[--NP_UPOS];
+    raw_replace(o->pos, o->il, NP_POOL + o->off, o->dl);
+    NP_CUR = o->cur_before;
+    NP_ANCHOR = o->anchor_before;
+    NP_LASTKIND = NP_KIND_NONE;
+}
+
+static void redo(void)
+{
+    if (NP_UPOS == NP_UN)
+        return;
+    const UndoOp *o = &NP_UNDO[NP_UPOS++];
+    raw_replace(o->pos, o->dl, NP_POOL + o->off + o->dl, o->il);
+    NP_CUR = NP_ANCHOR = o->pos + o->il;
+    NP_LASTKIND = NP_KIND_NONE;
 }
 
 /* the selection [*a, *b); returns 0 if nothing is selected */
@@ -126,11 +267,18 @@ static int delete_selection(void)
     int a, b;
     if (!sel_range(&a, &b))
         return 0;
-    for (int i = a; i < NP_LEN - (b - a); i++)
-        NP_BUF[i] = NP_BUF[i + (b - a)];
-    NP_LEN -= b - a;
-    NP_CUR = NP_ANCHOR = a;
+    edit_replace(a, b - a, 0, 0, NP_KIND_NONE);
     return 1;
+}
+
+/* type s[0,n) at the caret, over the selection if there is one (a single letter can join a typing run) */
+static void insert_text(const char *s, int n)
+{
+    int a, b;
+    if (sel_range(&a, &b))
+        edit_replace(a, b - a, s, n, NP_KIND_NONE);
+    else
+        edit_replace(NP_CUR, 0, s, n, (n == 1 && s[0] != '\n') ? NP_KIND_TYPE : NP_KIND_NONE);
 }
 
 /* ---- layout ---- */
@@ -398,22 +546,20 @@ static void copy_selection(void)
 /* paste the clipboard at the caret over the selection: '\r' and other control characters are dropped, a Tab becomes spaces */
 static void paste(void)
 {
-    static char clip[NP_MAX + 1];
+    static char clip[NP_MAX + 1], text[NP_MAX + 1];
     int n = ui_clipboard_get(clip, (int)sizeof clip);
-    if (n == 0)
-        return;
-    delete_selection();
-    for (int i = 0; i < n; i++)
+    int len = 0;
+    for (int i = 0; i < n && len < NP_MAX; i++)
     {
         unsigned char c = (unsigned char)clip[i];
-        if (c == '\n')
-            insert_char('\n');
+        if (c == '\n' || (c >= 32 && c < 127))
+            text[len++] = (char)c;
         else if (c == '\t')
-            for (int k = 0; k < NP_TAB; k++)
-                insert_char(' ');
-        else if (c >= 32 && c < 127)
-            insert_char((char)c);
+            for (int k = 0; k < NP_TAB && len < NP_MAX; k++)
+                text[len++] = ' ';
     }
+    if (len > 0)
+        insert_text(text, len); /* one undo step, whatever its size */
 }
 
 static void np_key(Window *w, const KeyEvent *k)
@@ -423,9 +569,10 @@ static void np_key(Window *w, const KeyEvent *k)
         wm_key_partial(); /* a release changes nothing: no redraw at all */
         return;
     }
+    unsigned edits_before = NP_EDITS;
     int vertical = 0;
     int motion = 0; /* a key that only moves the caret: with Shift it extends the selection */
-    int select_all = 0;
+    int keep_anchor = 0;
     int shift = (k->mods & KMOD_SHIFT) != 0, ctrl = (k->mods & KMOD_CTRL) != 0;
     int old_lines = line_count(), old_lo, old_hi;
     sel_lines(&old_lo, &old_hi);
@@ -439,7 +586,7 @@ static void np_key(Window *w, const KeyEvent *k)
         case 'a':
             NP_ANCHOR = 0;
             NP_CUR = NP_LEN;
-            select_all = 1;
+            keep_anchor = 1;
             break;
         case 'c':
         case KEY_INSERT:
@@ -451,6 +598,19 @@ static void np_key(Window *w, const KeyEvent *k)
             break;
         case 'v':
             paste();
+            break;
+        case 'z':
+            if (shift)
+                redo();
+            else
+                undo();
+            keep_anchor = 1; /* undo puts the old selection back */
+            old_lines = -1;  /* it may have changed lines far from the caret: redraw the whole text area */
+            break;
+        case 'y':
+            redo();
+            keep_anchor = 1;
+            old_lines = -1;
             break;
         default:
             break;
@@ -501,7 +661,7 @@ static void np_key(Window *w, const KeyEvent *k)
             break;
         case KEY_BACKSPACE:
             if (!delete_selection() && NP_CUR > 0)
-                delete_at(--NP_CUR);
+                edit_replace(NP_CUR - 1, 1, 0, 0, NP_KIND_BACK);
             break;
         case KEY_DELETE:
             if (shift) /* Shift+Delete = cut */
@@ -510,32 +670,31 @@ static void np_key(Window *w, const KeyEvent *k)
                 delete_selection();
             }
             else if (!delete_selection() && NP_CUR < NP_LEN)
-                delete_at(NP_CUR);
+                edit_replace(NP_CUR, 1, 0, 0, NP_KIND_FWD);
             break;
         case KEY_INSERT:
             if (shift) /* Shift+Insert = paste */
                 paste();
             break;
         case KEY_ENTER:
-            delete_selection();
-            insert_char('\n');
+            insert_text("\n", 1);
             break;
         case KEY_TAB:
-            delete_selection();
-            for (int i = 0; i < NP_TAB; i++)
-                insert_char(' ');
+            insert_text("    ", NP_TAB);
             break;
         default:
             if (k->ch >= 32 && k->ch < 127 && !(k->mods & KMOD_ALT))
             {
-                delete_selection();
-                insert_char((char)k->ch);
+                char c = (char)k->ch;
+                insert_text(&c, 1);
             }
             break;
         }
     }
+    if (NP_EDITS == edits_before)
+        NP_LASTKIND = NP_KIND_NONE; /* a key that did not edit (movement, copy ...) ends a typing run */
 
-    if (!(motion && shift) && !select_all)
+    if (!(motion && shift) && !keep_anchor)
         NP_ANCHOR = NP_CUR; /* no selection, unless Shift extended it */
     if (!vertical)
         NP_DESIRED = NP_CUR - line_start(NP_CUR);
@@ -575,6 +734,7 @@ static int np_press(Window *w, int x, int y)
     int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
     NP_CUR = NP_ANCHOR = pos_at(in, x, y);
     NP_SELECTING = 1; /* dragging from here selects */
+    NP_LASTKIND = NP_KIND_NONE; /* clicking ends a typing run */
     NP_DESIRED = NP_CUR - line_start(NP_CUR);
     NP_FOLLOW = 1;
     ui_caret_restart();
