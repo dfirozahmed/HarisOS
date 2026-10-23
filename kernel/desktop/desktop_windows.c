@@ -1,5 +1,6 @@
 /* HarisOS desktop windows: welcome screen and sample Hello/message dialogs. */
 #include "desktop.h"
+#include "heap.h"
 #include "taskbar.h"
 #include "ui.h"
 #include "wm.h"
@@ -99,15 +100,12 @@ static void hello_key(Window *w, const KeyEvent *k)
 #define MSG_LINE (UI_EDIT_MAX + 12)
 typedef struct
 {
-    int used;
     char line[WM_MAX_EDITS][MSG_LINE];
-} MsgData;
-static MsgData MSGS[WM_MAX_WINDOWS];
+} MsgData; /* one per message box, from the heap: freed when the box closes */
 
 static void msg_close(Window *w)
 {
-    if (w->user)
-        ((MsgData *)w->user)->used = 0;
+    kfree(w->user); /* (NULL is fine) */
 }
 
 static void msg_draw(Window *w, UiRect body)
@@ -134,10 +132,7 @@ static void on_msg_ok(UiButton *b, void *user)
 
 static void show_message(Window *src)
 {
-    MsgData *m = 0;
-    for (int i = 0; i < WM_MAX_WINDOWS && !m; i++)
-        if (!MSGS[i].used)
-            m = &MSGS[i];
+    MsgData *m = kcalloc(1, sizeof(MsgData));
     int W = (int)gfx_width(), H = (int)gfx_height();
     int w = 340, h = 210;
     int x = src->r.x + (src->r.w - w) / 2, y = src->r.y + (src->r.h - h) / 2; /* centered over its window */
@@ -152,11 +147,11 @@ static void show_message(Window *src)
     Window *win = m ? wm_create_dialog((Window *)src, "Message", x, y, w, h, msg_draw, m) : 0;
     if (!win)
     {
-        STATUS_LINE = "Window limit reached - close one first.";
+        kfree(m);
+        STATUS_LINE = "Cannot open another window - close one first.";
         wm_invalidate();
         return;
     }
-    m->used = 1;
     for (int i = 0; i < WM_MAX_EDITS; i++)
     {
         char *o = put_str(m->line[i], HELLO_LABEL[i]);

@@ -14,7 +14,7 @@
 #ifndef HARIS_SHM_H
 #define HARIS_SHM_H
 
-#define SHM_MAX 64
+#define SHM_MAX 1024             /* segments that can exist at once: the table is grown as needed up to this */
 #define SHM_NAME_MAX 32          /* including the final 0 */
 #define SHM_MAX_PAGES 4096       /* 16 MiB per segment */
 

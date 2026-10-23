@@ -15,7 +15,8 @@ typedef struct
     u64 *phys; /* physical address of each page: a heap block of `pages` entries, made with the segment */
 } Segment;
 
-static Segment SEGS[SHM_MAX];
+static Segment *SEGS; /* the table: a heap block of SEG_CAP entries, doubled when full (callers only ever hold indexes, so it may move) */
+static int SEG_CAP;
 
 static int names_equal(const char *a, const char *b)
 {
@@ -47,9 +48,27 @@ static void release(Segment *s)
     s->pages = 0;
 }
 
+/* Double the table (at most SHM_MAX entries); the new entries are unused. 0 = at the limit or out of memory. */
+static int grow_table(void)
+{
+    if (SEG_CAP >= SHM_MAX)
+        return 0;
+    int cap = SEG_CAP ? SEG_CAP * 2 : 16;
+    if (cap > SHM_MAX)
+        cap = SHM_MAX;
+    Segment *t = krealloc(SEGS, (u64)cap * sizeof(Segment));
+    if (!t)
+        return 0;
+    for (int i = SEG_CAP; i < cap; i++)
+        t[i].used = 0;
+    SEGS = t;
+    SEG_CAP = cap;
+    return 1;
+}
+
 static int find(const char *name)
 {
-    for (int i = 0; i < SHM_MAX; i++)
+    for (int i = 0; i < SEG_CAP; i++)
         if (SEGS[i].used && SEGS[i].linked && names_equal(SEGS[i].name, name))
             return i;
     return -1;
@@ -64,9 +83,9 @@ int shm_open(const char *name, u64 size, unsigned flags)
         return (flags & SHM_CREATE) && (flags & SHM_EXCL) ? -1 : s;
     if (!(flags & SHM_CREATE) || size == 0 || size > (u64)SHM_MAX_PAGES * PMM_PAGE_SIZE)
         return -1;
-    for (s = 0; s < SHM_MAX && SEGS[s].used; s++)
+    for (s = 0; s < SEG_CAP && SEGS[s].used; s++)
         ;
-    if (s == SHM_MAX)
+    if (s == SEG_CAP && !grow_table())
         return -1;
     Segment *g = &SEGS[s];
     unsigned pages = (unsigned)((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
@@ -101,19 +120,19 @@ int shm_open(const char *name, u64 size, unsigned flags)
     return s;
 }
 
-unsigned shm_pages(int s) { return s >= 0 && s < SHM_MAX && SEGS[s].used ? SEGS[s].pages : 0; }
+unsigned shm_pages(int s) { return s >= 0 && s < SEG_CAP && SEGS[s].used ? SEGS[s].pages : 0; }
 
-u64 shm_page(int s, unsigned i) { return s >= 0 && s < SHM_MAX && SEGS[s].used && i < SEGS[s].pages ? SEGS[s].phys[i] : 0; }
+u64 shm_page(int s, unsigned i) { return s >= 0 && s < SEG_CAP && SEGS[s].used && i < SEGS[s].pages ? SEGS[s].phys[i] : 0; }
 
 void shm_ref(int s)
 {
-    if (s >= 0 && s < SHM_MAX && SEGS[s].used)
+    if (s >= 0 && s < SEG_CAP && SEGS[s].used)
         SEGS[s].refs++;
 }
 
 void shm_unref(int s)
 {
-    if (s < 0 || s >= SHM_MAX || !SEGS[s].used)
+    if (s < 0 || s >= SEG_CAP || !SEGS[s].used)
         return;
     if (SEGS[s].refs > 0)
         SEGS[s].refs--;
@@ -135,7 +154,7 @@ int shm_unlink(const char *name)
 int shm_in_use(void)
 {
     int n = 0;
-    for (int i = 0; i < SHM_MAX; i++)
+    for (int i = 0; i < SEG_CAP; i++)
         n += SEGS[i].used ? 1 : 0;
     return n;
 }

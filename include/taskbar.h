@@ -26,7 +26,7 @@ typedef struct
     int minimized; /* hidden: the icon is dimmed */
 } TaskbarApp;
 
-#define TASKBAR_MAX_APPS 8
+#define TASKBAR_MAX_APPS 32 /* the most app buttons ever kept; how many are drawn depends on the screen width (they shrink to fit) */
 
 /* The app buttons to show (copied; at most TASKBAR_MAX_APPS). */
 void taskbar_set_apps(const TaskbarApp *apps, int count);

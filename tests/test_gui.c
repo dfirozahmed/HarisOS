@@ -31,6 +31,7 @@ void pmm_free_page(unsigned long long phys)
 
 /* the kernel heap (shm.c keeps its page lists there, gui.c its surfaces): host memory, counted, with a switch that makes it fail */
 static int HEAP_BLOCKS, HEAP_FAIL;
+static int TABLES; /* heap blocks the segment table (and the surface table) keep for good once they exist */
 void *kmalloc(unsigned long long size)
 {
     if (HEAP_FAIL)
@@ -47,6 +48,15 @@ void kfree(void *p)
         free(p);
         HEAP_BLOCKS--;
     }
+}
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_BLOCKS++;
+    return n;
 }
 
 static int WOKEN[16], WOKEN_N;
@@ -71,6 +81,12 @@ static GuiEvent move_ev(int x, int y)
 int main(void)
 {
     int seg = -1, w, h, x, y, n;
+
+    /* the tables are made on first use and stay: count them once, so the leak checks below can ask for "nothing else" */
+    int warm = gui_create("Warm", 64, 48, 1, &seg);
+    CHECK(warm > 0 && gui_slot_count() >= 1);
+    gui_destroy(warm);
+    TABLES = HEAP_BLOCKS;
 
     /* create: size limits, titles, the pixel segment */
     CHECK(gui_create("Hello", GUI_W_MIN - 1, 100, 7, &seg) == -1);
@@ -204,7 +220,7 @@ int main(void)
     CHECK(b > 0 && b != a && gui_slot(b) == (a & 255) && gui_slot(a) == -1 && !gui_valid(a) && gui_valid(b));
     CHECK(gui_post(a, &k) == -1);
     gui_destroy(b);
-    CHECK(HEAP_BLOCKS == 0 && gui_in_use() == 0); /* the surface and the page list went back to the heap */
+    CHECK(HEAP_BLOCKS - TABLES == 0 && gui_in_use() == 0); /* the surface and the page list went back to the heap */
 
     /* the slots: GUI_MAX at most (all small), and a process that ends takes its surfaces with it */
     int hs[GUI_MAX];
@@ -215,16 +231,17 @@ int main(void)
     for (int i = 0; i < GUI_MAX; i++)
         all = all && hs[i] > 0 && gui_slot(hs[i]) == i && gui_handle_at(i) == hs[i];
     CHECK(all && gui_in_use() == GUI_MAX);
+    CHECK(gui_slot_count() == GUI_MAX); /* the table grew to the limit, by doubling */
     CHECK(gui_create("F", 64, 48, 8, &seg) == -1);
-    CHECK(HEAP_BLOCKS == 2 * GUI_MAX && shm_in_use() == GUI_MAX); /* a surface and a page list each */
+    CHECK(HEAP_BLOCKS - TABLES == 2 * GUI_MAX && shm_in_use() == GUI_MAX); /* a surface and a page list each */
     gui_release_owner(8);
     all = 1;
     for (int i = 1; i < GUI_MAX; i++)
         all = all && !gui_valid(hs[i]);
-    CHECK(all && gui_in_use() == 1 && gui_valid(hs[0]) && HEAP_BLOCKS == 2);
+    CHECK(all && gui_in_use() == 1 && gui_valid(hs[0]) && HEAP_BLOCKS - TABLES == 2);
     CHECK(gui_handle_at(0) == hs[0] && gui_handle_at(1) == -1 && gui_handle_at(-1) == -1 && gui_handle_at(GUI_MAX) == -1);
     gui_release_owner(9);
-    CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS == 0);
+    CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS - TABLES == 0);
 
     /* out of memory half way (pages, or the heap): nothing stays allocated */
     PAGE_LIMIT = 1;
@@ -233,12 +250,12 @@ int main(void)
     HEAP_FAIL = 1;
     CHECK(gui_create("Big", 512, 512, 1, &seg) == -1);
     HEAP_FAIL = 0;
-    CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS == 0);
+    CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS - TABLES == 0);
     int big = gui_create("Big", GUI_W_MAX, GUI_H_MAX, 1, &seg);
     CHECK(big > 0 && shm_pages(seg) == (unsigned)((GUI_W_MAX * GUI_H_MAX * 4 + 4095) / 4096)); /* the largest surface still fits a segment */
     CHECK(shm_pages(seg) <= SHM_MAX_PAGES);
     gui_destroy(big);
-    CHECK(PAGES_OUT == 0 && HEAP_BLOCKS == 0);
+    CHECK(PAGES_OUT == 0 && HEAP_BLOCKS - TABLES == 0);
 
     if (fails)
     {

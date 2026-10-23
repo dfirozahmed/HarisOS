@@ -23,7 +23,7 @@
 #ifndef HARIS_GUI_H
 #define HARIS_GUI_H
 
-#define GUI_MAX 32
+#define GUI_MAX 256 /* surfaces that can exist at once (a handle holds the slot in 8 bits): the table is grown as needed up to this */
 #define GUI_TITLE_MAX 32
 #define GUI_W_MIN 64
 #define GUI_H_MIN 48
@@ -86,6 +86,7 @@ int gui_take_title_changed(int hnd);              /* 1 once after every gui_set_
  * whichever is first: *n = how many. NULL for a position outside the surface. */
 const unsigned *gui_pixels(int hnd, int x, int y, int *n);
 
+int gui_slot_count(void); /* how many slots the table has now (grows as needed): slots 0 .. count-1 may hold a surface */
 int gui_in_use(void); /* surfaces that exist, for leak checks */
 
 #endif

@@ -556,6 +556,15 @@ void kfree(void *p)
         HEAP_BLOCKS--;
     }
 }
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_BLOCKS++;
+    return n;
+}
 
 #define MAPS_MAX 64
 static struct { ull va, phys; unsigned flags; int live; } MAPS[MAPS_MAX];

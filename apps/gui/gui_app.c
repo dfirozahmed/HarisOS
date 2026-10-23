@@ -6,14 +6,20 @@
  * surface or ends. No window code ever runs inside a system call: the calls set flags in gui.c and this notices them on its next pass. */
 #include "gui.h"
 #include "guiapp.h"
+#include "heap.h"
 #include "taskbar.h"
 #include "ui.h"
 #include "wm.h"
 
-static Window *WIN[GUI_MAX];  /* the window of each surface slot, NULL = none yet */
-static int WIN_ID[GUI_MAX];   /* its Window.id: a pointer alone could be a different window by now */
-static int WIN_H[GUI_MAX];    /* the handle it was opened for */
-static int LEFT[GUI_MAX];     /* is the left button down (a hover event does not say) */
+typedef struct
+{
+    Window *win; /* the window of this surface slot, NULL = none yet */
+    int id;      /* its Window.id: a pointer alone could be a different window by now */
+    int h;       /* the handle it was opened for */
+    int left;    /* is the left button down (a hover event does not say) */
+} Slot;
+static Slot *SL; /* per surface slot: a heap block of SL_CAP entries, grown to follow the table of gui.c */
+static int SL_CAP;
 static int OPENED;            /* windows opened so far: each new one starts a bit lower and further right */
 
 static int handle_of(const Window *w) { return (int)(unsigned long long)w->user; }
@@ -23,7 +29,7 @@ static int *left_of(const Window *w)
 {
     static int spare;
     int slot = gui_slot(handle_of(w));
-    return slot >= 0 ? &LEFT[slot] : &spare;
+    return slot >= 0 && slot < SL_CAP ? &SL[slot].left : &spare;
 }
 
 static void draw(Window *w, UiRect body)
@@ -189,28 +195,52 @@ static int open_window(int slot, int h)
     win->on_close_request = on_close_request;
     win->on_close = on_close;
     win->icon = TASKBAR_ICON_LOGO;
-    WIN[slot] = win;
-    WIN_ID[slot] = win->id;
-    WIN_H[slot] = h;
-    LEFT[slot] = 0;
+    SL[slot].win = win;
+    SL[slot].id = win->id;
+    SL[slot].h = h;
+    SL[slot].left = 0;
+    return 1;
+}
+
+/* Keep one Slot per slot of the surface table (which grows). The new entries are empty. 0 = out of memory. */
+static int follow_table(void)
+{
+    int n = gui_slot_count();
+    if (n <= SL_CAP)
+        return 1;
+    Slot *t = krealloc(SL, (unsigned long long)n * sizeof(Slot));
+    if (!t)
+        return 0;
+    for (int i = SL_CAP; i < n; i++)
+    {
+        t[i].win = 0;
+        t[i].id = 0;
+        t[i].h = -1;
+        t[i].left = 0;
+    }
+    SL = t;
+    SL_CAP = n;
     return 1;
 }
 
 int gui_app_poll(void)
 {
     int changed = 0;
-    for (int slot = 0; slot < GUI_MAX; slot++)
+    if (!follow_table())
+        return 0; /* (out of memory: try again on the next pass) */
+    for (int slot = 0; slot < SL_CAP; slot++)
     {
         int h = gui_handle_at(slot);
-        if (WIN[slot] && (h != WIN_H[slot] || !wm_is_open(WIN[slot]) || WIN[slot]->id != WIN_ID[slot]))
+        Slot *s = &SL[slot];
+        if (s->win && (h != s->h || !wm_is_open(s->win) || s->win->id != s->id))
         {
             /* the surface is gone (or the user closed the window): close what is left of the pair */
-            if (wm_is_open(WIN[slot]) && WIN[slot]->id == WIN_ID[slot])
-                wm_close(WIN[slot]);
-            WIN[slot] = 0;
+            if (wm_is_open(s->win) && s->win->id == s->id)
+                wm_close(s->win);
+            s->win = 0;
             changed = 1;
         }
-        if (h >= 0 && !WIN[slot])
+        if (h >= 0 && !s->win)
         {
             if (open_window(slot, h))
                 changed = 1;

@@ -30,6 +30,7 @@ void pmm_free_page(unsigned long long phys)
 
 /* the kernel heap (shm.c keeps its page lists there, gui.c its surfaces): host memory, counted, with a switch that makes it fail */
 static int HEAP_BLOCKS, HEAP_FAIL;
+static int TABLES; /* heap blocks the segment table (and the surface table) keep for good once they exist */
 void *kmalloc(unsigned long long size)
 {
     if (HEAP_FAIL)
@@ -47,9 +48,23 @@ void kfree(void *p)
         HEAP_BLOCKS--;
     }
 }
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_BLOCKS++;
+    return n;
+}
 
 int main(void)
 {
+    /* the segment table is made on first use and stays: count it once, so the leak checks below can ask for "nothing else" */
+    shm_unlink("warm");
+    CHECK(shm_open("warm", 4096, SHM_CREATE) >= 0 && shm_unlink("warm") == 0 && shm_in_use() == 0);
+    TABLES = HEAP_BLOCKS;
+
     /* names */
     CHECK(shm_valid_name("a") && shm_valid_name("frame.buffer-1"));
     CHECK(!shm_valid_name("") && !shm_valid_name("a/b") && !shm_valid_name("tab\there"));
@@ -126,18 +141,18 @@ int main(void)
         snprintf(nm, sizeof(nm), "s%d", i);
         CHECK(shm_unlink(nm) == 0);
     }
-    CHECK(shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS == 0); /* every page list went back to the heap */
+    CHECK(shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS - TABLES == 0); /* every page list went back to the heap */
 
     /* the heap is out of memory: no segment, no pages, no list left behind */
     HEAP_FAIL = 1;
     CHECK(shm_open("nolist", 4096, SHM_CREATE) == -1);
     HEAP_FAIL = 0;
-    CHECK(shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS == 0);
+    CHECK(shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS - TABLES == 0);
 
     /* the largest segment: a 16 MiB page list is kept in the heap, not in the table */
     int most = shm_open("most", (unsigned long long)SHM_MAX_PAGES * 4096, SHM_CREATE);
-    CHECK(most >= 0 && shm_pages(most) == SHM_MAX_PAGES && HEAP_BLOCKS == 1 && shm_page(most, SHM_MAX_PAGES - 1) != 0);
-    CHECK(shm_unlink("most") == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS == 0);
+    CHECK(most >= 0 && shm_pages(most) == SHM_MAX_PAGES && HEAP_BLOCKS - TABLES == 1 && shm_page(most, SHM_MAX_PAGES - 1) != 0);
+    CHECK(shm_unlink("most") == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && HEAP_BLOCKS - TABLES == 0);
 
     if (fails == 0)
         printf("shm tests passed\n");

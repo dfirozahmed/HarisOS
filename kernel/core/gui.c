@@ -22,7 +22,8 @@ typedef struct
     int waiter;        /* thread to wake, -1 = none */
 } Surface;
 
-static Surface *S[GUI_MAX]; /* made with kmalloc when a window is created, freed when it is destroyed */
+static Surface **S; /* the table of surfaces: a heap block of S_CAP pointers, doubled when full (up to GUI_MAX); each surface is a heap block too */
+static int S_CAP;
 static unsigned NEXT_GEN = 1;
 
 /* The handle is gen * 256 + slot; generations start at 1, so a valid handle is never 0 and -1 is never valid. */
@@ -31,7 +32,7 @@ static Surface *get(int hnd)
     if (hnd < 0)
         return 0;
     unsigned slot = (unsigned)hnd & 255u, gen = (unsigned)hnd >> 8;
-    if (slot >= GUI_MAX || !S[slot] || S[slot]->gen != gen)
+    if (slot >= (unsigned)S_CAP || !S[slot] || S[slot]->gen != gen)
         return 0;
     return S[slot];
 }
@@ -81,15 +82,33 @@ static void seg_name(char *out, unsigned gen)
     out[k] = 0;
 }
 
+/* Double the table of surfaces (at most GUI_MAX); the new slots are empty. 0 = at the limit or out of memory. */
+static int grow_table(void)
+{
+    if (S_CAP >= GUI_MAX)
+        return 0;
+    int cap = S_CAP ? S_CAP * 2 : 8;
+    if (cap > GUI_MAX)
+        cap = GUI_MAX;
+    Surface **t = krealloc(S, (u64)cap * sizeof(Surface *));
+    if (!t)
+        return 0;
+    for (int i = S_CAP; i < cap; i++)
+        t[i] = 0;
+    S = t;
+    S_CAP = cap;
+    return 1;
+}
+
 int gui_create(const char *title, int w, int h, int pid, int *seg)
 {
     if (!title || !title_ok(title) || w < GUI_W_MIN || w > GUI_W_MAX || h < GUI_H_MIN || h > GUI_H_MAX)
         return -1;
     int slot = 0;
-    while (slot < GUI_MAX && S[slot])
+    while (slot < S_CAP && S[slot])
         slot++;
-    if (slot == GUI_MAX)
-        return -1;
+    if (slot == S_CAP && !grow_table())
+        return -1; /* at GUI_MAX, or out of memory */
     Surface *s = kmalloc(sizeof(Surface));
     if (!s)
         return -1;
@@ -140,7 +159,7 @@ void gui_destroy(int hnd)
 
 void gui_release_owner(int pid)
 {
-    for (int i = 0; i < GUI_MAX; i++)
+    for (int i = 0; i < S_CAP; i++)
         if (S[i] && S[i]->owner == pid)
             gui_destroy((int)(S[i]->gen << 8) | i);
 }
@@ -288,7 +307,7 @@ int gui_request_close(int hnd)
 
 int gui_handle_at(int slot)
 {
-    if (slot < 0 || slot >= GUI_MAX || !S[slot])
+    if (slot < 0 || slot >= S_CAP || !S[slot])
         return -1;
     return (int)(S[slot]->gen << 8) | slot;
 }
@@ -332,10 +351,12 @@ const unsigned *gui_pixels(int hnd, int x, int y, int *n)
     return (const unsigned *)(page + in_page);
 }
 
+int gui_slot_count(void) { return S_CAP; }
+
 int gui_in_use(void)
 {
     int n = 0;
-    for (int i = 0; i < GUI_MAX; i++)
+    for (int i = 0; i < S_CAP; i++)
         n += S[i] ? 1 : 0;
     return n;
 }

@@ -4,7 +4,9 @@
 
 #define SLOT 40 /* size of one clickable app slot */
 #define GAP 4
-#define MAX_APPS 8
+#define MAX_APPS TASKBAR_MAX_APPS
+#define MIN_SLOT 22       /* the narrowest app button when many windows are open */
+#define RIGHT_RESERVE 290 /* room kept for the tray and the clock on the right */
 
 static TaskbarApp APPS[MAX_APPS] = {};
 static int APP_COUNT = 4;
@@ -197,23 +199,33 @@ void taskbar_draw(void)
     /* apps */
     for (int i = 0; i < MAX_APPS; i++)
         ITEM[1 + i].r = ui_rect(0, 0, 0, 0); /* unused buttons: no hit area */
-    for (int i = 0; i < APP_COUNT; i++)
+    /* The buttons shrink (down to MIN_SLOT) so that more windows fit; what still does not fit is not shown (the task manager lists all). */
+    int avail = W - RIGHT_RESERVE - x;
+    int fit = avail > 0 ? avail / (MIN_SLOT + GAP) : 0;
+    int shown = APP_COUNT < fit ? APP_COUNT : fit;
+    int slot = SLOT;
+    if (shown > 0 && shown * (SLOT + GAP) > avail)
+        slot = avail / shown - GAP;
+    if (slot < MIN_SLOT)
+        slot = MIN_SLOT;
+    int isz = slot < 32 ? slot - 8 : 24; /* icon size */
+    for (int i = 0; i < shown; i++)
     {
-        int icx = x + SLOT / 2;
-        ITEM[1 + i].r = ui_rect(x, cy - SLOT / 2 + 2, SLOT, SLOT - 4);
+        int icx = x + slot / 2;
+        ITEM[1 + i].r = ui_rect(x, cy - SLOT / 2 + 2, slot, SLOT - 4);
         UiRgb bg = APPS[i].active ? ui_rgb_mix(t->surface_alt, t->accent, 40) : t->surface;
         if (APPS[i].active || SET.hover == 1 + i || SET.pressed == 1 + i)
         {
             if (!APPS[i].active)
                 bg = t->surface_alt;
-            gfx_fill_round_rect(x, cy - SLOT / 2 + 2, SLOT, SLOT - 4, t->radius_m, ui_color(state_bg(bg, 1 + i, APPS[i].active)));
+            gfx_fill_round_rect(x, cy - SLOT / 2 + 2, slot, SLOT - 4, t->radius_m, ui_color(state_bg(bg, 1 + i, APPS[i].active)));
         }
-        ui_icon(app_icon(APPS[i].icon), icx, cy - 1, 24, APPS[i].minimized ? t->text_dim : t->text);
+        ui_icon(app_icon(APPS[i].icon), icx, cy - 1, isz, APPS[i].minimized ? t->text_dim : t->text);
         if (APPS[i].active)
-            gfx_fill_round_rect(icx - 8, by + TASKBAR_HEIGHT - 6, 16, 3, 1, ui_color(t->accent_hi));
+            gfx_fill_round_rect(icx - (isz / 3), by + TASKBAR_HEIGHT - 6, (isz / 3) * 2, 3, 1, ui_color(t->accent_hi));
         else if (APPS[i].running)
             gfx_fill_circle_q(icx * 16 + 8, (by + TASKBAR_HEIGHT - 5) * 16 + 8, 2 * 16, ui_color(t->text_dim), 255);
-        x += SLOT + GAP;
+        x += slot + GAP;
     }
 
     /* clock */

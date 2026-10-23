@@ -7,7 +7,7 @@
 
 #define WM_SHADOW_MARGIN 48
 
-extern Window *WM_Z[WM_MAX_WINDOWS];
+extern Window **WM_Z;
 extern int WM_ZN;
 extern int WM_HAS_DMG;
 

@@ -21,7 +21,7 @@
 
 #include "ui.h"
 
-#define WM_MAX_WINDOWS 32
+#define WM_WINDOW_CAP 4096 /* windows are made as needed (see wm.c); this only stops a program that opens them in a loop */
 #define WM_MAX_BUTTONS 14 /* per window */
 #define WM_TITLE_MAX 32
 #define WM_MAX_EDITS 3 /* text inputs per window */
@@ -69,7 +69,7 @@ typedef struct Window
     UiButtonSet set;
 } Window;
 
-/* NULL when all WM_MAX_WINDOWS slots are in use. The new window is on top and focused. */
+/* NULL when the heap is out of memory or WM_WINDOW_CAP windows are open. The new window is on top and focused. */
 Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user);
 /* Like wm_create, but a modal dialog (message box) of `owner`: while it is open the owner
  * cannot be used (clicking the owner brings the dialog to the front); every other window

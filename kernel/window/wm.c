@@ -1,11 +1,23 @@
 /* HarisOS window manager. See include/wm.h. */
 #include "wm.h"
+#include "heap.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "wm_internal.h"
 
-static Window POOL[WM_MAX_WINDOWS];
-Window *WM_Z[WM_MAX_WINDOWS]; /* open windows, WM_Z[0] = back, WM_Z[WM_ZN-1] = top (focused) */
+/* Windows live in chunks of WM_CHUNK, made with kmalloc when all the slots so far are in use. A chunk is never given back: a slot is reused
+ * for the next window, so a Window pointer stays valid memory for ever (apps keep them and ask wm_is_open() before use). */
+#define WM_CHUNK 8
+typedef struct WinChunk
+{
+    struct WinChunk *next;
+    Window win[WM_CHUNK];
+} WinChunk;
+static WinChunk *CHUNKS;
+static int SLOTS; /* slots in all chunks */
+
+Window **WM_Z; /* open windows, WM_Z[0] = back, WM_Z[WM_ZN-1] = top (focused): a heap block of Z_CAP pointers, grown when full */
+static int Z_CAP;
 int WM_ZN;
 static int NEXT_ID = 1;
 
@@ -79,15 +91,51 @@ int wm_z_index_internal(const Window *w)
 }
 
 /* ---- create / close / raise ---------------------------------- */
+/* Room for one more entry in WM_Z (the list is doubled when it is full). 0 = no memory or WM_WINDOW_CAP reached. */
+static int z_room(void)
+{
+    if (WM_ZN >= WM_WINDOW_CAP)
+        return 0;
+    if (WM_ZN < Z_CAP)
+        return 1;
+    int cap = Z_CAP ? Z_CAP * 2 : 16;
+    Window **nz = krealloc(WM_Z, (unsigned long long)cap * sizeof(Window *));
+    if (!nz)
+        return 0; /* the old list is untouched */
+    WM_Z = nz;
+    Z_CAP = cap;
+    return 1;
+}
+
+/* A window slot that is not in use; a new chunk when all are. */
+static Window *free_slot(void)
+{
+    WinChunk *last = 0;
+    for (WinChunk *c = CHUNKS; c; c = c->next)
+    {
+        for (int i = 0; i < WM_CHUNK; i++)
+            if (!c->win[i].used)
+                return &c->win[i];
+        last = c;
+    }
+    if (SLOTS >= WM_WINDOW_CAP)
+        return 0;
+    WinChunk *n = kcalloc(1, sizeof(WinChunk));
+    if (!n)
+        return 0;
+    if (last)
+        last->next = n;
+    else
+        CHUNKS = n;
+    SLOTS += WM_CHUNK;
+    return &n->win[0];
+}
+
 Window *wm_create(const char *title, int x, int y, int w, int h, WmDrawFn draw, void *user)
 {
-    Window *win = 0;
-    for (int i = 0; i < WM_MAX_WINDOWS; i++)
-        if (!POOL[i].used)
-        {
-            win = &POOL[i];
-            break;
-        }
+    if (!z_room())
+        return 0;
+    Window *win = free_slot();
     if (!win)
         return 0;
 

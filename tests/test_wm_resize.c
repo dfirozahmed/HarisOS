@@ -12,6 +12,9 @@ void timer_init(void){}
 #include <stdlib.h>
 void *kmalloc(unsigned long long n){ return malloc((size_t)n); } /* the clipboard (ui_edit.c) keeps its text in the kernel heap */
 void kfree(void *p){ free(p); }
+static int HEAP_FAIL; /* 1 = the next heap requests fail */
+void *kcalloc(unsigned long long n, unsigned long long s){ return HEAP_FAIL ? 0 : calloc((size_t)n, (size_t)s); }
+void *krealloc(void *p, unsigned long long n){ return HEAP_FAIL ? 0 : realloc(p, (size_t)n); }
 static void draw(Window*w,UiRect b){ ui_text(b.x+16,b.y+16,"Resizable window",UI_TEXT_HEADING); (void)w; }
 static void ptr(int x,int y,unsigned b){ wm_pointer(x,y,b); }
 static int wheel_steps, wheel_ret;

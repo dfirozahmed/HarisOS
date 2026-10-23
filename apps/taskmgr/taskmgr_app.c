@@ -9,6 +9,7 @@
 #include "cpuload.h"
 #include "desktop.h"
 #include "gfx.h"
+#include "heap.h"
 #include "pmm.h"
 #include "task.h"
 #include "taskbar.h"
@@ -64,8 +65,11 @@ static BlkStats DISK_PREV; /* counters at the last sample, to get the change per
 static unsigned DISK_READ_KBS, DISK_WRITE_KBS;
 static unsigned long long DPREV_R[BLK_MAX], DPREV_W[BLK_MAX]; /* the same per disk (index in the blk table) */
 static unsigned DKBS_R[BLK_MAX], DKBS_W[BLK_MAX];
-static Window *PROCS[WM_MAX_WINDOWS];
+static Window **PROCS; /* the open windows (wm_list), a heap block of PROCS_CAP pointers */
+static int PROCS_CAP;
 static int NPROCS;
+static Window **PREV; /* the list before the last refresh, to see whether it changed */
+static int PREV_CAP;
 static int SEL_ID = -1; /* id of the selected window (survives list refreshes), -1 = none */
 static unsigned long long LAST_MS;
 
@@ -90,9 +94,25 @@ static void put_str(char *s, int *n, const char *t)
     s[*n] = 0;
 }
 
+/* Room for at least `need` pointers in *arr (grown by doubling); 0 if the heap is out of memory. */
+static int grow(Window ***arr, int *cap, int need)
+{
+    if (need <= *cap)
+        return 1;
+    int n = *cap ? *cap : 16;
+    while (n < need)
+        n *= 2;
+    Window **p = krealloc(*arr, (unsigned long long)n * sizeof(Window *));
+    if (!p)
+        return 0;
+    *arr = p;
+    *cap = n;
+    return 1;
+}
+
 static void reload(void)
 {
-    NPROCS = wm_list(PROCS, WM_MAX_WINDOWS);
+    NPROCS = grow(&PROCS, &PROCS_CAP, wm_count()) ? wm_list(PROCS, PROCS_CAP) : 0;
     int found = 0;
     for (int i = 0; i < NPROCS; i++)
         if (PROCS[i]->id == SEL_ID)
@@ -734,9 +754,9 @@ static int tm_tick(Window *w)
     unsigned long long dt = now - LAST_MS;
     LAST_MS = now;
     int old_n = NPROCS;
-    Window *old[WM_MAX_WINDOWS];
-    for (int i = 0; i < old_n; i++)
-        old[i] = PROCS[i];
+    int have_old = grow(&PREV, &PREV_CAP, old_n);
+    for (int i = 0; have_old && i < old_n; i++)
+        PREV[i] = PROCS[i];
     reload();
     take_samples(dt); /* keep sampling while the other tab is shown, so the graph has no gap */
     if (TAB == TAB_PERFORMANCE)
@@ -746,10 +766,10 @@ static int tm_tick(Window *w)
     }
     if (TAB == TAB_THREADS)
         return 1; /* threads start and end without the window manager knowing: redraw the list every second */
-    if (old_n != NPROCS)
+    if (old_n != NPROCS || !have_old)
         return 1;
     for (int i = 0; i < NPROCS; i++)
-        if (old[i] != PROCS[i])
+        if (PREV[i] != PROCS[i])
             return 1;
     return 0;
 }
