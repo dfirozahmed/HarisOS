@@ -23,7 +23,12 @@
  * the waiter registers; it is not preempted at once, it runs better from the next scheduling decision (see task_set_priority).
  * Condition variable waiters do not lend priority: nobody holds anything they wait for.
  *
- * Limits: no recursive locking; a cycle of threads waiting for each other is a deadlock and stays one. A holder that ended or was
+ * Deadlock detection: before a thread sleeps in mutex_lock, the chain "holder waits for mutex, whose holder waits for ..." is followed;
+ * if it leads back to the thread, mutex_lock returns -1 at once instead of sleeping (the last thread to close the cycle is the one
+ * that is told; the others keep waiting and get the lock when it lets go). The system call SYS_MUTEX_LOCK does the same. Cycles through
+ * other waits (a condition variable, a semaphore, a pipe) are not seen: only mutexes know who holds them.
+ *
+ * Limits: no recursive locking. A holder that ended or was
  * killed loses the lock (the next lock / trylock takes it back); only the thread id is remembered, so a new thread that reuses that
  * slot would look like the old holder. The main loop (thread 0) never blocks: task_block() only yields there, so it spins
  * politely instead of sleeping. Do not lock from an interrupt handler.
@@ -47,7 +52,9 @@ typedef struct
 #define COND_INIT { 0 }
 
 void mutex_init(Mutex *m);
-int mutex_lock(Mutex *m);
+int mutex_lock(Mutex *m);    /* -1 instead of waiting if the wait would close a cycle of threads that wait for each other (a deadlock) */
+int mutex_relock(Mutex *m);  /* mutex_lock without that check: for cond_wait, which must come back holding the mutex */
+int mutex_would_deadlock(Mutex *m, int task); /* 1 if `task` waiting for m would close such a cycle (for the system call layer) */
 int mutex_trylock(Mutex *m);
 int mutex_unlock(Mutex *m);
 int mutex_held(const Mutex *m); /* 1 if the running thread holds it */

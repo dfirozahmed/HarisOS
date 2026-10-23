@@ -127,7 +127,36 @@ static int is_locked(Mutex *m)
     return m->owner >= 0;
 }
 
-int mutex_lock(Mutex *m)
+/* Deadlock detection: would `task` wait for ever if it started to wait for m? Follow the chain "m's holder waits for that mutex, whose
+ * holder waits for ...": if it comes back to `task`, the last wait would close a cycle. A link counts only while the holder really sleeps
+ * on that mutex (its waiter bit is set; an unlock clears it) and is alive, so a thread that was just woken does not give a false alarm.
+ * Interrupts off. */
+static int deadlock_via(Mutex *m, int task)
+{
+    for (int depth = 0; m && depth < TASK_MAX; depth++)
+    {
+        int o = m->owner;
+        if (o < 0 || o >= TASK_MAX || !alive(o))
+            return 0;
+        if (o == task)
+            return 1;
+        Mutex *next = BLOCKED_ON[o];
+        if (!next || !(next->waiters & (1u << o)))
+            return 0;
+        m = next;
+    }
+    return 0;
+}
+
+int mutex_would_deadlock(Mutex *m, int task)
+{
+    unsigned long long irq = irq_save();
+    int r = task >= 0 && task < TASK_MAX && deadlock_via(m, task);
+    irq_restore(irq);
+    return r;
+}
+
+static int lock_impl(Mutex *m, int detect)
 {
     int me = task_current();
     unsigned long long irq = irq_save();
@@ -138,6 +167,12 @@ int mutex_lock(Mutex *m)
     }
     while (is_locked(m))
     {
+        if (detect && deadlock_via(m, me))
+        {
+            mutex_cancel_wait(m, me);
+            irq_restore(irq);
+            return -1; /* waiting would close a cycle of threads that wait for each other */
+        }
         mutex_wait_for(m, me); /* the holder borrows our priority from here on */
         task_block(); /* interrupts stay off from the check above to the switch: the unlock cannot slip in between */
     }
@@ -146,6 +181,10 @@ int mutex_lock(Mutex *m)
     irq_restore(irq);
     return 0;
 }
+
+int mutex_lock(Mutex *m) { return lock_impl(m, 1); }
+
+int mutex_relock(Mutex *m) { return lock_impl(m, 0); }
 
 int mutex_trylock(Mutex *m)
 {
@@ -199,7 +238,7 @@ int cond_wait(CondVar *c, Mutex *m)
     while (c->waiters & (1u << me)) /* signal / broadcast clear the bit; the main loop's yield-only block just goes round */
         task_block();
     irq_restore(irq);
-    return mutex_lock(m);
+    return mutex_relock(m);
 }
 
 /* The pieces of the waits above for the system call layer, which sleeps in its own loop so that a signal can end the wait. */

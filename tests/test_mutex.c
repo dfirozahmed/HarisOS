@@ -158,6 +158,28 @@ static void idle_blocker(void *arg)
     task_block();
 }
 
+/* deadlock detection: A holds M1 and later wants M2, B holds M2 and wants M1 */
+static volatile int DL_RESULT = 99;
+static void dl_a(void *arg)
+{
+    (void)arg;
+    mutex_lock(&M1);
+    task_block();
+    DL_RESULT = mutex_lock(&M2); /* B holds M2 and sleeps for M1, which we hold: waiting would be for ever */
+    if (DL_RESULT == 0)
+        mutex_unlock(&M2);
+    mutex_unlock(&M1);
+}
+static void dl_b(void *arg)
+{
+    (void)arg;
+    mutex_lock(&M2);
+    mutex_lock(&M1);
+    logv(2);
+    mutex_unlock(&M1);
+    mutex_unlock(&M2);
+}
+
 static void drain(void)
 {
     for (int i = 0; i < 100 && task_count() > 1; i++)
@@ -362,6 +384,26 @@ int main(void)
         CHECK(mutex_unlock(&M1) == 0);
         task_wake(x);
         drain();
+
+        /* deadlock detection: the thread that would close the cycle is told (-1), the other one still gets its lock afterwards */
+        LOGN = 0;
+        int da = task_create("DLA", dl_a, 0);
+        task_set_priority(da, 1);
+        task_yield(); /* A holds M1 and sleeps */
+        int db = task_create("DLB", dl_b, 0);
+        task_set_priority(db, 2);
+        task_yield(); /* B holds M2 and sleeps for M1 */
+        CHECK(task_state(da) == TASK_BLOCKED && task_state(db) == TASK_BLOCKED && M1.owner == da && M2.owner == db);
+        CHECK(mutex_would_deadlock(&M2, da) == 1);       /* A waiting for M2: B waits for M1, A holds it */
+        CHECK(mutex_would_deadlock(&M2, 0) == 0);        /* the main thread holds nothing B waits for */
+        CHECK(mutex_would_deadlock(&M1, db) == 0);       /* B already waits there: its holder A waits for nothing yet */
+        CHECK(mutex_would_deadlock(&M2, -1) == 0 && mutex_would_deadlock(&M2, TASK_MAX) == 0);
+        task_wake(da);
+        drain();
+        CHECK(DL_RESULT == -1);                          /* told, not put to sleep for ever */
+        CHECK(LOGN == 1 && LOG[0] == 2);                 /* B got M1 once A let it go */
+        CHECK(M1.owner == -1 && M2.owner == -1 && task_count() == 1);
+        /* a chain without a cycle is fine: the earlier tests wait for each other in a line and all finish */
 
         /* a holder that ended while waiters existed: the lock is taken back and no stale loan is left */
         CHECK(task_set_inherited(0, TASK_PRIO_MAX + 1) == -1 && task_set_inherited(5, 1) == -1 && task_set_inherited(0, -1) == 0);

@@ -1320,6 +1320,8 @@ static long long sys_mutex_lock(const SyscallFrame *f)
     {
         if (f->rsi == 1)
             return 1;
+        if (mutex_would_deadlock(m, me))
+            return -1; /* the holder (directly or through other mutexes) waits for something this process holds */
         mutex_wait_for(m, me);
         task_block(); /* an unlock wakes it; interrupts are off, so the unlock cannot slip in between the check and here */
         if (sig_interrupted(p))
@@ -1365,7 +1367,7 @@ static long long sys_cond_wait(const SyscallFrame *f)
             interrupted = 1;
         }
     }
-    mutex_lock(m); /* the mutex comes back whatever woke us (it may sleep until its holder lets go) */
+    mutex_relock(m); /* the mutex comes back whatever woke us (it may sleep until its holder lets go) */
     return interrupted ? -1 : 0;
 }
 

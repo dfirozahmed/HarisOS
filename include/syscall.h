@@ -113,8 +113,8 @@
  *   SYS_MUTEX_OPEN (42) rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL): a descriptor for a named mutex (see mutex.h, usync.h), or -1. At most 16
  *                  mutexes and condition variables together. SYS_CLOSE lets go; fork copies it. It cannot be read, written or seeked.
  *   SYS_MUTEX_LOCK (43) rdi = descriptor, rsi = 0: take it, sleeping while another process holds it (0 returned); rsi = 1: only try (1 if it is
- *                  held). -1: not a mutex, the caller holds it already, or a signal handler interrupted the wait. A holder that ends or is
- *                  killed loses it.
+ *                  held). -1: not a mutex, the caller holds it already, waiting would be a deadlock (the holder waits, directly or through other
+ *                  mutexes, for one this process holds), or a signal handler interrupted the wait. A holder that ends or is killed loses it.
  *   SYS_MUTEX_UNLOCK (44) rdi = descriptor: release it and wake the waiter with the highest priority. 0, or -1 if the caller does not hold it.
  *   SYS_COND_OPEN (45) rdi = name, rsi = flags: a descriptor for a named condition variable (a separate namespace from mutexes), or -1.
  *   SYS_COND_WAIT (46) rdi = condition variable, rsi = mutex held by the caller: release the mutex, sleep until signalled, take the mutex again.

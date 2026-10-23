@@ -79,6 +79,7 @@ set(KERNEL_SOURCES
     kernel/core/sem.c               # semaphores (host-tested)
     kernel/core/mutex.c             # kernel mutex + condition variable (host-tested)
     kernel/core/usync.c             # named mutexes / condition variables for processes (host-tested through test_syscall)
+    kernel/core/rwlock.c            # reader-writer lock (host-tested)
     kernel/core/signal.c            # signal handlers: frames on the user stack, sigreturn
     kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
     kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start
