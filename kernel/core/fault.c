@@ -219,6 +219,8 @@ static void screen_text(const char *s)
     }
 }
 
+extern char __ImageBase; /* defined by the linker: the address the image was loaded at */
+
 static volatile int IN_FAULT;
 
 /* ---- exceptions that are expected --------------------------------------------------------------------------------
@@ -364,6 +366,32 @@ void fault_dispatch(FaultFrame *f)
             text[n++] = owner[i];
         text[n++] = '\n';
         text[n] = 0;
+    }
+
+    /* Where the kernel image was loaded, and where RIP is inside it. The firmware picks the load address, so the same
+     * kernel crashes at a different RIP on every machine; RIP minus the base is the same everywhere, and is the address
+     * to look up in the disassembly of KERNEL.EFI (llvm-objdump -d: the listing starts at 0x140000000 + offset). */
+    {
+        int n = 0;
+        while (text[n])
+            n++;
+        if (n < (int)sizeof(text) - 80)
+        {
+            static const char HEAD[] = "\nIMAGE BASE=";
+            static const char MID[] = "  RIP-BASE=";
+            unsigned long long base = (unsigned long long)&__ImageBase;
+            unsigned long long off = f->rip - base;
+            for (int i = 0; HEAD[i]; i++)
+                text[n++] = HEAD[i];
+            for (int i = 15; i >= 0; i--)
+                text[n++] = "0123456789ABCDEF"[(base >> (4 * i)) & 15];
+            for (int i = 0; MID[i]; i++)
+                text[n++] = MID[i];
+            for (int i = 15; i >= 0; i--)
+                text[n++] = "0123456789ABCDEF"[(off >> (4 * i)) & 15];
+            text[n++] = '\n';
+            text[n] = 0;
+        }
     }
 
     serial_init();
