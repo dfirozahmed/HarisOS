@@ -6,11 +6,13 @@
 #include "gdt.h"
 #include "mq.h"
 #include "pipe.h"
+#include "sem.h"
 #include "shm.h"
 #include "process.h"
 #include "serial.h"
 #include "task.h"
 #include "uaccess.h"
+#include "usersig.h"
 #include "vfs.h"
 
 typedef unsigned long long ull;
@@ -18,6 +20,10 @@ typedef unsigned long long ull;
 static ull COUNT;
 
 ull syscall_count(void) { return COUNT; }
+
+/* A signal with a handler arrived while this process slept in a system call: the call gives up (-1) so that the handler can run at its
+ * return. */
+static int sig_interrupted(const Process *p) { return p && (p->sig_pending & ~p->sig_blocked & SIG_HANDLER_MASK) != 0; }
 
 /* ---- moving bytes between ring 3 and the kernel ------------------------------------------------------------------
  * Every pointer from ring 3 is checked with aspace_user_ok() before it is used (mapped, user accessible, writable if it
@@ -140,6 +146,8 @@ static long long mq_read_user(Process *p, ull idx, ull ptr, ull len)
     {
         mq_wait(q, 0, task_current());
         task_block();
+        if (sig_interrupted(p))
+            return -1;
     }
     if (got < 0)
         return -1;
@@ -159,6 +167,8 @@ static long long mq_write_user(Process *p, ull idx, ull ptr, ull len)
     {
         mq_wait(q, 1, task_current());
         task_block();
+        if (sig_interrupted(p))
+            return -1;
     }
     return r < 0 ? -1 : (long long)len;
 }
@@ -179,6 +189,8 @@ static long long pipe_read_user(Process *p, ull idx, ull ptr, ull len)
     {
         pipe_wait(pipe, 0, task_current());
         task_block();
+        if (sig_interrupted(p))
+            return -1;
     }
     if (got > 0)
         copy_to_user(ptr, buf, (unsigned)got);
@@ -204,6 +216,8 @@ static long long pipe_write_user(Process *p, ull idx, ull ptr, ull len)
             {
                 pipe_wait(pipe, 1, task_current());
                 task_block();
+                if (sig_interrupted(p))
+                    return total + sent ? (long long)(total + sent) : -1;
                 continue;
             }
             if (r < 0) /* nobody will ever read it: what went in stays, the caller is told */
@@ -217,6 +231,8 @@ static long long pipe_write_user(Process *p, ull idx, ull ptr, ull len)
 
 static long long file_read(Process *p, ull idx, ull ptr, ull len)
 {
+    if (pfile_is_sem(&p->file[idx]))
+        return -1; /* a semaphore holds no bytes */
     if (pfile_is_mq(&p->file[idx]))
         return mq_read_user(p, idx, ptr, len);
     if (pfile_is_pipe(&p->file[idx]))
@@ -254,6 +270,8 @@ static long long file_read(Process *p, ull idx, ull ptr, ull len)
  * the file is gone, the drive is read only / locked / full, the RAM Disk has no content, or the file would pass 4 GiB). */
 static long long file_write(Process *p, ull idx, ull ptr, ull len)
 {
+    if (pfile_is_sem(&p->file[idx]))
+        return -1;
     if (pfile_is_mq(&p->file[idx]))
         return mq_write_user(p, idx, ptr, len);
     if (pfile_is_pipe(&p->file[idx]))
@@ -362,6 +380,8 @@ static long long sys_read(const SyscallFrame *f)
              * are off, so the key cannot arrive between console_read and task_block and be missed. */
             console_wait(p->console, task_current());
             task_block();
+            if (sig_interrupted(p))
+                return -1;
         }
         if (got > 0)
             copy_to_user(ptr, buf, (unsigned)got);
@@ -607,7 +627,7 @@ static long long sys_spawn(const SyscallFrame *f)
             if (io[k] < PROCESS_FD_FIRST || io[k] >= PROCESS_FD_FIRST + PROCESS_MAX_FILES)
                 return -1;
             idx = io[k] - PROCESS_FD_FIRST;
-            if (p->file[idx].node < 0 || pfile_is_mq(&p->file[idx]) || ((p->file[idx].flags & PFILE_WRITE) != 0) != (k != 0))
+            if (p->file[idx].node < 0 || pfile_is_object(&p->file[idx]) || ((p->file[idx].flags & PFILE_WRITE) != 0) != (k != 0))
                 return -1; /* not open, or opened the wrong way round (input must be readable, output writable) */
         }
         if (idx >= 0)
@@ -648,7 +668,11 @@ static long long sys_wait(const SyscallFrame *f)
         return -1;
     int code;
     while (!process_reap((int)want, &code))
+    {
         task_block(); /* the child's exit wakes this thread; interrupts are off, so that cannot slip in between */
+        if (sig_interrupted(p))
+            return -1; /* the child stays waitable */
+    }
     p->child[slot] = 0;
     if (status_ptr)
         copy_to_user(status_ptr, (const char *)&code, 4);
@@ -983,7 +1007,7 @@ static long long sys_dup2(const SyscallFrame *f)
         src = (int)old - PROCESS_FD_FIRST;
     else
         return -1;
-    if (src >= 0 && (pfile_is_mq(&p->file[src]) || ((p->file[src].flags & PFILE_WRITE) != 0) != (nw != 0)))
+    if (src >= 0 && (pfile_is_object(&p->file[src]) || ((p->file[src].flags & PFILE_WRITE) != 0) != (nw != 0)))
         return -1; /* input must be readable, output writable; a message queue is neither */
     if (src >= 0 && p->stdio[nw] == src)
         return (long long)nw; /* already so */
@@ -1150,6 +1174,122 @@ static long long sys_mq_unlink(const SyscallFrame *f)
     return mq_unlink(name);
 }
 
+/* ---- semaphores -------------------------------------------------------------------------------------------------------------- */
+/* SYS_SEM_OPEN: rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL), rdx = the starting count for one that is made (0 .. 2^31-1).
+ * A descriptor for the semaphore, or -1. SYS_CLOSE lets go; fork copies the descriptor. */
+static long long sys_sem_open(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || (f->rsi & ~(ull)(SEM_CREATE | SEM_EXCL)) || f->rdx > SEM_VALUE_MAX)
+        return -1;
+    char name[SEM_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !sem_valid_name(name))
+        return -1;
+    int slot = -1;
+    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        if (p->file[i].node < 0)
+        {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return -1;
+    int s = sem_open(name, (unsigned)f->rsi, (unsigned)f->rdx);
+    if (s < 0)
+        return -1;
+    p->file[slot].node = PROCESS_SEM_NODE + s;
+    p->file[slot].pos = 0;
+    p->file[slot].flags = 0;
+    sem_ref(s);
+    return PROCESS_FD_FIRST + slot;
+}
+
+static int sem_of(Process *p, ull fd)
+{
+    ull idx = fd - PROCESS_FD_FIRST;
+    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0 || !pfile_is_sem(&p->file[idx]))
+        return -1;
+    return pfile_sem(&p->file[idx]);
+}
+
+/* SYS_SEM_WAIT: rdi = descriptor, rsi = 0 to wait (sleeps while the count is 0), 1 to only try. Takes one off the count: 0.
+ * With rsi = 1 and a count of 0: 1 (it would have to wait). -1: not a semaphore descriptor. */
+static long long sys_sem_wait(const SyscallFrame *f)
+{
+    int s = sem_of(process_current(), f->rdi);
+    if (s < 0 || f->rsi > 1)
+        return -1;
+    int r;
+    while ((r = sem_trywait(s)) == SEM_WOULDBLOCK)
+    {
+        if (f->rsi == 1)
+            return 1;
+        sem_wait_for(s, task_current());
+        task_block(); /* a post wakes it; interrupts are off, so the post cannot slip in between the check and here */
+        if (sig_interrupted(process_current()))
+            return -1;
+    }
+    return r == 0 ? 0 : -1;
+}
+
+/* SYS_SEM_POST: rdi = descriptor: the count goes up by one and a sleeper is woken. 0, or -1 (not a semaphore, or the count is at its
+ * maximum). */
+static long long sys_sem_post(const SyscallFrame *f)
+{
+    int s = sem_of(process_current(), f->rdi);
+    return s >= 0 && sem_post(s) == 0 ? 0 : -1;
+}
+
+/* SYS_SEM_VALUE: rdi = descriptor: the count now, or -1. */
+static long long sys_sem_value(const SyscallFrame *f)
+{
+    int s = sem_of(process_current(), f->rdi);
+    return s >= 0 ? sem_value(s) : -1;
+}
+
+static long long sys_sem_unlink(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current())
+        return -1;
+    char name[SEM_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !sem_valid_name(name))
+        return -1;
+    return sem_unlink(name);
+}
+
+/* ---- signal handlers --------------------------------------------------------------------------------------------------------- */
+static long long sys_sigaction(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    ull sig = f->rdi, handler = f->rsi, entry = f->rdx;
+    if (!p || (sig != SIGINT && sig != SIGTERM))
+        return -1;
+    if (handler == 0)
+    {
+        p->sig_handler[sig] = 0;
+        p->sig_pending &= ~(1u << sig);
+        return 0;
+    }
+    if (handler < PAGING_USER_BASE || handler >= PAGING_USER_END || entry < PAGING_USER_BASE || entry >= PAGING_USER_END)
+        return -1;
+    p->sig_handler[sig] = handler;
+    p->sig_entry = entry;
+    p->sig_ignore &= ~(1u << sig); /* installing a handler ends "ignore" */
+    return 0;
+}
+
+static long long sys_sigmask(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    if (!p)
+        return -1;
+    unsigned old = p->sig_blocked;
+    p->sig_blocked = (unsigned)f->rdi & SIG_HANDLER_MASK; /* a signal that was waiting runs as this call returns */
+    return old;
+}
+
 /* ---- signals and process list ---------------------------------------------------------------------------------------- */
 static long long sys_kill(const SyscallFrame *f)
 {
@@ -1216,7 +1356,7 @@ static long long sys_brk(const SyscallFrame *f)
     return (long long)want;
 }
 
-long long syscall_dispatch(SyscallFrame *f)
+static long long dispatch_call(SyscallFrame *f)
 {
     COUNT++;
     switch (f->rax)
@@ -1288,9 +1428,35 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_mq_open(f);
     case SYS_MQ_UNLINK:
         return sys_mq_unlink(f);
+    case SYS_SEM_OPEN:
+        return sys_sem_open(f);
+    case SYS_SEM_WAIT:
+        return sys_sem_wait(f);
+    case SYS_SEM_POST:
+        return sys_sem_post(f);
+    case SYS_SEM_VALUE:
+        return sys_sem_value(f);
+    case SYS_SEM_UNLINK:
+        return sys_sem_unlink(f);
+    case SYS_SIGACTION:
+        return sys_sigaction(f);
+    case SYS_SIGRETURN:
+        return signal_sigreturn(f);
+    case SYS_SIGMASK:
+        return sys_sigmask(f);
     default:
         return -1;
     }
+}
+
+/* Every system call goes through here: after the work, a signal handler that is due runs before the process sees the result (usersig.h).
+ * SYS_SIGRETURN is the one that comes back from a handler: it is not interrupted by the next one at once (the timer tick will do it). */
+long long syscall_dispatch(SyscallFrame *f)
+{
+    long long r = dispatch_call(f);
+    if (f->rax != SYS_SIGRETURN && signal_deliverable(process_current()))
+        r = signal_syscall_return(f, r);
+    return r;
 }
 
 
@@ -1310,6 +1476,18 @@ typedef unsigned long long u64;
 /* One CPU, interrupts off from SYSCALL to SYSRET: plain variables do instead of per-CPU data. */
 u64 syscall_user_rsp;
 u64 syscall_kstack;
+
+/* A return from a signal handler that came in at a timer tick must restore rcx and r11 too, which SYSRET cannot: the exit then goes
+ * through IRETQ (signal.c asks with syscall_request_iret; the exit code below looks at the flag). */
+u64 syscall_use_iret;
+u64 syscall_iret_rip, syscall_iret_rflags;
+
+void syscall_request_iret(u64 rip, u64 rflags)
+{
+    syscall_iret_rip = rip;
+    syscall_iret_rflags = rflags;
+    syscall_use_iret = 1;
+}
 
 /* The code the CPU jumps to on SYSCALL. At this point RSP is still the user's. Frame layout = SyscallFrame.
  *
@@ -1353,6 +1531,8 @@ __asm__(".text\n"
         "    movups 112(%rsp), %xmm5\n"
         "    addq $128, %rsp\n"
         "    movq %rax, 48(%rsp)\n" /* the result goes into the saved rax */
+        "    cmpq $0, syscall_use_iret(%rip)\n"
+        "    jne 4f\n"
         "    movq 56(%rsp), %rcx\n"
         "    movq %rcx, %rdx\n"
         "    sarq $47, %rdx\n"
@@ -1374,7 +1554,25 @@ __asm__(".text\n"
         "    subq $32, %rsp\n"
         "    call process_exit\n"
         "3:  hlt\n"
-        "    jmp 3b\n");
+        "    jmp 3b\n"
+        /* the return from a signal handler that interrupted the program at a timer tick: every register from the frame (rcx and r11 as the
+         * program had them), then IRETQ with the address and flags signal.c chose (it checked that rip is in the user half) */
+        "4:  movq $0, syscall_use_iret(%rip)\n"
+        "    popq %r9\n"
+        "    popq %r8\n"
+        "    popq %r10\n"
+        "    popq %rdx\n"
+        "    popq %rsi\n"
+        "    popq %rdi\n"
+        "    popq %rax\n"
+        "    popq %rcx\n"
+        "    popq %r11\n"
+        "    pushq $0x1B\n" /* SS: the user's stack segment ... */
+        "    pushq 8(%rsp)\n" /* ... RSP: the saved user stack pointer is where the pops stopped */
+        "    pushq syscall_iret_rflags(%rip)\n"
+        "    pushq $0x23\n" /* CS */
+        "    pushq syscall_iret_rip(%rip)\n"
+        "    iretq\n");
 
 void syscall_entry(void);
 
@@ -1414,6 +1612,14 @@ void syscall_set_kernel_stack(u64 top)
 
 /* Host tests: no instruction, no registers; the stack is just remembered. */
 static unsigned long long KSTACK;
+unsigned long long syscall_iret_rip, syscall_iret_rflags; /* what the last syscall_request_iret asked for (the test looks) */
+int syscall_iret_requests;
+void syscall_request_iret(unsigned long long rip, unsigned long long rflags)
+{
+    syscall_iret_rip = rip;
+    syscall_iret_rflags = rflags;
+    syscall_iret_requests++;
+}
 void syscall_init(void) {}
 void syscall_set_kernel_stack(unsigned long long top)
 {

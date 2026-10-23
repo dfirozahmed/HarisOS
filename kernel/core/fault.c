@@ -340,6 +340,10 @@ void fault_dispatch(FaultFrame *f)
     {
         unsigned long long fault_cr2;
         __asm__ volatile("mov %%cr2, %0" : "=r"(fault_cr2));
+        /* a write to a copy-on-write page (present, write, user = error code 7) is no fault: the page gets its own copy and the instruction
+         * runs again */
+        if (f->vector == 14 && (f->error & 7) == 7 && process_cow_fault(fault_cr2) == 1)
+            return;
         process_fault(f, fault_cr2);
     }
 

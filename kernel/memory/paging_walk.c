@@ -1,5 +1,6 @@
 /* HarisOS page table walk: see include/paging.h. No hardware access, so it is tested on the host. */
 #include "paging.h"
+#include "cow.h"
 
 typedef unsigned long long u64;
 
@@ -154,6 +155,7 @@ u64 *paging_clone(const u64 *old_pml4, PagingAllocFn alloc)
 /* ---- user address spaces ------------------------------------------------------------------------------------- */
 
 #define PTE_OWNED (1ULL << 9) /* software bit (the CPU ignores bits 9-11): this page is ours to free */
+#define PTE_COW (1ULL << 10) /* software bit: a copy-on-write page (read-only until written) */
 
 int paging_map_page(u64 *pml4, u64 virt, u64 phys, unsigned flags, PagingAllocFn alloc)
 {
@@ -189,6 +191,8 @@ int paging_map_page(u64 *pml4, u64 virt, u64 phys, unsigned flags, PagingAllocFn
         v |= PTE_NX;
     if (flags & PAGING_OWNED)
         v |= PTE_OWNED;
+    if (flags & PAGING_COW)
+        v |= PTE_COW;
     *leaf = v;
     return 0;
 }
@@ -358,4 +362,104 @@ int paging_unmap_page(u64 *pml4, u64 virt, u64 *phys)
         *phys = *leaf & ADDR_MASK;
     *leaf = 0;
     return 0;
+}
+
+int paging_clone_user_cow(u64 *src, u64 *dst, int first, int last, PagingAllocFn table_alloc, PagingAllocFn page_alloc,
+                          PagingFreeFn page_free)
+{
+    for (int i = first; i <= last; i++)
+    {
+        if (!(src[i] & PTE_P))
+            continue;
+        const u64 *pdpt = (const u64 *)(src[i] & ADDR_MASK);
+        for (int j = 0; j < 512; j++)
+        {
+            if (!(pdpt[j] & PTE_P) || (pdpt[j] & PTE_PS))
+                continue;
+            const u64 *pd = (const u64 *)(pdpt[j] & ADDR_MASK);
+            for (int k = 0; k < 512; k++)
+            {
+                if (!(pd[k] & PTE_P) || (pd[k] & PTE_PS))
+                    continue;
+                volatile u64 *pt = (volatile u64 *)(pd[k] & ADDR_MASK);
+                for (int m = 0; m < 512; m++)
+                {
+                    u64 e = pt[m];
+                    if (!(e & PTE_P))
+                        continue;
+                    u64 virt = ((u64)i << 39) | ((u64)j << 30) | ((u64)k << 21) | ((u64)m << 12);
+                    u64 phys = e & ADDR_MASK;
+                    unsigned exec = (e & PTE_NX) ? 0 : PAGING_EXEC;
+                    if (!(e & PTE_OWNED))
+                    {
+                        if (paging_map_page(dst, virt, phys, ((e & PTE_RW) ? PAGING_WRITE : 0) | exec, table_alloc) != 0)
+                            return -1; /* shared memory: the same page, the same permissions */
+                        continue;
+                    }
+                    int was_writable = (e & PTE_RW) || (e & PTE_COW);
+                    if (cow_share(phys) != 0) /* the table is full: copy now */
+                    {
+                        u64 *copy = page_alloc();
+                        if (!copy)
+                            return -1;
+                        const volatile u64 *from = (const volatile u64 *)phys;
+                        volatile u64 *to = (volatile u64 *)copy;
+                        for (int w = 0; w < 512; w++)
+                            to[w] = from[w];
+                        if (paging_map_page(dst, virt, (u64)copy, (was_writable ? PAGING_WRITE : 0) | exec | PAGING_OWNED, table_alloc) != 0)
+                        {
+                            page_free((u64)copy);
+                            return -1;
+                        }
+                        continue;
+                    }
+                    /* shared: one more holder. A page that could be written becomes read-only + COW in both spaces. */
+                    unsigned flags = exec | PAGING_OWNED | (was_writable ? PAGING_COW : 0);
+                    if (was_writable)
+                        pt[m] = (e & ~PTE_RW) | PTE_COW;
+                    if (paging_map_page(dst, virt, phys, flags, table_alloc) != 0)
+                    {
+                        cow_release(phys); /* dst did not take it */
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+int paging_cow_resolve(u64 *pml4, u64 virt, PagingAllocFn page_alloc)
+{
+    if (virt < PAGING_USER_BASE || virt >= PAGING_USER_END)
+        return 0;
+    static const int shift[3] = {39, 30, 21};
+    u64 *table = pml4;
+    for (int level = 0; level < 3; level++)
+    {
+        u64 e = table[(virt >> shift[level]) & 511];
+        if (!(e & PTE_P) || (level > 0 && (e & PTE_PS)))
+            return 0;
+        table = (u64 *)(e & ADDR_MASK);
+    }
+    volatile u64 *leaf = &table[(virt >> 12) & 511];
+    u64 e = *leaf;
+    if (!(e & PTE_P) || !(e & PTE_COW))
+        return 0;
+    u64 phys = e & ADDR_MASK;
+    if (!cow_shared(phys)) /* the other holders are gone (they wrote first, or ended): this one is the only one now */
+    {
+        *leaf = (e & ~PTE_COW) | PTE_RW;
+        return 1;
+    }
+    u64 *copy = page_alloc();
+    if (!copy)
+        return -1;
+    const volatile u64 *from = (const volatile u64 *)phys;
+    volatile u64 *to = (volatile u64 *)copy;
+    for (int w = 0; w < 512; w++)
+        to[w] = from[w];
+    cow_release(phys); /* the page stays with the others: it was shared, so this cannot be the last holder */
+    *leaf = (((u64)copy & ADDR_MASK) | (e & ~(ADDR_MASK | PTE_COW))) | PTE_RW;
+    return 1;
 }

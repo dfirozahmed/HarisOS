@@ -557,6 +557,12 @@ static int maps_live(void)
     return n;
 }
 
+/* signal.c is tested on its own (test_signal.c); here the system call side only needs to know what the dispatcher asked of it */
+static int SIGDELIV, SIGSYS_CALLS, SIGRET_CALLS;
+int signal_deliverable(const Process *p) { (void)p; return SIGDELIV; }
+long long signal_syscall_return(SyscallFrame *f, long long result) { (void)f; SIGSYS_CALLS++; return result + 1000; }
+long long signal_sigreturn(SyscallFrame *f) { (void)f; SIGRET_CALLS++; return 777; }
+
 /* the volume's lock: volume 0 (RAM Disk) */
 static int VOL_LOCKED = 1, VOL_WRITABLE = 1, VOL_LOCKABLE = 1;
 
@@ -650,6 +656,14 @@ static void drain(void) { drained += pipe_read(pfile_pipe(&PROC.file[0]), PIPE_O
 static void drop_reader(void) { pfile_close(&PROC.file[0]); BLOCK_ACTION = 0; }
 static void drop_writer(void) { pfile_close(&PROC.file[1]); BLOCK_ACTION = 0; }
 
+static void sem_poster(void) { sem_post(pfile_sem(&PROC.file[0])); BLOCK_ACTION = 0; }
+static void pipe_feed_two(void) { int p = -1; for (int i = 0; i < PROCESS_MAX_FILES; i++) if (PROC.file[i].node >= PROCESS_PIPE_NODE && PROC.file[i].node < PROCESS_MQ_NODE && !(PROC.file[i].flags & PFILE_WRITE)) p = pfile_pipe(&PROC.file[i]); if (p >= 0) pipe_write(p, "ok", 2); BLOCK_ACTION = 0; }
+static void raise_int(void) { PROC.sig_pending |= 1u << SIGINT; BLOCK_ACTION = 0; }
+static void raise_then_feed(void)
+{
+    PROC.sig_pending |= 1u << SIGINT;
+    BLOCK_ACTION = pipe_feed_two;
+}
 static void mq_feed(void) { mq_send(pfile_mq(&PROC.file[0]), "fed!", 4); BLOCK_ACTION = 0; }
 static void mq_drain(void) { char b[300]; mq_recv(pfile_mq(&PROC.file[0]), b, sizeof(b)); BLOCK_ACTION = 0; }
 
@@ -1755,6 +1769,180 @@ int main(void)
         CURRENT_PROC = 0;
         CHECK(call(SYS_MQ_OPEN, U("k"), SYS_CREATE, 0) == -1 && call(SYS_MQ_UNLINK, U("k"), 0, 0) == -1);
         CURRENT_PROC = &PROC;
+    }
+
+    /* ================= semaphores ================= */
+    reset();
+    {
+        char rb[8];
+        long long s = call(SYS_SEM_OPEN, U("lock"), SYS_CREATE, 2);
+        CHECK(s == 3 && PROC.file[0].node == PROCESS_SEM_NODE + 0 && sem_in_use() == 1 && call(SYS_SEM_VALUE, (ull)s, 0, 0) == 2);
+        long long s2 = call(SYS_SEM_OPEN, U("lock"), 0, 0);                        /* the same semaphore through a second descriptor */
+        CHECK(s2 == 4 && call(SYS_SEM_VALUE, (ull)s2, 0, 0) == 2);
+
+        BLOCKS = 0;
+        CHECK(call(SYS_SEM_WAIT, (ull)s, 0, 0) == 0 && call(SYS_SEM_WAIT, (ull)s2, 0, 0) == 0 && BLOCKS == 0);   /* 2 -> 0, no sleeping */
+        CHECK(call(SYS_SEM_VALUE, (ull)s, 0, 0) == 0);
+        CHECK(call(SYS_SEM_WAIT, (ull)s, 1, 0) == 1 && BLOCKS == 0);              /* only try: it would have to sleep */
+        BLOCK_ACTION = sem_poster;
+        CHECK(call(SYS_SEM_WAIT, (ull)s, 0, 0) == 0 && BLOCKS == 1);              /* sleeps until another process posts */
+        CHECK(call(SYS_SEM_VALUE, (ull)s, 0, 0) == 0);
+        CHECK(call(SYS_SEM_POST, (ull)s, 0, 0) == 0 && call(SYS_SEM_POST, (ull)s2, 0, 0) == 0 && call(SYS_SEM_VALUE, (ull)s, 0, 0) == 2);
+        CHECK(call(SYS_SEM_WAIT, (ull)s, 1, 0) == 0 && call(SYS_SEM_VALUE, (ull)s, 0, 0) == 1);
+
+        /* what a semaphore descriptor cannot do */
+        CHECK(call(SYS_READ, (ull)s, U(rb), 4) == -1 && call(SYS_WRITE, (ull)s, U("x"), 1) == -1 && call(SYS_SEEK, (ull)s, 0, 0) == -1);
+        CHECK(call(SYS_DUP2, (ull)s, 1, 0) == -1 && call(SYS_DUP2, (ull)s, 0, 0) == -1);
+        int io[3] = {(int)s, -1, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io)) == -1);
+        int io2[3] = {-1, (int)s, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io2)) == -1);
+
+        /* the wrong kind of descriptor, and bad arguments */
+        long long file = call(SYS_OPEN, U("HELLO.ELF"), 0, 0);
+        CHECK(file >= 3 && call(SYS_SEM_WAIT, (ull)file, 1, 0) == -1 && call(SYS_SEM_POST, (ull)file, 0, 0) == -1 && call(SYS_SEM_VALUE, (ull)file, 0, 0) == -1);
+        call(SYS_CLOSE, (ull)file, 0, 0);
+        CHECK(call(SYS_SEM_WAIT, 0, 1, 0) == -1 && call(SYS_SEM_WAIT, 99, 1, 0) == -1 && call(SYS_SEM_WAIT, (ull)-1, 1, 0) == -1);
+        CHECK(call(SYS_SEM_WAIT, 7, 1, 0) == -1);                                  /* a free slot */
+        CHECK(call(SYS_SEM_WAIT, (ull)s, 2, 0) == -1);                             /* no such mode */
+
+        /* the largest count */
+        long long big = call(SYS_SEM_OPEN, U("big"), SYS_CREATE, 0x7FFFFFFF);
+        CHECK(big >= 3 && call(SYS_SEM_POST, (ull)big, 0, 0) == -1 && call(SYS_SEM_VALUE, (ull)big, 0, 0) == 0x7FFFFFFF);
+        CHECK(call(SYS_SEM_OPEN, U("huge"), SYS_CREATE, 0x80000000ULL) == -1);
+        CHECK(call(SYS_SEM_UNLINK, U("big"), 0, 0) == 0 && call(SYS_CLOSE, (ull)big, 0, 0) == 0 && sem_in_use() == 1);
+
+        /* names, flags, limits */
+        CHECK(call(SYS_SEM_OPEN, U("nothing"), 0, 0) == -1 && call(SYS_SEM_OPEN, U("a/b"), SYS_CREATE, 0) == -1 && call(SYS_SEM_OPEN, U(""), SYS_CREATE, 0) == -1);
+        CHECK(call(SYS_SEM_OPEN, U("lock"), SYS_CREATE | SYS_EXCL, 0) == -1 && call(SYS_SEM_OPEN, U("lock"), 4, 0) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_SEM_OPEN, U("lock"), 0, 0) == -1);
+        USER_OK = 1;
+        long long held[PROCESS_MAX_FILES];
+        int h = 0;
+        while (h < PROCESS_MAX_FILES - 2 && (held[h] = call(SYS_OPEN, U("HELLO.ELF"), 0, 0)) >= 3)
+            h++;
+        CHECK(h == PROCESS_MAX_FILES - 2 && call(SYS_SEM_OPEN, U("lock"), 0, 0) == -1);   /* no free descriptor */
+        for (int i = 0; i < h; i++)
+            call(SYS_CLOSE, (ull)held[i], 0, 0);
+
+        /* unlink and closing */
+        CHECK(call(SYS_SEM_UNLINK, U("lock"), 0, 0) == 0 && call(SYS_SEM_UNLINK, U("lock"), 0, 0) == -1 && call(SYS_SEM_OPEN, U("lock"), 0, 0) == -1);
+        CHECK(call(SYS_SEM_POST, (ull)s, 0, 0) == 0);                              /* still works through the descriptors */
+        CHECK(call(SYS_CLOSE, (ull)s, 0, 0) == 0 && sem_in_use() == 1);
+        CHECK(call(SYS_CLOSE, (ull)s2, 0, 0) == 0 && sem_in_use() == 0);
+        CHECK(call(SYS_SEM_POST, (ull)s, 0, 0) == -1);                             /* closed */
+        long long c = call(SYS_SEM_OPEN, U("copy"), SYS_CREATE, 1);
+        ProcessFile dup = PROC.file[c - 3];
+        pfile_ref(&dup);                                                           /* what fork does */
+        CHECK(call(SYS_SEM_UNLINK, U("copy"), 0, 0) == 0 && call(SYS_CLOSE, (ull)c, 0, 0) == 0 && sem_in_use() == 1);
+        pfile_close(&dup);
+        CHECK(sem_in_use() == 0);
+        c = call(SYS_SEM_OPEN, U("ends"), SYS_CREATE, 0);
+        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+            pfile_close(&PROC.file[i]);                                            /* a process that ends */
+        CHECK(call(SYS_SEM_UNLINK, U("ends"), 0, 0) == 0 && sem_in_use() == 0);
+
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_SEM_OPEN, U("k"), SYS_CREATE, 0) == -1 && call(SYS_SEM_WAIT, 3, 1, 0) == -1 && call(SYS_SEM_UNLINK, U("k"), 0, 0) == -1);
+        CURRENT_PROC = &PROC;
+    }
+
+    /* ================= signal handlers: the system call side ================= */
+    reset();
+    {
+        const ull H = 0x400000003000ULL, E = 0x400000002000ULL;
+        PROC.sig_ignore = 1u << SIGINT;
+        CHECK(call(SYS_SIGACTION, SIGINT, H, E) == 0 && PROC.sig_handler[SIGINT] == H && PROC.sig_entry == E);
+        CHECK(PROC.sig_ignore == 0);                                            /* installing a handler ends "ignore" */
+        CHECK(call(SYS_SIGACTION, SIGTERM, H + 16, E) == 0 && PROC.sig_handler[SIGTERM] == H + 16);
+        PROC.sig_pending = 1u << SIGINT;
+        CHECK(call(SYS_SIGACTION, SIGINT, 0, 0) == 0 && PROC.sig_handler[SIGINT] == 0 && PROC.sig_pending == 0); /* back to the default */
+        CHECK(PROC.sig_handler[SIGTERM] == H + 16);
+        CHECK(call(SYS_SIGACTION, SIGKILL, H, E) == -1 && call(SYS_SIGACTION, 1, H, E) == -1 && call(SYS_SIGACTION, 40, H, E) == -1 &&
+              call(SYS_SIGACTION, 0, H, E) == -1 && call(SYS_SIGACTION, ~0ULL, H, E) == -1);
+        CHECK(call(SYS_SIGACTION, SIGINT, 0x1000, E) == -1 && call(SYS_SIGACTION, SIGINT, H, 0x1000) == -1);               /* kernel half */
+        CHECK(call(SYS_SIGACTION, SIGINT, 0x800000000000ULL, E) == -1 && call(SYS_SIGACTION, SIGINT, H, ~0ULL) == -1);     /* past the user half */
+        CHECK(call(SYS_SIGACTION, SIGINT, 0x3FFFFFFFFFFFULL, E) == -1);                                                     /* just below it */
+        CHECK(PROC.sig_handler[SIGINT] == 0);                                                                              /* nothing was changed by the refusals */
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_SIGACTION, SIGINT, H, E) == -1 && call(SYS_SIGMASK, 4, 0, 0) == -1);
+        CURRENT_PROC = &PROC;
+
+        /* the mask */
+        PROC.sig_blocked = 0;
+        CHECK(call(SYS_SIGMASK, 1u << SIGINT, 0, 0) == 0 && PROC.sig_blocked == (1u << SIGINT));
+        CHECK(call(SYS_SIGMASK, 0xFFFFFFFFULL, 0, 0) == (1u << SIGINT) && PROC.sig_blocked == ((1u << SIGINT) | (1u << SIGTERM))); /* only these two can be */
+        CHECK(call(SYS_SIGMASK, 1u << SIGKILL, 0, 0) == ((1u << SIGINT) | (1u << SIGTERM)) && PROC.sig_blocked == 0);   /* SIGKILL cannot be blocked */
+
+        /* every system call is followed by a handler that is due, except the one that returns from a handler */
+        SIGSYS_CALLS = SIGRET_CALLS = 0;
+        SIGDELIV = 0;
+        CHECK(call(SYS_YIELD, 0, 0, 0) == 0 && SIGSYS_CALLS == 0);
+        SIGDELIV = 1;
+        CHECK(call(SYS_YIELD, 0, 0, 0) == 1000 && SIGSYS_CALLS == 1);           /* the frame was changed: the stub's result */
+        CHECK(call(SYS_SIGRETURN, 0, 0, 0) == 777 && SIGRET_CALLS == 1 && SIGSYS_CALLS == 1);
+        SIGDELIV = 0;
+
+        /* a system call that sleeps gives up when a signal with a handler arrives (and not when it is blocked) */
+        PROC.sig_handler[SIGINT] = H;
+        PROC.sig_entry = E;
+        int pf[2];
+        CHECK(call(SYS_PIPE, U(pf), 0, 0) == 0);
+        char rb[8];
+        BLOCK_ACTION = raise_int;
+        BLOCKS = 0;
+        CHECK(call(SYS_READ, (ull)pf[0], U(rb), 4) == -1 && BLOCKS == 1);       /* a pipe read */
+        PROC.sig_pending = 0;
+        PROC.sig_blocked = 1u << SIGINT;
+        BLOCKS = 0;
+        BLOCK_ACTION = raise_then_feed;                                        /* blocked: the signal does not interrupt; the data does */
+        CHECK(call(SYS_READ, (ull)pf[0], U(rb), 4) == 2 && BLOCKS == 2 && PROC.sig_pending == (1u << SIGINT));
+        PROC.sig_pending = PROC.sig_blocked = 0;
+        BLOCK_ACTION = raise_int;
+        static char big[PIPE_SIZE];
+        CHECK(call(SYS_WRITE, (ull)pf[1], U(big), 4096) == 4096);               /* fill it */
+        PROC.sig_pending = 0;
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_WRITE, (ull)pf[1], U("more"), 4) == -1);                 /* a write that has to wait */
+        PROC.sig_pending = 0;
+        call(SYS_CLOSE, (ull)pf[0], 0, 0);
+        call(SYS_CLOSE, (ull)pf[1], 0, 0);
+
+        long long q = call(SYS_MQ_OPEN, U("sigq"), SYS_CREATE, 0);
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_READ, (ull)q, U(rb), 4) == -1);                          /* a queue receive */
+        for (int i = 0; i < MQ_DEPTH; i++)
+            call(SYS_WRITE, (ull)q, U("x"), 1);
+        PROC.sig_pending = 0;
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_WRITE, (ull)q, U("x"), 1) == -1);                        /* a queue send */
+        call(SYS_MQ_UNLINK, U("sigq"), 0, 0);
+        call(SYS_CLOSE, (ull)q, 0, 0);
+        PROC.sig_pending = 0;
+
+        long long s = call(SYS_SEM_OPEN, U("sigs"), SYS_CREATE, 0);
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_SEM_WAIT, (ull)s, 0, 0) == -1 && call(SYS_SEM_VALUE, (ull)s, 0, 0) == 0);   /* a semaphore wait */
+        call(SYS_SEM_UNLINK, U("sigs"), 0, 0);
+        call(SYS_CLOSE, (ull)s, 0, 0);
+        PROC.sig_pending = 0;
+
+        PROC.child[0] = 1234; /* a child that is not finished: wait sleeps ... */
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_WAIT, 1234, 0, 0) == -1 && PROC.child[0] == 1234);       /* ... is interrupted, and the child stays waitable */
+        PROC.child[0] = 0;
+        PROC.sig_pending = 0;
+
+        CON_LINE = "";                                                         /* the console: nothing typed */
+        PROC.console = 4;
+        CON_BLOCKS_BEFORE_DATA = 5;
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_READ, 0, U(rb), 4) == -1);
+        BLOCK_ACTION = 0;
+        PROC.sig_pending = PROC.sig_blocked = 0;
+        PROC.sig_handler[SIGINT] = 0;
+        PROC.sig_entry = 0;
     }
 
     /* ================= yield, exit, unknown ================= */

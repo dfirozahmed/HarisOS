@@ -172,6 +172,50 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(23, pid > 0 && sys_wait(pid, &st) == pid && st == 0);
     CHECK(24, sys_wait(pid, &st) == -1); /* once only */
 
+    /* the kernel itself writes into a page the child shares with its parent (a read into a buffer): the child gets its own copy first, the
+     * parent's bytes stay as they were */
+    static char shared_buf[16] = "parent-original";
+    int kp[2];
+    CHECK(25, sys_pipe(kp) == 0);
+    pid = fork();
+    if (pid == 0)
+    {
+        long long got2 = sys_read(kp[0], shared_buf, 4); /* a system call writes the buffer */
+        sys_exit(got2 == 4 && memcmp(shared_buf, "from", 4) == 0 && shared_buf[4] == 'n' ? 0 : 1);
+    }
+    CHECK(26, sys_write(kp[1], "from", 4) == 4 && pid > 0 && sys_wait(pid, &st) == pid && st == 0);
+    CHECK(27, memcmp(shared_buf, "parent-original", 16) == 0);
+    sys_close(kp[0]);
+    sys_close(kp[1]);
+
+    /* a child that writes every page of a big block while the parent still shares it, and a grandchild: each ends with its own bytes */
+    unsigned char *blk = malloc(256 * 1024);
+    CHECK(28, blk != 0);
+    for (int i = 0; i < 256 * 1024; i++)
+        blk[i] = (unsigned char)i;
+    pid = fork();
+    if (pid == 0)
+    {
+        long long g = fork();
+        if (g == 0)
+        {
+            for (int i = 0; i < 256 * 1024; i += 4096)
+                blk[i] = 0xAA;
+            sys_exit(1 + (blk[0] == 0xAA && blk[4096] == 0xAA ? 0 : 1));
+        }
+        for (int i = 0; i < 256 * 1024; i += 4096)
+            blk[i] = 0xBB;
+        int gst = 0;
+        sys_wait(g, &gst);
+        sys_exit(gst == 1 && blk[0] == 0xBB && blk[8192] == 0xBB && blk[1] == 1 ? 0 : 2);
+    }
+    CHECK(29, pid > 0 && sys_wait(pid, &st) == pid && st == 0);
+    int same = 1;
+    for (int i = 0; i < 256 * 1024; i++)
+        same = same && blk[i] == (unsigned char)i;
+    CHECK(30, same);
+    free(blk);
+
     free((void *)heap);
     if (fail == 0)
         puts("forktest: all checks passed");

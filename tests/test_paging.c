@@ -1,6 +1,7 @@
 /* Host test for paging_walk.c: splitting big pages and making single pages not present. The "page tables" are
  * ordinary host memory; their entries hold host addresses, which is all the walk needs. */
 #include "paging.h"
+#include "cow.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,13 @@ static int freed(u64 phys)
         if (FREED[i] == phys)
             return 1;
     return 0;
+}
+
+/* what aspace.c passes to paging_destroy_range: a page other spaces share is counted down, not freed */
+static void cow_aware_free(u64 phys)
+{
+    if (cow_release(phys))
+        free_record(phys);
 }
 
 static u64 *new_table(void)
@@ -415,6 +423,133 @@ int main(void)
         CHECK(paging_unmap_page(sp, U0 + (1ULL << 30), &got) == -1);            /* no tables there at all */
         CHECK(paging_unmap_page(sp, U0 + 1, &got) == -1 && paging_unmap_page(sp, 0x1000, &got) == -1 && paging_unmap_page(sp, PAGING_USER_END, &got) == -1);
         CHECK(paging_unmap_page(sp, U0, 0) == 0);                               /* the phys pointer is optional */
+    }
+
+    /* copy-on-write fork: paging_clone_user_cow and paging_cow_resolve */
+    {
+        ALLOC_LIMIT = 100000;
+        TABLES_MADE = 0;
+        const u64 UB = PAGING_USER_BASE, COW_BIT = 1ULL << 10, OWN_BIT = 1ULL << 9;
+        u64 *src = new_table(), *dst = new_table();
+        u64 *code = ALIGNED_ALLOC(4096, 4096), *data = ALIGNED_ALLOC(4096, 4096), *shm = ALIGNED_ALLOC(4096, 4096);
+        for (int w = 0; w < 512; w++)
+        {
+            code[w] = 0xC0DE0000ULL + (u64)w;
+            data[w] = 0xDA7A0000ULL + (u64)w;
+            shm[w] = 0x5A4E0000ULL + (u64)w;
+        }
+        CHECK(paging_map_page(src, UB, (u64)code, PAGING_EXEC | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_map_page(src, UB + 0x1000, (u64)data, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_map_page(src, UB + 0x2000, (u64)shm, PAGING_WRITE, alloc_table) == 0);
+        FREED_N = 0;
+        TABLES_MADE = 0;
+        CHECK(paging_clone_user_cow(src, dst, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record) == 0);
+        CHECK(TABLES_MADE <= 8 && FREED_N == 0);                                /* only tables were made: no page was copied */
+
+        u64 phys = 0, ent = 0, sphys = 0, sent = 0;
+        /* code: the same page in both, read-only, executable, counted as shared, no COW mark (it is never written) */
+        CHECK(paging_translate(dst, UB, &phys, &ent) == 0 && phys == (u64)code && !(ent & RW) && !(ent & NX) && !(ent & COW_BIT) && (ent & OWN_BIT));
+        CHECK(cow_shared((u64)code));
+        /* data: the same page, read-only and marked COW in BOTH spaces (the parent's entry was changed) */
+        CHECK(paging_translate(dst, UB + 0x1000, &phys, &ent) == 0 && phys == (u64)data && !(ent & RW) && (ent & NX) && (ent & COW_BIT) && (ent & OWN_BIT));
+        CHECK(paging_translate(src, UB + 0x1000, &sphys, &sent) == 0 && sphys == (u64)data && !(sent & RW) && (sent & COW_BIT));
+        CHECK(cow_shared((u64)data));
+        /* shared memory: as it was, writable, not counted */
+        CHECK(paging_translate(dst, UB + 0x2000, &phys, &ent) == 0 && phys == (u64)shm && (ent & RW) && !(ent & OWN_BIT) && !(ent & COW_BIT) && !cow_shared((u64)shm));
+
+        /* a write in the child: it gets a copy, the parent keeps the original, which is held by one space now */
+        CHECK(paging_cow_resolve(dst, UB + 0x1000, alloc_table) == 1);
+        CHECK(paging_translate(dst, UB + 0x1000, &phys, &ent) == 0 && phys != (u64)data && (ent & RW) && !(ent & COW_BIT) && (ent & OWN_BIT) && (ent & NX));
+        CHECK(memcmp((void *)phys, data, 4096) == 0);                           /* the copy has the contents */
+        ((u64 *)phys)[3] = 0x1234;
+        CHECK(data[3] == 0xDA7A0003ULL);                                        /* the parent does not see the child's write */
+        CHECK(!cow_shared((u64)data));
+        /* the parent writes later: it is the only holder, so no copy: the same page just becomes writable */
+        CHECK(paging_cow_resolve(src, UB + 0x1000, alloc_table) == 1);
+        CHECK(paging_translate(src, UB + 0x1000, &sphys, &sent) == 0 && sphys == (u64)data && (sent & RW) && !(sent & COW_BIT));
+        CHECK(paging_cow_resolve(src, UB + 0x1000, alloc_table) == 0);          /* already writable: nothing to do */
+
+        /* what is not a copy-on-write page */
+        CHECK(paging_cow_resolve(dst, UB, alloc_table) == 0);                   /* read-only code: a real fault */
+        CHECK(paging_cow_resolve(dst, UB + 0x2000, alloc_table) == 0);          /* shared memory, writable */
+        CHECK(paging_cow_resolve(dst, UB + 0x5000, alloc_table) == 0);          /* nothing mapped */
+        CHECK(paging_cow_resolve(dst, UB + (1ULL << 40), alloc_table) == 0);    /* no tables there */
+        CHECK(paging_cow_resolve(dst, 0x1000, alloc_table) == 0 && paging_cow_resolve(dst, PAGING_USER_END, alloc_table) == 0);
+
+        /* destroying both spaces: the shared code page is freed once, the shared memory page never, the data pages once each */
+        FREED_N = 0;
+        paging_destroy_range(dst, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        int code_freed = freed((u64)code), data_freed = freed((u64)data);
+        CHECK(!code_freed && !data_freed && !freed((u64)shm));                  /* the parent still holds them */
+        paging_destroy_range(src, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        CHECK(freed((u64)code) && freed((u64)data) && !freed((u64)shm));
+        CHECK(cow_shared_pages() == 0);                                         /* the counts are back to nothing */
+
+        /* a fork of a fork: three holders of the code page, and the last one to go frees it */
+        u64 *a = new_table(), *b = new_table(), *c = new_table();
+        u64 *pg = ALIGNED_ALLOC(4096, 4096);
+        memset(pg, 7, 4096);
+        TABLES_MADE = 0;
+        CHECK(paging_map_page(a, UB, (u64)pg, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_clone_user_cow(a, b, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record) == 0);
+        CHECK(paging_clone_user_cow(b, c, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record) == 0); /* b's entry is already COW */
+        CHECK(paging_translate(c, UB, &phys, &ent) == 0 && phys == (u64)pg && (ent & COW_BIT) && !(ent & RW));
+        FREED_N = 0;
+        paging_destroy_range(a, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        paging_destroy_range(b, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        CHECK(!freed((u64)pg));
+        CHECK(paging_cow_resolve(c, UB, alloc_table) == 1);                      /* the last holder writes: no copy */
+        paging_translate(c, UB, &phys, 0);
+        CHECK(phys == (u64)pg);
+        paging_destroy_range(c, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        CHECK(freed((u64)pg) && cow_shared_pages() == 0);
+
+        /* no memory for the copy: -1 and the entry is untouched */
+        u64 *p1 = new_table(), *p2 = new_table();
+        TABLES_MADE = 0;
+        CHECK(paging_map_page(p1, UB, (u64)pg, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_clone_user_cow(p1, p2, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record) == 0);
+        ALLOC_LIMIT = TABLES_MADE;
+        CHECK(paging_cow_resolve(p2, UB, alloc_table) == -1);
+        ALLOC_LIMIT = 100000;
+        CHECK(paging_translate(p2, UB, &phys, &ent) == 0 && phys == (u64)pg && !(ent & RW) && (ent & COW_BIT) && cow_shared((u64)pg));
+        FREED_N = 0;
+        paging_destroy_range(p1, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        paging_destroy_range(p2, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        CHECK(freed((u64)pg) && cow_shared_pages() == 0);
+
+        /* the table of shared pages is full: the page is copied right away instead (the fork still works) */
+        u64 *f1 = new_table(), *f2 = new_table();
+        TABLES_MADE = 0;
+        CHECK(paging_map_page(f1, UB, (u64)pg, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0);
+        int stuffed = 0;
+        while (cow_share((u64)(stuffed + 5000000) << 12) == 0)
+            stuffed++;
+        CHECK(paging_clone_user_cow(f1, f2, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record) == 0);
+        CHECK(paging_translate(f2, UB, &phys, &ent) == 0 && phys != (u64)pg && (ent & RW) && !(ent & COW_BIT) && memcmp((void *)phys, pg, 4096) == 0);
+        CHECK(paging_translate(f1, UB, &sphys, &sent) == 0 && sphys == (u64)pg && (sent & RW) && !(sent & COW_BIT));   /* the parent was not touched */
+        for (int i = 0; i < stuffed; i++)
+            cow_release((u64)(i + 5000000) << 12);
+        CHECK(cow_shared_pages() == 0);
+
+        /* out of memory part way through a clone: -1, and destroying both spaces leaves no count behind */
+        u64 *g1 = new_table(), *g2 = new_table();
+        u64 *extra = ALIGNED_ALLOC(4096, 4096);
+        TABLES_MADE = 0;
+        CHECK(paging_map_page(g1, UB, (u64)pg, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_map_page(g1, UB + (5ULL << 30), (u64)extra, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0); /* needs tables of its own */
+        for (int limit = 0; limit < 8; limit++)
+        {
+            u64 *h = new_table();
+            TABLES_MADE = 0;
+            ALLOC_LIMIT = limit;
+            int r = paging_clone_user_cow(g1, h, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record);
+            CHECK(r == 0 || r == -1);
+            paging_destroy_range(h, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, cow_aware_free);
+        }
+        ALLOC_LIMIT = 100000;
+        CHECK(cow_shared_pages() == 0);                                        /* every holder that was counted was released */
+        (void)g2;
     }
 
     if (fails == 0)

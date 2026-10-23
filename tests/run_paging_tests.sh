@@ -7,5 +7,6 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_paging.c" \
   "$ROOT/kernel/memory/paging_walk.c" \
+  "$ROOT/kernel/memory/cow.c" \
   -o "$OUT"
 "$OUT"

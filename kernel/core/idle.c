@@ -84,6 +84,8 @@ __asm__(".text\n"
         "    movl $0, (%rax)\n"
         "    cld\n"
         "    call task_tick\n"
+        "    leaq 128(%rsp), %rcx\n" /* the frame: r11 is the lowest word */
+        "    call signal_irq\n" /* a signal handler that is due runs before the program goes on (usersig.h) */
         "    movups 32(%rsp), %xmm0\n"
         "    movups 48(%rsp), %xmm1\n"
         "    movups 64(%rsp), %xmm2\n"

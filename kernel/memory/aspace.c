@@ -1,5 +1,6 @@
 /* HarisOS address spaces: see include/aspace.h. */
 #include "aspace.h"
+#include "cow.h"
 #include "irq.h"
 #include "pmm.h"
 #include "preempt.h"
@@ -38,6 +39,13 @@ static void free_page(u64 phys)
     preempt_enable();
 }
 
+/* What destroying a space calls for every page and table it owns: a page that other spaces share (copy-on-write) is only counted down. */
+static void release_page(u64 phys)
+{
+    if (cow_release(phys))
+        free_page(phys);
+}
+
 static u64 read_msr(unsigned msr)
 {
     unsigned lo, hi;
@@ -74,16 +82,38 @@ AddressSpace *aspace_create(void)
     return as;
 }
 
+static void flush_tlb(void)
+{
+    u64 cr3;
+    __asm__ volatile("mov %%cr3, %0\n\tmov %0, %%cr3" : "=r"(cr3) : : "memory");
+}
+
+/* A write to a copy-on-write page (a page fault, or the kernel about to write user memory for a system call): see paging_cow_resolve.
+ * 1 = the page is private and writable now, 0 = not a copy-on-write page, -1 = no memory for the copy. */
+int aspace_cow_fault(AddressSpace *as, u64 va)
+{
+    u64 page = va & ~4095ULL;
+    int r = paging_cow_resolve(as->entry, page, alloc_page);
+    if (r == 1)
+        __asm__ volatile("invlpg (%0)" : : "r"(page) : "memory"); /* (this is the space in use) */
+    return r;
+}
+
 AddressSpace *aspace_clone(const AddressSpace *src)
 {
     AddressSpace *as = aspace_create();
     if (!as)
         return 0;
-    if (paging_clone_user(src->entry, as->entry, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_page, alloc_page, free_page) != 0)
+    /* Copy-on-write: nothing is copied here. The parent's own entries lose their write permission (and the TLB must forget the old
+     * ones: src is the space in use, a fork is a system call of the process that owns it). */
+    if (paging_clone_user_cow((u64 *)src->entry, as->entry, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_page, alloc_page,
+                              free_page) != 0)
     {
-        aspace_destroy(as); /* frees whatever was copied so far */
+        aspace_destroy(as); /* gives back whatever was shared or copied so far */
+        flush_tlb();
         return 0;
     }
+    flush_tlb();
     return as;
 }
 
@@ -118,6 +148,10 @@ int aspace_translate(const AddressSpace *as, u64 va, u64 *phys) { return paging_
 
 int aspace_user_ok(const AddressSpace *as, u64 va, u64 len, int write)
 {
+    if (write && len > 0 && va + len > va)
+        for (u64 page = va & ~4095ULL; page < va + len; page += 4096) /* the kernel is about to write here: copy-on-write pages become private first */
+            if (aspace_cow_fault((AddressSpace *)as, page) < 0)
+                return 0;
     return paging_user_range_ok(as->entry, va, len, write);
 }
 
@@ -133,7 +167,7 @@ void aspace_destroy(AddressSpace *as)
 {
     if (!as)
         return;
-    paging_destroy_range(as->entry, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, free_page);
+    paging_destroy_range(as->entry, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, release_page);
     free_page((u64)as); /* the top-level table; the kernel slots in it point at tables that stay */
 }
 

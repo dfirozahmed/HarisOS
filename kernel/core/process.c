@@ -222,6 +222,10 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->parent = sp->parent;
     p->cwd = sp->cwd;
     p->sig_ignore = 0;
+    for (int i = 0; i < 32; i++)
+        p->sig_handler[i] = 0;
+    p->sig_entry = 0;
+    p->sig_pending = p->sig_blocked = 0;
     for (int i = 0; i < PROCESS_MAX_SHM; i++)
         p->shm[i].seg = -1;
     p->shm_next = 0;
@@ -403,6 +407,10 @@ int process_exec_elf(const char *name, const void *file, u64 size, const Process
     if (free_file)
         kfree((void *)file);
     process_release_shm(p); /* the old address space (and the mappings in it) goes away below */
+    for (int i = 0; i < 32; i++) /* a new program has none of the old one's handlers (ignored signals stay ignored) */
+        p->sig_handler[i] = 0;
+    p->sig_entry = 0;
+    p->sig_pending = p->sig_blocked = 0;
     set_heap(p, heap_base);
     task_exec_replace(as, name);
     process_enter_user(st.entry, st.user_rsp, st.argc, st.argv);
@@ -450,6 +458,7 @@ int process_fork(u64 user_rip, u64 user_rsp)
     cp->pid = NEXT_PID;
     cp->parent = task_current();
     cp->own_console = 0; /* the window belongs to whoever opened it */
+    cp->sig_pending = 0; /* handlers and the mask are inherited, what is waiting for the parent is not */
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         cp->child[i] = 0;
     st->entry = user_rip;
@@ -471,6 +480,12 @@ int process_fork(u64 user_rip, u64 user_rsp)
     STATS.started++;
     p->child[slot] = NEXT_PID;
     return NEXT_PID++;
+}
+
+int process_cow_fault(u64 addr)
+{
+    AddressSpace *as = task_address_space();
+    return as ? aspace_cow_fault(as, addr) : 0;
 }
 
 int process_ppid(void)
@@ -546,6 +561,12 @@ static void deliver(int tid, int sig)
         return;
     if (sig != SIGKILL && (p->sig_ignore & (1u << sig)))
         return;
+    if (sig != SIGKILL && sig < 32 && p->sig_handler[sig] && p->sig_entry)
+    {
+        p->sig_pending |= 1u << sig; /* its handler runs when it is about to return to ring 3 (usersig.h); a sleeping system call is woken */
+        task_wake(tid);
+        return;
+    }
     if (tid == task_current())
     {
         STATS.killed++;

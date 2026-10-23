@@ -63,4 +63,14 @@ int dup2(int oldfd, int newfd);
 int getpid(void);
 int getppid(void);
 
+/* Signal handlers. signal(SIGINT, f) makes the kernel call f(SIGINT) instead of ending the process when Ctrl+C (or kill) comes: while
+ * the program computes (at a timer tick) or at the end of a system call. signal(sig, 0) goes back to the default (the process ends).
+ * f is an ordinary function; while it runs the same signal is blocked, and when it returns the program goes on exactly where it was
+ * (a sleeping system call, such as a read, returns -1 first). Only SIGINT and SIGTERM can be caught; SIGKILL cannot. Handlers are
+ * inherited by fork and dropped by exec. sigblock(mask) blocks the signals whose bits (1 << signal) are set and returns the old mask:
+ * a blocked signal waits (use it around code that must not be interrupted). Returns 0, or -1. */
+typedef void (*sighandler_t)(int);
+int signal(int sig, sighandler_t handler);
+unsigned sigblock(unsigned mask);
+
 #endif

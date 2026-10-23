@@ -19,6 +19,7 @@
 #include "fault.h"
 #include "mq.h"
 #include "pipe.h"
+#include "sem.h"
 #include "shm.h"
 
 #define PROCESS_IMAGE_MAX (64 * 1024)
@@ -64,7 +65,12 @@ typedef struct
 /* ... or a message queue (mq.h): node = PROCESS_MQ_NODE + the queue's number; it is read and written like a pipe end that does both. */
 #define PROCESS_MQ_NODE 0x50000000
 static inline int pfile_is_pipe(const ProcessFile *f) { return f->node >= PROCESS_PIPE_NODE && f->node < PROCESS_MQ_NODE; }
-static inline int pfile_is_mq(const ProcessFile *f) { return f->node >= PROCESS_MQ_NODE; }
+/* ... or a semaphore (sem.h): node = PROCESS_SEM_NODE + its number. SYS_SEM_* work on it; it cannot be read, written or seeked. */
+#define PROCESS_SEM_NODE 0x60000000
+static inline int pfile_is_mq(const ProcessFile *f) { return f->node >= PROCESS_MQ_NODE && f->node < PROCESS_SEM_NODE; }
+static inline int pfile_is_sem(const ProcessFile *f) { return f->node >= PROCESS_SEM_NODE; }
+static inline int pfile_sem(const ProcessFile *f) { return f->node - PROCESS_SEM_NODE; }
+static inline int pfile_is_object(const ProcessFile *f) { return f->node >= PROCESS_MQ_NODE; } /* a queue or a semaphore: not a stdin / stdout */
 static inline int pfile_mq(const ProcessFile *f) { return f->node - PROCESS_MQ_NODE; }
 static inline int pfile_pipe(const ProcessFile *f) { return f->node - PROCESS_PIPE_NODE; }
 
@@ -75,6 +81,8 @@ static inline void pfile_ref(const ProcessFile *f)
         pipe_ref(pfile_pipe(f), (f->flags & PFILE_WRITE) != 0);
     else if (f->node >= 0 && pfile_is_mq(f))
         mq_ref(pfile_mq(f));
+    else if (f->node >= 0 && pfile_is_sem(f))
+        sem_ref(pfile_sem(f));
 }
 
 /* Close an open slot: a pipe end is given back to the pipe (waking whoever waits on it). Safe on a free slot. */
@@ -84,6 +92,8 @@ static inline void pfile_close(ProcessFile *f)
         pipe_unref(pfile_pipe(f), (f->flags & PFILE_WRITE) != 0);
     else if (f->node >= 0 && pfile_is_mq(f))
         mq_unref(pfile_mq(f));
+    else if (f->node >= 0 && pfile_is_sem(f))
+        sem_unref(pfile_sem(f));
     f->node = -1;
     f->pos = f->flags = 0;
 }
@@ -131,6 +141,9 @@ typedef struct Process
     int parent;                       /* thread id of the parent, -1 = none */
     int cwd;                          /* VFS node of the working folder (VFS_ROOT = "This PC"): relative paths start there */
     unsigned sig_ignore;              /* bit n set: signal n is ignored (SYS_SIGIGNORE); 0 at the start of every process */
+    unsigned long long sig_handler[32]; /* handlers (SYS_SIGACTION), 0 = none: the default action; only SIGINT and SIGTERM can have one */
+    unsigned long long sig_entry;     /* the user code stub that calls a handler and then SYS_SIGRETURN (usersig.h) */
+    unsigned sig_pending, sig_blocked; /* bit n: signal n waits for its handler / must wait (it is being handled) */
     ProcessShm shm[PROCESS_MAX_SHM];  /* shared memory mapped here (SYS_SHM_MAP) */
     unsigned long long shm_next;      /* where the next mapping goes (0 = PROCESS_SHM_BASE) */
     int child[PROCESS_MAX_CHILDREN];  /* pids of children not yet waited for, 0 = free slot */
@@ -187,6 +200,10 @@ int process_exec_elf(const char *name, const void *file, unsigned long long size
 int process_fork(unsigned long long user_rip, unsigned long long user_rsp);
 
 int process_ppid(void); /* the parent's pid, 0 if none */
+
+/* A write to a read-only page that ring 3 attempted (page fault, error code 7): if it is a copy-on-write page of a forked process it is
+ * made private and writable. 1 = the faulting instruction can run again, anything else = a real fault. */
+int process_cow_fault(unsigned long long addr);
 
 /* End the running process (called by SYS_EXIT, and by the kernel itself). Does not return. */
 __attribute__((noreturn)) void process_exit(int code);

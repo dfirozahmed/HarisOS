@@ -98,6 +98,19 @@
  *                  and the message stays, if the buffer is smaller than it). Messages keep their boundaries and their order. SYS_CLOSE
  *                  lets go; fork copies the descriptor. At most 8 queues. It cannot be seeked, redirected or given to SYS_SPAWN.
  *   SYS_MQ_UNLINK (33) rdi = name: the name goes away; the queue lives while a descriptor is open. 0, or -1.
+ *   SYS_SEM_OPEN (34) rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL), rdx = starting count of a new one: a descriptor for a semaphore (named
+ *                  counter, see sem.h), or -1. At most 16. SYS_CLOSE lets go; fork copies it. It cannot be read, written or seeked.
+ *   SYS_SEM_WAIT (35) rdi = descriptor, rsi = 0: take one off the count, sleeping while it is 0 (0 returned); rsi = 1: only try (1 if it
+ *                  would have to sleep). -1 for something that is not a semaphore.
+ *   SYS_SEM_POST (36) rdi = descriptor: the count goes up by one, a sleeper is woken. 0, or -1.
+ *   SYS_SEM_VALUE (37) rdi = descriptor: the count now, or -1.   SYS_SEM_UNLINK (38) rdi = name: the name goes away; 0 or -1.
+ *   SYS_SIGACTION (39) rdi = signal (SIGINT or SIGTERM), rsi = handler (0 = back to the default action), rdx = the address of the process's
+ *                  entry stub (see usersig.h; the user library has it): from now on that signal runs the handler instead of ending the
+ *                  process, at the next system call return or timer tick. Both addresses must be in the user half. 0, or -1.
+ *   SYS_SIGRETURN (40) only for the stub: back to where the process was when the handler started (see usersig.h).
+ *   SYS_SIGMASK (41) rdi = mask (bit n = block signal n; only SIGINT and SIGTERM): a blocked signal waits until it is unblocked. Returns
+ *                  the old mask. (A handler runs with its own signal blocked.)
+ *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
  *
@@ -157,6 +170,14 @@
 #define SYS_SHM_SIZE 31
 #define SYS_MQ_OPEN 32
 #define SYS_MQ_UNLINK 33
+#define SYS_SEM_OPEN 34
+#define SYS_SEM_WAIT 35
+#define SYS_SEM_POST 36
+#define SYS_SEM_VALUE 37
+#define SYS_SEM_UNLINK 38
+#define SYS_SIGACTION 39
+#define SYS_SIGRETURN 40
+#define SYS_SIGMASK 41
 
 /* flags of SYS_SHM_MAP and SYS_MQ_OPEN */
 #define SYS_CREATE 1 /* make it if there is none */
@@ -214,5 +235,9 @@ void syscall_set_kernel_stack(unsigned long long top);
 long long syscall_dispatch(SyscallFrame *f);
 
 unsigned long long syscall_count(void); /* calls made since boot */
+
+/* For signal.c: after this system call the exit goes through IRETQ to rip / rflags instead of SYSRET (all registers of the frame are
+ * then restored as they are, including rcx and r11). */
+void syscall_request_iret(unsigned long long rip, unsigned long long rflags);
 
 #endif

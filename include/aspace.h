@@ -38,6 +38,7 @@ int aspace_init(void);
 
 AddressSpace *aspace_create(void);                                 /* NULL: no memory, or aspace_init failed */
 AddressSpace *aspace_clone(const AddressSpace *src);                 /* a copy of a user space (fork): its own pages with the same contents; NULL if memory ran out */
+int aspace_cow_fault(AddressSpace *as, unsigned long long va); /* a write to a copy-on-write page: 1 = made private + writable, 0 = not such a page, -1 = no memory */
 int aspace_map_shared(AddressSpace *as, unsigned long long va, unsigned long long phys, unsigned flags); /* an existing page (shared memory), not owned: 0 or -1 */
 int aspace_unmap_shared(AddressSpace *as, unsigned long long va);    /* take such a page out again (flushes the TLB entry): 0 or -1 */
 int aspace_map_new(AddressSpace *as, unsigned long long va, unsigned flags); /* 0 or -1 (see paging_map_page) */

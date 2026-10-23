@@ -62,6 +62,7 @@ set(KERNEL_SOURCES
     kernel/memory/paging_walk.c     # page table walk: split big pages, map / unmap one page (host-tested)
     kernel/memory/paging.c          # page tables on the real CPU (CR3, invlpg): guard pages
     kernel/memory/aspace.c          # user address spaces: one set of page tables per process, shared kernel half
+    kernel/memory/cow.c             # copy-on-write: who holds a shared page (host-tested)
     kernel/memory/heap.c           # kernel heap: kmalloc / kfree on top of the page allocator
     kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
     kernel/core/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
@@ -75,6 +76,8 @@ set(KERNEL_SOURCES
     kernel/core/pipe.c              # pipes: the byte queue between processes (host-tested)
     kernel/core/shm.c               # shared memory segments (host-tested)
     kernel/core/mq.c                # message queues (host-tested)
+    kernel/core/sem.c               # semaphores (host-tested)
+    kernel/core/signal.c            # signal handlers: frames on the user stack, sigreturn
     kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
     kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start
     kernel/core/process.c          # user processes: address space + thread, ring 3 entry, boot self test
@@ -234,7 +237,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

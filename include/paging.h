@@ -59,6 +59,7 @@ int paging_set_present_in(unsigned long long *pml4, unsigned long long virt, int
 #define PAGING_WRITE 1u
 #define PAGING_EXEC 2u  /* without it the page has No-Execute: data and stacks cannot run as code */
 #define PAGING_OWNED 4u /* paging_destroy_range frees the physical page (a software bit, ignored by the CPU) */
+#define PAGING_COW 8u   /* read-only now, but a copy-on-write page: the first write makes a private copy (paging_cow_resolve) */
 
 /* Map the 4 KiB page at virt (a user address, page aligned) to the physical page phys (page aligned), user accessible,
  * building the tables on the way with alloc. 0 = done, -1 = bad address, already mapped, a big page in the way, or
@@ -86,6 +87,19 @@ void paging_destroy_range(unsigned long long *pml4, int first, int last, PagingF
  * that is not marked PAGING_OWNED (shared memory) can be taken out this way. 0 and *phys, or -1 if nothing is mapped there or the page
  * is owned. */
 int paging_unmap_page(unsigned long long *pml4, unsigned long long virt, unsigned long long *phys);
+
+/* The same for fork without copying: every owned page that was writable is now shared by both spaces, read-only and marked
+ * PAGING_COW (src is changed too: the original entries lose their write permission, so the caller must flush its TLB); an owned page
+ * that was never writable is shared as it is; pages without the mark (shared memory) are mapped again as they are. cow.h counts the
+ * holders of every shared page. If the sharing table is full the page is copied, as paging_clone_user does. 0, or -1 if an allocator
+ * ran out (dst holds what was done so far; free it with paging_destroy_range: the counts stay right). */
+int paging_clone_user_cow(unsigned long long *src, unsigned long long *dst, int first, int last, PagingAllocFn table_alloc,
+                          PagingAllocFn page_alloc, PagingFreeFn page_free);
+
+/* A write to the page at virt that was refused: if it is a copy-on-write page it becomes writable. When other spaces still hold it
+ * it is copied to a new page first (page_alloc) and this space lets go of the shared one. 1 = done (the caller flushes virt from the
+ * TLB), 0 = not a copy-on-write page (not mapped, or an ordinary page: a real fault), -1 = no memory for the copy. */
+int paging_cow_resolve(unsigned long long *pml4, unsigned long long virt, PagingAllocFn page_alloc);
 
 /* Copy the user part (top-level slots first..last) of src into dst, whose slots there are empty: every page marked PAGING_OWNED
  * gets a fresh copy of its 4096 bytes (page_alloc gives the new physical page; its old contents do not matter; page_free takes

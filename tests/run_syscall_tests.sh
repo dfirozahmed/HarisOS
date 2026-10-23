@@ -10,5 +10,6 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/kernel/core/pipe.c" \
   "$ROOT/kernel/core/shm.c" \
   "$ROOT/kernel/core/mq.c" \
+  "$ROOT/kernel/core/sem.c" \
   -o "$OUT"
 "$OUT"

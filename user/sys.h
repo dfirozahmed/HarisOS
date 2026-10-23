@@ -40,6 +40,14 @@
 #define SYS_SHM_SIZE 31
 #define SYS_MQ_OPEN 32
 #define SYS_MQ_UNLINK 33
+#define SYS_SEM_OPEN 34
+#define SYS_SEM_WAIT 35
+#define SYS_SEM_POST 36
+#define SYS_SEM_VALUE 37
+#define SYS_SEM_UNLINK 38
+#define SYS_SIGACTION 39
+#define SYS_SIGRETURN 40
+#define SYS_SIGMASK 41
 
 #define SYS_CREATE 1
 #define SYS_EXCL 2
@@ -120,6 +128,17 @@ static inline long long sys_shm_size(void *addr) { return syscall3(SYS_SHM_SIZE,
 /* a message queue: a descriptor (sys_write sends one message, sys_read receives one), or -1 */
 static inline long long sys_mq_open(const char *name, unsigned flags) { return syscall3(SYS_MQ_OPEN, (long long)(usize)name, flags, 0); }
 static inline long long sys_mq_unlink(const char *name) { return syscall3(SYS_MQ_UNLINK, (long long)(usize)name, 0, 0); }
+/* a semaphore: a descriptor (sys_close lets go), or -1. initial = the count of a new one. wait: takes one off (0), sleeping while the
+ * count is 0; try_wait returns 1 instead of sleeping. post: adds one. */
+static inline long long sys_sem_open(const char *name, unsigned flags, unsigned initial) { return syscall3(SYS_SEM_OPEN, (long long)(usize)name, flags, initial); }
+static inline long long sys_sem_wait(int fd) { return syscall3(SYS_SEM_WAIT, fd, 0, 0); }
+static inline long long sys_sem_try_wait(int fd) { return syscall3(SYS_SEM_WAIT, fd, 1, 0); }
+static inline long long sys_sem_post(int fd) { return syscall3(SYS_SEM_POST, fd, 0, 0); }
+static inline long long sys_sem_value(int fd) { return syscall3(SYS_SEM_VALUE, fd, 0, 0); }
+static inline long long sys_sem_unlink(const char *name) { return syscall3(SYS_SEM_UNLINK, (long long)(usize)name, 0, 0); }
+/* signal handlers: use signal() of libc.h. sigmask blocks the signals whose bits are set (returns the old mask) */
+static inline long long sys_sigaction(int sig, void *handler, void *entry) { return syscall3(SYS_SIGACTION, sig, (long long)(usize)handler, (long long)(usize)entry); }
+static inline unsigned sys_sigmask(unsigned mask) { return (unsigned)syscall3(SYS_SIGMASK, mask, 0, 0); }
 /* a pipe: fds[0] reads what is written to fds[1]; 0 or -1 */
 static inline long long sys_pipe(int *fds) { return syscall3(SYS_PIPE, (long long)(usize)fds, 0, 0); }
 /* sys_spawn with redirection: io[0..2] = open descriptors for the child's fd 0, 1, 2, or -1 to leave one alone */

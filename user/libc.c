@@ -589,3 +589,25 @@ int execv(const char *path, const char *const *argv) { return (int)sys_exec(path
 int dup2(int oldfd, int newfd) { return (int)sys_dup2(oldfd, newfd); }
 int getpid(void) { return (int)sys_getpid(0); }
 int getppid(void) { return (int)sys_getpid(1); }
+
+/* ---- signals ------------------------------------------------------------------------------------------------------------- */
+/* The stub the kernel starts a handler through (usersig.h): it arrives with rdx = the handler, r8 = the signal and rsp = 8 mod 16 as at
+ * the entry of a function. It calls handler(sig) (Microsoft x64: argument in rcx, 32 bytes of shadow space) and then asks the kernel to
+ * go back to where the program was. */
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl sigentry\n"
+        "sigentry:\n"
+        "    movl %r8d, %ecx\n"
+        "    movq %rdx, %rax\n"
+        "    subq $40, %rsp\n"
+        "    call *%rax\n"
+        "    addq $40, %rsp\n"
+        "    movl $" STRINGIFY(SYS_SIGRETURN) ", %eax\n"
+        "    syscall\n"
+        "    ud2\n");
+
+extern char sigentry[];
+
+int signal(int sig, sighandler_t handler) { return (int)sys_sigaction(sig, (void *)handler, handler ? (void *)sigentry : 0); }
+unsigned sigblock(unsigned mask) { return sys_sigmask(mask); }

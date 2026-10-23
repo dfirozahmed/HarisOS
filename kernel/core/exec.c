@@ -3,9 +3,11 @@
 #include "console.h"
 #include "elf.h"
 #include "heap.h"
+#include "cow.h"
 #include "paging.h"
 #include "mq.h"
 #include "pipe.h"
+#include "sem.h"
 #include "shm.h"
 #include "pmm.h"
 #include "process.h"
@@ -629,6 +631,38 @@ int exec_selftest(void)
             return -380; /* a pipe was not given back */
     }
 
+    /* signal handlers: SIGHAND.ELF (optional; needs SPIN.ELF); exits with 53 */
+    if (exec_find("SIGHAND.ELF") >= 0 && exec_find("SPIN.ELF") >= 0)
+    {
+        id = exec_run("SIGHAND.ELF", &err);
+        if (id < 0)
+            return -660;
+        if (process_wait(id) != 0)
+            return -661;
+        ProcessStats s12;
+        process_stats(&s12);
+        if (s12.last_exit != 53)
+            return -662 - (s12.last_exit > 0 && s12.last_exit < 53 ? s12.last_exit : 0); /* -663 ... -715 */
+        if (pipe_in_use() != 0)
+            return -716;
+    }
+
+    /* semaphores: SEMTEST.ELF (optional); exits with 52; nothing may be left behind */
+    if (exec_find("SEMTEST.ELF") >= 0)
+    {
+        id = exec_run("SEMTEST.ELF", &err);
+        if (id < 0)
+            return -600;
+        if (process_wait(id) != 0)
+            return -601;
+        ProcessStats s11;
+        process_stats(&s11);
+        if (s11.last_exit != 52)
+            return -602 - (s11.last_exit > 0 && s11.last_exit < 52 ? s11.last_exit : 0); /* -603 ... -653 */
+        if (sem_in_use() != 0 || shm_in_use() != 0)
+            return -654;
+    }
+
     /* shared memory and message queues: IPCTEST.ELF with IPCCHILD.ELF (optional); exits with 51; nothing may be left behind */
     if (exec_find("IPCTEST.ELF") >= 0 && exec_find("IPCCHILD.ELF") >= 0)
     {
@@ -659,6 +693,8 @@ int exec_selftest(void)
             return -482 - (s9.last_exit > 0 && s9.last_exit < 50 ? s9.last_exit : 0); /* -483 ... -531 */
         if (pipe_in_use() != 0)
             return -532;
+        if (cow_shared_pages() != 0)
+            return -533; /* a copy-on-write page is still counted as shared */
     }
 
     /* signals: SIGTEST.ELF ends SPIN.ELF in several states (optional); exits with 49 */
