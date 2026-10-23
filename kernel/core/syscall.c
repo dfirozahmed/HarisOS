@@ -312,7 +312,7 @@ static long long sys_write(const SyscallFrame *f)
 {
     ull fd = f->rdi, ptr = f->rsi, len = f->rdx;
     Process *p = process_current();
-    if (fd == 0 || fd >= PROCESS_FD_FIRST + PROCESS_MAX_FILES)
+    if (fd == 0 || (fd >= PROCESS_FD_FIRST && (!p || fd >= PROCESS_FD_FIRST + (ull)p->file_cap)))
         return -1;
     if (len > SYS_WRITE_MAX)
         return -1;
@@ -390,7 +390,7 @@ static long long sys_read(const SyscallFrame *f)
     }
 
     ull idx = fd - PROCESS_FD_FIRST;
-    if (fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
+    if (fd < PROCESS_FD_FIRST || idx >= (ull)p->file_cap || p->file[idx].node < 0)
         return -1;
     return file_read(p, idx, ptr, len);
 }
@@ -451,15 +451,9 @@ static long long sys_open(const SyscallFrame *f)
     char path[256];
     if (copy_string_from_user(path, (int)sizeof(path), ptr, as) < 0)
         return -1;
-    int slot = -1;
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
-        if (p->file[i].node < 0)
-        {
-            slot = i;
-            break;
-        }
+    int slot = process_file_slot(p); /* a free entry; the list grows when all are in use */
     if (slot < 0)
-        return -1; /* too many open files */
+        return -1; /* too many open files (or no memory for the list) */
     /* a plain name is searched among the programs only for reading: a file to change belongs to the working folder */
     int node = resolve_path(p, path, !(flags & SYS_O_WRITE));
     const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
@@ -493,7 +487,7 @@ static long long sys_close(const SyscallFrame *f)
     if (fd < PROCESS_FD_FIRST) /* closing the console is allowed and does nothing */
         return 0;
     ull idx = fd - PROCESS_FD_FIRST;
-    if (idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
+    if (idx >= (ull)p->file_cap || p->file[idx].node < 0)
         return -1;
     pfile_close(&p->file[idx]);
     for (int k = 0; k < 3; k++)
@@ -511,7 +505,7 @@ static long long sys_seek(const SyscallFrame *f)
     ull whence = f->rdx;
     Process *p = process_current();
     ull idx = fd - PROCESS_FD_FIRST;
-    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0 || p->file[idx].node >= PROCESS_PIPE_NODE)
+    if (!p || fd < PROCESS_FD_FIRST || idx >= (ull)p->file_cap || p->file[idx].node < 0 || p->file[idx].node >= PROCESS_PIPE_NODE)
         return -1; /* (a pipe or a message queue has no position) */
     const VfsNode *n = vfs_node(p->file[idx].node);
     if (!n)
@@ -625,7 +619,7 @@ static long long sys_spawn(const SyscallFrame *f)
         int idx = p->stdio[k];
         if (io[k] != -1)
         {
-            if (io[k] < PROCESS_FD_FIRST || io[k] >= PROCESS_FD_FIRST + PROCESS_MAX_FILES)
+            if (io[k] < PROCESS_FD_FIRST || io[k] >= PROCESS_FD_FIRST + p->file_cap)
                 return -1;
             idx = io[k] - PROCESS_FD_FIRST;
             if (p->file[idx].node < 0 || pfile_is_object(&p->file[idx]) || ((p->file[idx].flags & PFILE_WRITE) != 0) != (k != 0))
@@ -785,15 +779,23 @@ static long long sys_pipe(const SyscallFrame *f)
     Process *p = process_current();
     if (!as || !p || !aspace_user_ok(as, f->rdi, 8, 1))
         return -1;
-    int slot[2], found = 0;
-    for (int i = 0; i < PROCESS_MAX_FILES && found < 2; i++)
-        if (p->file[i].node < 0)
-            slot[found++] = i;
-    if (found < 2)
+    int slot[2];
+    slot[0] = process_file_slot(p);
+    if (slot[0] < 0)
         return -1;
+    p->file[slot[0]].node = PROCESS_PIPE_NODE; /* held for a moment, so that the second search finds another entry */
+    slot[1] = process_file_slot(p); /* (may move the list: entries are named by index) */
+    if (slot[1] < 0)
+    {
+        pfile_clear(&p->file[slot[0]]);
+        return -1;
+    }
     int pipe = pipe_new();
     if (pipe < 0)
+    {
+        pfile_clear(&p->file[slot[0]]); /* (the entry held above) */
         return -1;
+    }
     for (int k = 0; k < 2; k++)
     {
         p->file[slot[k]].node = PROCESS_PIPE_NODE + pipe;
@@ -814,7 +816,7 @@ static int in_use_here(const Process *p, int node)
 {
     if (p->cwd == node)
         return 1;
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+    for (int i = 0; i < p->file_cap; i++)
         if (p->file[i].node == node)
             return 1;
     return 0;
@@ -1004,7 +1006,7 @@ static long long sys_dup2(const SyscallFrame *f)
         src = -1;
     else if (old >= 0 && old <= 2)
         src = p->stdio[old];
-    else if (old >= PROCESS_FD_FIRST && old < PROCESS_FD_FIRST + PROCESS_MAX_FILES && p->file[old - PROCESS_FD_FIRST].node >= 0)
+    else if (old >= PROCESS_FD_FIRST && old < PROCESS_FD_FIRST + p->file_cap && p->file[old - PROCESS_FD_FIRST].node >= 0)
         src = (int)old - PROCESS_FD_FIRST;
     else
         return -1;
@@ -1015,12 +1017,7 @@ static long long sys_dup2(const SyscallFrame *f)
     int slot = -1;
     if (src >= 0)
     {
-        for (int i = 0; i < PROCESS_MAX_FILES; i++)
-            if (p->file[i].node < 0)
-            {
-                slot = i;
-                break;
-            }
+        slot = process_file_slot(p); /* (may move the list: src is an index) */
         if (slot < 0)
             return -1;
     }
@@ -1151,13 +1148,7 @@ static long long sys_mq_open(const SyscallFrame *f)
     char name[MQ_NAME_MAX + 1];
     if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !mq_valid_name(name))
         return -1;
-    int slot = -1;
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
-        if (p->file[i].node < 0)
-        {
-            slot = i;
-            break;
-        }
+    int slot = process_file_slot(p); /* a free entry; the list grows when all are in use */
     if (slot < 0)
         return -1;
     int q = mq_open(name, (unsigned)f->rsi);
@@ -1193,13 +1184,7 @@ static long long sys_sem_open(const SyscallFrame *f)
     char name[SEM_NAME_MAX + 1];
     if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !sem_valid_name(name))
         return -1;
-    int slot = -1;
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
-        if (p->file[i].node < 0)
-        {
-            slot = i;
-            break;
-        }
+    int slot = process_file_slot(p); /* a free entry; the list grows when all are in use */
     if (slot < 0)
         return -1;
     int s = sem_open(name, (unsigned)f->rsi, (unsigned)f->rdx);
@@ -1215,7 +1200,7 @@ static long long sys_sem_open(const SyscallFrame *f)
 static int sem_of(Process *p, ull fd)
 {
     ull idx = fd - PROCESS_FD_FIRST;
-    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0 || !pfile_is_sem(&p->file[idx]))
+    if (!p || fd < PROCESS_FD_FIRST || idx >= (ull)p->file_cap || p->file[idx].node < 0 || !pfile_is_sem(&p->file[idx]))
         return -1;
     return pfile_sem(&p->file[idx]);
 }
@@ -1278,13 +1263,7 @@ static long long usync_open_fd(const SyscallFrame *f, int kind)
     char name[USYNC_NAME_MAX + 1];
     if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !usync_valid_name(name))
         return -1;
-    int slot = -1;
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
-        if (p->file[i].node < 0)
-        {
-            slot = i;
-            break;
-        }
+    int slot = process_file_slot(p); /* a free entry; the list grows when all are in use */
     if (slot < 0)
         return -1;
     int s = usync_open(name, kind, (unsigned)f->rsi);
@@ -1304,7 +1283,7 @@ static long long sys_cond_open(const SyscallFrame *f) { return usync_open_fd(f, 
 static int usync_of(Process *p, ull fd, int kind)
 {
     ull idx = fd - PROCESS_FD_FIRST;
-    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
+    if (!p || fd < PROCESS_FD_FIRST || idx >= (ull)p->file_cap || p->file[idx].node < 0)
         return -1;
     if (kind == USYNC_MUTEX ? !pfile_is_mutex(&p->file[idx]) : !pfile_is_cond(&p->file[idx]))
         return -1;

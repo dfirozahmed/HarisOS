@@ -689,12 +689,10 @@ static void reset(void)
     PROC.parent = -1;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         PROC.child[i] = 0;
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
-    {
-        PROC.file[i].node = -1;
-        PROC.file[i].pos = 0;
-        PROC.file[i].flags = 0;
-    }
+    kfree(PROC.file); /* a new process: the list of open files starts with PROCESS_FILES_FIRST free entries */
+    PROC.file = 0;
+    PROC.file_cap = 0;
+    CHECK(process_files_init(&PROC) == 0);
     READ_CALLS = 0;
     host_uaccess = 0;
 }
@@ -718,7 +716,7 @@ static void cond_signaller(void)
 }
 static void cond_broadcaster(void) { cond_broadcast(usync_cond(pfile_usync(&PROC.file[1]))); BLOCK_ACTION = 0; }
 static void sem_poster(void) { sem_post(pfile_sem(&PROC.file[0])); BLOCK_ACTION = 0; }
-static void pipe_feed_two(void) { int p = -1; for (int i = 0; i < PROCESS_MAX_FILES; i++) if (PROC.file[i].node >= PROCESS_PIPE_NODE && PROC.file[i].node < PROCESS_MQ_NODE && !(PROC.file[i].flags & PFILE_WRITE)) p = pfile_pipe(&PROC.file[i]); if (p >= 0) pipe_write(p, "ok", 2); BLOCK_ACTION = 0; }
+static void pipe_feed_two(void) { int p = -1; for (int i = 0; i < PROC.file_cap; i++) if (PROC.file[i].node >= PROCESS_PIPE_NODE && PROC.file[i].node < PROCESS_MQ_NODE && !(PROC.file[i].flags & PFILE_WRITE)) p = pfile_pipe(&PROC.file[i]); if (p >= 0) pipe_write(p, "ok", 2); BLOCK_ACTION = 0; }
 /* what the compositor does while the program sleeps in SYS_GUI_EVENT: the user turns the wheel / closes the window */
 static int GUI_TEST_HANDLE;
 static void gui_poster(void) { GuiEvent e = {GUI_EV_WHEEL, 3, 0, 0, 0, 0, 0, 0}; gui_post(GUI_TEST_HANDLE, &e); BLOCK_ACTION = 0; }
@@ -951,6 +949,47 @@ int main(void)
     BLOCK_FROM = 0;
     CHECK(host_uaccess == 0);
 
+    /* the list of open files starts small, grows by doubling without losing its entries, and gives up cleanly without memory */
+    reset();
+    {
+        CHECK(PROC.file_cap == PROCESS_FILES_FIRST);
+        int f[2 * PROCESS_FILES_FIRST + 2];
+        for (int i = 0; i < PROCESS_FILES_FIRST + 1; i++)
+        {
+            f[i] = (int)call(SYS_OPEN, U("HELLO.ELF"), 0, 0);
+            CHECK(f[i] == PROCESS_FD_FIRST + i);
+        }
+        CHECK(PROC.file_cap == 2 * PROCESS_FILES_FIRST);                                     /* the 9th open made it grow ... */
+        CHECK(call(SYS_SEEK, (ull)f[0], 0, 0) == 0 && call(SYS_CLOSE, (ull)f[PROCESS_FILES_FIRST], 0, 0) == 0); /* ... and the old entries work */
+        CHECK(PROC.file[PROCESS_FILES_FIRST].node < 0);
+
+        /* every entry in use and the heap empty: open and pipe fail and leave nothing behind (not even the entry pipe held for a moment) */
+        for (int i = PROCESS_FILES_FIRST; i < 2 * PROCESS_FILES_FIRST; i++)
+            CHECK(call(SYS_OPEN, U("HELLO.ELF"), 0, 0) == PROCESS_FD_FIRST + i);
+        HEAP_FAIL = 1;
+        int pfd[2];
+        CHECK(call(SYS_OPEN, U("HELLO.ELF"), 0, 0) == -1 && call(SYS_PIPE, U(pfd), 0, 0) == -1 && pipe_in_use() == 0);
+        CHECK(PROC.file_cap == 2 * PROCESS_FILES_FIRST);
+        HEAP_FAIL = 0;
+        CHECK(call(SYS_CLOSE, (ull)PROCESS_FD_FIRST + 3, 0, 0) == 0);                       /* one free entry, none to grow into */
+        HEAP_FAIL = 1;
+        CHECK(call(SYS_PIPE, U(pfd), 0, 0) == -1 && pipe_in_use() == 0 && PROC.file[3].node < 0);
+        HEAP_FAIL = 0;
+        CHECK(call(SYS_PIPE, U(pfd), 0, 0) == 0 && PROC.file_cap == 4 * PROCESS_FILES_FIRST && pfd[0] == PROCESS_FD_FIRST + 3); /* it grows when it can */
+        CHECK(call(SYS_CLOSE, (ull)pfd[0], 0, 0) == 0 && call(SYS_CLOSE, (ull)pfd[1], 0, 0) == 0 && pipe_in_use() == 0);
+
+        /* a process that ends gives the list back */
+        for (int i = 0; i < PROC.file_cap; i++)
+            pfile_close(&PROC.file[i]);
+        kfree(PROC.file);
+        PROC.file = 0;
+        PROC.file_cap = 0;
+        CURRENT_PROC = &PROC;
+        CHECK(call(SYS_CLOSE, PROCESS_FD_FIRST, 0, 0) == -1 && call(SYS_READ, PROCESS_FD_FIRST, U(pfd), 4) == -1); /* no list: nothing is open, no crash */
+        CHECK(call(SYS_OPEN, U("HELLO.ELF"), 0, 0) == PROCESS_FD_FIRST && PROC.file_cap == PROCESS_FILES_FIRST); /* the list is made again when needed */
+        CHECK(call(SYS_CLOSE, PROCESS_FD_FIRST, 0, 0) == 0);
+    }
+
     /* only PROCESS_MAX_FILES descriptors: the next open fails; closing makes room (the lowest free number comes first) */
     reset();
     int fds[PROCESS_MAX_FILES + 2];
@@ -967,7 +1006,7 @@ int main(void)
     CHECK(call(SYS_CLOSE, (ull)fds[0], 0, 0) == 0);
     CHECK(call(SYS_CLOSE, (ull)fds[0], 0, 0) == -1); /* twice */
     CHECK(call(SYS_READ, (ull)fds[0], U(data), 4) == -1 && call(SYS_SEEK, (ull)fds[0], 0, 0) == -1); /* closed: unusable */
-    CHECK(call(SYS_CLOSE, 99, 0, 0) == -1 && call(SYS_CLOSE, ~0ULL, 0, 0) == -1);
+    CHECK(call(SYS_CLOSE, PROCESS_MAX_FILES + 50, 0, 0) == -1 && call(SYS_CLOSE, ~0ULL, 0, 0) == -1);
     CHECK(call(SYS_CLOSE, 0, 0, 0) == 0 && call(SYS_CLOSE, 1, 0, 0) == 0 && call(SYS_CLOSE, 2, 0, 0) == 0); /* the console: no-op */
 
     /* descriptors 0..2 are not files */
@@ -1484,7 +1523,7 @@ int main(void)
                 break;
         }
         CHECK(made == 4 && pipe_in_use() == 4);
-        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        for (int i = 0; i < PROC.file_cap; i++)
             pfile_close(&PROC.file[i]);
         CHECK(pipe_in_use() == 0);
         CURRENT_PROC = 0;
@@ -1510,7 +1549,7 @@ int main(void)
         memset(rb, 0, sizeof(rb));
         CHECK(call(SYS_READ, 0, U(rb), 64) == 8 && strcmp(rb, "via fd 1") == 0);
         PROC.stdio[0] = PROC.stdio[1] = -1;
-        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        for (int i = 0; i < PROC.file_cap; i++)
             pfile_close(&PROC.file[i]);
         CHECK(pipe_in_use() == 0);
     }
@@ -1631,7 +1670,7 @@ int main(void)
         CHECK(PROC.stdio[0] == -1 && PROC.stdio[1] == -1 && PROC.stdio[2] == -1);
         call(SYS_CLOSE, (ull)rfd, 0, 0);
         int used = 0;
-        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        for (int i = 0; i < PROC.file_cap; i++)
             used += PROC.file[i].node >= 0;
         CHECK(used == 0);                                                                   /* nothing left behind */
         CHECK(call(SYS_UNLINK, U("/RAM Disk/dupw.txt"), 0, 0) == 0);
@@ -1952,7 +1991,7 @@ int main(void)
             call(SYS_CLOSE, (ull)held[i], 0, 0);
         /* a process that ends gives its queues back (process_release_files) */
         CHECK(mq_in_use() == 1);
-        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        for (int i = 0; i < PROC.file_cap; i++)
             pfile_close(&PROC.file[i]);
         CHECK(call(SYS_MQ_UNLINK, U("q"), 0, 0) == 0 && mq_in_use() == 0);
         /* a copy of a descriptor (fork, dup2) counts as a holder */
@@ -2035,7 +2074,7 @@ int main(void)
         pfile_close(&dup);
         CHECK(sem_in_use() == 0);
         c = call(SYS_SEM_OPEN, U("ends"), SYS_CREATE, 0);
-        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        for (int i = 0; i < PROC.file_cap; i++)
             pfile_close(&PROC.file[i]);                                            /* a process that ends */
         CHECK(call(SYS_SEM_UNLINK, U("ends"), 0, 0) == 0 && sem_in_use() == 0);
 
@@ -2120,7 +2159,7 @@ int main(void)
         CHECK(call(SYS_SYNC_UNLINK, U("lk"), 0, 0) == 0 && call(SYS_SYNC_UNLINK, U("lk"), 0, 0) == -1 && call(SYS_MUTEX_OPEN, U("lk"), 0, 0) == -1);
         CHECK(call(SYS_COND_OPEN, U("lk"), 0, 0) >= 3); /* the condition variable of that name is still there */
         CHECK(call(SYS_MUTEX_LOCK, (ull)m, 1, 0) == 0 && call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0); /* the unlinked mutex still works */
-        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        for (int i = 0; i < PROC.file_cap; i++)
             pfile_close(&PROC.file[i]); /* a process that ends */
         CHECK(usync_in_use() == 1); /* the condition variable's name is still linked */
         CHECK(call(SYS_SYNC_UNLINK, U("lk"), 1, 0) == 0 && usync_in_use() == 0);

@@ -20,7 +20,7 @@
  *   SYS_OPEN  (5)  rdi = pointer to a NUL-terminated path, rsi = flags (see SYS_O_*; 0 = read only). Returns a file
  *                  descriptor (3 and up) or -1. A path without '/' is a file name looked up in the top folder of every
  *                  drive ("HELLO.ELF"); a path starting with '/' is a VFS path ("/RAM Disk/Documents/readme.txt").
- *                  At most PROCESS_MAX_FILES files are open at once.
+ *                  At most PROCESS_MAX_FILES (1024) files, pipe ends, queues and so on are open at once.
  *   SYS_CLOSE (6)  rdi = fd. Returns 0, or -1 if it is not open. (Closing 0, 1 or 2 does nothing.)
  *   SYS_SEEK  (7)  rdi = fd, rsi = offset (signed), rdx = whence (0 = from the start, 1 = from the current position,
  *                  2 = from the end of the file). Returns the new position, or -1 (bad fd, bad whence, negative result).

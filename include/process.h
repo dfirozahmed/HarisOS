@@ -50,7 +50,8 @@ int process_start_elf(const char *name, const void *file, unsigned long long siz
 #define PROCESS_MAX_CHILDREN 8
 
 /* An open file of a process. */
-#define PROCESS_MAX_FILES 8
+#define PROCESS_MAX_FILES 1024 /* the most open files (and pipe ends, queues, ...) one process can have: a sanity cap, the list grows as needed */
+#define PROCESS_FILES_FIRST 8  /* entries a new process starts with */
 #define PROCESS_FD_FIRST 3 /* file descriptors 0, 1 and 2 are the console: input, output, errors (unless redirected) */
 #define PFILE_WRITE 1      /* opened for writing (SYS_O_WRITE): reads are refused */
 #define PFILE_APPEND 2     /* every write goes to the end */
@@ -166,11 +167,67 @@ typedef struct Process
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
      * rounded up). Lowering the break keeps the pages: they are given back when the process ends. */
     unsigned long long heap_base, heap_brk, heap_mapped, heap_limit;
-    ProcessFile file[PROCESS_MAX_FILES]; /* file descriptor PROCESS_FD_FIRST + index */
+    ProcessFile *file; /* file descriptor PROCESS_FD_FIRST + index: a heap block of file_cap entries, made with the process and grown when full */
+    int file_cap;
     int stdio[3]; /* fd 0, 1, 2: -1 = the console, else the index in file[] that stands in for it (shell redirection) */
 } Process;
 
 Process *process_current(void); /* the running process, NULL in a kernel thread */
+
+/* The list of open files. process_files_init: file_cap = PROCESS_FILES_FIRST entries, all free (node -1); 0, or -1 when the heap is out of memory.
+ * process_file_slot: the index of a free entry, the list doubled first if every entry is in use (up to PROCESS_MAX_FILES); -1 at the limit or when
+ * the heap is out of memory (nothing changed). A slot is named by its index, never by address: growing may move the list. process_files_copy:
+ * dst gets a list of its own with the same entries (the caller counts the new holders with pfile_ref); 0, or -1 for no memory. */
+static inline void pfile_clear(ProcessFile *f)
+{
+    f->node = -1;
+    f->pos = f->flags = 0;
+}
+
+static inline int process_files_init(Process *p)
+{
+    p->file = kmalloc((unsigned long long)PROCESS_FILES_FIRST * sizeof(ProcessFile));
+    p->file_cap = 0;
+    if (!p->file)
+        return -1;
+    p->file_cap = PROCESS_FILES_FIRST;
+    for (int i = 0; i < p->file_cap; i++)
+        pfile_clear(&p->file[i]);
+    return 0;
+}
+
+static inline int process_file_slot(Process *p)
+{
+    for (int i = 0; i < p->file_cap; i++)
+        if (p->file[i].node < 0)
+            return i;
+    if (p->file_cap >= PROCESS_MAX_FILES)
+        return -1;
+    int cap = p->file_cap ? p->file_cap * 2 : PROCESS_FILES_FIRST;
+    if (cap > PROCESS_MAX_FILES)
+        cap = PROCESS_MAX_FILES;
+    ProcessFile *n = krealloc(p->file, (unsigned long long)cap * sizeof(ProcessFile));
+    if (!n)
+        return -1;
+    int first = p->file_cap;
+    for (int i = first; i < cap; i++)
+        pfile_clear(&n[i]);
+    p->file = n;
+    p->file_cap = cap;
+    return first;
+}
+
+static inline int process_files_copy(Process *dst, const Process *src)
+{
+    dst->file = kmalloc((unsigned long long)src->file_cap * sizeof(ProcessFile));
+    dst->file_cap = 0;
+    if (!dst->file)
+        return -1;
+    for (int i = 0; i < src->file_cap; i++)
+        dst->file[i] = src->file[i];
+    dst->file_cap = src->file_cap;
+    return 0;
+}
 
 /* Close every open file of the process (pipes: the ends go back to the pipe). Called when it ends; harmless to call twice. */
 void process_release_files(Process *p);

@@ -233,15 +233,16 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         p->child[i] = 0;
     set_heap(p, heap_base);
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+    if (process_files_init(p) != 0)
     {
-        p->file[i].node = -1;
-        p->file[i].pos = 0;
-        p->file[i].flags = 0;
+        kfree(st);
+        kfree(p);
+        aspace_destroy(as);
+        return -1;
     }
     for (int k = 0; k < 3; k++)
         p->stdio[k] = -1;
-    if (sp->redirect) /* shell redirection: files stand in for fd 0, 1, 2 (more than PROCESS_MAX_FILES cannot happen: only 3) */
+    if (sp->redirect) /* shell redirection: files stand in for fd 0, 1, 2 (only 3 of the PROCESS_FILES_FIRST entries) */
     {
         int used = 0;
         for (int k = 0; k < 3; k++)
@@ -264,11 +265,12 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     if (id < 0)
     {
         kfree(st);
+        kfree(p->file);
         kfree(p);
         aspace_destroy(as);
         return -1;
     }
-    for (int i = 0; i < PROCESS_MAX_FILES; i++) /* the child holds the pipe ends it was given */
+    for (int i = 0; i < p->file_cap; i++) /* the child holds the pipe ends it was given */
         pfile_ref(&p->file[i]);
     STATS.started++;
     sp->pid = NEXT_PID++;
@@ -283,8 +285,11 @@ void process_release_files(Process *p)
         return;
     process_release_shm(p);
     gui_release_owner(p->pid); /* its windows go away with it */
-    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+    for (int i = 0; i < p->file_cap; i++)
         pfile_close(&p->file[i]);
+    kfree(p->file); /* the list itself (NULL is fine) */
+    p->file = 0;
+    p->file_cap = 0;
     for (int k = 0; k < 3; k++)
         p->stdio[k] = -1;
 }
@@ -458,6 +463,13 @@ int process_fork(u64 user_rip, u64 user_rsp)
         for (unsigned i = 0; i < sizeof(Process); i++)
             to[i] = from[i];
     }
+    if (process_files_copy(cp, p) != 0) /* the clone gets a list of open files of its own too (entries are copies, as before) */
+    {
+        kfree(st);
+        kfree(cp);
+        aspace_destroy(cas);
+        return -1;
+    }
     cp->shm = 0; /* the clone gets a list of its own: it maps the same segments, but unmaps them independently */
     cp->shm_cap = 0;
     if (p->shm_cap > 0)
@@ -465,6 +477,7 @@ int process_fork(u64 user_rip, u64 user_rsp)
         cp->shm = kmalloc((unsigned long long)p->shm_cap * sizeof(ProcessShm));
         if (!cp->shm)
         {
+            kfree(cp->file);
             kfree(st);
             kfree(cp);
             aspace_destroy(cas);
@@ -487,12 +500,13 @@ int process_fork(u64 user_rip, u64 user_rsp)
     if (id < 0)
     {
         kfree(st);
+        kfree(cp->file);
         kfree(cp->shm);
         kfree(cp);
         aspace_destroy(cas);
         return -1;
     }
-    for (int i = 0; i < PROCESS_MAX_FILES; i++) /* the child holds the pipe ends it inherited */
+    for (int i = 0; i < cp->file_cap; i++) /* the child holds the pipe ends it inherited */
         pfile_ref(&cp->file[i]);
     for (int i = 0; i < cp->shm_cap; i++) /* ... and the shared memory it inherited (the pages are shared by the clone) */
         if (cp->shm[i].seg >= 0)
