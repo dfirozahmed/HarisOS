@@ -19,9 +19,8 @@ static ProcessStats STATS;
 
 void process_stats(ProcessStats *out) { *out = STATS; }
 
-static int EXIT_CODE_OF[TASK_MAX]; /* by thread id */
-
-int process_exit_code(int id) { return id >= 0 && id < TASK_MAX ? EXIT_CODE_OF[id] : 0; }
+/* (the exit code of a process is kept in the record of its thread, see task_set_exit_code) */
+int process_exit_code(int id) { return task_exit_code(id); }
 
 int process_wait(int id)
 {
@@ -613,7 +612,7 @@ static void terminate(int tid, int sig)
         return;
     int code = 128 + sig;
     STATS.killed++;
-    EXIT_CODE_OF[tid] = code;
+    task_set_exit_code(tid, code);
     serial_puts("HARISOS: process ");
     serial_puts(task_name(tid));
     serial_puts(" ended by signal ");
@@ -652,7 +651,7 @@ int process_signal(int pid, int sig)
 {
     if (pid <= 0 || sig < 0 || sig > 31)
         return -1;
-    for (int tid = 1; tid < TASK_MAX; tid++)
+    for (int tid = 1; tid < task_slots(); tid++)
     {
         const Process *p = task_data_of(tid);
         if (p && p->pid == pid)
@@ -669,7 +668,7 @@ int process_priority(int pid, int prio)
 {
     if (pid <= 0 || prio < -1 || prio > TASK_PRIO_MAX)
         return -1;
-    for (int tid = 1; tid < TASK_MAX; tid++)
+    for (int tid = 1; tid < task_slots(); tid++)
     {
         const Process *p = task_data_of(tid);
         if (p && p->pid == pid)
@@ -687,7 +686,7 @@ void process_interrupt_console(int con)
 {
     if (con < 0)
         return;
-    for (int tid = 1; tid < TASK_MAX; tid++)
+    for (int tid = 1; tid < task_slots(); tid++)
     {
         const Process *p = task_data_of(tid);
         if (p && p->console == con)
@@ -698,7 +697,7 @@ void process_interrupt_console(int con)
 int process_info(int index, ProcessInfo *out)
 {
     int seen = 0;
-    for (int tid = 1; tid < TASK_MAX; tid++)
+    for (int tid = 1; tid < task_slots(); tid++)
     {
         const Process *p = task_data_of(tid);
         if (!p)
@@ -729,7 +728,7 @@ __attribute__((noreturn)) void process_exit(int code)
 {
     STATS.exited++;
     STATS.last_exit = code;
-    EXIT_CODE_OF[task_current()] = code;
+    task_set_exit_code(task_current(), code);
     serial_puts("HARISOS: process ");
     serial_puts(task_name(task_current()));
     serial_puts(" exited, code ");
@@ -753,7 +752,7 @@ static void hex64(char *out, u64 v) /* 16 hex digits and a NUL */
 __attribute__((noreturn)) void process_fault(const FaultFrame *f, u64 cr2)
 {
     STATS.faulted++;
-    EXIT_CODE_OF[task_current()] = -1;
+    task_set_exit_code(task_current(), -1);
     static char text[1024]; /* not on the stack: this runs on a small emergency stack for page faults */
     fault_format(text, sizeof(text), f, cr2);
     serial_puts("HARISOS: process ");

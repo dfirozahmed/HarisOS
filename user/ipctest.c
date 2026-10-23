@@ -67,7 +67,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(17, sys_shm_unmap((void *)m) == 0);
 
     /* limits and bad arguments */
-    CHECK(18, (long long)sys_shm_map("big", 1024 * 1024 + 1, SYS_CREATE) == -1);
+    CHECK(18, (long long)sys_shm_map("big", 16 * 1024 * 1024 + 1, SYS_CREATE) == -1); /* (the limit is 16 MiB) */
     CHECK(19, (long long)sys_shm_map("bad/name", 4096, SYS_CREATE) == -1 && (long long)sys_shm_map("", 4096, SYS_CREATE) == -1);
     volatile unsigned char *mb = sys_shm_map("megabyte", 1024 * 1024, SYS_CREATE);
     CHECK(20, (long long)mb != -1 && sys_shm_size((void *)mb) == 1024 * 1024);

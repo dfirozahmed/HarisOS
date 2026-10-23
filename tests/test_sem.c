@@ -62,10 +62,10 @@ int main(void)
     WOKEN_N = 0;
     sem_wait_for(s, 3);
     sem_wait_for(s, 5);
-    sem_wait_for(s, 99);                                                  /* out of range: ignored */
-    sem_wait_for(s, -1);
+    sem_wait_for(s, 99);                                                  /* a high id is fine: the set grows */
+    sem_wait_for(s, -1);                                                  /* not a thread: ignored */
     CHECK(WOKEN_N == 0);
-    CHECK(sem_post(s) == 0 && woke(3) && woke(5) && WOKEN_N == 2);
+    CHECK(sem_post(s) == 0 && woke(3) && woke(5) && woke(99) && WOKEN_N == 3);
     WOKEN_N = 0;
     CHECK(sem_post(s) == 0 && WOKEN_N == 0);                              /* the registration was used up */
 

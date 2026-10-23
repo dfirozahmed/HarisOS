@@ -24,6 +24,44 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
+/* the threads of a set as a bit mask (these tests only use small ids) */
+static unsigned mask_of(const TaskSet *s)
+{
+    unsigned m = 0;
+    for (int i = taskset_next(s, 0); i >= 0 && i < 32; i = taskset_next(s, i + 1))
+        m |= 1u << i;
+    return m;
+}
+
+/* The kernel heap (the table of threads and the sets of sleepers use it): host memory, counted, with a switch that makes it fail. */
+static int HEAP_LIVE, HEAP_FAIL;
+void *kmalloc(unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *p = calloc(1, size ? (size_t)size : 1);
+    if (p)
+        HEAP_LIVE++;
+    return p;
+}
+void kfree(void *p)
+{
+    if (p)
+    {
+        free(p);
+        HEAP_LIVE--;
+    }
+}
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_LIVE++;
+    return n;
+}
+
 volatile int host_if = 1;
 static int BLOCKS_OUT;
 
@@ -166,10 +204,10 @@ int main(void)
     CHECK(rw_wrlock(&RW) == 0);
     int rd = task_create("RD", rd_once, (void *)5);
     task_yield();
-    CHECK(task_state(rd) == TASK_BLOCKED && LOGN == 0 && RW.rwaiters == (1u << rd));
+    CHECK(task_state(rd) == TASK_BLOCKED && LOGN == 0 && mask_of(&RW.rwaiters) == (1u << rd));
     CHECK(!task_others_ready()); /* asleep, not spinning */
     CHECK(rw_wrunlock(&RW) == 0);
-    CHECK(task_state(rd) == TASK_READY && RW.rwaiters == 0);
+    CHECK(task_state(rd) == TASK_READY && mask_of(&RW.rwaiters) == 0);
     drain();
     CHECK(LOGN == 1 && LOG[0] == 5 && RW.readers == 0 && task_count() == 1);
 
@@ -179,15 +217,15 @@ int main(void)
     task_yield(); /* RA is inside, asleep */
     int wa = task_create("WA", wr_once, (void *)10);
     task_yield(); /* WA waits for RA */
-    CHECK(task_state(wa) == TASK_BLOCKED && RW.wwaiters == (1u << wa) && RW.readers == 1);
+    CHECK(task_state(wa) == TASK_BLOCKED && mask_of(&RW.wwaiters) == (1u << wa) && RW.readers == 1);
     int rb = task_create("RB", rd_once, (void *)2);
     task_yield(); /* RB would share with RA, but a writer is waiting: it waits too */
-    CHECK(task_state(rb) == TASK_BLOCKED && RW.rwaiters == (1u << rb) && RW.readers == 1 && LOGN == 1);
+    CHECK(task_state(rb) == TASK_BLOCKED && mask_of(&RW.rwaiters) == (1u << rb) && RW.readers == 1 && LOGN == 1);
     CHECK(rw_tryrdlock(&RW) == -1); /* the same for a try */
     task_wake(ra);
     drain();
     CHECK(LOGN == 4 && LOG[0] == 1 && LOG[1] == 101 && LOG[2] == 10 && LOG[3] == 2); /* RA, RA out, then the writer, then the reader */
-    CHECK(RW.readers == 0 && RW.writer == -1 && RW.wwaiters == 0 && RW.rwaiters == 0 && task_count() == 1);
+    CHECK(RW.readers == 0 && RW.writer == -1 && mask_of(&RW.wwaiters) == 0 && mask_of(&RW.rwaiters) == 0 && task_count() == 1);
     (void)rb;
 
     /* ---- writers go in turn, the best waiting one first ---- */
@@ -196,7 +234,7 @@ int main(void)
     int wl = task_create("WLOW", wr_once, (void *)1);
     int wh = task_create("WHIGH", wr_once, (void *)2);
     CHECK(task_set_priority(wl, 0) == 0 && task_set_priority(wh, 4) == 0);
-    for (int i = 0; i < 200 && RW.wwaiters != ((1u << wl) | (1u << wh)); i++)
+    for (int i = 0; i < 200 && mask_of(&RW.wwaiters) != ((1u << wl) | (1u << wh)); i++)
         task_yield(); /* the low one only gets to run (and wait) after aging */
     CHECK(rw_wrunlock(&RW) == 0);
     for (int i = 0; i < 2000 && task_count() > 1; i++)
@@ -221,7 +259,7 @@ int main(void)
     task_yield();
     int wq = task_create("WQ", wr_once, (void *)3);
     task_yield(); /* the writer waits for the reader */
-    CHECK(task_state(wq) == TASK_BLOCKED && RW.wwaiters == (1u << wq));
+    CHECK(task_state(wq) == TASK_BLOCKED && mask_of(&RW.wwaiters) == (1u << wq));
     CHECK(rw_tryrdlock(&RW) == -1);
     CHECK(task_kill(wq) == 0);
     drain();

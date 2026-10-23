@@ -30,7 +30,7 @@ void pipe_ref(int p, int writer);
 void pipe_unref(int p, int writer);
 int pipe_read(int p, void *buf, unsigned len);
 int pipe_write(int p, const void *buf, unsigned len);
-void pipe_wait(int p, int writer_side, int task); /* wake `task` at the next change that could unblock a reader (0) / writer (1) */
+int pipe_wait(int p, int writer_side, int task); /* wake `task` at the next change that could unblock a reader (0) / writer (1). 0, or -1 (no memory to remember it: the caller must not task_block, it yields and tries again) */
 
 int pipe_in_use(void);        /* pipes that exist (for the leak check) */
 int pipe_valid(int p);        /* is p a pipe that exists */

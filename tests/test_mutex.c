@@ -24,6 +24,44 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
+/* the threads of a set as a bit mask (these tests only use small ids) */
+static unsigned mask_of(const TaskSet *s)
+{
+    unsigned m = 0;
+    for (int i = taskset_next(s, 0); i >= 0 && i < 32; i = taskset_next(s, i + 1))
+        m |= 1u << i;
+    return m;
+}
+
+/* The kernel heap (the table of threads and the sets of sleepers use it): host memory, counted, with a switch that makes it fail. */
+static int HEAP_LIVE, HEAP_FAIL;
+void *kmalloc(unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *p = calloc(1, size ? (size_t)size : 1);
+    if (p)
+        HEAP_LIVE++;
+    return p;
+}
+void kfree(void *p)
+{
+    if (p)
+    {
+        free(p);
+        HEAP_LIVE--;
+    }
+}
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_LIVE++;
+    return n;
+}
+
 volatile int host_if = 1;
 static int BLOCKS_OUT;
 
@@ -212,9 +250,9 @@ int main(void)
     CHECK(!task_others_ready()); /* asleep, not spinning */
     task_yield();
     CHECK(task_state(w) == TASK_BLOCKED && LOGN == 0);
-    CHECK(M.waiters == (1u << w));
+    CHECK(mask_of(&M.waiters) == (1u << w));
     CHECK(mutex_unlock(&M) == 0);
-    CHECK(task_state(w) == TASK_READY && M.waiters == 0);
+    CHECK(task_state(w) == TASK_READY && mask_of(&M.waiters) == 0);
     drain();
     CHECK(LOGN == 1 && LOG[0] == 5 && M.owner == -1 && task_count() == 1);
 
@@ -226,7 +264,7 @@ int main(void)
     int t3 = task_create("MID", lock_worker, (void *)3);
     CHECK(t1 > 0 && t2 > 0 && t3 > 0);
     CHECK(task_set_priority(t1, 0) == 0 && task_set_priority(t2, 4) == 0 && task_set_priority(t3, 3) == 0);
-    for (int i = 0; i < 200 && M.waiters != ((1u << t1) | (1u << t2) | (1u << t3)); i++)
+    for (int i = 0; i < 200 && mask_of(&M.waiters) != ((1u << t1) | (1u << t2) | (1u << t3)); i++)
         task_yield(); /* the lowest one only gets to run (and block) after aging */
     CHECK(task_state(t1) == TASK_BLOCKED && task_state(t2) == TASK_BLOCKED && task_state(t3) == TASK_BLOCKED);
     CHECK(mutex_unlock(&M) == 0);
@@ -241,7 +279,7 @@ int main(void)
     int k1 = task_create("KILLED", lock_worker, (void *)1);
     int k2 = task_create("LIVE", lock_worker, (void *)2);
     CHECK(task_set_priority(k1, 4) == 0);
-    for (int i = 0; i < 200 && M.waiters != ((1u << k1) | (1u << k2)); i++)
+    for (int i = 0; i < 200 && mask_of(&M.waiters) != ((1u << k1) | (1u << k2)); i++)
         task_yield(); /* k1 blocks first and lends its priority to us: k2 only runs after aging */
     CHECK(task_state(k1) == TASK_BLOCKED && task_state(k2) == TASK_BLOCKED);
     CHECK(task_kill(k1) == 0);
@@ -264,14 +302,14 @@ int main(void)
     CHECK(cond_wait(&CV, &M) == -1); /* the mutex is not held */
     cond_signal(&CV);                /* nobody waits: nothing happens, nothing is remembered */
     cond_broadcast(&CV);
-    CHECK(CV.waiters == 0);
+    CHECK(mask_of(&CV.waiters) == 0);
 
     LOGN = 0;
     FLAG = 0;
     int c1 = task_create("C1", wait_worker, (void *)1);
     task_yield();
     CHECK(task_state(c1) == TASK_BLOCKED && M.owner == -1); /* waiting releases the mutex */
-    CHECK(CV.waiters == (1u << c1));
+    CHECK(mask_of(&CV.waiters) == (1u << c1));
     task_yield();
     CHECK(task_state(c1) == TASK_BLOCKED && LOGN == 0);
     cond_signal(&CV); /* the flag is still 0: C1 wakes, checks, waits again */
@@ -308,7 +346,7 @@ int main(void)
         still += task_state(d[i]) == TASK_BLOCKED;
     CHECK(still == 2);
     cond_broadcast(&CV);
-    CHECK(CV.waiters == 0);
+    CHECK(mask_of(&CV.waiters) == 0);
     drain();
     CHECK(LOGN == 3 && task_count() == 1 && M.owner == -1);
 
@@ -397,7 +435,7 @@ int main(void)
         CHECK(mutex_would_deadlock(&M2, da) == 1);       /* A waiting for M2: B waits for M1, A holds it */
         CHECK(mutex_would_deadlock(&M2, 0) == 0);        /* the main thread holds nothing B waits for */
         CHECK(mutex_would_deadlock(&M1, db) == 0);       /* B already waits there: its holder A waits for nothing yet */
-        CHECK(mutex_would_deadlock(&M2, -1) == 0 && mutex_would_deadlock(&M2, TASK_MAX) == 0);
+        CHECK(mutex_would_deadlock(&M2, -1) == 0 && mutex_would_deadlock(&M2, task_slots()) == 0);
         task_wake(da);
         drain();
         CHECK(DL_RESULT == -1);                          /* told, not put to sleep for ever */

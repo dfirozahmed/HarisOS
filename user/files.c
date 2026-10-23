@@ -76,7 +76,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(35, sys_write(7, "x", 1) == -1);                    /* not a console descriptor */
     CHECK(36, sys_write(1, "", 0) == 0);
 
-    /* too many open files: all slots are taken, the next open fails, and one close makes room */
+    /* more open files than the 8 the table once held: the list of descriptors grows, and every close makes room again */
     long long fds[8];
     int opened = 0;
     for (int i = 0; i < 8; i++)
@@ -85,7 +85,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
         if (fds[i] >= 0)
             opened++;
     }
-    CHECK(37, opened >= 7 && opened <= 8); /* fd was one of the slots: the others fill the rest */
+    CHECK(37, opened == 8); /* (it used to refuse the last one or two) */
     for (int i = 0; i < 8; i++)
         if (fds[i] >= 0)
             sys_close((int)fds[i]);

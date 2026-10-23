@@ -137,7 +137,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(19, sys_wait(pid, &st) == pid && st == 0);
     sys_close(b[0]);
 
-    /* the limit on children, and every one of them can be waited for */
+    /* many children at once (there used to be a limit of 8), and every one of them can be waited for */
     long long many[12];
     int count = 0;
     while (count < 12)
@@ -149,7 +149,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
             break;
         many[count++] = c;
     }
-    CHECK(20, count >= 3 && count <= 8);
+    CHECK(20, count == 12);
     int all = 1;
     for (int i = 0; i < count; i++)
         all = all && sys_wait(many[i], &st) == many[i] && st == 0;

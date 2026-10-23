@@ -76,6 +76,7 @@ set(KERNEL_SOURCES
     kernel/core/pipe.c              # pipes: the byte queue between processes (host-tested)
     kernel/core/shm.c               # shared memory segments (host-tested)
     kernel/core/mq.c                # message queues (host-tested)
+    kernel/core/taskset.c           # sets of threads that sleep on an object (host-tested)
     kernel/core/gui.c               # GUI surfaces for user programs: pixels in shared memory, event queues (host-tested)
     kernel/core/sem.c               # semaphores (host-tested)
     kernel/core/mutex.c             # kernel mutex + condition variable (host-tested)

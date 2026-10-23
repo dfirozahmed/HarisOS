@@ -2,12 +2,13 @@
 #include "pipe.h"
 #include "heap.h"
 #include "task.h"
+#include "taskset.h"
 
 typedef struct
 {
     int readers, writers; /* holders of each end (several processes can hold one, after a spawn) */
     unsigned head, count; /* the queue is buf[head .. head + count), wrapping */
-    unsigned rwait, wwait; /* bit i = thread i waits to read / to write */
+    TaskSet rwait, wwait; /* the threads that wait to read / to write */
     unsigned char buf[PIPE_SIZE];
 } Pipe;
 
@@ -58,19 +59,12 @@ int pipe_new(void)
         return -1;
     p->readers = p->writers = 0;
     p->head = p->count = 0;
-    p->rwait = p->wwait = 0;
+    p->rwait = p->wwait = (TaskSet)TASKSET_INIT;
     PIPES[i] = p;
     return i;
 }
 
-static void wake_all(unsigned *mask)
-{
-    unsigned m = *mask;
-    *mask = 0;
-    for (int t = 0; t < TASK_MAX; t++)
-        if (m & (1u << t))
-            task_wake(t);
-}
+static void wake_all(TaskSet *set) { taskset_wake_all(set); }
 
 void pipe_ref(int p, int writer)
 {
@@ -98,6 +92,8 @@ void pipe_unref(int p, int writer)
     if (q->readers == 0 && q->writers == 0)
     {
         PIPES[p] = 0;
+        taskset_free(&q->rwait);
+        taskset_free(&q->wwait);
         kfree(q);
     }
 }
@@ -141,13 +137,10 @@ int pipe_write(int p, const void *buf, unsigned len)
     return (int)n;
 }
 
-void pipe_wait(int p, int writer_side, int task)
+int pipe_wait(int p, int writer_side, int task)
 {
     Pipe *q = get(p);
-    if (!q || task < 0 || task >= TASK_MAX)
-        return;
-    if (writer_side)
-        q->wwait |= 1u << task;
-    else
-        q->rwait |= 1u << task;
+    if (!q || task < 0)
+        return 0;
+    return taskset_add(writer_side ? &q->wwait : &q->rwait, task);
 }

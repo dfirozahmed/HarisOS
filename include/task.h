@@ -30,7 +30,7 @@
 #ifndef HARIS_TASK_H
 #define HARIS_TASK_H
 
-#define TASK_MAX 16
+#define TASK_LIMIT 4096 /* threads that can exist at once: the table of threads is grown (16 slots at a time) as they are created, up to this */
 #define TASK_STACK_SIZE (32 * 1024) /* usable bytes; a 4 KiB guard page (unmapped) sits below, see paging.h */
 #define TASK_NAME_MAX 16
 
@@ -39,8 +39,8 @@
 
 /* Priorities: the scheduler gives the CPU to the READY thread with the highest priority; equal ones take turns (round robin).
  * A thread that is READY but passed over TASK_AGE_PASSES times gets one level of boost, so a busy high-priority thread cannot
- * starve the others for ever (the boost is lost when it runs). TASK_AGE_PASSES >= TASK_MAX keeps plain round robin exact among
- * threads of equal priority: none of them waits that long. */
+ * starve the others for ever (the boost is lost when it runs). The limit is TASK_AGE_PASSES, or the number of thread slots if that is more:
+ * it keeps plain round robin exact among threads of equal priority, none of them waits that long. */
 #define TASK_PRIO_MIN 0
 #define TASK_PRIO_DEFAULT 2 /* every new thread, and the main loop */
 #define TASK_PRIO_MAX 4
@@ -124,8 +124,18 @@ __attribute__((noreturn)) void task_exit(void);
 
 int task_current(void); /* id of the running thread */
 int task_count(void);   /* threads that are not finished */
+int task_slots(void);   /* how many thread slots the table has now (it grows as threads are created, never shrinks): ids 0 .. task_slots()-1 are valid */
 TaskState task_state(int id);
 const char *task_name(int id); /* NULL for an unused slot */
+
+/* Two pointers a thread carries for mutex.c (the mutexes it holds, the mutex it sleeps on), valid for any id below task_slots() whatever its
+ * state; NULL for a bad id. A new thread starts with both NULL. */
+void **task_held_slot(int id);
+void **task_blocked_slot(int id);
+/* How the process of thread `id` ended (process.c): set when it ends, read after the thread is gone, until the slot is used by a new thread
+ * (which starts with 0). */
+void task_set_exit_code(int id, int code);
+int task_exit_code(int id);
 unsigned long long task_switches(void);
 unsigned long long task_ticks(void); /* how many timer interrupts task_tick() has seen (a boot log diagnostic) */
 /* The name of the thread whose stack guard page contains addr (a page fault with CR2 = addr means that thread's stack

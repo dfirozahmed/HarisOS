@@ -59,12 +59,12 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     long long d = sys_spawn("CRASH.ELF", 0);
     CHECK(22, d > 0 && sys_wait(d, &st) == d && st == -1);
 
-    /* many children at once, and the limit */
+    /* many children at once: the list of children and the table of threads grow (there used to be a limit of 8 children) */
     long long kids[16];
     int n = 0;
     while (n < 12 && (kids[n] = sys_spawn("HELLO.ELF", 0)) > 0)
         n++;
-    CHECK(23, n >= 3 && n <= 8); /* stopped by a refusal: PROCESS_MAX_CHILDREN is 8 (fewer if the thread slots run out) */
+    CHECK(23, n == 12); /* all twelve were started: nothing refused them */
     int good = 1;
     for (int i = 0; i < n; i++)
     {

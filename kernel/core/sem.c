@@ -2,12 +2,13 @@
 #include "sem.h"
 #include "heap.h"
 #include "task.h"
+#include "taskset.h"
 
 typedef struct
 {
     int linked, refs;
     unsigned value;
-    unsigned waiters; /* bit i = thread i sleeps in a wait */
+    TaskSet waiters; /* the threads that sleep in a wait */
     char name[SEM_NAME_MAX];
 } Semaphore;
 
@@ -67,6 +68,7 @@ static int grow_table(void)
 
 static void release(int s)
 {
+    taskset_free(&SEMS[s]->waiters);
     kfree(SEMS[s]);
     SEMS[s] = 0;
 }
@@ -90,7 +92,7 @@ int sem_open(const char *name, unsigned flags, unsigned initial)
     m->linked = 1;
     m->refs = 0;
     m->value = initial;
-    m->waiters = 0;
+    m->waiters = (TaskSet)TASKSET_INIT;
     int n = 0;
     for (; name[n]; n++)
         m->name[n] = name[n];
@@ -145,19 +147,16 @@ int sem_post(int s)
     if (!m || m->value >= SEM_VALUE_MAX)
         return -1;
     m->value++;
-    unsigned w = m->waiters;
-    m->waiters = 0;
-    for (int t = 0; t < TASK_MAX; t++)
-        if (w & (1u << t))
-            task_wake(t);
+    taskset_wake_all(&m->waiters);
     return 0;
 }
 
-void sem_wait_for(int s, int task)
+int sem_wait_for(int s, int task)
 {
     Semaphore *m = get(s);
-    if (m && task >= 0 && task < TASK_MAX)
-        m->waiters |= 1u << task;
+    if (!m || task < 0)
+        return 0;
+    return taskset_add(&m->waiters, task);
 }
 
 int sem_value(int s)

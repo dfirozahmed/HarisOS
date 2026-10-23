@@ -24,6 +24,35 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
+/* The kernel heap (the table of threads and the sets of sleepers use it): host memory, counted, with a switch that makes it fail. */
+static int HEAP_LIVE, HEAP_FAIL;
+void *kmalloc(unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *p = calloc(1, size ? (size_t)size : 1);
+    if (p)
+        HEAP_LIVE++;
+    return p;
+}
+void kfree(void *p)
+{
+    if (p)
+    {
+        free(p);
+        HEAP_LIVE--;
+    }
+}
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_LIVE++;
+    return n;
+}
+
 /* ---- heap, clock, interrupt flag ---- */
 volatile int host_if = 1; /* irq.h (HARIS_HOST): the interrupt flag of this pretend CPU */
 
@@ -564,17 +593,32 @@ int main(void)
     task_sleep_ms(50);
     CHECK(task_current() == 0 && task_state(0) == TASK_RUNNING);
 
-    /* slots are reused: far more threads than TASK_MAX over time, and TASK_MAX - 1 at once */
+    /* the table of threads grows with them (16 slots at a time): 40 at once, ten times over, and a slot that is free again is reused */
     volatile int ran = 0;
+    CHECK(task_slots() == 16);
     for (int round = 0; round < 10; round++)
     {
-        for (int i = 0; i < TASK_MAX - 1; i++)
+        for (int i = 0; i < 40; i++)
             CHECK(task_create("Q", quick_worker, (void *)&ran) > 0);
-        CHECK(task_create("Q", quick_worker, (void *)&ran) == -1); /* full */
         drain();
     }
-    CHECK(ran == 10 * (TASK_MAX - 1));
+    CHECK(ran == 400 && task_slots() == 48 && task_count() == 1); /* (40 threads and the main thread need 3 chunks) */
     CHECK(BLOCKS_OUT == 0);
+
+    /* every slot in use and no memory for another chunk: the new thread is refused and its stack block goes back at once */
+    {
+        int fill = task_slots() - task_count();
+        for (int i = 0; i < fill; i++)
+            CHECK(task_create("Q", quick_worker, (void *)&ran) > 0);
+        int blocks_full = BLOCKS_OUT, heap_full = HEAP_LIVE;
+        HEAP_FAIL = 1;
+        CHECK(task_create("Q", quick_worker, (void *)&ran) == -1);
+        HEAP_FAIL = 0;
+        CHECK(BLOCKS_OUT == blocks_full && HEAP_LIVE == heap_full && task_slots() == 48);
+        CHECK(task_create("Q", quick_worker, (void *)&ran) > 0 && task_slots() == 64); /* with memory the table grows */
+        drain();
+        CHECK(BLOCKS_OUT == 0);
+    }
 
     /* ---- the timer tick ---- */
     /* the main loop is never preempted, whatever the tick count */
@@ -738,7 +782,7 @@ int main(void)
         task_yield();
         CHECK(BLK_STAGE == 2 && task_state(b) == TASK_BLOCKED); /* it blocked again */
         task_wake(-1);
-        task_wake(TASK_MAX);
+        task_wake(task_slots());
         task_wake(15); /* an unused slot */
         CHECK(task_state(b) == TASK_BLOCKED);
         task_wake(b);
@@ -787,20 +831,22 @@ int main(void)
     PAGING_FAIL = 0;
     CHECK(ran == 1 && GUARDS_OUT == 0 && WRONG_UNGUARD == 0 && BLOCKS_OUT == 0);
 
-    /* a full table gives the block back, guard not touched */
-    for (int i = 0; i < TASK_MAX - 1; i++)
+    /* a full table that cannot grow gives the block back, guard not touched */
+    for (int i = 0, n = task_slots() - task_count(); i < n; i++)
         task_create("Q", quick_worker, (void *)&ran);
     int guards_before = GUARDS_OUT;
+    HEAP_FAIL = 1;
     CHECK(task_create("Q", quick_worker, (void *)&ran) == -1);
+    HEAP_FAIL = 0;
     CHECK(GUARDS_OUT == guards_before);
     drain();
     CHECK(GUARDS_OUT == 0 && BLOCKS_OUT == 0);
 
     /* ---- priorities ---- */
     {
-        CHECK(task_priority(0) == TASK_PRIO_DEFAULT && task_priority(5) == -1 && task_priority(-1) == -1 && task_priority(TASK_MAX) == -1);
+        CHECK(task_priority(0) == TASK_PRIO_DEFAULT && task_priority(5) == -1 && task_priority(-1) == -1 && task_priority(task_slots()) == -1);
         CHECK(task_set_priority(5, 3) == -1);               /* unused slot */
-        CHECK(task_set_priority(-1, 3) == -1 && task_set_priority(TASK_MAX, 3) == -1);
+        CHECK(task_set_priority(-1, 3) == -1 && task_set_priority(task_slots(), 3) == -1);
         CHECK(task_set_priority(0, TASK_PRIO_MAX + 1) == -1 && task_set_priority(0, TASK_PRIO_MIN - 1) == -1);
         CHECK(task_priority(0) == TASK_PRIO_DEFAULT);       /* a refused change leaves it alone */
 

@@ -5,12 +5,36 @@
 
 /* Interrupts must be off in all of these helpers. */
 
-/* Priority inheritance. Every thread has the list of mutexes it holds (Mutex.next_held) and the mutex it sleeps on (if any). Whenever a
- * thread starts or stops waiting for a mutex, or a mutex is let go, the holder's borrowed priority is worked out again: the best
- * effective priority among all the threads that wait for any mutex it still holds (task_set_inherited). A holder that is itself
- * waiting for another mutex passes the priority on down the chain (so the borrowing is transitive). */
-static Mutex *HELD[TASK_MAX];
-static Mutex *BLOCKED_ON[TASK_MAX];
+/* Priority inheritance. Every thread has the list of mutexes it holds (Mutex.next_held) and the mutex it sleeps on (if any); the scheduler's
+ * record of the thread keeps both pointers (task_held_slot / task_blocked_slot). Whenever a thread starts or stops waiting for a mutex, or
+ * a mutex is let go, the holder's borrowed priority is worked out again: the best effective priority among all the threads that wait for
+ * any mutex it still holds (task_set_inherited). A holder that is itself waiting for another mutex passes the priority on down the chain
+ * (so the borrowing is transitive). */
+static Mutex *held_of(int id)
+{
+    void **s = task_held_slot(id);
+    return s ? (Mutex *)*s : 0;
+}
+
+static void set_held(int id, Mutex *m)
+{
+    void **s = task_held_slot(id);
+    if (s)
+        *s = m;
+}
+
+static Mutex *blocked_of(int id)
+{
+    void **s = task_blocked_slot(id);
+    return s ? (Mutex *)*s : 0;
+}
+
+static void set_blocked(int id, Mutex *m)
+{
+    void **s = task_blocked_slot(id);
+    if (s)
+        *s = m;
+}
 
 static int alive(int id)
 {
@@ -20,8 +44,9 @@ static int alive(int id)
 
 static void unlink_held(Mutex *m, int owner)
 {
-    if (owner >= 0 && owner < TASK_MAX)
-        for (Mutex **pp = &HELD[owner]; *pp; pp = &(*pp)->next_held)
+    void **slot = task_held_slot(owner);
+    if (slot)
+        for (Mutex **pp = (Mutex **)slot; *pp; pp = &(*pp)->next_held)
             if (*pp == m)
             {
                 *pp = m->next_held;
@@ -33,8 +58,8 @@ static void unlink_held(Mutex *m, int owner)
 static void take(Mutex *m, int me)
 {
     m->owner = me;
-    m->next_held = HELD[me];
-    HELD[me] = m;
+    m->next_held = held_of(me);
+    set_held(me, m);
 }
 
 static void drop(Mutex *m)
@@ -46,9 +71,9 @@ static void drop(Mutex *m)
 static void recompute(int owner)
 {
     int eff = -1;
-    for (const Mutex *h = HELD[owner]; h; h = h->next_held)
-        for (int i = 0; i < TASK_MAX; i++)
-            if ((h->waiters & (1u << i)) && i != owner && alive(i))
+    for (const Mutex *h = held_of(owner); h; h = h->next_held)
+        for (int i = taskset_next(&h->waiters, 0); i >= 0; i = taskset_next(&h->waiters, i + 1))
+            if (i != owner && alive(i))
             {
                 int p = task_effective_priority(i);
                 if (p > eff)
@@ -61,28 +86,27 @@ static void recompute(int owner)
  * threads waiting for each other is a deadlock, which this does not try to solve, but it must not loop for ever). */
 static void propagate(Mutex *m)
 {
-    for (int depth = 0; m && depth < TASK_MAX; depth++)
+    int limit = task_slots();
+    for (int depth = 0; m && depth < limit; depth++)
     {
         int o = m->owner;
-        if (o < 0 || o >= TASK_MAX)
+        if (o < 0 || !task_held_slot(o))
             break;
         recompute(o);
-        m = BLOCKED_ON[o];
+        m = blocked_of(o);
     }
 }
 
-/* The waiter in `mask` with the highest priority (lowest id among equals), or -1. Threads that are no longer blocked (ended or
- * killed while waiting) are dropped from the mask, so a wake-up is never spent on a thread that cannot use it. */
-static int best_waiter(unsigned *mask)
+/* The waiter in `set` with the highest priority (lowest id among equals), or -1. Threads that are no longer blocked (ended or killed
+ * while waiting) are dropped from the set, so a wake-up is never spent on a thread that cannot use it. */
+static int best_waiter(TaskSet *set)
 {
     int best = -1, best_prio = -1;
-    for (int i = 0; i < TASK_MAX; i++)
+    for (int i = taskset_next(set, 0); i >= 0; i = taskset_next(set, i + 1))
     {
-        if (!(*mask & (1u << i)))
-            continue;
         if (task_state(i) != TASK_BLOCKED)
         {
-            *mask &= ~(1u << i);
+            taskset_remove(set, i);
             continue;
         }
         int p = task_effective_priority(i);
@@ -95,12 +119,12 @@ static int best_waiter(unsigned *mask)
     return best;
 }
 
-static void wake_best(unsigned *mask)
+static void wake_best(TaskSet *set)
 {
-    int id = best_waiter(mask);
+    int id = best_waiter(set);
     if (id >= 0)
     {
-        *mask &= ~(1u << id);
+        taskset_remove(set, id);
         task_wake(id);
     }
 }
@@ -109,8 +133,15 @@ void mutex_init(Mutex *m)
 {
     unlink_held(m, m->owner); /* storage that is reused while its old holder still has it in its list */
     m->owner = -1;
-    m->waiters = 0;
+    m->waiters = (TaskSet)TASKSET_INIT; /* (the storage may be fresh and hold anything: nothing to free here, see mutex_destroy) */
     m->next_held = 0;
+}
+
+void mutex_destroy(Mutex *m)
+{
+    unlink_held(m, m->owner);
+    m->owner = -1;
+    taskset_free(&m->waiters);
 }
 
 /* 1 if somebody holds it. A holder that has ended or was killed (its slot is unused or dead) does not count: the lock is taken
@@ -129,19 +160,20 @@ static int is_locked(Mutex *m)
 
 /* Deadlock detection: would `task` wait for ever if it started to wait for m? Follow the chain "m's holder waits for that mutex, whose
  * holder waits for ...": if it comes back to `task`, the last wait would close a cycle. A link counts only while the holder really sleeps
- * on that mutex (its waiter bit is set; an unlock clears it) and is alive, so a thread that was just woken does not give a false alarm.
- * Interrupts off. */
+ * on that mutex (it is in the mutex's waiter set; an unlock removes it) and is alive, so a thread that was just woken does not give a
+ * false alarm. Interrupts off. */
 static int deadlock_via(Mutex *m, int task)
 {
-    for (int depth = 0; m && depth < TASK_MAX; depth++)
+    int limit = task_slots();
+    for (int depth = 0; m && depth < limit; depth++)
     {
         int o = m->owner;
-        if (o < 0 || o >= TASK_MAX || !alive(o))
+        if (o < 0 || !task_held_slot(o) || !alive(o))
             return 0;
         if (o == task)
             return 1;
-        Mutex *next = BLOCKED_ON[o];
-        if (!next || !(next->waiters & (1u << o)))
+        Mutex *next = blocked_of(o);
+        if (!next || !taskset_has(&next->waiters, o))
             return 0;
         m = next;
     }
@@ -151,7 +183,7 @@ static int deadlock_via(Mutex *m, int task)
 int mutex_would_deadlock(Mutex *m, int task)
 {
     unsigned long long irq = irq_save();
-    int r = task >= 0 && task < TASK_MAX && deadlock_via(m, task);
+    int r = task >= 0 && task_held_slot(task) && deadlock_via(m, task);
     irq_restore(irq);
     return r;
 }
@@ -173,11 +205,13 @@ static int lock_impl(Mutex *m, int detect)
             irq_restore(irq);
             return -1; /* waiting would close a cycle of threads that wait for each other */
         }
-        mutex_wait_for(m, me); /* the holder borrows our priority from here on */
-        task_block(); /* interrupts stay off from the check above to the switch: the unlock cannot slip in between */
+        if (mutex_wait_for(m, me) == 0) /* the holder borrows our priority from here on */
+            task_block(); /* interrupts stay off from the check above to the switch: the unlock cannot slip in between */
+        else
+            task_yield(); /* no memory to remember that we sleep here: nobody would wake us, so look again instead */
     }
     take(m, me);
-    mutex_cancel_wait(m, me); /* the main loop's task_block only yields: its bit may still be set */
+    mutex_cancel_wait(m, me); /* the main loop's task_block only yields: it may still be in the set */
     irq_restore(irq);
     return 0;
 }
@@ -203,7 +237,7 @@ static void release(Mutex *m)
     int o = m->owner;
     drop(m);
     wake_best(&m->waiters);
-    if (o >= 0 && o < TASK_MAX)
+    if (o >= 0 && task_held_slot(o))
         recompute(o);
 }
 
@@ -222,7 +256,9 @@ int mutex_unlock(Mutex *m)
 
 int mutex_held(const Mutex *m) { return m->owner == task_current(); }
 
-void cond_init(CondVar *c) { c->waiters = 0; }
+void cond_init(CondVar *c) { c->waiters = (TaskSet)TASKSET_INIT; }
+
+void cond_destroy(CondVar *c) { taskset_free(&c->waiters); }
 
 int cond_wait(CondVar *c, Mutex *m)
 {
@@ -233,47 +269,52 @@ int cond_wait(CondVar *c, Mutex *m)
         irq_restore(irq);
         return -1;
     }
-    c->waiters |= 1u << me; /* registered before the mutex is let go: a signal sent after the unlock cannot be missed */
+    int registered = taskset_add(&c->waiters, me) == 0; /* before the mutex is let go: a signal sent after the unlock cannot be missed */
     release(m);
-    while (c->waiters & (1u << me)) /* signal / broadcast clear the bit; the main loop's yield-only block just goes round */
+    /* signal / broadcast remove us from the set; the main loop's yield-only block just goes round. (Without memory to remember us there is
+     * nobody to wake us: that is a spurious return, which every caller of a condition variable must expect.) */
+    while (registered && taskset_has(&c->waiters, me))
         task_block();
     irq_restore(irq);
     return mutex_relock(m);
 }
 
 /* The pieces of the waits above for the system call layer, which sleeps in its own loop so that a signal can end the wait. */
-void mutex_wait_for(Mutex *m, int task)
+int mutex_wait_for(Mutex *m, int task)
 {
-    if (task < 0 || task >= TASK_MAX)
-        return;
-    m->waiters |= 1u << task;
-    BLOCKED_ON[task] = m;
+    if (task < 0 || !task_held_slot(task))
+        return 0;
+    if (taskset_add(&m->waiters, task) != 0)
+        return -1;
+    set_blocked(task, m);
     propagate(m);
+    return 0;
 }
 
 void mutex_cancel_wait(Mutex *m, int task)
 {
-    if (task < 0 || task >= TASK_MAX)
+    if (task < 0 || !task_held_slot(task))
         return;
-    m->waiters &= ~(1u << task);
-    if (BLOCKED_ON[task] == m)
-        BLOCKED_ON[task] = 0;
+    taskset_remove(&m->waiters, task);
+    if (blocked_of(task) == m)
+        set_blocked(task, 0);
     propagate(m);
 }
 
-void cond_wait_for(CondVar *c, int task)
+int cond_wait_for(CondVar *c, int task)
 {
-    if (task >= 0 && task < TASK_MAX)
-        c->waiters |= 1u << task;
+    if (task < 0)
+        return 0;
+    return taskset_add(&c->waiters, task);
 }
 
 void cond_cancel_wait(CondVar *c, int task)
 {
-    if (task >= 0 && task < TASK_MAX)
-        c->waiters &= ~(1u << task);
+    if (task >= 0)
+        taskset_remove(&c->waiters, task);
 }
 
-int cond_waiting(const CondVar *c, int task) { return task >= 0 && task < TASK_MAX && (c->waiters & (1u << task)) != 0; }
+int cond_waiting(const CondVar *c, int task) { return task >= 0 && taskset_has(&c->waiters, task); }
 
 void cond_signal(CondVar *c)
 {
@@ -285,9 +326,6 @@ void cond_signal(CondVar *c)
 void cond_broadcast(CondVar *c)
 {
     unsigned long long irq = irq_save();
-    for (int i = 0; i < TASK_MAX; i++)
-        if (c->waiters & (1u << i))
-            task_wake(i);
-    c->waiters = 0;
+    taskset_wake_all(&c->waiters);
     irq_restore(irq);
 }

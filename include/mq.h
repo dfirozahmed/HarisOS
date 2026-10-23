@@ -30,7 +30,7 @@ void mq_unref(int q);
 int mq_unlink(const char *name);
 int mq_send(int q, const void *msg, unsigned len);
 int mq_recv(int q, void *buf, unsigned cap);
-void mq_wait(int q, int send_side, int task);
+int mq_wait(int q, int send_side, int task); /* 0, or -1 when there was no memory to remember the thread: yield instead of task_block */
 int mq_valid(int q);
 int mq_in_use(void);
 int mq_valid_name(const char *name);

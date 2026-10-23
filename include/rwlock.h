@@ -20,15 +20,17 @@
 #ifndef HARIS_RWLOCK_H
 #define HARIS_RWLOCK_H
 
+#include "taskset.h"
+
 typedef struct
 {
     int readers;       /* threads holding it for reading */
     int writer;        /* thread id of the writer, -1 if none */
-    unsigned rwaiters; /* bit i: thread i sleeps in rw_rdlock */
-    unsigned wwaiters; /* bit i: thread i sleeps in rw_wrlock */
+    TaskSet rwaiters;  /* the threads that sleep in rw_rdlock */
+    TaskSet wwaiters;  /* the threads that sleep in rw_wrlock */
 } RWLock;
 
-#define RWLOCK_INIT { 0, -1, 0, 0 }
+#define RWLOCK_INIT { 0, -1, TASKSET_INIT, TASKSET_INIT }
 
 void rw_init(RWLock *l);
 int rw_rdlock(RWLock *l);

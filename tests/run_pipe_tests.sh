@@ -7,5 +7,6 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_pipe.c" \
   "$ROOT/kernel/core/pipe.c" \
+  "$ROOT/kernel/core/taskset.c" \
   -o "$OUT"
 "$OUT"

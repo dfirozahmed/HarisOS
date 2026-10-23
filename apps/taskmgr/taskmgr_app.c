@@ -221,7 +221,7 @@ static void draw_threads(UiRect body)
     ui_separator(list.x, list.y - 2, list.w);
 
     int vis = list.h / ROW_H, row = 0, live = 0;
-    for (int id = 0; id < TASK_MAX; id++)
+    for (int id = 0; id < task_slots(); id++)
     {
         const char *name = task_name(id);
         TaskState st = task_state(id);

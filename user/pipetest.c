@@ -70,12 +70,14 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     sys_close(a[0]);
     sys_close(a[1]);
 
-    /* every free descriptor taken: no pipe, and what failed leaves nothing behind */
-    int fds[8], used = 0;
-    for (; used < 8; used++)
+    /* the list of descriptors grows (it used to hold 8): with 40 files open a pipe still works, and closing them leaves nothing behind */
+    int fds[40], used = 0;
+    for (; used < 40; used++)
         if ((fds[used] = (int)sys_open("HELLO.ELF")) < 0)
             break;
-    CHECK(22, used >= 6 && sys_pipe(a) == -1);
+    CHECK(22, used == 40 && sys_pipe(a) == 0);
+    sys_close(a[0]);
+    sys_close(a[1]);
     for (int i = 0; i < used; i++)
         sys_close(fds[i]);
     CHECK(23, sys_pipe(a) == 0);

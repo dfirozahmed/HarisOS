@@ -30,7 +30,7 @@ void sem_unref(int s);
 int sem_unlink(const char *name);
 int sem_trywait(int s);
 int sem_post(int s);
-void sem_wait_for(int s, int task); /* wake `task` at the next post */
+int sem_wait_for(int s, int task); /* wake `task` at the next post. 0, or -1 (no memory to remember it: yield instead of task_block) */
 int sem_value(int s);               /* the count, -1 for a semaphore that does not exist */
 int sem_valid(int s);
 int sem_in_use(void);

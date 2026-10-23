@@ -10,5 +10,6 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/kernel/core/rwlock.c" \
   "$ROOT/kernel/core/task.c" \
   "$ROOT/kernel/core/task_ctx.c" \
+  "$ROOT/kernel/core/taskset.c" \
   -o "$OUT"
 "$OUT"

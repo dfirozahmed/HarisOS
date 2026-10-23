@@ -26,6 +26,16 @@ ull syscall_count(void) { return COUNT; }
  * return. */
 static int sig_interrupted(const Process *p) { return p && (p->sig_pending & ~p->sig_blocked & SIG_HANDLER_MASK) != 0; }
 
+/* After registering with mq_wait / pipe_wait / sem_wait_for / mutex_wait_for (their result in `registered`): sleep. If the thread could not be remembered
+ * (no memory for the set it would be woken from) nothing would ever wake it, so it only yields and the caller's loop looks again. */
+static void sleep_registered(int registered)
+{
+    if (registered == 0)
+        task_block();
+    else
+        task_yield();
+}
+
 /* ---- moving bytes between ring 3 and the kernel ------------------------------------------------------------------
  * Every pointer from ring 3 is checked with aspace_user_ok() before it is used (mapped, user accessible, writable if it
  * is to be written) and only then touched, inside the SMAP window (uaccess.h) and in small pieces through a buffer on the
@@ -145,8 +155,7 @@ static long long mq_read_user(Process *p, ull idx, ull ptr, ull len)
     int got;
     while ((got = mq_recv(q, buf, cap)) == MQ_WOULDBLOCK)
     {
-        mq_wait(q, 0, task_current());
-        task_block();
+        sleep_registered(mq_wait(q, 0, task_current()));
         if (sig_interrupted(p))
             return -1;
     }
@@ -166,8 +175,7 @@ static long long mq_write_user(Process *p, ull idx, ull ptr, ull len)
     int r;
     while ((r = mq_send(q, buf, (unsigned)len)) == MQ_WOULDBLOCK)
     {
-        mq_wait(q, 1, task_current());
-        task_block();
+        sleep_registered(mq_wait(q, 1, task_current()));
         if (sig_interrupted(p))
             return -1;
     }
@@ -188,8 +196,7 @@ static long long pipe_read_user(Process *p, ull idx, ull ptr, ull len)
     int got;
     while ((got = pipe_read(pipe, buf, want)) == PIPE_WOULDBLOCK)
     {
-        pipe_wait(pipe, 0, task_current());
-        task_block();
+        sleep_registered(pipe_wait(pipe, 0, task_current()));
         if (sig_interrupted(p))
             return -1;
     }
@@ -215,8 +222,7 @@ static long long pipe_write_user(Process *p, ull idx, ull ptr, ull len)
             int r = pipe_write(pipe, buf + sent, n - sent);
             if (r == PIPE_WOULDBLOCK)
             {
-                pipe_wait(pipe, 1, task_current());
-                task_block();
+                sleep_registered(pipe_wait(pipe, 1, task_current()));
                 if (sig_interrupted(p))
                     return total + sent ? (long long)(total + sent) : -1;
                 continue;
@@ -1211,8 +1217,7 @@ static long long sys_sem_wait(const SyscallFrame *f)
     {
         if (f->rsi == 1)
             return 1;
-        sem_wait_for(s, task_current());
-        task_block(); /* a post wakes it; interrupts are off, so the post cannot slip in between the check and here */
+        sleep_registered(sem_wait_for(s, task_current())); /* a post wakes it; interrupts are off, so the post cannot slip in between the check and here */
         if (sig_interrupted(process_current()))
             return -1;
     }
@@ -1302,8 +1307,7 @@ static long long sys_mutex_lock(const SyscallFrame *f)
             return 1;
         if (mutex_would_deadlock(m, me))
             return -1; /* the holder (directly or through other mutexes) waits for something this process holds */
-        mutex_wait_for(m, me);
-        task_block(); /* an unlock wakes it; interrupts are off, so the unlock cannot slip in between the check and here */
+        sleep_registered(mutex_wait_for(m, me)); /* an unlock wakes it; interrupts are off, so the unlock cannot slip in between the check and here */
         if (sig_interrupted(p))
         {
             mutex_cancel_wait(m, me);
@@ -1451,7 +1455,7 @@ static long long sys_psinfo(const SyscallFrame *f)
     const AddressSpace *as = task_address_space();
     if (!as || !process_current() || !aspace_user_ok(as, out_ptr, sizeof(SysPsInfo), 1))
         return -1;
-    if (index >= TASK_MAX)
+    if (index >= (ull)task_slots())
         return 0;
     ProcessInfo pi;
     if (!process_info((int)index, &pi))

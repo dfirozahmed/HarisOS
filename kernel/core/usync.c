@@ -65,6 +65,8 @@ static int grow_table(void)
 
 static void release(int s)
 {
+    mutex_destroy(&OBJS[s]->mutex); /* the sets of sleepers give their memory back */
+    cond_destroy(&OBJS[s]->cond);
     kfree(OBJS[s]);
     OBJS[s] = 0;
 }

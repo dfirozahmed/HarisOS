@@ -2,6 +2,7 @@
 #include "mq.h"
 #include "heap.h"
 #include "task.h"
+#include "taskset.h"
 
 typedef struct
 {
@@ -10,7 +11,7 @@ typedef struct
     unsigned head, count; /* the queue is slot[head .. head + count) */
     unsigned len[MQ_DEPTH];
     unsigned char msg[MQ_DEPTH][MQ_MSG_MAX];
-    unsigned rwait, wwait; /* bit i = thread i waits to receive / to send */
+    TaskSet rwait, wwait; /* the threads that wait to receive / to send */
 } Queue;
 
 /* The table is a heap block of Q_CAP pointers, doubled when full (up to MQ_MAX); each queue is a heap block of its own, so a pointer to a
@@ -69,6 +70,8 @@ static int grow_table(void)
 
 static void release(int q)
 {
+    taskset_free(&QUEUES[q]->rwait);
+    taskset_free(&QUEUES[q]->wwait);
     kfree(QUEUES[q]);
     QUEUES[q] = 0;
 }
@@ -92,7 +95,7 @@ int mq_open(const char *name, unsigned flags)
     s->linked = 1;
     s->refs = 0;
     s->head = s->count = 0;
-    s->rwait = s->wwait = 0;
+    s->rwait = s->wwait = (TaskSet)TASKSET_INIT;
     int n = 0;
     for (; name[n]; n++)
         s->name[n] = name[n];
@@ -101,14 +104,7 @@ int mq_open(const char *name, unsigned flags)
     return q;
 }
 
-static void wake_all(unsigned *mask)
-{
-    unsigned m = *mask;
-    *mask = 0;
-    for (int t = 0; t < TASK_MAX; t++)
-        if (m & (1u << t))
-            task_wake(t);
-}
+static void wake_all(TaskSet *set) { taskset_wake_all(set); }
 
 void mq_ref(int q)
 {
@@ -175,15 +171,12 @@ int mq_recv(int q, void *buf, unsigned cap)
     return (int)len;
 }
 
-void mq_wait(int q, int send_side, int task)
+int mq_wait(int q, int send_side, int task)
 {
     Queue *s = get(q);
-    if (!s || task < 0 || task >= TASK_MAX)
-        return;
-    if (send_side)
-        s->wwait |= 1u << task;
-    else
-        s->rwait |= 1u << task;
+    if (!s || task < 0)
+        return 0;
+    return taskset_add(send_side ? &s->wwait : &s->rwait, task);
 }
 
 int mq_in_use(void)

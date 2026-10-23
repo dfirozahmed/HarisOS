@@ -79,6 +79,11 @@ static int DEAD_TASK = -1;
 TaskState task_state(int id) { return id == DEAD_TASK ? TASK_DEAD : TASK_BLOCKED; }
 int task_effective_priority(int id) { (void)id; return TASK_PRIO_DEFAULT; }
 int task_set_inherited(int id, int prio) { (void)id; (void)prio; return 0; }
+/* what mutex.c asks of the scheduler's record of a thread: two pointers per id (64 pretend threads) */
+static void *HELD_PTR[64], *BLOCKED_PTR[64];
+int task_slots(void) { return 64; }
+void **task_held_slot(int id) { return id >= 0 && id < 64 ? &HELD_PTR[id] : 0; }
+void **task_blocked_slot(int id) { return id >= 0 && id < 64 ? &BLOCKED_PTR[id] : 0; }
 
 void process_exit(int code)
 {
@@ -2129,7 +2134,7 @@ int main(void)
         CHECK(call(SYS_MUTEX_LOCK, (ull)m, 1, 0) == 1 && BLOCKS == 0);
         CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == -1 && mx->owner == 3);
         BLOCK_ACTION = mutex_releaser;
-        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 0, 0) == 0 && BLOCKS == 1 && mx->owner == 7 && mx->waiters == 0);
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 0, 0) == 0 && BLOCKS == 1 && mx->owner == 7 && taskset_empty(&mx->waiters));
         CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0);
 
         /* a holder that ended does not keep it */
@@ -2148,7 +2153,7 @@ int main(void)
         SAW_RELEASED = 0;
         BLOCK_ACTION = cond_signaller;
         CHECK(call(SYS_COND_WAIT, (ull)cv, (ull)m, 0) == 0 && BLOCKS == 1 && SAW_RELEASED && mx->owner == 7);
-        CHECK(usync_cond(1)->waiters == 0);
+        CHECK(taskset_empty(&usync_cond(1)->waiters));
         BLOCK_ACTION = cond_broadcaster;
         CHECK(call(SYS_COND_WAIT, (ull)cv, (ull)m, 0) == 0 && BLOCKS == 2 && mx->owner == 7);
         CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0);
@@ -2320,13 +2325,13 @@ int main(void)
         Mutex *smx = usync_mutex(pfile_usync(&PROC.file[sm - 3]));
         smx->owner = 3; /* held by someone else: the lock sleeps, a signal ends the wait and nothing stays registered */
         BLOCK_ACTION = raise_int;
-        CHECK(call(SYS_MUTEX_LOCK, (ull)sm, 0, 0) == -1 && smx->owner == 3 && smx->waiters == 0);
+        CHECK(call(SYS_MUTEX_LOCK, (ull)sm, 0, 0) == -1 && smx->owner == 3 && taskset_empty(&smx->waiters));
         PROC.sig_pending = 0;
         smx->owner = -1;
         CHECK(call(SYS_MUTEX_LOCK, (ull)sm, 0, 0) == 0);
         BLOCK_ACTION = raise_int;
         CHECK(call(SYS_COND_WAIT, (ull)sc, (ull)sm, 0) == -1);                  /* a condition wait: interrupted ... */
-        CHECK(smx->owner == 7 && usync_cond(pfile_usync(&PROC.file[sc - 3]))->waiters == 0); /* ... with the mutex held again, nobody registered */
+        CHECK(smx->owner == 7 && taskset_empty(&usync_cond(pfile_usync(&PROC.file[sc - 3]))->waiters)); /* ... with the mutex held again, nobody registered */
         PROC.sig_pending = 0;
         call(SYS_MUTEX_UNLOCK, (ull)sm, 0, 0);
         call(SYS_SYNC_UNLINK, U("sigm"), 0, 0);

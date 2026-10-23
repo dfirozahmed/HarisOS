@@ -11,7 +11,7 @@
  *                                         the caller. Check the condition in a loop: another thread may have changed it again.
  *   cond_signal(&cv) / cond_broadcast(&cv) wake the best waiter / all waiters. Nothing happens if nobody waits (a signal is not kept).
  *
- * How it works: a lock holds its owner thread id and a bit per sleeping thread (TASK_MAX is 16). Everything is decided with
+ * How it works: a lock holds its owner thread id and the set of sleeping threads (taskset.h). Everything is decided with
  * interrupts off, so the check "is it free?" and task_block() cannot be separated by a wake-up (see task_block in task.h). When
  * several threads wait, the one with the highest priority (task_priority) is woken first; a thread that ended while waiting is
  * skipped. A woken thread checks again, so another thread may take the lock first ("barging"); it then sleeps again.
@@ -36,22 +36,25 @@
 #ifndef HARIS_MUTEX_H
 #define HARIS_MUTEX_H
 
+#include "taskset.h"
+
 typedef struct Mutex_
 {
     int owner;         /* thread id of the holder, -1 if free */
-    unsigned waiters;  /* bit i: thread i sleeps in mutex_lock */
+    TaskSet waiters;   /* the threads that sleep in mutex_lock */
     struct Mutex_ *next_held; /* the next mutex the holder holds (priority inheritance, mutex.c) */
 } Mutex;
 
 typedef struct
 {
-    unsigned waiters;  /* bit i: thread i sleeps in cond_wait */
+    TaskSet waiters;   /* the threads that sleep in cond_wait */
 } CondVar;
 
-#define MUTEX_INIT { -1, 0, 0 }
-#define COND_INIT { 0 }
+#define MUTEX_INIT { -1, TASKSET_INIT, 0 }
+#define COND_INIT { TASKSET_INIT }
 
-void mutex_init(Mutex *m);
+void mutex_init(Mutex *m);    /* for storage that holds nothing yet (it may be uninitialised: nothing is freed) */
+void mutex_destroy(Mutex *m); /* the mutex goes away (a heap block that held it is about to be freed): its set of sleepers gives its memory back */
 int mutex_lock(Mutex *m);    /* -1 instead of waiting if the wait would close a cycle of threads that wait for each other (a deadlock) */
 int mutex_relock(Mutex *m);  /* mutex_lock without that check: for cond_wait, which must come back holding the mutex */
 int mutex_would_deadlock(Mutex *m, int task); /* 1 if `task` waiting for m would close such a cycle (for the system call layer) */
@@ -61,13 +64,14 @@ int mutex_held(const Mutex *m); /* 1 if the running thread holds it */
 
 /* For the system call layer (usync.h), which sleeps in its own loop so that a signal can end the wait: register / forget `task` as
  * a sleeper. The caller loops on mutex_trylock (or cond_waiting) and calls task_block() with interrupts off. */
-void mutex_wait_for(Mutex *m, int task);
+int mutex_wait_for(Mutex *m, int task); /* 0, or -1 when there was no memory to remember the sleeper: then yield instead of task_block */
 void mutex_cancel_wait(Mutex *m, int task);
-void cond_wait_for(CondVar *c, int task);
+int cond_wait_for(CondVar *c, int task); /* the same: 0, or -1 (then cond_waiting says no and the wait ends at once, which a caller must accept) */
 void cond_cancel_wait(CondVar *c, int task);
 int cond_waiting(const CondVar *c, int task);
 
 void cond_init(CondVar *c);
+void cond_destroy(CondVar *c);
 int cond_wait(CondVar *c, Mutex *m);
 void cond_signal(CondVar *c);
 void cond_broadcast(CondVar *c);
