@@ -34,6 +34,7 @@
 #include "syscall.h"
 #include "task.h"
 #include "taskbar.h"
+#include "terminal.h"
 #include "timer.h"
 #include "vfs.h"
 #include "volume.h"
@@ -293,6 +294,12 @@ void kernel_main(const BootInfo *info)
 
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
+
+    /* The first user program: INIT.ELF in a Terminal window, if the boot disk has it. It keeps the shell running; closing
+     * the window ends it. Opened after the first frame so it is in front of the welcome window and has the keyboard.
+     * (Remove "init" from USER_PROGRAMS in CMakeLists.txt for a desktop that starts empty.) */
+    if (gfx_ready() && exec_find("INIT.ELF") >= 0)
+        terminal_open("INIT.ELF");
 
     MouseState m;
     if (have_mouse)

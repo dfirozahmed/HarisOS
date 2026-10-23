@@ -6,6 +6,7 @@ extern const AppInfo APP_DEVMGR;
 extern const AppInfo APP_DISPLAY;
 extern const AppInfo APP_TASKMGR;
 extern const AppInfo APP_NOTEPAD;
+extern const AppInfo APP_TERMINAL;
 
 static const AppInfo *const APPS[] = {
     &APP_EXPLORER,
@@ -13,6 +14,7 @@ static const AppInfo *const APPS[] = {
     &APP_DISPLAY,
     &APP_TASKMGR,
     &APP_NOTEPAD,
+    &APP_TERMINAL,
 };
 
 #define APP_N ((int)(sizeof APPS / sizeof APPS[0]))

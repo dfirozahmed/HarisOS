@@ -3,6 +3,7 @@
 #include "console.h"
 #include "elf.h"
 #include "heap.h"
+#include "paging.h"
 #include "pmm.h"
 #include "process.h"
 #include "serial.h"
@@ -337,6 +338,49 @@ static int shell_test(int node)
     return result;
 }
 
+/* ---- init, end to end ---------------------------------------------------------------------------------------------------
+ * INIT.ELF runs the shell on a console and starts it again when it ends; closing the window ends both. */
+static int init_test(int node)
+{
+    int con = console_open("init test");
+    if (con < 0)
+        return -320;
+    int err = 0;
+    int id = exec_run_node(node, "INIT.ELF", con, &err);
+    if (id < 0)
+    {
+        console_close(con);
+        return -321;
+    }
+    int result = 0;
+    if (!wait_prompt(con, id))
+        result = -322;
+    else if (!row_has(con, "init: HarisOS is up") || !row_has(con, "HarisOS shell"))
+        result = -323;
+    else
+    {
+        type_line(con, "exit 3"); /* the shell ends; init says so and starts a new one */
+        if (!wait_prompt(con, id))
+            result = -324;
+        else if (!row_has(con, "init: the shell ended (3), starting it again"))
+            result = -325;
+        else
+        {
+            type_line(con, "echo second shell"); /* the new shell works */
+            if (!wait_prompt(con, id))
+                result = -326;
+            else if (!row_has(con, "second shell"))
+                result = -327;
+        }
+    }
+    console_close(con); /* the shell reads end of input, exits with 130, init ends too */
+    if (process_wait(id) != 0)
+        return result ? result : -328;
+    if (result == 0 && process_exit_code(id) != 0)
+        result = -329;
+    return result;
+}
+
 /* ---- floating point state per process ----------------------------------------------------------------------------------
  * FPUA.ELF and FPUB.ELF fill xmm0-15, the x87 stack, MXCSR and the x87 control word with values of their own (a different
  * rounding mode each), spin, and check that nothing changed. They run at the same time, so the timer interrupt moves the CPU
@@ -378,6 +422,10 @@ int exec_selftest(void)
     HeapStats h0;
     heap_stats(&h0);
     u64 free0 = pmm_free_pages() + h0.arena_bytes / 4096;
+    unsigned tables0 = paging_tables(); /* page tables made for stack guard pages stay (see below) */
+    u64 tag0[PMM_TAG_COUNT]; /* who owns the pages, to say who kept one if the count is off at the end */
+    for (int t = 0; t < PMM_TAG_COUNT; t++)
+        tag0[t] = pmm_tag_pages((PmmTag)t);
     ProcessStats s0;
     process_stats(&s0);
 
@@ -472,6 +520,15 @@ int exec_selftest(void)
             return sh;
     }
 
+    /* init: INIT.ELF keeps the shell running (optional, needs the shell's files) */
+    int init_node = exec_find("INIT.ELF");
+    if (init_node >= 0 && sh_node >= 0 && exec_find("LS.ELF") >= 0)
+    {
+        int it = init_test(init_node);
+        if (it != 0)
+            return it;
+    }
+
     /* floating point / SSE registers are kept apart per process (FPUA.ELF and FPUB.ELF are optional) */
     if (exec_find("FPUA.ELF") >= 0 && exec_find("FPUB.ELF") >= 0)
     {
@@ -530,7 +587,30 @@ int exec_selftest(void)
 
     HeapStats h1;
     heap_stats(&h1);
-    if (pmm_free_pages() + h1.arena_bytes / 4096 != free0)
+    /* A thread's stack has an unmapped guard page (task.c). Unmapping it splits a 2 MiB page of the kernel's identity map, which
+     * takes one page table; the table is kept for good (nothing maps the 2 MiB page back together). Which stacks land in a not yet
+     * split region depends on where the allocator hands pages out, so programs that run many threads at once can add tables
+     * (proctest does). Those pages are not leaks: they are counted by paging_tables() and subtracted here. */
+    unsigned new_tables = paging_tables() - tables0;
+    if (pmm_free_pages() + h1.arena_bytes / 4096 + new_tables != free0)
+    {
+        serial_puts("HARISOS: exec self test: free pages before ");
+        serial_putd((long long)free0);
+        serial_puts(", after (with the new page tables) ");
+        serial_putd((long long)(pmm_free_pages() + h1.arena_bytes / 4096 + new_tables));
+        serial_puts("\n");
+        for (int t = 0; t < PMM_TAG_COUNT; t++)
+            if (pmm_tag_pages((PmmTag)t) != tag0[t])
+            {
+                serial_puts("HARISOS: exec self test: pages of tag ");
+                serial_putd(t);
+                serial_puts(" went from ");
+                serial_putd((long long)tag0[t]);
+                serial_puts(" to ");
+                serial_putd((long long)pmm_tag_pages((PmmTag)t));
+                serial_puts("\n");
+            }
         return -9; /* a page, a stack or a table was not given back */
+    }
     return 0;
 }

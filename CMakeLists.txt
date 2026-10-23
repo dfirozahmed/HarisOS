@@ -157,7 +157,8 @@ set(KERNEL_SOURCES
     apps/display/display_app.c      # Display Settings app: brightness slider
     apps/taskmgr/taskmgr_app.c      # Task Manager app: processes and performance
     apps/notepad/notepad_app.c      # Notepad app: plain-text editor
-    apps/console/console_app.c)     # Console window: where a program started from the File Explorer prints and reads
+    apps/console/console_app.c      # Console window: where a program started from the File Explorer prints and reads
+    apps/terminal/terminal_app.c)   # Terminal app: a console window running the shell; also starts INIT.ELF at boot
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h ${CMAKE_SOURCE_DIR}/apps/explorer/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
@@ -230,7 +231,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

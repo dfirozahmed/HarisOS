@@ -93,8 +93,8 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
             strcpy(cwd, "?");
         printf("%s> ", cwd);
         long long n = sys_read(0, line, sizeof(line) - 1);
-        if (n <= 0) /* the window was closed */
-            sys_exit(0);
+        if (n <= 0) /* the window was closed: input is gone (init stops when it sees 130) */
+            sys_exit(130);
         while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
             n--;
         line[n] = 0;
