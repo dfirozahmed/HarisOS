@@ -1,6 +1,7 @@
 /* HarisOS idle: see include/idle.h. */
 #include "idle.h"
 #include "fault.h"
+#include "gdt.h"
 #include "io.h"
 #include "timer.h"
 
@@ -41,9 +42,6 @@ typedef struct
     unsigned long long base;
 } __attribute__((packed)) DescPtr;
 
-/* null, 64-bit code (0x08), data (0x10), TSS (0x18, a 16-byte descriptor: two slots; filled in idle_init) */
-#define SEL_TSS 0x18
-static unsigned long long GDT[5] = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
 static IdtEntry IDT[IDT_COUNT];
 
 static volatile unsigned *LAPIC;
@@ -133,33 +131,12 @@ static void idt_set(int vec, void (*handler)(void))
 {
     unsigned long long a = (unsigned long long)handler;
     IDT[vec].off_lo = (unsigned short)a;
-    IDT[vec].sel = 0x08;
+    IDT[vec].sel = SEL_KERNEL_CODE;
     IDT[vec].ist = 0;
     IDT[vec].type = 0x8E; /* present, interrupt gate (IF cleared on entry) */
     IDT[vec].off_mid = (unsigned short)(a >> 16);
     IDT[vec].off_hi = (unsigned)(a >> 32);
     IDT[vec].zero = 0;
-}
-
-/* The firmware's GDT lives in memory we no longer own, so switch to ours before any interrupt can happen. */
-static void gdt_load(void)
-{
-    DescPtr p = {sizeof(GDT) - 1, (unsigned long long)GDT};
-    __asm__ volatile("lgdt %0\n\t"
-                     "pushq $0x08\n\t"
-                     "leaq 1f(%%rip), %%rax\n\t"
-                     "pushq %%rax\n\t"
-                     "lretq\n"
-                     "1:\n\t"
-                     "movw $0x10, %%ax\n\t"
-                     "movw %%ax, %%ds\n\t"
-                     "movw %%ax, %%es\n\t"
-                     "movw %%ax, %%ss\n\t"
-                     "movw %1, %%ax\n\t"
-                     "ltr %%ax\n\t" /* the TSS gives the double fault its own stack */
-                     :
-                     : "m"(p), "i"(SEL_TSS)
-                     : "rax", "memory");
 }
 
 static void idt_load(void)
@@ -203,8 +180,7 @@ int idle_init(void)
     LAPIC = (volatile unsigned *)addr;
     idle_lapic_eoi = addr + LAPIC_EOI;
 
-    fault_tss_descriptor(&GDT[SEL_TSS / 8]);
-    gdt_load();
+    gdt_init(); /* our own GDT (kernel and user segments) and TSS, see gdt.h */
     for (int i = 0; i < IDT_COUNT; i++)
         idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
     idt_set(VEC_TIMER, idle_isr_timer);

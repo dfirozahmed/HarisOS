@@ -69,6 +69,7 @@ set(KERNEL_SOURCES
     kernel/core/task.c             # kernel threads (cooperative): task table, round-robin scheduler, boot self test
     kernel/core/task_ctx.c          # kernel threads: the register-saving context switch
     kernel/core/heapmon.c           # background thread: checks the kernel heap once a second
+    kernel/core/gdt.c               # GDT: kernel + user segments, TSS (host-tested layout)
     kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)

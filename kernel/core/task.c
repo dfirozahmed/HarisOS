@@ -38,6 +38,7 @@ typedef struct
 static Task TASKS[TASK_MAX];
 static int CUR;
 static unsigned long long SWITCHES;
+static unsigned long long TICKS; /* timer interrupts seen by task_tick, for the boot log */
 static unsigned SLICE_LEFT = TASK_SLICE_TICKS;
 volatile int preempt_count; /* see preempt.h */
 
@@ -246,6 +247,7 @@ __attribute__((noreturn)) void task_exit(void)
 
 void task_tick(void)
 {
+    TICKS++;
     Task *t = &TASKS[CUR];
     if (!(t->flags & TASK_PREEMPTIBLE) || t->state != TASK_RUNNING || preempt_count > 0)
         return;
@@ -292,6 +294,8 @@ const char *task_name(int id)
 
 unsigned long long task_switches(void) { return SWITCHES; }
 
+unsigned long long task_ticks(void) { return TICKS; }
+
 const char *task_guard_hit(unsigned long long addr)
 {
     for (int i = 0; i < TASK_MAX; i++)
@@ -337,16 +341,20 @@ int task_selftest(void)
     return 0;
 }
 
-/* A thread that never yields. Only the timer interrupt can take the CPU from it. It stops by itself at its deadline, so a
- * broken tick makes the test fail instead of hanging the boot. */
+/* A thread that never yields. Only the timer interrupt can take the CPU from it. It stops when the test tells it to
+ * (SPIN_STOP), or at a generous deadline, so a broken tick makes the test fail instead of hanging the boot. The test
+ * does not depend on how fast the machine is: it waits for a number of preemptions, not for a number of milliseconds
+ * (an emulator on a busy host can be very slow). */
+#define SPIN_NEEDED 3        /* preemptions that prove the timer works */
+#define SPIN_DEADLINE_US 500000
 static volatile unsigned long long SPIN_COUNT;
-static volatile int SPIN_DONE;
+static volatile int SPIN_DONE, SPIN_STOP;
 static unsigned long long SPIN_DEADLINE;
 
 static void spin_worker(void *arg)
 {
     (void)arg;
-    while ((long long)(timer_us() - SPIN_DEADLINE) < 0)
+    while (!SPIN_STOP && (long long)(timer_us() - SPIN_DEADLINE) < 0)
         SPIN_COUNT++;
     SPIN_DONE = 1;
 }
@@ -358,7 +366,8 @@ int task_selftest_preempt(void)
 
     SPIN_COUNT = 0;
     SPIN_DONE = 0;
-    SPIN_DEADLINE = timer_us() + 20000;
+    SPIN_STOP = 0;
+    SPIN_DEADLINE = timer_us() + SPIN_DEADLINE_US;
     if (task_create_flags("SPIN", spin_worker, 0, TASK_PREEMPTIBLE) < 0)
         return -1;
 
@@ -366,13 +375,13 @@ int task_selftest_preempt(void)
     for (int i = 0; i < 400 && !SPIN_DONE; i++)
     {
         task_yield(); /* the spinner runs; we are back because its slice ended (timer) or because it finished */
-        if (!SPIN_DONE)
-            preempted++;
+        if (!SPIN_DONE && ++preempted >= SPIN_NEEDED)
+            SPIN_STOP = 1; /* enough proof: let it end at its next turn */
     }
     task_yield(); /* frees the stack of the finished spinner */
     if (!SPIN_DONE)
         return -2;
-    if (preempted < 2) /* 20 ms of spinning is several slices: coming back only at the end means no preemption */
+    if (preempted < SPIN_NEEDED) /* it ran to its deadline: the timer never took the CPU from it */
         return -3;
     if (SPIN_COUNT == 0)
         return -4;

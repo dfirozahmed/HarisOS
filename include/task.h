@@ -66,6 +66,7 @@ int task_count(void);   /* threads that are not finished */
 TaskState task_state(int id);
 const char *task_name(int id); /* NULL for an unused slot */
 unsigned long long task_switches(void);
+unsigned long long task_ticks(void); /* how many timer interrupts task_tick() has seen (a boot log diagnostic) */
 /* The name of the thread whose stack guard page contains addr (a page fault with CR2 = addr means that thread's stack
  * overflowed), or NULL. For the crash screen. */
 const char *task_guard_hit(unsigned long long addr);
@@ -73,7 +74,8 @@ const char *task_guard_hit(unsigned long long addr);
 /* Quick check at boot: starts two threads that take turns, 0 = they did. Needs task_init and a working heap. */
 int task_selftest(void);
 /* Starts a preemptible thread that never yields and checks that the timer interrupt takes the CPU away from it.
- * 0 = it did. Needs the LAPIC tick (idle_ready()). Never hangs: the thread stops by itself after ~20 ms. */
+ * 0 = it did (three times). Needs the LAPIC tick (idle_ready()). Never hangs: the thread stops by itself after
+ * half a second if the timer does not work, and the result is then -3. */
 int task_selftest_preempt(void);
 
 /* ---- for task.c and task_ctx.c ---- */

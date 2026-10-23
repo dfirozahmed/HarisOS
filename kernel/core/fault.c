@@ -105,6 +105,8 @@ void fault_tss_descriptor(unsigned long long out[2])
     out[1] = base >> 32;
 }
 
+void fault_tss_set_rsp0(unsigned long long rsp0) { TSS.rsp[0] = rsp0; }
+
 /* ---- output --------------------------------------------------- */
 /* 5x7 glyphs, upper case only (the report is upper case). One row per byte, bit 4 = leftmost pixel. */
 static const char GLYPH_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#=:-./()_";

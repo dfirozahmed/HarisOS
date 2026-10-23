@@ -10,6 +10,7 @@
 #include "fbwc.h"
 #include "fault.h"
 #include "fat32.h"
+#include "gdt.h"
 #include "acpi.h"
 #include "gfx.h"
 #include "heap.h"
@@ -175,6 +176,12 @@ void kernel_main(const BootInfo *info)
         }
         else
             serial_puts("firmware's (no guard pages)\n");
+        int gd = gdt_check(); /* the CPU accepts the ring 3 selectors and the TSS is loaded */
+        serial_puts("HARISOS: GDT check ");
+        serial_puts(gd == 0 ? "ok" : "FAILED ");
+        if (gd != 0)
+            serial_putd(gd);
+        serial_puts("\n");
         task_init();
         int st = task_selftest();
         int sp = st == 0 ? task_selftest_preempt() : 0;
@@ -184,6 +191,8 @@ void kernel_main(const BootInfo *info)
         serial_putd(st);
         serial_puts(", preempt ");
         serial_putd(sp);
+        serial_puts(", ticks ");
+        serial_putd((long long)task_ticks());
         serial_puts(")\n");
         if (st != 0 || sp != 0)
             __builtin_trap();

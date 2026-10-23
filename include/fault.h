@@ -46,6 +46,10 @@ extern void (*const fault_stub_table[32])(void);
  * double-fault stack. The caller puts them into its GDT and loads the selector with ltr. */
 void fault_tss_descriptor(unsigned long long out[2]);
 
+/* The stack the CPU loads when an interrupt or fault comes from ring 3 (the TSS's rsp0). Set it to the top of the
+ * running thread's kernel stack. */
+void fault_tss_set_rsp0(unsigned long long rsp0);
+
 /* Called by the stub with the saved registers. Never returns. */
 __attribute__((noreturn)) void fault_dispatch(FaultFrame *f);
 

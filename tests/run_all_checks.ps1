@@ -18,6 +18,7 @@ try {
         @('Text input tests', 'tests/run_edit_tests.sh'),
         @('Kernel heap tests', 'tests/run_heap_tests.sh'),
         @('CPU exception report tests', 'tests/run_fault_tests.sh'),
+        @('GDT layout tests', 'tests/run_gdt_tests.sh'),
         @('Page table tests', 'tests/run_paging_tests.sh'),
         @('Kernel thread tests', 'tests/run_task_tests.sh'),
         @('Notepad tests', 'tests/run_notepad_tests.sh'),
