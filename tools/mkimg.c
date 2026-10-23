@@ -197,7 +197,8 @@ static void name83(const char *path, char out[11])
         out[8 + i] = (char)((ext[i] >= 'a' && ext[i] <= 'z') ? ext[i] - 32 : ext[i]);
 }
 
-#define MAX_EXTRA 14 /* the root folder is one 512-byte cluster: 16 entries, two are used */
+#define ROOT_CLUSTERS 8                  /* the root folder: 8 clusters of 512 bytes = 128 entries */
+#define MAX_EXTRA (ROOT_CLUSTERS * 16 - 2) /* two entries are used (EFI, KERNEL.EFI) */
 
 int main(int argc, char **argv)
 {
@@ -220,7 +221,7 @@ int main(int argc, char **argv)
     part = img + (size_t)PART_FIRST * SECTOR;
     format_fat32();
 
-    uint32_t root = alloc_chain(1), efi = alloc_chain(1), boot = alloc_chain(1);
+    uint32_t root = alloc_chain(ROOT_CLUSTERS), efi = alloc_chain(1), boot = alloc_chain(1);
     uint32_t c_loader = add_file(loader, loader_size);
     uint32_t c_kernel = add_file(kernel, kernel_size);
 

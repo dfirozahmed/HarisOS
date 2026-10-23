@@ -205,6 +205,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->own_console = sp->parent < 0;
     p->pid = NEXT_PID;
     p->parent = sp->parent;
+    p->cwd = sp->cwd;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         p->child[i] = 0;
     /* The heap may not run into the stack: it stops below the 1 MiB the stack may grow into (ELF_STACK_RESERVE). */

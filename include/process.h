@@ -49,6 +49,7 @@ typedef struct
     const char *args;
     unsigned args_len;
     int parent;
+    int cwd; /* working folder (a VFS node id, 0 = the root); a child normally gets its parent's */
     int pid;
 } ProcessSpawn;
 
@@ -70,6 +71,7 @@ typedef struct Process
     int own_console;                  /* 1 = started by the kernel / File Explorer: it writes the "[process exited]" line */
     int pid;                          /* its number, see ProcessSpawn */
     int parent;                       /* thread id of the parent, -1 = none */
+    int cwd;                          /* VFS node of the working folder (VFS_ROOT = "This PC"): relative paths start there */
     int child[PROCESS_MAX_CHILDREN];  /* pids of children not yet waited for, 0 = free slot */
     /* The heap (SYS_BRK): heap_base is page aligned, just above the program's last segment. heap_brk is the program's
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk

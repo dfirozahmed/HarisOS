@@ -149,7 +149,7 @@ void task_block(void)
 
 /* ---- spawn and wait: the loader and the exit records are fakes ---- */
 static int SPAWN_CALLS, SPAWN_FAIL, SPAWN_NEXT_PID = 100;
-static int SP_NODE, SP_ARGC, SP_CONSOLE, SP_PARENT;
+static int SP_NODE, SP_ARGC, SP_CONSOLE, SP_PARENT, SP_CWD;
 static unsigned SP_LEN;
 static char SP_ARGS[PROCESS_ARGS_BYTES], SP_NAME[64];
 
@@ -167,6 +167,7 @@ int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
     SP_LEN = sp->args_len;
     SP_CONSOLE = sp->console;
     SP_PARENT = sp->parent;
+    SP_CWD = sp->cwd;
     memcpy(SP_ARGS, sp->args, sp->args_len);
     sp->pid = SPAWN_NEXT_PID++;
     return 3;
@@ -182,7 +183,7 @@ int process_reap(int pid, int *code)
 }
 
 /* ---- the file system: four files and a folder ---- */
-static VfsNode NODES[6];
+static VfsNode NODES[7]; /* 0 = the root, 6 = the folder "RAM Disk" (holds DIR and readme.txt) */
 static int READ_CALLS;
 
 static unsigned char pattern(int id, unsigned off) { return (unsigned char)(off * 7 + 3 + (unsigned)id); }
@@ -195,9 +196,11 @@ static void setup_vfs(void)
     strcpy(NODES[3].name, "readme.txt"); NODES[3].used = 1; NODES[3].size = 20;
     strcpy(NODES[4].name, "BAD.BIN");   NODES[4].used = 1; NODES[4].size = 2000;
     strcpy(NODES[5].name, "EMPTY.BIN"); NODES[5].used = 1; NODES[5].size = 0;
+    NODES[0].used = 1; NODES[0].is_dir = 1; NODES[0].parent = -1;
+    strcpy(NODES[6].name, "RAM Disk"); NODES[6].used = 1; NODES[6].is_dir = 1;
 }
 
-const VfsNode *vfs_node(int id) { return id >= 1 && id <= 5 ? &NODES[id] : 0; }
+const VfsNode *vfs_node(int id) { return id >= 0 && id <= 6 ? &NODES[id] : 0; }
 
 static int ieq(const char *a, const char *b)
 {
@@ -217,11 +220,42 @@ int exec_find(const char *name)
 
 int vfs_lookup(const char *path)
 {
-    if (strcmp(path, "/RAM Disk/readme.txt") == 0)
+    if (strcmp(path, "/") == 0)
+        return 0;
+    if (ieq(path, "/RAM Disk"))
+        return 6;
+    if (ieq(path, "/RAM Disk/readme.txt"))
         return 3;
-    if (strcmp(path, "/RAM Disk/DIR") == 0)
+    if (ieq(path, "/RAM Disk/DIR"))
         return 2;
     return -1;
+}
+
+/* the tree: / -> RAM Disk -> { DIR, readme.txt }; every other folder is empty */
+int vfs_list(int dir, int *out, int max)
+{
+    int all[2], n = 0;
+    if (dir == 0)
+        all[n++] = 6;
+    else if (dir == 6)
+    {
+        all[n++] = 2;
+        all[n++] = 3;
+    }
+    for (int i = 0; i < n && i < max; i++)
+        out[i] = all[i];
+    return n;
+}
+
+int vfs_path(int id, char *out, int cap)
+{
+    const char *p = id == 0 ? "/" : id == 6 ? "/RAM Disk" : id == 2 ? "/RAM Disk/DIR" : id == 3 ? "/RAM Disk/readme.txt" : "";
+    int n = (int)strlen(p);
+    if (n + 1 > cap)
+        n = cap - 1;
+    memcpy(out, p, (size_t)n);
+    out[n] = 0;
+    return n;
 }
 
 int vfs_read(int id, unsigned offset, void *buf, unsigned len)
@@ -277,6 +311,7 @@ static void reset(void)
     CURRENT_PROC = &PROC;
     PROC.console = -1;
     PROC.own_console = 1;
+    PROC.cwd = 0;
     PROC.parent = -1;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         PROC.child[i] = 0;
@@ -650,6 +685,81 @@ int main(void)
     USER_OK = 1;
     CHECK(call(SYS_WAIT, 300, U(&st), 0) == 300 && st == 5);
     CURRENT_PROC = &PROC;
+
+    /* ================= folders: readdir, stat, chdir, getcwd, relative paths ================= */
+    reset();
+    {
+        SysDirEntry e;
+        memset(&e, 0x55, sizeof(e));
+        CHECK(call(SYS_READDIR, U("/"), 0, U(&e)) == 1 && strcmp(e.name, "RAM Disk") == 0 && e.is_dir == 1 && e.size == 0);
+        CHECK(call(SYS_READDIR, U("/"), 1, U(&e)) == 0);                                  /* past the end */
+        CHECK(call(SYS_READDIR, U("/RAM Disk"), 0, U(&e)) == 1 && strcmp(e.name, "DIR") == 0 && e.is_dir == 1);
+        CHECK(call(SYS_READDIR, U("/RAM Disk"), 1, U(&e)) == 1 && strcmp(e.name, "readme.txt") == 0 && e.size == 20 && e.is_dir == 0);
+        CHECK(e.name[11] == 0 && e.name[95] == 0);                                        /* the rest of the name is cleared */
+        CHECK(call(SYS_READDIR, U("/RAM Disk"), 2, U(&e)) == 0);
+        CHECK(call(SYS_READDIR, U("/RAM Disk/DIR"), 0, U(&e)) == 0);                      /* an empty folder */
+        CHECK(call(SYS_READDIR, U("/RAM Disk/readme.txt"), 0, U(&e)) == -1);              /* a file */
+        CHECK(call(SYS_READDIR, U("/nothing"), 0, U(&e)) == -1);
+        CHECK(call(SYS_READDIR, U("/RAM Disk"), 512, U(&e)) == -1 && call(SYS_READDIR, U("/RAM Disk"), ~0ULL, U(&e)) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_READDIR, U("/RAM Disk"), 0, U(&e)) == -1);                         /* bad pointers */
+        USER_OK = 1;
+
+        CHECK(call(SYS_STAT, U("/RAM Disk/readme.txt"), U(&e), 0) == 0 && e.size == 20 && e.is_dir == 0 && strcmp(e.name, "readme.txt") == 0);
+        CHECK(call(SYS_STAT, U("/"), U(&e), 0) == 0 && e.is_dir == 1 && e.name[0] == 0);
+        CHECK(call(SYS_STAT, U("HELLO.ELF"), U(&e), 0) == 0 && e.size == 600);              /* a plain name: the programs' folder */
+        CHECK(call(SYS_STAT, U("nothing"), U(&e), 0) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_STAT, U("/"), U(&e), 0) == -1);
+        USER_OK = 1;
+
+        /* the working folder */
+        char cwd[32];
+        CHECK(call(SYS_GETCWD, U(cwd), sizeof(cwd), 0) == 1 && strcmp(cwd, "/") == 0);
+        CHECK(call(SYS_CHDIR, U("/RAM Disk"), 0, 0) == 0 && PROC.cwd == 6);
+        CHECK(call(SYS_GETCWD, U(cwd), sizeof(cwd), 0) == 9 && strcmp(cwd, "/RAM Disk") == 0);
+        CHECK(call(SYS_GETCWD, U(cwd), 9, 0) == -1 && call(SYS_GETCWD, U(cwd), 10, 0) == 9); /* the NUL needs room too */
+        CHECK(call(SYS_GETCWD, U(cwd), 0, 0) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_GETCWD, U(cwd), sizeof(cwd), 0) == -1);
+        USER_OK = 1;
+        CHECK(call(SYS_STAT, U("readme.txt"), U(&e), 0) == 0 && e.size == 20);             /* relative to the folder */
+        CHECK(call(SYS_STAT, U("DIR/../readme.txt"), U(&e), 0) == 0 && e.size == 20);
+        CHECK(call(SYS_STAT, U("./readme.txt"), U(&e), 0) == 0 && call(SYS_STAT, U(".//DIR/."), U(&e), 0) == 0 && e.is_dir);
+        CHECK(call(SYS_CHDIR, U("DIR"), 0, 0) == 0 && PROC.cwd == 2);
+        CHECK(call(SYS_GETCWD, U(cwd), sizeof(cwd), 0) == 13 && strcmp(cwd, "/RAM Disk/DIR") == 0);
+        CHECK(call(SYS_CHDIR, U(".."), 0, 0) == 0 && PROC.cwd == 6);
+        CHECK(call(SYS_CHDIR, U("../.."), 0, 0) == 0 && PROC.cwd == 0);
+        CHECK(call(SYS_CHDIR, U("/RAM Disk/DIR"), 0, 0) == 0 && call(SYS_CHDIR, U("../../../.."), 0, 0) == 0 && PROC.cwd == 0); /* never above the root */
+        CHECK(call(SYS_CHDIR, U("/RAM Disk"), 0, 0) == 0);
+        CHECK(call(SYS_CHDIR, U("readme.txt"), 0, 0) == -1 && PROC.cwd == 6);               /* a file */
+        CHECK(call(SYS_CHDIR, U("nothing"), 0, 0) == -1 && call(SYS_CHDIR, U("HELLO.ELF"), 0, 0) == -1 && PROC.cwd == 6);
+        USER_OK = 0;
+        CHECK(call(SYS_CHDIR, U("/"), 0, 0) == -1 && PROC.cwd == 6);
+        USER_OK = 1;
+
+        /* open and spawn use it: a name in the folder wins, otherwise the programs' folder; a child inherits the folder */
+        long long fd = call(SYS_OPEN, U("readme.txt"), 0, 0);
+        CHECK(fd >= 3 && PROC.file[fd - 3].node == 3);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+        fd = call(SYS_OPEN, U("DIR/../readme.txt"), 0, 0);
+        CHECK(fd >= 3 && PROC.file[fd - 3].node == 3);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+        fd = call(SYS_OPEN, U("HELLO.ELF"), 0, 0);
+        CHECK(fd >= 3 && PROC.file[fd - 3].node == 1);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+        CHECK(call(SYS_OPEN, U("DIR"), 0, 0) == -1);                                       /* a folder cannot be opened */
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) > 0 && SP_NODE == 1 && SP_CWD == 6);
+        PROC.child[0] = 0;
+        PROC.cwd = 99; /* the folder's drive was unplugged: it is the top again */
+        CHECK(call(SYS_GETCWD, U(cwd), sizeof(cwd), 0) == 1 && strcmp(cwd, "/") == 0 && PROC.cwd == 0);
+        CHECK(call(SYS_STAT, U("DIR"), U(&e), 0) == -1);                                  /* the top has no DIR */
+
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_READDIR, U("/"), 0, U(&e)) == -1 && call(SYS_STAT, U("/"), U(&e), 0) == -1);
+        CHECK(call(SYS_CHDIR, U("/"), 0, 0) == -1 && call(SYS_GETCWD, U(cwd), sizeof(cwd), 0) == -1);
+        CURRENT_PROC = &PROC;
+    }
 
     /* ================= yield, exit, unknown ================= */
     reset();

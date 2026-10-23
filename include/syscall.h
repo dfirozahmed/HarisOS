@@ -37,6 +37,18 @@
  *   SYS_WAIT (10)  rdi = pid, rsi = pointer to an int for the exit code, or 0. Blocks until that child has ended, stores
  *                  its exit code (-1 = ended by a CPU exception) and returns the pid. A child is waited for once. -1 for
  *                  a pid that is not an outstanding child, or a bad pointer (the child stays waitable).
+ *   SYS_READDIR (11) rdi = folder path, rsi = index, rdx = pointer to a SysDirEntry. Fills in the index-th entry of the
+ *                  folder (folders first, then files, each sorted by name; "/" lists the drives). Returns 1 if it did, 0 when
+ *                  index is past the last entry, -1 for a path that is not a folder, a bad pointer or an index >= 512.
+ *   SYS_STAT (12)  rdi = path, rsi = pointer to a SysDirEntry: size, is_dir and the name of that file or folder. 0 or -1.
+ *   SYS_CHDIR (13) rdi = path: the working folder becomes that folder. 0, or -1 (not a folder). A child starts in its
+ *                  parent's working folder.
+ *   SYS_GETCWD (14) rdi = buffer, rsi = size: the working folder as an absolute path ("/" = the drives, "/RAM Disk/Documents"),
+ *                  NUL-terminated. Returns its length, or -1 if it does not fit.
+ *
+ * Paths (SYS_OPEN, SYS_SPAWN, SYS_READDIR, SYS_STAT, SYS_CHDIR): one that starts with '/' is absolute. Any other is
+ * relative to the working folder; "." and ".." are understood. SYS_OPEN and SYS_SPAWN also accept a plain file name that
+ * is not found there and look it up in the top folder of every drive ("HELLO.ELF": where the programs are).
  *   anything else  returns -1.
  *
  * What the CPU does on SYSCALL: RIP goes to LSTAR, CS / SS are loaded from STAR (kernel code / data), the return address
@@ -61,9 +73,21 @@
 #define SYS_BRK 8
 #define SYS_SPAWN 9
 #define SYS_WAIT 10
+#define SYS_READDIR 11
+#define SYS_STAT 12
+#define SYS_CHDIR 13
+#define SYS_GETCWD 14
 
 #define SYS_WRITE_MAX 4096 /* one write call sends at most this many bytes */
 #define SYS_READ_MAX 65536 /* one read call returns at most this many bytes */
+
+/* What SYS_READDIR and SYS_STAT give back (the same layout in user/sys.h). */
+typedef struct
+{
+    unsigned size;   /* bytes, 0 for a folder */
+    unsigned is_dir; /* 1 = folder */
+    char name[96];   /* NUL-terminated; "" for the root */
+} SysDirEntry;
 
 /* What the entry code saves on the kernel stack, lowest address first (the push order in syscall.c). */
 typedef struct

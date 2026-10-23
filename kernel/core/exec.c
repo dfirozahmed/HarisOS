@@ -251,6 +251,92 @@ static int echo_test(int node)
     return 0;
 }
 
+/* ---- the shell, end to end ------------------------------------------------------------------------------------------------
+ * SH.ELF on a console, driven like a user at the keyboard. The shell is BLOCKED both when it waits for a line and when it waits
+ * for a program it started, so "ready" means: blocked and the bottom row is a bare prompt (it ends with '>'). */
+static int wait_prompt(int con, int id)
+{
+    char row[CONSOLE_COLS + 1];
+    for (int i = 0; i < 3000; i++)
+    {
+        TaskState s = task_state(id);
+        if (s == TASK_DEAD || s == TASK_UNUSED)
+            return 0;
+        if (s == TASK_BLOCKED && console_row(con, 0, row))
+        {
+            int n = 0;
+            while (row[n])
+                n++;
+            if (n > 0 && row[n - 1] == '>')
+                return 1;
+        }
+        task_yield();
+    }
+    return 0;
+}
+
+static int shell_test(int node)
+{
+    int con = console_open("shell test");
+    if (con < 0)
+        return -270;
+    int err = 0;
+    int id = exec_run_node(node, "SH.ELF", con, &err);
+    if (id < 0)
+    {
+        console_close(con);
+        return -271;
+    }
+    static const struct
+    {
+        const char *line, *expect;
+    } STEPS[] = {
+        {"", "HarisOS shell"},
+        {"echo hello    world", "hello world"},
+        {"cd \"/RAM Disk\"", "/RAM Disk>"},
+        {"ls", "Documents/"},
+        {"ls -l Documents", "612  notes.txt"},
+        {"cat readme.txt", "> cat readme.txt"}, /* a RAM Disk file has no bytes: nothing printed, no error either */
+        {"cat nothing.txt", "cat: cannot open 'nothing.txt'"},
+        {"nosuchcmd", "cannot run 'nosuchcmd'"},
+        {"cd nowhere", "cd: no such folder: nowhere"},
+        {"hello", "[exit 42]"},
+        {"crash", "[crashed]"},
+        {"cd ..", "/>"},
+    };
+    int result = 0;
+    for (unsigned i = 0; i < sizeof(STEPS) / sizeof(STEPS[0]) && result == 0; i++)
+    {
+        if (i > 0)
+            type_line(con, STEPS[i].line);
+        if (!wait_prompt(con, id))
+            result = -272 - (int)i;
+        else if (!row_has(con, STEPS[i].expect))
+            result = -290 - (int)i;
+    }
+    if (result == 0)
+    {
+        type_line(con, "exit 7");
+        ProcessStats s;
+        if (process_wait(id) != 0)
+            result = -310;
+        else
+        {
+            process_stats(&s);
+            if (s.last_exit != 7)
+                result = -311;
+        }
+    }
+    else
+    {
+        console_close(con); /* wakes a blocked shell: it sees end of input and ends */
+        process_wait(id);
+        return result;
+    }
+    console_close(con);
+    return result;
+}
+
 /* ---- floating point state per process ----------------------------------------------------------------------------------
  * FPUA.ELF and FPUB.ELF fill xmm0-15, the x87 stack, MXCSR and the x87 control word with values of their own (a different
  * rounding mode each), spin, and check that nothing changed. They run at the same time, so the timer interrupt moves the CPU
@@ -361,6 +447,29 @@ int exec_selftest(void)
         process_stats(&s5);
         if (s5.last_exit != 46) /* the parent ends last, so its code is the last one */
             return -162 - (s5.last_exit > 0 && s5.last_exit < 46 ? s5.last_exit : 0); /* -163 ... -207 */
+    }
+
+    /* folders and paths: DIRTEST.ELF checks SYS_READDIR / STAT / CHDIR / GETCWD and relative paths (optional); exits with 47 */
+    if (exec_find("DIRTEST.ELF") >= 0)
+    {
+        id = exec_run("DIRTEST.ELF", &err);
+        if (id < 0)
+            return -210;
+        if (process_wait(id) != 0)
+            return -211;
+        ProcessStats s6;
+        process_stats(&s6);
+        if (s6.last_exit != 47)
+            return -212 - (s6.last_exit > 0 && s6.last_exit < 47 ? s6.last_exit : 0); /* -213 ... -258 */
+    }
+
+    /* the shell: SH.ELF starts LS / HELLO / CRASH on a console (optional, needs those files) */
+    int sh_node = exec_find("SH.ELF");
+    if (sh_node >= 0 && exec_find("LS.ELF") >= 0 && exec_find("CAT.ELF") >= 0 && exec_find("CRASH.ELF") >= 0)
+    {
+        int sh = shell_test(sh_node);
+        if (sh != 0)
+            return sh;
     }
 
     /* floating point / SSE registers are kept apart per process (FPUA.ELF and FPUB.ELF are optional) */

@@ -60,6 +60,70 @@ static int copy_string_from_user(char *dst, int cap, ull src, const AddressSpace
     return -1;
 }
 
+/* ---- paths ---------------------------------------------------------------------------------------------------------- */
+#define PATH_MAX 320
+
+/* The VFS node a path from ring 3 names, or -1. An absolute path is looked up as it is. A relative one is joined to the
+ * working folder and cleaned ("." dropped, ".." removes the component before it, never above the root) before the lookup.
+ * `bare_ok`: a plain file name that was not found that way is looked up in the top folder of every drive (the programs
+ * live there), which is how "HELLO.ELF" works from any folder. */
+static int resolve_path(const Process *p, const char *in, int bare_ok)
+{
+    if (in[0] == '/')
+        return vfs_lookup(in);
+    char joined[PATH_MAX], norm[PATH_MAX];
+    int n = 0;
+    if (p->cwd != VFS_ROOT && vfs_node(p->cwd))
+        n = vfs_path(p->cwd, joined, 256);
+    joined[n++] = '/';
+    int tail = 0;
+    while (in[tail] && n + 1 < PATH_MAX)
+        joined[n++] = in[tail++];
+    joined[n] = 0;
+    int node = -1;
+    if (!in[tail]) /* (a path too long to join is not found) */
+    {
+        int len = 0;
+        for (const char *s = joined; *s;)
+        {
+            while (*s == '/')
+                s++;
+            const char *start = s;
+            while (*s && *s != '/')
+                s++;
+            int clen = (int)(s - start);
+            if (clen == 0 || (clen == 1 && start[0] == '.'))
+                continue;
+            if (clen == 2 && start[0] == '.' && start[1] == '.')
+            {
+                while (len > 0 && norm[len - 1] != '/')
+                    len--;
+                if (len > 0)
+                    len--; /* the '/' in front of the removed component */
+                continue;
+            }
+            if (len + 1 + clen >= PATH_MAX)
+                return -1;
+            norm[len++] = '/';
+            for (int i = 0; i < clen; i++)
+                norm[len++] = start[i];
+        }
+        if (len == 0)
+            norm[len++] = '/';
+        norm[len] = 0;
+        node = vfs_lookup(norm);
+    }
+    if (node < 0 && bare_ok)
+    {
+        int slash = 0;
+        for (const char *s = in; *s; s++)
+            slash |= *s == '/';
+        if (!slash)
+            node = exec_find(in);
+    }
+    return node;
+}
+
 /* ---- the calls ----------------------------------------------------------------------------------------------------- */
 static long long sys_write(const SyscallFrame *f)
 {
@@ -170,7 +234,7 @@ static long long sys_open(const SyscallFrame *f)
     char path[256];
     if (copy_string_from_user(path, (int)sizeof(path), ptr, as) < 0)
         return -1;
-    int node = path[0] == '/' ? vfs_lookup(path) : exec_find(path);
+    int node = resolve_path(p, path, 1);
     const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
     if (!n || n->is_dir)
         return -1;
@@ -255,7 +319,7 @@ static long long sys_spawn(const SyscallFrame *f)
         }
     if (slot < 0)
         return -1; /* wait for some of them first */
-    int node = path[0] == '/' ? vfs_lookup(path) : exec_find(path);
+    int node = resolve_path(p, path, 1);
     const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
     if (!n || n->is_dir)
         return -1;
@@ -292,7 +356,8 @@ static long long sys_spawn(const SyscallFrame *f)
         }
     }
 
-    ProcessSpawn sp = {.console = p->console, .argc = argc, .args = blob, .args_len = len, .parent = task_current()};
+    ProcessSpawn sp = {.console = p->console, .argc = argc, .args = blob, .args_len = len, .parent = task_current(),
+                       .cwd = p->cwd};
     int err = 0;
     int id = exec_spawn_node(node, n->name, &sp, &err);
     if (id < 0)
@@ -327,6 +392,103 @@ static long long sys_wait(const SyscallFrame *f)
     if (status_ptr)
         copy_to_user(status_ptr, (const char *)&code, 4);
     return (long long)want;
+}
+
+/* ---- folders -------------------------------------------------------------------------------------------------------- */
+#define READDIR_MAX 512
+
+static void fill_entry(SysDirEntry *e, const VfsNode *n)
+{
+    e->size = n->is_dir ? 0 : n->size;
+    e->is_dir = n->is_dir ? 1 : 0;
+    unsigned i = 0;
+    for (; n->name[i] && i < sizeof(e->name) - 1; i++)
+        e->name[i] = n->name[i];
+    for (; i < sizeof(e->name); i++)
+        e->name[i] = 0;
+}
+
+/* SYS_READDIR: the folder is read (listed, sorted) on every call and the index-th entry is handed out: no state is kept in
+ * the process, so an entry added or removed between two calls only shifts the numbering. */
+static long long sys_readdir(const SyscallFrame *f)
+{
+    ull path_ptr = f->rdi, index = f->rsi, out_ptr = f->rdx;
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || !aspace_user_ok(as, out_ptr, sizeof(SysDirEntry), 1))
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), path_ptr, as) < 0)
+        return -1;
+    int dir = resolve_path(p, path, 0);
+    const VfsNode *d = dir >= 0 ? vfs_node(dir) : 0;
+    if (!d || !d->is_dir || index >= READDIR_MAX)
+        return -1;
+    int ids[READDIR_MAX];
+    int total = vfs_list(dir, ids, READDIR_MAX);
+    if (index >= (ull)total)
+        return 0;
+    const VfsNode *n = vfs_node(ids[index]);
+    if (!n)
+        return -1;
+    SysDirEntry e;
+    fill_entry(&e, n);
+    copy_to_user(out_ptr, (const char *)&e, sizeof(e));
+    return 1;
+}
+
+static long long sys_stat(const SyscallFrame *f)
+{
+    ull path_ptr = f->rdi, out_ptr = f->rsi;
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || !aspace_user_ok(as, out_ptr, sizeof(SysDirEntry), 1))
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), path_ptr, as) < 0)
+        return -1;
+    int node = resolve_path(p, path, 1);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (!n)
+        return -1;
+    SysDirEntry e;
+    fill_entry(&e, n);
+    copy_to_user(out_ptr, (const char *)&e, sizeof(e));
+    return 0;
+}
+
+static long long sys_chdir(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), f->rdi, as) < 0)
+        return -1;
+    int node = resolve_path(p, path, 0);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (!n || !n->is_dir)
+        return -1;
+    p->cwd = node;
+    return 0;
+}
+
+static long long sys_getcwd(const SyscallFrame *f)
+{
+    ull ptr = f->rdi, cap = f->rsi;
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || cap == 0 || cap > SYS_READ_MAX || !aspace_user_ok(as, ptr, cap, 1))
+        return -1;
+    if (!vfs_node(p->cwd))
+        p->cwd = VFS_ROOT; /* the drive was unplugged: back to the top */
+    char tmp[256];
+    int n = vfs_path(p->cwd, tmp, (int)sizeof(tmp));
+    if ((ull)n + 1 > cap)
+        return -1;
+    copy_to_user(ptr, tmp, (unsigned)n + 1);
+    return n;
 }
 
 /* The heap. Pages are mapped one by one up to the new break; if memory runs out half way, the pages already mapped stay
@@ -379,6 +541,14 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_spawn(f);
     case SYS_WAIT:
         return sys_wait(f);
+    case SYS_READDIR:
+        return sys_readdir(f);
+    case SYS_STAT:
+        return sys_stat(f);
+    case SYS_CHDIR:
+        return sys_chdir(f);
+    case SYS_GETCWD:
+        return sys_getcwd(f);
     default:
         return -1;
     }

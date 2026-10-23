@@ -17,6 +17,10 @@
 #define SYS_BRK 8
 #define SYS_SPAWN 9
 #define SYS_WAIT 10
+#define SYS_READDIR 11
+#define SYS_STAT 12
+#define SYS_CHDIR 13
+#define SYS_GETCWD 14
 
 typedef unsigned long long usize;
 
@@ -37,6 +41,20 @@ static inline long long sys_brk(long long addr) { return syscall3(SYS_BRK, addr,
 static inline long long sys_spawn(const char *path, const char *const *argv) { return syscall3(SYS_SPAWN, (long long)(usize)path, (long long)(usize)argv, 0); }
 /* Waits for child `pid`; its exit code goes to *status (if not 0). Returns pid or -1. */
 static inline long long sys_wait(long long pid, int *status) { return syscall3(SYS_WAIT, pid, (long long)(usize)status, 0); }
+/* what sys_readdir and sys_stat fill in (SysDirEntry in include/syscall.h) */
+typedef struct
+{
+    unsigned size;
+    unsigned is_dir;
+    char name[96];
+} DirEntry;
+
+/* 1 = entry `index` of folder `path` is in *e, 0 = no more entries, -1 = error */
+static inline long long sys_readdir(const char *path, unsigned index, DirEntry *e) { return syscall3(SYS_READDIR, (long long)(usize)path, index, (long long)(usize)e); }
+static inline long long sys_stat(const char *path, DirEntry *e) { return syscall3(SYS_STAT, (long long)(usize)path, (long long)(usize)e, 0); }
+static inline long long sys_chdir(const char *path) { return syscall3(SYS_CHDIR, (long long)(usize)path, 0, 0); }
+/* the working folder into buf (NUL-terminated); its length, or -1 */
+static inline long long sys_getcwd(char *buf, usize size) { return syscall3(SYS_GETCWD, (long long)(usize)buf, (long long)size, 0); }
 static inline void sys_yield(void) { syscall3(SYS_YIELD, 0, 0, 0); }
 
 __attribute__((noreturn)) static inline void sys_exit(int code)
