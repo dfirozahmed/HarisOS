@@ -391,3 +391,143 @@ int putchar(int c)
     sys_write(1, &ch, 1);
     return c;
 }
+
+/* ---- heap ---------------------------------------------------------------------------------------------------------- */
+/* The heap is one run of blocks from heap_lo to heap_hi, each with a 16-byte header in front of its payload; the next
+ * block starts right after the payload, so no list pointers are needed. malloc takes the first free block that is big
+ * enough (splitting off the rest), free marks a block free and merges neighbours. Linear walks: simple, not fast. */
+#define HDR 16
+#define MIN_PAYLOAD 16
+#define MAGIC_USED 0xA110CA7EA110CA7EULL
+#define MAGIC_FREE 0xF4EEF4EEF4EEF4EEULL
+#define GROW_MIN (64 * 1024)
+
+typedef struct
+{
+    usize size;  /* payload bytes, a multiple of 16 */
+    usize magic; /* MAGIC_USED / MAGIC_FREE */
+} Block;
+
+static char *heap_lo, *heap_hi;
+
+void *sbrk(long long increment)
+{
+    long long cur = sys_brk(0);
+    if (cur < 0)
+        return (void *)-1;
+    if (increment == 0)
+        return (void *)cur;
+    long long r = sys_brk(cur + increment);
+    return r < 0 ? (void *)-1 : (void *)cur;
+}
+
+static Block *next_block(Block *b) { return (Block *)((char *)b + HDR + b->size); }
+
+/* merge every run of free blocks into one */
+static void coalesce(void)
+{
+    for (Block *b = (Block *)heap_lo; (char *)b < heap_hi;)
+    {
+        Block *n = next_block(b);
+        if (b->magic == MAGIC_FREE && (char *)n < heap_hi && n->magic == MAGIC_FREE)
+            b->size += HDR + n->size; /* look at b again: the next one may be free too */
+        else
+            b = n;
+    }
+}
+
+/* ask the kernel for at least `need` more payload bytes; they become one free block at the end of the heap */
+static int grow(usize need)
+{
+    usize bytes = (need + HDR + 4095) & ~(usize)4095;
+    if (bytes < GROW_MIN)
+        bytes = GROW_MIN;
+    char *old = sbrk((long long)bytes);
+    if (old == (char *)-1)
+        return -1;
+    if (!heap_lo)
+    {
+        heap_lo = (char *)(((usize)old + 15) & ~(usize)15);
+        heap_hi = heap_lo;
+        bytes -= (usize)(heap_lo - old);
+    }
+    Block *b = (Block *)heap_hi;
+    b->size = bytes - HDR;
+    b->magic = MAGIC_FREE;
+    heap_hi += bytes;
+    coalesce();
+    return 0;
+}
+
+void *malloc(usize size)
+{
+    if (size > ((usize)1 << 40))
+        return 0; /* no overflow in the rounding below, and nothing that big fits anyway */
+    size = (size + 15) & ~(usize)15;
+    if (size < MIN_PAYLOAD)
+        size = MIN_PAYLOAD;
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        for (Block *b = (Block *)heap_lo; (char *)b < heap_hi; b = next_block(b))
+        {
+            if (b->magic != MAGIC_FREE || b->size < size)
+                continue;
+            if (b->size >= size + HDR + MIN_PAYLOAD) /* split: the rest stays free */
+            {
+                Block *rest = (Block *)((char *)b + HDR + size);
+                rest->size = b->size - size - HDR;
+                rest->magic = MAGIC_FREE;
+                b->size = size;
+            }
+            b->magic = MAGIC_USED;
+            return (char *)b + HDR;
+        }
+        if (attempt == 0 && grow(size) != 0)
+            return 0;
+    }
+    return 0;
+}
+
+static Block *block_of(void *ptr)
+{
+    Block *b = (Block *)((char *)ptr - HDR);
+    if ((char *)ptr < heap_lo + HDR || (char *)ptr >= heap_hi || ((usize)ptr & 15) || b->magic != MAGIC_USED)
+    {
+        fdprintf(2, "free/realloc: bad pointer %p\n", ptr);
+        sys_exit(127);
+    }
+    return b;
+}
+
+void free(void *ptr)
+{
+    if (!ptr)
+        return;
+    block_of(ptr)->magic = MAGIC_FREE;
+    coalesce();
+}
+
+void *calloc(usize count, usize size)
+{
+    if (size && count > ((usize)1 << 40) / size)
+        return 0;
+    void *p = malloc(count * size);
+    if (p)
+        memset(p, 0, count * size);
+    return p;
+}
+
+void *realloc(void *ptr, usize size)
+{
+    if (!ptr)
+        return malloc(size);
+    Block *b = block_of(ptr);
+    if (size <= b->size)
+        return ptr; /* never shrinks in place: the tail stays with the block */
+    void *n = malloc(size);
+    if (!n)
+        return 0; /* the old block is untouched, as the standard says */
+    memcpy(n, ptr, b->size);
+    free(ptr);
+    return n;
+}

@@ -24,6 +24,11 @@
  *   SYS_CLOSE (6)  rdi = fd. Returns 0, or -1 if it is not open. (Closing 0, 1 or 2 does nothing.)
  *   SYS_SEEK  (7)  rdi = fd, rsi = offset (signed), rdx = whence (0 = from the start, 1 = from the current position,
  *                  2 = from the end of the file). Returns the new position, or -1 (bad fd, bad whence, negative result).
+ *   SYS_BRK   (8)  rdi = new program break (the end of the heap), or 0. The heap starts at the first page after the
+ *                  program's last segment and may grow to PROCESS_HEAP_MAX; new pages are zeroed and not executable.
+ *                  0 returns the current break. A value outside heap_base ... heap_limit returns -1 and changes
+ *                  nothing; otherwise the break becomes rdi and that is returned. Lowering the break does not give
+ *                  pages back (they stay mapped, not cleared again, until the process ends). malloc is built on this.
  *   anything else  returns -1.
  *
  * What the CPU does on SYSCALL: RIP goes to LSTAR, CS / SS are loaded from STAR (kernel code / data), the return address
@@ -45,6 +50,7 @@
 #define SYS_OPEN 5
 #define SYS_CLOSE 6
 #define SYS_SEEK 7
+#define SYS_BRK 8
 
 #define SYS_WRITE_MAX 4096 /* one write call sends at most this many bytes */
 #define SYS_READ_MAX 65536 /* one read call returns at most this many bytes */

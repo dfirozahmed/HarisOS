@@ -41,4 +41,13 @@ int fdprintf(int fd, const char *fmt, ...); /* to fd 1 or 2 */
 int puts(const char *s);                    /* the string and a newline */
 int putchar(int c);
 
+/* The heap, on top of SYS_BRK. Blocks are 16-byte aligned. malloc(0) returns a valid minimal block; a failed request
+ * returns NULL. free(NULL) does nothing; freeing a pointer that malloc did not give out (or freeing twice) is caught by
+ * a marker in the block header: the program prints a message and exits with 127. */
+void *sbrk(long long increment); /* the old break, or (void *)-1 */
+void *malloc(usize size);
+void *calloc(usize count, usize size); /* zeroed; NULL if count * size overflows */
+void *realloc(void *ptr, usize size);
+void free(void *ptr);
+
 #endif

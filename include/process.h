@@ -34,9 +34,14 @@ int process_start_elf(const char *name, const void *file, unsigned long long siz
  * calls reach it with process_current(). */
 #define PROCESS_MAX_FILES 5
 #define PROCESS_FD_FIRST 3 /* file descriptors 0, 1 and 2 are the console: input, output, errors */
+#define PROCESS_HEAP_MAX (64ULL * 1024 * 1024) /* the most SYS_BRK lets a program grow its heap to */
 typedef struct Process
 {
     int console; /* console.h handle of its window, -1 = none (output goes to the serial port, input is empty) */
+    /* The heap (SYS_BRK): heap_base is page aligned, just above the program's last segment. heap_brk is the program's
+     * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
+     * rounded up). Lowering the break keeps the pages: they are given back when the process ends. */
+    unsigned long long heap_base, heap_brk, heap_mapped, heap_limit;
     struct
     {
         int node;     /* VFS node of an open file, -1 = this slot is free (file descriptor PROCESS_FD_FIRST + index) */

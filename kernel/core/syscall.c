@@ -232,6 +232,30 @@ static long long sys_seek(const SyscallFrame *f)
     return pos;
 }
 
+/* The heap. Pages are mapped one by one up to the new break; if memory runs out half way, the pages already mapped stay
+ * (heap_mapped moves with them, so a retry does not map them twice) but the break does not move. */
+static long long sys_brk(const SyscallFrame *f)
+{
+    ull want = f->rdi;
+    AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    if (want == 0)
+        return (long long)p->heap_brk;
+    if (want < p->heap_base || want > p->heap_limit)
+        return -1;
+    ull need = (want + 4095) & ~4095ULL; /* want <= heap_limit < 2^47: no overflow */
+    while (p->heap_mapped < need)
+    {
+        if (aspace_map_new(as, p->heap_mapped, ASPACE_WRITE) != 0)
+            return -1;
+        p->heap_mapped += 4096;
+    }
+    p->heap_brk = want;
+    return (long long)want;
+}
+
 long long syscall_dispatch(SyscallFrame *f)
 {
     COUNT++;
@@ -252,6 +276,8 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_close(f);
     case SYS_SEEK:
         return sys_seek(f);
+    case SYS_BRK:
+        return sys_brk(f);
     default:
         return -1;
     }

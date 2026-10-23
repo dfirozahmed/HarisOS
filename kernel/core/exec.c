@@ -328,6 +328,20 @@ int exec_selftest(void)
             return -62 - (s3.last_exit > 0 && s3.last_exit < 44 ? s3.last_exit : 0); /* -63 ... -105: which check failed */
     }
 
+    /* SYS_BRK and the heap (malloc / free / realloc): HEAPTEST.ELF exits with 45 if all checks held (optional) */
+    if (exec_find("HEAPTEST.ELF") >= 0)
+    {
+        id = exec_run("HEAPTEST.ELF", &err);
+        if (id < 0)
+            return -110;
+        if (process_wait(id) != 0)
+            return -111;
+        ProcessStats s4;
+        process_stats(&s4);
+        if (s4.last_exit != 45)
+            return -112 - (s4.last_exit > 0 && s4.last_exit < 45 ? s4.last_exit : 0); /* -113 ... -156 */
+    }
+
     /* floating point / SSE registers are kept apart per process (FPUA.ELF and FPUB.ELF are optional) */
     if (exec_find("FPUA.ELF") >= 0 && exec_find("FPUB.ELF") >= 0)
     {

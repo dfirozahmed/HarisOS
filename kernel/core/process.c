@@ -121,7 +121,7 @@ static int copy_in(AddressSpace *as, u64 va, const unsigned char *src, u64 n)
  * thread. On failure the address space is destroyed here, so the callers just return. Returns the thread id or -1. */
 static void process_free(void *p) { kfree(p); }
 
-static int launch(const char *name, AddressSpace *as, u64 entry, int console)
+static int launch(const char *name, AddressSpace *as, u64 entry, int console, u64 heap_base)
 {
     for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
         if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
@@ -145,6 +145,12 @@ static int launch(const char *name, AddressSpace *as, u64 entry, int console)
      * 16-aligned instead faults on the first one. The slot at [rsp] is the "return address": zero, never used. */
     st->user_rsp = PAGING_USER_END - 8;
     p->console = console;
+    /* The heap may not run into the stack: it stops below the 1 MiB the stack may grow into (ELF_STACK_RESERVE). */
+    u64 stack_low = PAGING_USER_END - 1024ULL * 1024;
+    p->heap_base = p->heap_brk = p->heap_mapped = heap_base;
+    p->heap_limit = heap_base + PROCESS_HEAP_MAX < stack_low ? heap_base + PROCESS_HEAP_MAX : stack_low;
+    if (p->heap_limit < heap_base)
+        p->heap_limit = heap_base; /* the program sits that high: no heap */
     for (int i = 0; i < PROCESS_MAX_FILES; i++)
     {
         p->file[i].node = -1;
@@ -186,7 +192,7 @@ int process_start(const char *name, const void *image, u64 size)
         aspace_destroy(as);
         return -1;
     }
-    return launch(name, as, PAGING_USER_BASE, -1);
+    return launch(name, as, PAGING_USER_BASE, -1, PAGING_USER_BASE + pages * 4096);
 }
 
 int process_start_elf(const char *name, const void *file, u64 size, int console, int *err)
@@ -203,9 +209,13 @@ int process_start_elf(const char *name, const void *file, u64 size, int console,
 
     /* Each segment gets its own pages (elf_parse made sure no page is shared) with the permissions it asks for. A fresh
      * page is zero, which is exactly what the bytes after filesz (.bss) must be; only the file's bytes are copied. */
+    u64 heap_base = 0; /* the first page after the last segment */
     for (int i = 0; i < info.nseg; i++)
     {
         const ElfSegment *s = &info.seg[i];
+        u64 seg_end = (s->vaddr + s->memsz + 4095) & ~4095ULL;
+        if (seg_end > heap_base)
+            heap_base = seg_end;
         unsigned flags = ((s->flags & ELF_PF_W) ? ASPACE_WRITE : 0) | ((s->flags & ELF_PF_X) ? ASPACE_EXEC : 0);
         u64 first = s->vaddr & ~4095ULL, last = (s->vaddr + s->memsz - 1) & ~4095ULL;
         for (u64 va = first; va <= last; va += 4096)
@@ -220,7 +230,7 @@ int process_start_elf(const char *name, const void *file, u64 size, int console,
             return -1;
         }
     }
-    return launch(name, as, info.entry, console);
+    return launch(name, as, info.entry, console, heap_base);
 }
 
 __attribute__((noreturn)) void process_exit(int code)

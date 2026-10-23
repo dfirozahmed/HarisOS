@@ -11,6 +11,7 @@
 #define SYS_OPEN 5
 #define SYS_CLOSE 6
 #define SYS_SEEK 7
+#define SYS_BRK 8
 
 typedef unsigned long long usize;
 
@@ -26,6 +27,7 @@ static inline long long sys_read(int fd, void *buf, usize len) { return syscall3
 static inline long long sys_open(const char *path) { return syscall3(SYS_OPEN, (long long)(usize)path, 0, 0); }
 static inline long long sys_close(int fd) { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline long long sys_seek(int fd, long long offset, int whence) { return syscall3(SYS_SEEK, fd, offset, whence); }
+static inline long long sys_brk(long long addr) { return syscall3(SYS_BRK, addr, 0, 0); }
 static inline void sys_yield(void) { syscall3(SYS_YIELD, 0, 0, 0); }
 
 __attribute__((noreturn)) static inline void sys_exit(int code)

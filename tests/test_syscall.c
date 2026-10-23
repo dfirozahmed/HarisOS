@@ -42,6 +42,20 @@ int aspace_user_ok(const AddressSpace *as, ull va, ull len, int write)
     return USER_OK;
 }
 
+/* the heap: pages are only counted; MAP_FAIL_AFTER > 0 makes the Nth mapping from now on fail */
+static int MAPPED_PAGES, MAP_FAIL_AFTER;
+static ull LAST_MAPPED_VA;
+
+int aspace_map_new(AddressSpace *as, ull va, unsigned flags)
+{
+    CHECK(as == &FAKE_AS && (va & 4095) == 0 && flags == ASPACE_WRITE); /* writable, never executable */
+    if (MAP_FAIL_AFTER > 0 && --MAP_FAIL_AFTER == 0)
+        return -1;
+    MAPPED_PAGES++;
+    LAST_MAPPED_VA = va;
+    return 0;
+}
+
 /* ---- the user-memory window (SMAP): it must be open exactly while user memory is touched ---- */
 volatile int host_uaccess;
 
@@ -485,6 +499,32 @@ int main(void)
     PROC.file[0].node = 99; /* a node number that no longer exists */
     CHECK(call(SYS_READ, (ull)fd, U(data), 4) == -1 && call(SYS_SEEK, (ull)fd, 0, 2) == -1);
     NODES[1].used = 1;
+
+    /* ================= brk ================= */
+    reset();
+    const ull HB = 0x400000010000ULL;
+    PROC.heap_base = PROC.heap_brk = PROC.heap_mapped = HB;
+    PROC.heap_limit = HB + 16 * 4096;
+    MAPPED_PAGES = 0;
+    CHECK(call(SYS_BRK, 0, 0, 0) == (long long)HB);                               /* 0 = ask */
+    CHECK(call(SYS_BRK, HB + 100, 0, 0) == (long long)(HB + 100) && MAPPED_PAGES == 1);
+    CHECK(call(SYS_BRK, HB + 4096, 0, 0) == (long long)(HB + 4096) && MAPPED_PAGES == 1); /* same page */
+    CHECK(call(SYS_BRK, HB + 4097, 0, 0) == (long long)(HB + 4097) && MAPPED_PAGES == 2 && LAST_MAPPED_VA == HB + 4096);
+    CHECK(call(SYS_BRK, HB, 0, 0) == (long long)HB && MAPPED_PAGES == 2);                /* lowering maps nothing */
+    CHECK(call(SYS_BRK, HB + 8192, 0, 0) == (long long)(HB + 8192) && MAPPED_PAGES == 2); /* still mapped: not again */
+    CHECK(call(SYS_BRK, HB - 1, 0, 0) == -1 && call(SYS_BRK, HB + 16 * 4096 + 1, 0, 0) == -1);
+    CHECK(call(SYS_BRK, ~0ULL, 0, 0) == -1 && call(SYS_BRK, 1, 0, 0) == -1);
+    CHECK(call(SYS_BRK, 0, 0, 0) == (long long)(HB + 8192) && MAPPED_PAGES == 2);        /* refused: nothing moved */
+    CHECK(call(SYS_BRK, HB + 16 * 4096, 0, 0) == (long long)(HB + 16 * 4096) && MAPPED_PAGES == 16); /* the limit itself */
+    /* out of memory half way: the break stays, the pages already mapped stay counted, a retry continues */
+    PROC.heap_brk = PROC.heap_mapped = HB;
+    MAPPED_PAGES = 0;
+    MAP_FAIL_AFTER = 3;
+    CHECK(call(SYS_BRK, HB + 5 * 4096, 0, 0) == -1 && MAPPED_PAGES == 2 && PROC.heap_brk == HB && PROC.heap_mapped == HB + 2 * 4096);
+    CHECK(call(SYS_BRK, HB + 5 * 4096, 0, 0) == (long long)(HB + 5 * 4096) && MAPPED_PAGES == 5);
+    CURRENT_PROC = 0;
+    CHECK(call(SYS_BRK, 0, 0, 0) == -1);                                                 /* a kernel thread has no heap */
+    CURRENT_PROC = &PROC;
 
     /* ================= yield, exit, unknown ================= */
     reset();
