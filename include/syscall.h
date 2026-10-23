@@ -57,6 +57,11 @@
  *   SYS_LOCK (19) rdi = a path on a drive, rsi = 1 lock writing, 0 unlock, 2 ask. Drives start locked (blk.h), so a program that
  *                  writes must unlock the drive first (the "lock" program does). Returns 1 / 0 for "ask" (locked or not), 0 for
  *                  a change, -1 if the path is not on a drive, the drive cannot be written, or the lock cannot be changed.
+ *   SYS_PIPE (20) rdi = pointer to int[2]: gets the descriptors of the read end and the write end of a new pipe. 0, or -1.
+ *                  SYS_READ on the read end waits until there is data (or every holder of the write end has closed it or ended:
+ *                  then it returns 0); SYS_WRITE on the write end waits for room (and returns -1, or the bytes that went in, if
+ *                  every holder of the read end is gone). Both ends can be given to children with SYS_SPAWN. A pipe holds 4096
+ *                  bytes; it cannot be seeked.
  *
  * Writing: SYS_OPEN with SYS_O_WRITE (and CREATE / TRUNC / APPEND) gives a descriptor SYS_WRITE can use (any length up to
  * SYS_WRITE_MAX; it returns the bytes written, fewer if the drive refused part way, or -1: read only / locked / full
@@ -100,6 +105,7 @@
 #define SYS_RMDIR 17
 #define SYS_RENAME 18
 #define SYS_LOCK 19
+#define SYS_PIPE 20
 
 /* SYS_OPEN flags */
 #define SYS_O_WRITE 1  /* open for writing (then it cannot be read) */

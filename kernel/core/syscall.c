@@ -4,6 +4,7 @@
 #include "console.h"
 #include "exec.h"
 #include "gdt.h"
+#include "pipe.h"
 #include "process.h"
 #include "serial.h"
 #include "task.h"
@@ -127,8 +128,60 @@ static int resolve_path(const Process *p, const char *in, int bare_ok)
 /* ---- open files ----------------------------------------------------------------------------------------------------- */
 /* Read from / write to open file slot `idx` of process p (descriptor PROCESS_FD_FIRST + idx, or a redirected fd 0 / 1 / 2).
  * The user buffer was checked by the caller. Positions are 32 bit (a FAT file cannot be bigger). */
+/* Reading and writing a pipe end. They wait (the thread is BLOCKED, not spinning) until the pipe has data / room or the other end
+ * is gone. Interrupts are off, so nothing can slip in between the check and task_block (see task.h). */
+static long long pipe_read_user(Process *p, ull idx, ull ptr, ull len)
+{
+    int pipe = pfile_pipe(&p->file[idx]);
+    if (p->file[idx].flags & PFILE_WRITE)
+        return -1; /* the write end */
+    char buf[CHUNK];
+    unsigned want = len < CHUNK ? (unsigned)len : CHUNK;
+    int got;
+    while ((got = pipe_read(pipe, buf, want)) == PIPE_WOULDBLOCK)
+    {
+        pipe_wait(pipe, 0, task_current());
+        task_block();
+    }
+    if (got > 0)
+        copy_to_user(ptr, buf, (unsigned)got);
+    return got < 0 ? -1 : got; /* 0 = every writer is gone: end of input */
+}
+
+static long long pipe_write_user(Process *p, ull idx, ull ptr, ull len)
+{
+    int pipe = pfile_pipe(&p->file[idx]);
+    if (!(p->file[idx].flags & PFILE_WRITE))
+        return -1; /* the read end */
+    char buf[CHUNK];
+    ull total = 0;
+    while (total < len)
+    {
+        unsigned n = (len - total) < CHUNK ? (unsigned)(len - total) : CHUNK;
+        copy_from_user(buf, ptr + total, n);
+        unsigned sent = 0;
+        while (sent < n)
+        {
+            int r = pipe_write(pipe, buf + sent, n - sent);
+            if (r == PIPE_WOULDBLOCK)
+            {
+                pipe_wait(pipe, 1, task_current());
+                task_block();
+                continue;
+            }
+            if (r < 0) /* nobody will ever read it: what went in stays, the caller is told */
+                return total + sent ? (long long)(total + sent) : -1;
+            sent += (unsigned)r;
+        }
+        total += n;
+    }
+    return (long long)total;
+}
+
 static long long file_read(Process *p, ull idx, ull ptr, ull len)
 {
+    if (pfile_is_pipe(&p->file[idx]))
+        return pipe_read_user(p, idx, ptr, len);
     if (p->file[idx].flags & PFILE_WRITE)
         return -1; /* opened for writing only */
     const VfsNode *vn = vfs_node(p->file[idx].node);
@@ -162,6 +215,8 @@ static long long file_read(Process *p, ull idx, ull ptr, ull len)
  * the file is gone, the drive is read only / locked / full, the RAM Disk has no content, or the file would pass 4 GiB). */
 static long long file_write(Process *p, ull idx, ull ptr, ull len)
 {
+    if (pfile_is_pipe(&p->file[idx]))
+        return pipe_write_user(p, idx, ptr, len);
     if (!(p->file[idx].flags & PFILE_WRITE))
         return -1; /* opened for reading */
     const VfsNode *vn = vfs_node(p->file[idx].node);
@@ -378,8 +433,7 @@ static long long sys_close(const SyscallFrame *f)
     ull idx = fd - PROCESS_FD_FIRST;
     if (idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
         return -1;
-    p->file[idx].node = -1;
-    p->file[idx].flags = 0;
+    pfile_close(&p->file[idx]);
     for (int k = 0; k < 3; k++)
         if (p->stdio[k] == (int)idx)
             p->stdio[k] = -1; /* closing the file that stood in for fd k puts the console back */
@@ -395,8 +449,8 @@ static long long sys_seek(const SyscallFrame *f)
     ull whence = f->rdx;
     Process *p = process_current();
     ull idx = fd - PROCESS_FD_FIRST;
-    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
-        return -1;
+    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0 || pfile_is_pipe(&p->file[idx]))
+        return -1; /* (a pipe has no position) */
     const VfsNode *n = vfs_node(p->file[idx].node);
     if (!n)
         return -1;
@@ -645,6 +699,35 @@ static long long sys_getcwd(const SyscallFrame *f)
     return n;
 }
 
+/* SYS_PIPE: rdi = pointer to two ints; they get the descriptors of the read end and the write end of a new pipe. 0, or -1 (fewer
+ * than two free descriptors, no free pipe, bad pointer). */
+static long long sys_pipe(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || !aspace_user_ok(as, f->rdi, 8, 1))
+        return -1;
+    int slot[2], found = 0;
+    for (int i = 0; i < PROCESS_MAX_FILES && found < 2; i++)
+        if (p->file[i].node < 0)
+            slot[found++] = i;
+    if (found < 2)
+        return -1;
+    int pipe = pipe_new();
+    if (pipe < 0)
+        return -1;
+    for (int k = 0; k < 2; k++)
+    {
+        p->file[slot[k]].node = PROCESS_PIPE_NODE + pipe;
+        p->file[slot[k]].pos = 0;
+        p->file[slot[k]].flags = k == 1 ? PFILE_WRITE : 0;
+        pipe_ref(pipe, k == 1);
+    }
+    int fds[2] = {PROCESS_FD_FIRST + slot[0], PROCESS_FD_FIRST + slot[1]};
+    copy_to_user(f->rdi, (const char *)fds, sizeof(fds));
+    return 0;
+}
+
 /* ---- changing the tree ---------------------------------------------------------------------------------------------- */
 /* Are any of the open files of this process (or the working folder) this node? Deleting or renaming it would leave a stale
  * descriptor, so it is refused. (Other processes' files are not checked: a read of a deleted file fails cleanly instead,
@@ -833,6 +916,8 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_rename(f);
     case SYS_LOCK:
         return sys_lock(f);
+    case SYS_PIPE:
+        return sys_pipe(f);
     default:
         return -1;
     }

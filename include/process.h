@@ -17,6 +17,7 @@
 #define HARIS_PROCESS_H
 
 #include "fault.h"
+#include "pipe.h"
 
 #define PROCESS_IMAGE_MAX (64 * 1024)
 #define PROCESS_STACK_PAGES 4
@@ -44,7 +45,7 @@ int process_start_elf(const char *name, const void *file, unsigned long long siz
 #define PROCESS_MAX_CHILDREN 8
 
 /* An open file of a process. */
-#define PROCESS_MAX_FILES 5
+#define PROCESS_MAX_FILES 8
 #define PROCESS_FD_FIRST 3 /* file descriptors 0, 1 and 2 are the console: input, output, errors (unless redirected) */
 #define PFILE_WRITE 1      /* opened for writing (SYS_O_WRITE): reads are refused */
 #define PFILE_APPEND 2     /* every write goes to the end */
@@ -54,6 +55,21 @@ typedef struct
     unsigned pos;   /* the read / write position */
     unsigned flags; /* PFILE_* */
 } ProcessFile;
+
+/* A slot can also hold one end of a pipe (pipe.h): node = PROCESS_PIPE_NODE + the pipe's number, flags has PFILE_WRITE for the
+ * write end. Such a slot is "open" like any other (node >= 0) but is not a VFS node. */
+#define PROCESS_PIPE_NODE 0x40000000
+static inline int pfile_is_pipe(const ProcessFile *f) { return f->node >= PROCESS_PIPE_NODE; }
+static inline int pfile_pipe(const ProcessFile *f) { return f->node - PROCESS_PIPE_NODE; }
+
+/* Close an open slot: a pipe end is given back to the pipe (waking whoever waits on it). Safe on a free slot. */
+static inline void pfile_close(ProcessFile *f)
+{
+    if (f->node >= 0 && pfile_is_pipe(f))
+        pipe_unref(pfile_pipe(f), (f->flags & PFILE_WRITE) != 0);
+    f->node = -1;
+    f->pos = f->flags = 0;
+}
 
 typedef struct
 {
@@ -96,6 +112,9 @@ typedef struct Process
 } Process;
 
 Process *process_current(void); /* the running process, NULL in a kernel thread */
+
+/* Close every open file of the process (pipes: the ends go back to the pipe). Called when it ends; harmless to call twice. */
+void process_release_files(Process *p);
 
 /* End the running process (called by SYS_EXIT, and by the kernel itself). Does not return. */
 __attribute__((noreturn)) void process_exit(int code);

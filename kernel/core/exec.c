@@ -4,6 +4,7 @@
 #include "elf.h"
 #include "heap.h"
 #include "paging.h"
+#include "pipe.h"
 #include "pmm.h"
 #include "process.h"
 #include "serial.h"
@@ -518,6 +519,22 @@ int exec_selftest(void)
         int sh = shell_test(sh_node);
         if (sh != 0)
             return sh;
+    }
+
+    /* pipes: PIPETEST.ELF connects itself to UPPER.ELF through two pipes (optional); exits with 48 */
+    if (exec_find("PIPETEST.ELF") >= 0 && exec_find("UPPER.ELF") >= 0)
+    {
+        id = exec_run("PIPETEST.ELF", &err);
+        if (id < 0)
+            return -330;
+        if (process_wait(id) != 0)
+            return -331;
+        ProcessStats s7;
+        process_stats(&s7);
+        if (s7.last_exit != 48)
+            return -332 - (s7.last_exit > 0 && s7.last_exit < 48 ? s7.last_exit : 0); /* -333 ... -379 */
+        if (pipe_in_use() != 0)
+            return -380; /* a pipe was not given back */
     }
 
     /* init: INIT.ELF keeps the shell running (optional, needs the shell's files) */

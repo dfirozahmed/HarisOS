@@ -68,6 +68,8 @@ static jmp_buf EXIT_JMP;
 Process *process_current(void) { return CURRENT_PROC; }
 int task_current(void) { return 7; }
 void task_yield(void) { YIELDS++; }
+static int WOKEN_TASKS[16], WOKEN_TASKS_N;
+void task_wake(int id) { if (WOKEN_TASKS_N < 16) WOKEN_TASKS[WOKEN_TASKS_N++] = id; } /* (pipes wake waiters) */
 
 void process_exit(int code)
 {
@@ -132,6 +134,7 @@ void console_wait(int con, int task_id)
 }
 
 static int PENDING_PID, PENDING_CODE, DONE_PID, DONE_CODE; /* a child that "ends" while the parent sleeps in task_block */
+static void (*BLOCK_ACTION)(void); /* what happens "elsewhere" while the caller sleeps in task_block (a pipe peer runs) */
 
 void task_block(void)
 {
@@ -139,6 +142,8 @@ void task_block(void)
     BLOCKS++;
     if (CON_BLOCKS_BEFORE_DATA > 0)
         CON_BLOCKS_BEFORE_DATA--; /* "the user pressed Enter while we slept" */
+    if (BLOCK_ACTION)
+        BLOCK_ACTION();
     if (PENDING_PID)
     {
         DONE_PID = PENDING_PID;
@@ -520,6 +525,14 @@ static void reset(void)
     READ_CALLS = 0;
     host_uaccess = 0;
 }
+
+/* what "the other process" does while the caller sleeps in task_block (see BLOCK_ACTION) */
+static char PIPE_OUT[10000];
+static int drained;
+static void feed(void) { pipe_write(pfile_pipe(&PROC.file[1]), "late", 4); BLOCK_ACTION = 0; }
+static void drain(void) { drained += pipe_read(pfile_pipe(&PROC.file[0]), PIPE_OUT + drained, 3000); }
+static void drop_reader(void) { pfile_close(&PROC.file[0]); BLOCK_ACTION = 0; }
+static void drop_writer(void) { pfile_close(&PROC.file[1]); BLOCK_ACTION = 0; }
 
 static ull U(const void *p) { return (ull)(unsigned long long)p; }
 
@@ -1180,6 +1193,129 @@ int main(void)
     CURRENT_PROC = 0;
     CHECK(call(SYS_LOCK, U("/RAM Disk"), 2, 0) == -1);
     CURRENT_PROC = &PROC;
+
+    /* ================= pipes ================= */
+    reset();
+    {
+        int fds[2] = {-1, -1};
+        char rb[64];
+        CHECK(call(SYS_PIPE, U(fds), 0, 0) == 0 && fds[0] == 3 && fds[1] == 4);       /* the lowest free numbers */
+        CHECK(PROC.file[0].flags == 0 && PROC.file[1].flags == PFILE_WRITE && pfile_is_pipe(&PROC.file[0]) && pfile_is_pipe(&PROC.file[1]));
+        CHECK(pipe_in_use() == 1);
+
+        /* data in, data out, no waiting */
+        BLOCKS = 0;
+        CHECK(call(SYS_WRITE, 4, U("hello"), 5) == 5);
+        memset(rb, 0, sizeof(rb));
+        CHECK(call(SYS_READ, 3, U(rb), 64) == 5 && strcmp(rb, "hello") == 0 && BLOCKS == 0);
+        CHECK(call(SYS_WRITE, 4, U("x"), 0) == 0);
+
+        /* an empty pipe with a writer: the reader sleeps until the other side has written */
+        BLOCK_ACTION = feed;
+        BLOCKS = 0;
+        memset(rb, 0, sizeof(rb));
+        CHECK(call(SYS_READ, 3, U(rb), 64) == 4 && strcmp(rb, "late") == 0 && BLOCKS == 1);
+
+        /* a full pipe: the writer sleeps until the other side has read; all of it arrives, in order */
+        static char big[10000];
+        char *out = PIPE_OUT;
+        for (int i = 0; i < (int)sizeof(big); i++)
+            big[i] = (char)(i * 13 + 5);
+        drained = 0;
+        BLOCK_ACTION = drain;
+        BLOCKS = 0;
+        CHECK(call(SYS_WRITE, 4, U(big), 4096) == 4096 && BLOCKS == 0);                 /* exactly fits */
+        CHECK(call(SYS_WRITE, 4, U(big + 4096), 4096) == 4096 && BLOCKS >= 1);          /* needs room */
+        BLOCK_ACTION = 0;
+        while (drained < 8192)
+        {
+            int r = pipe_read(pfile_pipe(&PROC.file[0]), out + drained, 8192 - drained);
+            if (r <= 0)
+                break;
+            drained += r;
+        }
+        CHECK(drained == 8192 && memcmp(out, big, 8192) == 0);
+
+        /* the wrong end */
+        CHECK(call(SYS_READ, 4, U(rb), 4) == -1 && call(SYS_WRITE, 3, U("x"), 1) == -1);
+        CHECK(call(SYS_SEEK, 3, 0, 0) == -1 && call(SYS_SEEK, 4, 0, 2) == -1);        /* a pipe has no position */
+
+        /* every writer gone: the rest is read, then end of input without sleeping */
+        CHECK(call(SYS_WRITE, 4, U("tail"), 4) == 4);
+        CHECK(call(SYS_CLOSE, 4, 0, 0) == 0);
+        BLOCKS = 0;
+        CHECK(call(SYS_READ, 3, U(rb), 2) == 2 && call(SYS_READ, 3, U(rb), 64) == 2 && call(SYS_READ, 3, U(rb), 64) == 0);
+        CHECK(BLOCKS == 0);
+        CHECK(call(SYS_CLOSE, 3, 0, 0) == 0 && pipe_in_use() == 0);                    /* both ends closed: freed */
+        CHECK(call(SYS_READ, 3, U(rb), 4) == -1 && call(SYS_CLOSE, 3, 0, 0) == -1);
+
+        /* every reader gone: a write is refused, and a sleeping writer is told */
+        CHECK(call(SYS_PIPE, U(fds), 0, 0) == 0);
+        CHECK(call(SYS_CLOSE, (ull)fds[0], 0, 0) == 0);
+        CHECK(call(SYS_WRITE, (ull)fds[1], U("x"), 1) == -1);
+        CHECK(call(SYS_CLOSE, (ull)fds[1], 0, 0) == 0 && pipe_in_use() == 0);
+        CHECK(call(SYS_PIPE, U(fds), 0, 0) == 0);
+        CHECK(call(SYS_WRITE, (ull)fds[1], U(big), 4096) == 4096);                      /* full */
+        BLOCK_ACTION = drop_reader;
+        CHECK(call(SYS_WRITE, (ull)fds[1], U("more"), 4) == -1);                        /* slept, then the reader was gone */
+        CHECK(call(SYS_CLOSE, (ull)fds[1], 0, 0) == 0 && pipe_in_use() == 0);
+
+        /* a reader sleeping when the last writer ends sees end of input */
+        CHECK(call(SYS_PIPE, U(fds), 0, 0) == 0);
+        BLOCK_ACTION = drop_writer;
+        CHECK(call(SYS_READ, (ull)fds[0], U(rb), 4) == 0);
+        CHECK(call(SYS_CLOSE, (ull)fds[0], 0, 0) == 0 && pipe_in_use() == 0);
+
+        /* refusals */
+        USER_OK = 0;
+        CHECK(call(SYS_PIPE, U(fds), 0, 0) == -1 && pipe_in_use() == 0);
+        USER_OK = 1;
+        long long files[PROCESS_MAX_FILES];
+        int open_n = 0;
+        while (open_n < PROCESS_MAX_FILES - 1 && (files[open_n] = call(SYS_OPEN, U("HELLO.ELF"), 0, 0)) >= 3)
+            open_n++;
+        CHECK(open_n == PROCESS_MAX_FILES - 1 && call(SYS_PIPE, U(fds), 0, 0) == -1 && pipe_in_use() == 0); /* one slot is not enough */
+        for (int i = 0; i < open_n; i++)
+            call(SYS_CLOSE, (ull)files[i], 0, 0);
+        int made = 0;
+        while (made < PIPE_MAX + 2 && call(SYS_PIPE, U(fds), 0, 0) == 0)
+        {
+            made++;
+            call(SYS_CLOSE, (ull)fds[1], 0, 0); /* keep only the read ends: a slot per pipe */
+            if (made == 4)
+                break;
+        }
+        CHECK(made == 4 && pipe_in_use() == 4);
+        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+            pfile_close(&PROC.file[i]);
+        CHECK(pipe_in_use() == 0);
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_PIPE, U(fds), 0, 0) == -1);
+        CURRENT_PROC = &PROC;
+
+        /* spawn with pipe ends as the child's fd 0 / 1 */
+        CHECK(call(SYS_PIPE, U(fds), 0, 0) == 0);
+        int io[3] = {-1, fds[1], -1};
+        SP_REDIR_N = 0;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io)) > 0 && SP_REDIR_N == 3);
+        CHECK(SP_REDIR[1].node >= PROCESS_PIPE_NODE && (SP_REDIR[1].flags & PFILE_WRITE) && SP_REDIR[0].node < 0);
+        PROC.child[0] = 0;
+        int in_io[3] = {fds[0], -1, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(in_io)) > 0 && SP_REDIR[0].node >= PROCESS_PIPE_NODE && !(SP_REDIR[0].flags & PFILE_WRITE));
+        PROC.child[0] = 0;
+        int bad1[3] = {fds[1], -1, -1}, bad2[3] = {-1, fds[0], -1};                      /* the wrong end for the job */
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(bad1)) == -1 && call(SYS_SPAWN, U("HELLO.ELF"), 0, U(bad2)) == -1);
+        /* the shell's own stdin / stdout can be a pipe end (a redirected process): reading and writing through fd 0 / 1 */
+        PROC.stdio[1] = fds[1] - 3;
+        PROC.stdio[0] = fds[0] - 3;
+        CHECK(call(SYS_WRITE, 1, U("via fd 1"), 8) == 8 && CON_WRITES == 0);
+        memset(rb, 0, sizeof(rb));
+        CHECK(call(SYS_READ, 0, U(rb), 64) == 8 && strcmp(rb, "via fd 1") == 0);
+        PROC.stdio[0] = PROC.stdio[1] = -1;
+        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+            pfile_close(&PROC.file[i]);
+        CHECK(pipe_in_use() == 0);
+    }
 
     /* ================= yield, exit, unknown ================= */
     reset();

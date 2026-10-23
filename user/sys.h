@@ -26,6 +26,7 @@
 #define SYS_RMDIR 17
 #define SYS_RENAME 18
 #define SYS_LOCK 19
+#define SYS_PIPE 20
 
 #define SYS_O_WRITE 1
 #define SYS_O_CREATE 2
@@ -73,6 +74,8 @@ static inline long long sys_rmdir(const char *path) { return syscall3(SYS_RMDIR,
 static inline long long sys_rename(const char *from, const char *to) { return syscall3(SYS_RENAME, (long long)(usize)from, (long long)(usize)to, 0); }
 /* drive lock: 1 = lock, 0 = unlock, 2 = ask (returns 1 if locked); see SYS_LOCK in include/syscall.h */
 static inline long long sys_lock(const char *path, int mode) { return syscall3(SYS_LOCK, (long long)(usize)path, mode, 0); }
+/* a pipe: fds[0] reads what is written to fds[1]; 0 or -1 */
+static inline long long sys_pipe(int *fds) { return syscall3(SYS_PIPE, (long long)(usize)fds, 0, 0); }
 /* sys_spawn with redirection: io[0..2] = open descriptors for the child's fd 0, 1, 2, or -1 to leave one alone */
 static inline long long sys_spawn_io(const char *path, const char *const *argv, const int *io) { return syscall3(SYS_SPAWN, (long long)(usize)path, (long long)(usize)argv, (long long)(usize)io); }
 static inline void sys_yield(void) { syscall3(SYS_YIELD, 0, 0, 0); }

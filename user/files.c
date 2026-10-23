@@ -85,7 +85,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
         if (fds[i] >= 0)
             opened++;
     }
-    CHECK(37, opened >= 4 && opened <= 5); /* fd was one of the slots: the others fill the rest */
+    CHECK(37, opened >= 7 && opened <= 8); /* fd was one of the slots: the others fill the rest */
     for (int i = 0; i < 8; i++)
         if (fds[i] >= 0)
             sys_close((int)fds[i]);

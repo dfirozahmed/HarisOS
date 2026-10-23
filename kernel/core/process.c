@@ -121,7 +121,11 @@ static int copy_in(AddressSpace *as, u64 va, const unsigned char *src, u64 n)
 
 /* The last steps of every way to start a process: the stack (writable, not executable), the first thread data, the
  * thread. On failure the address space is destroyed here, so the callers just return. Returns the thread id or -1. */
-static void process_free(void *p) { kfree(p); }
+static void process_free(void *p)
+{
+    process_release_files((Process *)p); /* (normally done at exit: this catches any other way a process can go away) */
+    kfree(p);
+}
 
 static int NEXT_PID = 1;
 
@@ -249,12 +253,25 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
         aspace_destroy(as);
         return -1;
     }
+    for (int i = 0; i < PROCESS_MAX_FILES; i++) /* the child holds the pipe ends it was given */
+        if (p->file[i].node >= PROCESS_PIPE_NODE)
+            pipe_ref(pfile_pipe(&p->file[i]), (p->file[i].flags & PFILE_WRITE) != 0);
     STATS.started++;
     sp->pid = NEXT_PID++;
     return id;
 }
 
 Process *process_current(void) { return (Process *)task_user_data(); }
+
+void process_release_files(Process *p)
+{
+    if (!p)
+        return;
+    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        pfile_close(&p->file[i]);
+    for (int k = 0; k < 3; k++)
+        p->stdio[k] = -1;
+}
 
 int process_start(const char *name, const void *image, u64 size)
 {
@@ -372,6 +389,7 @@ __attribute__((noreturn)) void process_exit(int code)
     Process *p = process_current();
     if (p && p->own_console)
         console_finish(p->console, code); /* "[process exited, code N]" in its window (does nothing without one) */
+    process_release_files(p); /* a reader of its pipes now sees end of input */
     record_exit(p, code);
     task_exit(); /* the scheduler frees the thread, its pages and its page tables */
 }
@@ -416,6 +434,7 @@ __attribute__((noreturn)) void process_fault(const FaultFrame *f, u64 cr2)
         if (p->own_console)
             console_finish(p->console, -1);
     }
+    process_release_files(p);
     record_exit(p, -1);
     task_exit();
 }
