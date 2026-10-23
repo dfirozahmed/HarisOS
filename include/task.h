@@ -106,9 +106,16 @@ int task_priority(int id);
  * value (-1 for those ids); task_priority stays the thread's own. */
 int task_set_inherited(int id, int prio);
 int task_effective_priority(int id);
+/* How many 1 ms timer ticks a preemptible thread of that priority runs before the next thread gets a turn: TASK_SLICE_TICKS for
+ * TASK_PRIO_DEFAULT, fewer below it (at least 1), more above it (1, 3, 5, 6, 8 for levels 0 .. 4). A thread runs with the slice of the
+ * priority it has when it gets the CPU (a borrowed priority counts). Out of range values are clamped. */
+unsigned task_slice_for(int prio);
 
 /* Called by the timer interrupt (idle.c) on every tick, with interrupts off: switches away from a preemptible thread
- * whose slice is over, unless preempt_disable() is in force. Does nothing for normal threads and the main loop. */
+ * whose slice is over, unless preempt_disable() is in force. It also switches at once, before the slice is over, if a thread that
+ * ranks higher is ready (it was woken by task_wake, or its sleep ended, or its priority was raised): so a wake-up takes effect at the
+ * next tick, at most 1 ms later, and never inside task_wake itself, which may be called from code that must not be switched away from.
+ * Does nothing for normal threads and the main loop. */
 void task_tick(void);
 /* 1 if some thread other than the running one could run now (the main loop yields instead of halting then). */
 int task_others_ready(void);

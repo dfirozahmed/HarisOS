@@ -56,6 +56,50 @@ static AddressSpace *ACTIVE_AS;  /* the address space loaded in CR3 (NULL = the 
 static unsigned SLICE_LEFT = TASK_SLICE_TICKS;
 volatile int preempt_count; /* see preempt.h */
 
+/* The priority the scheduler ranks thread k by: its own or the one it borrowed (the higher), plus one level per TASK_AGE_PASSES
+ * passes it waited. */
+static int rank_of(int k)
+{
+    const Task *t = &TASKS[k];
+    return (t->inherit > t->prio ? t->inherit : t->prio) + (int)(t->waited / TASK_AGE_PASSES);
+}
+
+/* The slice grows with the priority: the default level gets TASK_SLICE_TICKS, level 0 a third of it (at least one tick), level
+ * TASK_PRIO_MAX a bit over one and a half times. A thread that is wanted more also gets to keep the CPU longer. */
+unsigned task_slice_for(int prio)
+{
+    if (prio < TASK_PRIO_MIN)
+        prio = TASK_PRIO_MIN;
+    if (prio > TASK_PRIO_MAX)
+        prio = TASK_PRIO_MAX;
+    unsigned n = (unsigned)(TASK_SLICE_TICKS * (prio + 1)) / (TASK_PRIO_DEFAULT + 1);
+    return n ? n : 1;
+}
+
+/* The slice the running thread (or the one that is about to run) gets, by the priority it runs at (borrowed one included). */
+static unsigned slice_of(int k)
+{
+    const Task *t = &TASKS[k];
+    return task_slice_for(t->inherit > t->prio ? t->inherit : t->prio);
+}
+
+/* 1 if another thread is READY (or asleep with its time come) and ranks strictly higher than the running one. It is how a wake-up
+ * of a more important thread takes effect: the timer tick checks this and does not wait for the end of the slice. Interrupts off. */
+static int better_waiting(void)
+{
+    unsigned long long now = timer_us();
+    int mine = rank_of(CUR);
+    for (int i = 0; i < TASK_MAX; i++)
+    {
+        if (i == CUR)
+            continue;
+        const Task *t = &TASKS[i];
+        if ((t->state == TASK_READY || (t->state == TASK_SLEEPING && (long long)(now - t->wake_us) >= 0)) && rank_of(i) > mine)
+            return 1;
+    }
+    return 0;
+}
+
 /* What task_ctx_switch pops, lowest address first: the saved xmm6-15, the eight pushed registers (the first one
  * popped is r15) and the return address it finally "returns" to. */
 typedef struct
@@ -144,7 +188,7 @@ static void schedule(void)
         int k = (CUR + i) % TASK_MAX;
         if (TASKS[k].state == TASK_READY)
         {
-            int eff = (TASKS[k].inherit > TASKS[k].prio ? TASKS[k].inherit : TASKS[k].prio) + (int)(TASKS[k].waited / TASK_AGE_PASSES);
+            int eff = rank_of(k);
             if (next < 0 || eff > best)
             {
                 next = k;
@@ -192,7 +236,7 @@ static void schedule(void)
     TASKS[next].state = TASK_RUNNING;
     CUR = next;
     SWITCHES++;
-    SLICE_LEFT = TASK_SLICE_TICKS; /* the thread that comes in gets a whole slice */
+    SLICE_LEFT = slice_of(next); /* the thread that comes in gets a whole slice */
     task_ctx_switch(&old->rsp, TASKS[next].rsp);
     fpu_enter(&TASKS[CUR]); /* we are the thread that was chosen to continue: its floating point state now */
     reap();
@@ -477,9 +521,13 @@ void task_tick(void)
     Task *t = &TASKS[CUR];
     if (!(t->flags & TASK_PREEMPTIBLE) || t->state != TASK_RUNNING || preempt_count > 0)
         return;
-    if (--SLICE_LEFT > 0)
+    /* A thread that matters more became ready (task_wake, a sleep that ended, a priority that was raised): it takes the CPU now, not
+     * when the slice ends. This is the only safe place for it: task_wake can be called from code that must not be switched away from
+     * (it holds interrupts off, a pipe, the console), so it only makes the thread READY and this tick, at most one millisecond later,
+     * does the switch. A running thread that is not preemptible never gets here (the return above). */
+    if (!better_waiting() && --SLICE_LEFT > 0)
         return;
-    SLICE_LEFT = TASK_SLICE_TICKS;
+    SLICE_LEFT = slice_of(CUR);
     schedule(); /* we are in the interrupt: interrupts are off */
 }
 

@@ -398,6 +398,58 @@ static void tick_preempt_worker(void *arg)
     TK_P3 = 1;   /* reached only after we were switched back in */
 }
 
+/* slice length: a preemptible thread that ticks through its own slice by hand (see the test) */
+static volatile int SL_OK, SL_REACHED, SL_N;
+static void slice_worker(void *arg)
+{
+    (void)arg;
+    unsigned n = task_slice_for(task_effective_priority(task_current()));
+    unsigned long long s0 = task_switches();
+    for (unsigned i = 0; i + 1 < n; i++)
+        task_tick();
+    SL_OK = task_switches() == s0; /* the slice is not over yet */
+    SL_N = (int)n;
+    task_tick(); /* the last tick of its slice: the main thread gets the CPU here */
+    SL_REACHED = 1;
+}
+
+/* wake-up preemption: a normal thread of priority 4 notes 1, waits, notes 3; the preemptible one (priority 1, slice 3) notes 2, wakes it
+ * (or lets its sleep run out) and ticks once more: the better thread must run at that tick, before the preemptible one notes 4 */
+static volatile int WK_QUIET, WK_HI;
+static void hi_blocker(void *arg)
+{
+    (void)arg;
+    logv(1);
+    task_block();
+    logv(3);
+}
+static void wake_worker(void *arg)
+{
+    (void)arg;
+    unsigned long long s0 = task_switches();
+    task_tick();
+    WK_QUIET = task_switches() == s0; /* nobody better is waiting: an ordinary tick */
+    logv(2);
+    task_wake(WK_HI);
+    task_tick();
+    logv(4);
+}
+static void hi_sleeper(void *arg)
+{
+    (void)arg;
+    logv(1);
+    task_sleep_ms(5);
+    logv(3);
+}
+static void sleep_end_worker(void *arg)
+{
+    (void)arg;
+    logv(2);
+    NOW_US += 10000; /* the sleeper's time has come */
+    task_tick();
+    logv(4);
+}
+
 /* priority tests: a thread that yields until the low-priority one has run (which only aging can allow) */
 static volatile int LOW_RAN, HI_LOOPS;
 static void hi_worker(void *arg)
@@ -794,6 +846,79 @@ int main(void)
         drain_long();
         CHECK(task_count() == 1 && BLOCKS_OUT == 0);
     }
+
+    /* ---- slice length by priority, and wake-up preemption ---- */
+    CHECK(task_set_priority(0, 0) == 0); /* the main thread is the lowest: whatever runs is there because of its own priority */
+    {
+        static const unsigned want[5] = {1, 3, 5, 6, 8};
+        for (int p = 0; p <= TASK_PRIO_MAX; p++)
+            CHECK(task_slice_for(p) == want[p]);
+        CHECK(task_slice_for(TASK_PRIO_DEFAULT) == TASK_SLICE_TICKS);
+        CHECK(task_slice_for(-5) == want[0] && task_slice_for(99) == want[TASK_PRIO_MAX]); /* clamped */
+
+        /* each priority really runs for its slice: no switch before the last tick, a switch at it */
+        for (int p = 0; p <= TASK_PRIO_MAX; p++)
+        {
+            SL_OK = SL_REACHED = SL_N = 0;
+            CHECK(task_set_priority(0, p) == 0); /* as high as the worker: at the end of its slice we, not it, are the next one chosen */
+            int w = task_create_flags("SLICE", slice_worker, 0, TASK_PREEMPTIBLE);
+            CHECK(w > 0 && task_set_priority(w, p) == 0);
+            task_yield(); /* it runs until its last tick switches back to us */
+            CHECK(SL_N == (int)want[p] && SL_OK && !SL_REACHED);
+            drain_long();
+            CHECK(SL_REACHED && task_count() == 1);
+        }
+
+        /* a borrowed priority counts: a priority-0 thread that borrowed 4 gets the long slice */
+        SL_OK = SL_REACHED = SL_N = 0;
+        CHECK(task_set_priority(0, 4) == 0);
+        int bw = task_create_flags("BORROW", slice_worker, 0, TASK_PREEMPTIBLE);
+        CHECK(bw > 0 && task_set_priority(bw, 0) == 0 && task_set_inherited(bw, 4) == 0);
+        task_yield();
+        CHECK(SL_N == 8 && SL_OK && !SL_REACHED); /* own priority 0, but it runs (and is sliced) as 4 */
+        drain_long();
+        CHECK(SL_REACHED && task_count() == 1);
+        CHECK(task_set_priority(0, 0) == 0);
+
+        /* wake-up: a better thread woken in the middle of the slice runs at the next tick, not at the end of the slice */
+        LOGN = 0;
+        WK_QUIET = 0;
+        int hi = task_create("HI", hi_blocker, 0);
+        task_set_priority(hi, 4);
+        WK_HI = hi;
+        int ww = task_create_flags("WAKER", wake_worker, 0, TASK_PREEMPTIBLE);
+        CHECK(hi > 0 && ww > 0 && task_set_priority(ww, 1) == 0);
+        task_yield();
+        drain_long();
+        CHECK(WK_QUIET);
+        CHECK(LOGN == 4 && LOG[0] == 1 && LOG[1] == 2 && LOG[2] == 3 && LOG[3] == 4); /* 3 before 4: HI ran as soon as it was woken */
+        CHECK(task_count() == 1);
+
+        /* the same for a sleep that ends */
+        LOGN = 0;
+        int hs = task_create("HSLEEP", hi_sleeper, 0);
+        task_set_priority(hs, 4);
+        int se = task_create_flags("SLEEPEND", sleep_end_worker, 0, TASK_PREEMPTIBLE);
+        CHECK(hs > 0 && se > 0 && task_set_priority(se, 1) == 0);
+        task_yield();
+        drain_long();
+        CHECK(LOGN == 4 && LOG[0] == 1 && LOG[1] == 2 && LOG[2] == 3 && LOG[3] == 4);
+        CHECK(task_count() == 1);
+
+        /* an equal or lower thread that becomes ready does not cut a slice short */
+        LOGN = 0;
+        WK_QUIET = 0;
+        int lo = task_create("LOW", hi_blocker, 0);
+        task_set_priority(lo, 1);
+        WK_HI = lo;
+        int w2 = task_create_flags("WAKER", wake_worker, 0, TASK_PREEMPTIBLE);
+        CHECK(lo > 0 && w2 > 0 && task_set_priority(w2, 1) == 0);
+        task_yield();
+        drain_long();
+        CHECK(LOGN == 4 && LOG[0] == 1 && LOG[1] == 2 && LOG[2] == 4 && LOG[3] == 3); /* 4 before 3: the slice was not interrupted */
+        CHECK(task_count() == 1);
+    }
+    CHECK(task_set_priority(0, TASK_PRIO_DEFAULT) == 0);
 
     /* the same self test the kernel runs at boot */
     CHECK(task_selftest() == 0);
