@@ -663,6 +663,22 @@ int exec_selftest(void)
             return -654;
     }
 
+    /* mutexes and condition variables: MUXTEST.ELF (optional); exits with 54; nothing may be left behind */
+    if (exec_find("MUXTEST.ELF") >= 0)
+    {
+        id = exec_run("MUXTEST.ELF", &err);
+        if (id < 0)
+            return -720;
+        if (process_wait(id) != 0)
+            return -721;
+        ProcessStats s13;
+        process_stats(&s13);
+        if (s13.last_exit != 54)
+            return -722 - (s13.last_exit > 0 && s13.last_exit < 54 ? s13.last_exit : 0); /* -723 ... -775 */
+        if (usync_in_use() != 0 || shm_in_use() != 0)
+            return -776;
+    }
+
     /* shared memory and message queues: IPCTEST.ELF with IPCCHILD.ELF (optional); exits with 51; nothing may be left behind */
     if (exec_find("IPCTEST.ELF") >= 0 && exec_find("IPCCHILD.ELF") >= 0)
     {

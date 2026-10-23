@@ -1,6 +1,6 @@
 /* HarisOS user program: checks named mutexes and condition variables: a mutex around a counter in shared memory (four forked processes),
  * try-lock, a bounded buffer with a producer and a consumer that wait on conditions, broadcast, a holder that is killed, and names.
- * Exits with 53 if every check holds, otherwise with the number of the first one that did not. */
+ * Exits with 54 if every check holds, otherwise with the number of the first one that did not. */
 #include "libc.h"
 
 #define CHECK(n, cond)        \
@@ -168,5 +168,5 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
         puts("muxtest: all checks passed");
     else
         printf("muxtest: check %d failed\n", fail);
-    sys_exit(fail == 0 ? 53 : fail);
+    sys_exit(fail == 0 ? 54 : fail);
 }
