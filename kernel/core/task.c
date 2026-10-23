@@ -27,6 +27,7 @@ typedef struct
     TaskState state;
     unsigned flags;         /* TASK_PREEMPTIBLE */
     int prio;               /* TASK_PRIO_MIN..TASK_PRIO_MAX */
+    int inherit;            /* priority borrowed from a waiter on a lock this thread holds (task_set_inherited), -1 = none */
     unsigned waited;        /* schedule() passes in which this thread was READY but another one was chosen (aging) */
     unsigned long long wake_us; /* TASK_SLEEPING: when to become ready */
     TaskFn fn;
@@ -143,7 +144,7 @@ static void schedule(void)
         int k = (CUR + i) % TASK_MAX;
         if (TASKS[k].state == TASK_READY)
         {
-            int eff = TASKS[k].prio + (int)(TASKS[k].waited / TASK_AGE_PASSES);
+            int eff = (TASKS[k].inherit > TASKS[k].prio ? TASKS[k].inherit : TASKS[k].prio) + (int)(TASKS[k].waited / TASK_AGE_PASSES);
             if (next < 0 || eff > best)
             {
                 next = k;
@@ -221,6 +222,7 @@ int task_init(void)
         TASKS[i].free_data = 0;
         TASKS[i].flags = 0;
         TASKS[i].prio = TASK_PRIO_DEFAULT;
+        TASKS[i].inherit = -1;
         TASKS[i].waited = 0;
     }
     ACTIVE_AS = 0;
@@ -382,6 +384,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     t->arg = arg;
     t->flags = flags;
     t->prio = TASK_PRIO_DEFAULT;
+    t->inherit = -1;
     t->waited = 0;
     t->wake_us = 0;
     int n = 0;
@@ -419,6 +422,28 @@ int task_set_priority(int id, int prio)
 int task_priority(int id)
 {
     return id >= 0 && id < TASK_MAX && TASKS[id].state != TASK_UNUSED && TASKS[id].state != TASK_DEAD ? TASKS[id].prio : -1;
+}
+
+int task_set_inherited(int id, int prio)
+{
+    if (id < 0 || id >= TASK_MAX || prio < -1 || prio > TASK_PRIO_MAX)
+        return -1;
+    unsigned long long irq = irq_save();
+    if (TASKS[id].state == TASK_UNUSED || TASKS[id].state == TASK_DEAD)
+    {
+        irq_restore(irq);
+        return -1;
+    }
+    TASKS[id].inherit = prio;
+    irq_restore(irq);
+    return 0;
+}
+
+int task_effective_priority(int id)
+{
+    if (id < 0 || id >= TASK_MAX || TASKS[id].state == TASK_UNUSED || TASKS[id].state == TASK_DEAD)
+        return -1;
+    return TASKS[id].inherit > TASKS[id].prio ? TASKS[id].inherit : TASKS[id].prio;
 }
 
 void task_sleep_ms(unsigned ms)

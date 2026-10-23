@@ -16,18 +16,26 @@
  * several threads wait, the one with the highest priority (task_priority) is woken first; a thread that ended while waiting is
  * skipped. A woken thread checks again, so another thread may take the lock first ("barging"); it then sleeps again.
  *
- * Limits: no priority inheritance (a low-priority holder can keep a high-priority waiter waiting) and no recursive locking. A
- * holder that ended or was killed loses the lock (the next lock / trylock takes it back); only the thread id is remembered, so
- * a new thread that reuses that slot would look like the old holder. The main loop (thread 0) never blocks: task_block() only yields there, so it spins
+ * Priority inheritance: a thread that waits for a mutex lends its priority to the holder (task_set_inherited), so a low-priority
+ * holder cannot be starved by medium-priority threads while a high-priority one waits for it (priority inversion). The loan is
+ * transitive (A holds m1, B holds m2 and waits for m1, C waits for m2: A runs at C's priority), covers every mutex a thread holds
+ * (it gives back only what no remaining waiter asks for) and ends when the holder unlocks. The holder is raised from the moment
+ * the waiter registers; it is not preempted at once, it runs better from the next scheduling decision (see task_set_priority).
+ * Condition variable waiters do not lend priority: nobody holds anything they wait for.
+ *
+ * Limits: no recursive locking; a cycle of threads waiting for each other is a deadlock and stays one. A holder that ended or was
+ * killed loses the lock (the next lock / trylock takes it back); only the thread id is remembered, so a new thread that reuses that
+ * slot would look like the old holder. The main loop (thread 0) never blocks: task_block() only yields there, so it spins
  * politely instead of sleeping. Do not lock from an interrupt handler.
  * ============================================================ */
 #ifndef HARIS_MUTEX_H
 #define HARIS_MUTEX_H
 
-typedef struct
+typedef struct Mutex_
 {
     int owner;         /* thread id of the holder, -1 if free */
     unsigned waiters;  /* bit i: thread i sleeps in mutex_lock */
+    struct Mutex_ *next_held; /* the next mutex the holder holds (priority inheritance, mutex.c) */
 } Mutex;
 
 typedef struct
@@ -35,7 +43,7 @@ typedef struct
     unsigned waiters;  /* bit i: thread i sleeps in cond_wait */
 } CondVar;
 
-#define MUTEX_INIT { -1, 0 }
+#define MUTEX_INIT { -1, 0, 0 }
 #define COND_INIT { 0 }
 
 void mutex_init(Mutex *m);

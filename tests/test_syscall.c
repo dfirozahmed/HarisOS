@@ -75,7 +75,8 @@ void task_wake(int id) { if (WOKEN_TASKS_N < 16) WOKEN_TASKS[WOKEN_TASKS_N++] = 
 volatile int host_if = 1;
 static int DEAD_TASK = -1;
 TaskState task_state(int id) { return id == DEAD_TASK ? TASK_DEAD : TASK_BLOCKED; }
-int task_priority(int id) { (void)id; return TASK_PRIO_DEFAULT; }
+int task_effective_priority(int id) { (void)id; return TASK_PRIO_DEFAULT; }
+int task_set_inherited(int id, int prio) { (void)id; (void)prio; return 0; }
 
 void process_exit(int code)
 {

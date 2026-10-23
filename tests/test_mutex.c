@@ -95,6 +95,69 @@ static void foreign_unlock_worker(void *arg)
     UNLOCK_RESULT = mutex_unlock(&M);
 }
 
+/* ---- priority inheritance ---- */
+static Mutex M1 = MUTEX_INIT, M2 = MUTEX_INIT;
+
+/* holds M, sleeps until the test wakes it, then unlocks and notes the priority it runs at afterwards */
+static void sleeper_holder(void *arg)
+{
+    (void)arg;
+    mutex_lock(&M);
+    task_block();
+    mutex_unlock(&M);
+    logv(task_effective_priority(task_current()));
+}
+
+/* the same with two mutexes: lock M1, lock M2, sleep, unlock M1 (note), unlock M2 (note) */
+static void two_holder(void *arg)
+{
+    (void)arg;
+    mutex_lock(&M1);
+    mutex_lock(&M2);
+    task_block();
+    mutex_unlock(&M1);
+    logv(task_effective_priority(task_current()));
+    mutex_unlock(&M2);
+    logv(task_effective_priority(task_current()));
+}
+
+static void lock1_worker(void *arg)
+{
+    mutex_lock(&M1);
+    logv((int)(long long)arg);
+    mutex_unlock(&M1);
+}
+static void lock2_worker(void *arg)
+{
+    mutex_lock(&M2);
+    logv((int)(long long)arg);
+    mutex_unlock(&M2);
+}
+
+/* holds M2, then waits for M1 (a link in a chain) */
+static void chain_worker(void *arg)
+{
+    (void)arg;
+    mutex_lock(&M2);
+    mutex_lock(&M1);
+    mutex_unlock(&M1);
+    mutex_unlock(&M2);
+}
+
+static void plain_worker(void *arg) { logv((int)(long long)arg); }
+static void hold1_worker(void *arg)
+{
+    (void)arg;
+    mutex_lock(&M1);
+    task_block();
+    mutex_unlock(&M1);
+}
+static void idle_blocker(void *arg)
+{
+    (void)arg;
+    task_block();
+}
+
 static void drain(void)
 {
     for (int i = 0; i < 100 && task_count() > 1; i++)
@@ -156,7 +219,8 @@ int main(void)
     int k1 = task_create("KILLED", lock_worker, (void *)1);
     int k2 = task_create("LIVE", lock_worker, (void *)2);
     CHECK(task_set_priority(k1, 4) == 0);
-    task_yield();
+    for (int i = 0; i < 200 && M.waiters != ((1u << k1) | (1u << k2)); i++)
+        task_yield(); /* k1 blocks first and lends its priority to us: k2 only runs after aging */
     CHECK(task_state(k1) == TASK_BLOCKED && task_state(k2) == TASK_BLOCKED);
     CHECK(task_kill(k1) == 0);
     CHECK(mutex_unlock(&M) == 0);
@@ -225,6 +289,84 @@ int main(void)
     CHECK(CV.waiters == 0);
     drain();
     CHECK(LOGN == 3 && task_count() == 1 && M.owner == -1);
+
+    /* ---- priority inheritance ---- */
+    CHECK(task_set_priority(0, 0) == 0); /* the main thread is the lowest, so the order below is the priorities' doing */
+    {
+        /* the holder (priority 1) gets the priority of the waiter (4), so it runs before a thread of priority 3 and unlocks in time */
+        LOGN = 0;
+        int lo = task_create("LO", sleeper_holder, 0);
+        task_set_priority(lo, 1);
+        task_yield(); /* LO takes M and sleeps */
+        CHECK(task_state(lo) == TASK_BLOCKED && M.owner == lo);
+        CHECK(task_effective_priority(lo) == 1);
+        int hi = task_create("HI", lock_worker, (void *)7);
+        task_set_priority(hi, 4);
+        task_yield(); /* HI wants M and sleeps */
+        CHECK(task_state(hi) == TASK_BLOCKED);
+        CHECK(task_priority(lo) == 1 && task_effective_priority(lo) == 4); /* its own priority is unchanged; it runs at 4 */
+        int mid = task_create("MID", plain_worker, (void *)5);
+        task_set_priority(mid, 3);
+        task_wake(lo);
+        drain();
+        CHECK(LOGN == 3 && LOG[0] == 1 && LOG[1] == 7 && LOG[2] == 5); /* LO (back to 1 after its unlock), HI, then MID */
+        CHECK(task_effective_priority(lo) == -1 && task_count() == 1);
+
+        /* a chain: C (4) waits for B's M2, B (2) waits for A's M1, A (1) holds M1: A and B both run at 4 */
+        LOGN = 0;
+        int a = task_create("A", hold1_worker, 0);
+        task_set_priority(a, 1);
+        task_yield();
+        int b = task_create("B", chain_worker, 0);
+        task_set_priority(b, 2);
+        task_yield(); /* B has M2 and waits for M1 */
+        CHECK(task_state(b) == TASK_BLOCKED && task_effective_priority(a) == 2);
+        int c = task_create("C", lock2_worker, (void *)9);
+        task_set_priority(c, 4);
+        task_yield(); /* C waits for M2 */
+        CHECK(task_state(c) == TASK_BLOCKED);
+        CHECK(task_effective_priority(b) == 4 && task_effective_priority(a) == 4);
+        CHECK(task_priority(a) == 1 && task_priority(b) == 2);
+        task_wake(a);
+        drain();
+        CHECK(LOGN == 1 && LOG[0] == 9 && task_count() == 1 && M1.owner == -1 && M2.owner == -1);
+
+        /* two mutexes: after the first unlock the holder keeps what the waiter of the other one asks for, after the second it is back */
+        LOGN = 0;
+        int t = task_create("TWO", two_holder, 0);
+        task_set_priority(t, 1);
+        task_yield(); /* holds M1 and M2 */
+        int h = task_create("H", lock1_worker, (void *)7);
+        task_set_priority(h, 4);
+        task_yield();
+        CHECK(task_effective_priority(t) == 4);
+        int m = task_create("M", lock2_worker, (void *)5);
+        task_set_priority(m, 2);
+        task_yield();
+        CHECK(task_state(h) == TASK_BLOCKED && task_state(m) == TASK_BLOCKED && task_effective_priority(t) == 4);
+        task_wake(t);
+        drain();
+        CHECK(LOGN == 4 && LOG[0] == 2 && LOG[1] == 1 && LOG[2] == 7 && LOG[3] == 5); /* 4 -> 2 (M's wait) -> 1 */
+        CHECK(task_count() == 1);
+
+        /* the pieces the system calls use: a registered waiter lends its priority, a cancelled one takes it back */
+        CHECK(mutex_lock(&M1) == 0);
+        int x = task_create("X", idle_blocker, 0);
+        task_set_priority(x, 4);
+        task_yield();
+        CHECK(task_effective_priority(0) == 0);
+        mutex_wait_for(&M1, x);
+        CHECK(task_effective_priority(0) == 4 && task_priority(0) == 0);
+        mutex_cancel_wait(&M1, x);
+        CHECK(task_effective_priority(0) == 0);
+        CHECK(mutex_unlock(&M1) == 0);
+        task_wake(x);
+        drain();
+
+        /* a holder that ended while waiters existed: the lock is taken back and no stale loan is left */
+        CHECK(task_set_inherited(0, TASK_PRIO_MAX + 1) == -1 && task_set_inherited(5, 1) == -1 && task_set_inherited(0, -1) == 0);
+    }
+    CHECK(task_set_priority(0, TASK_PRIO_DEFAULT) == 0 && task_effective_priority(0) == TASK_PRIO_DEFAULT);
 
     CHECK(BLOCKS_OUT == 0);
     CHECK(host_if == 1);

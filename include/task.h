@@ -100,6 +100,12 @@ void task_yield(void);
  * task_set_priority: 0, or -1 for a bad id / value or a slot that is unused or finished. task_priority: -1 for those ids. */
 int task_set_priority(int id, int prio);
 int task_priority(int id);
+/* Priority inheritance (mutex.c uses it): a thread that holds a lock somebody better waits for runs at that waiter's priority until it
+ * lets go. task_set_inherited sets the borrowed priority (TASK_PRIO_MIN..TASK_PRIO_MAX), or -1 for none; the scheduler uses the higher of
+ * it and the thread's own. 0, or -1 for a bad id / value or a slot that is unused or finished. task_effective_priority is that higher
+ * value (-1 for those ids); task_priority stays the thread's own. */
+int task_set_inherited(int id, int prio);
+int task_effective_priority(int id);
 
 /* Called by the timer interrupt (idle.c) on every tick, with interrupts off: switches away from a preemptible thread
  * whose slice is over, unless preempt_disable() is in force. Does nothing for normal threads and the main loop. */
