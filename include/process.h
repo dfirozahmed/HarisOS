@@ -132,6 +132,17 @@ typedef struct
 } ProcessInfo;
 int process_info(int index, ProcessInfo *out);
 
+/* exec: replace the running process's program by the ELF file (see process_spawn_elf for the arguments; `args` supplies argc / args only).
+ * free_file != 0: the kernel heap block `file` is freed just before the point of no return (the caller can not do it).
+ * Does not return when it works. -1 with *err = the ELF_ERR_* reason or 0 (no memory) if it fails, and then nothing has changed. */
+int process_exec_elf(const char *name, const void *file, unsigned long long size, const ProcessSpawn *args, int *err, int free_file);
+
+/* fork: a copy of the running process, resuming at user_rip / user_rsp with rax = 0 (the system call layer passes what SYSCALL saved).
+ * Returns the child's pid, or -1. */
+int process_fork(unsigned long long user_rip, unsigned long long user_rsp);
+
+int process_ppid(void); /* the parent's pid, 0 if none */
+
 /* End the running process (called by SYS_EXIT, and by the kernel itself). Does not return. */
 __attribute__((noreturn)) void process_exit(int code);
 

@@ -100,6 +100,24 @@ int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
     return id;
 }
 
+/* exec: the same file reading, then the running process becomes the program. Returns only on failure (same codes as exec_spawn_node). */
+int exec_replace_node(int node, const char *name, ProcessSpawn *args, int *err)
+{
+    int e = 0;
+    if (err)
+        *err = 0;
+    unsigned size = 0;
+    unsigned char *buf = read_whole(node, &size, &e);
+    if (!buf)
+        return e;
+    int elf_err = 0;
+    process_exec_elf(name, buf, size, args, &elf_err, 1); /* does not return when it works (and frees buf itself then) */
+    kfree(buf);
+    if (err)
+        *err = elf_err;
+    return EXEC_ERR_LOAD;
+}
+
 int exec_run_node(int node, const char *name, int console, int *err)
 {
     ProcessSpawn sp = {.console = console, .parent = -1};
@@ -607,6 +625,22 @@ int exec_selftest(void)
             return -332 - (s7.last_exit > 0 && s7.last_exit < 48 ? s7.last_exit : 0); /* -333 ... -379 */
         if (pipe_in_use() != 0)
             return -380; /* a pipe was not given back */
+    }
+
+    /* fork and exec: FORKTEST.ELF copies itself, becomes ARGTEST / UPPER (optional); exits with 50 */
+    if (exec_find("FORKTEST.ELF") >= 0 && exec_find("ARGTEST.ELF") >= 0 && exec_find("UPPER.ELF") >= 0)
+    {
+        id = exec_run("FORKTEST.ELF", &err);
+        if (id < 0)
+            return -480;
+        if (process_wait(id) != 0)
+            return -481;
+        ProcessStats s9;
+        process_stats(&s9);
+        if (s9.last_exit != 50)
+            return -482 - (s9.last_exit > 0 && s9.last_exit < 50 ? s9.last_exit : 0); /* -483 ... -531 */
+        if (pipe_in_use() != 0)
+            return -532;
     }
 
     /* signals: SIGTEST.ELF ends SPIN.ELF in several states (optional); exits with 49 */

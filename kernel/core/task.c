@@ -248,6 +248,22 @@ void *task_data_of(int id)
     return id >= 0 && id < TASK_MAX && TASKS[id].state != TASK_UNUSED && TASKS[id].state != TASK_DEAD ? TASKS[id].data : 0;
 }
 
+void task_exec_replace(AddressSpace *as, const char *name)
+{
+    Task *t = &TASKS[CUR];
+    AddressSpace *old = t->as;
+    t->as = as;
+    aspace_switch(as); /* the kernel half is the same in both: this code and its stack stay valid */
+    ACTIVE_AS = as;
+    aspace_destroy(old); /* no longer loaded */
+    fpu_default(t->fpu);
+    fpu_enter(t);
+    int n = 0;
+    for (; name && name[n] && n < TASK_NAME_MAX - 1; n++)
+        t->name[n] = name[n];
+    t->name[n] = 0;
+}
+
 int task_kill(int id)
 {
     if (id <= 0 || id >= TASK_MAX || id == CUR)

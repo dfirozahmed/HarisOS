@@ -74,6 +74,19 @@ AddressSpace *aspace_create(void)
     return as;
 }
 
+AddressSpace *aspace_clone(const AddressSpace *src)
+{
+    AddressSpace *as = aspace_create();
+    if (!as)
+        return 0;
+    if (paging_clone_user(src->entry, as->entry, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_page, alloc_page, free_page) != 0)
+    {
+        aspace_destroy(as); /* frees whatever was copied so far */
+        return 0;
+    }
+    return as;
+}
+
 int aspace_map_new(AddressSpace *as, u64 va, unsigned flags)
 {
     u64 *page = alloc_page();
@@ -164,6 +177,7 @@ int aspace_selftest(void)
 #else
 
 int aspace_init(void) { return -1; }
+AddressSpace *aspace_clone(const AddressSpace *src) { (void)src; return 0; }
 AddressSpace *aspace_create(void) { return 0; }
 int aspace_selftest(void) { return -1; }
 

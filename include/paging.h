@@ -82,4 +82,12 @@ int paging_user_range_ok(const unsigned long long *pml4, unsigned long long virt
 typedef void (*PagingFreeFn)(unsigned long long phys);
 void paging_destroy_range(unsigned long long *pml4, int first, int last, PagingFreeFn free_fn);
 
+/* Copy the user part (top-level slots first..last) of src into dst, whose slots there are empty: every page marked PAGING_OWNED
+ * gets a fresh copy of its 4096 bytes (page_alloc gives the new physical page; its old contents do not matter; page_free takes
+ * back one that could not be mapped), every other page (shared memory) is mapped again as it is, and the tables are new
+ * (table_alloc). The pages keep their permissions. 0, or -1 if an allocator ran out: dst then holds what was done so far and
+ * the caller frees it with paging_destroy_range. This is fork. */
+int paging_clone_user(const unsigned long long *src, unsigned long long *dst, int first, int last, PagingAllocFn table_alloc,
+                      PagingAllocFn page_alloc, PagingFreeFn page_free);
+
 #endif

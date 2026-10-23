@@ -473,6 +473,44 @@ static long long sys_seek(const SyscallFrame *f)
     return pos;
 }
 
+/* The arguments of SYS_SPAWN / SYS_EXEC, copied into one blob "arg0\0arg1\0...": argv_ptr is a NULL-terminated array of string
+ * pointers, or 0 = just the path as argv[0]. 0 and *len / *argc, or -1 (bad pointers, too many or too long). */
+static int collect_args(const AddressSpace *as, ull path_ptr, ull argv_ptr, char *blob, unsigned *len_out, int *argc_out)
+{
+    unsigned len = 0;
+    int argc = 0;
+    if (argv_ptr == 0)
+    {
+        int l = copy_string_from_user(blob, PROCESS_ARGS_BYTES, path_ptr, as);
+        if (l < 0)
+            return -1;
+        len = (unsigned)l + 1;
+        argc = 1;
+    }
+    else
+    {
+        for (;; argc++)
+        {
+            if (argc == PROCESS_ARGS_MAX)
+                return -1; /* no terminating NULL within the limit */
+            ull slot_va = argv_ptr + (ull)argc * 8;
+            ull str;
+            if (slot_va < argv_ptr || !aspace_user_ok(as, slot_va, 8, 0))
+                return -1;
+            copy_from_user((char *)&str, slot_va, 8);
+            if (str == 0)
+                break;
+            int l = copy_string_from_user(blob + len, (int)(PROCESS_ARGS_BYTES - len), str, as);
+            if (l < 0)
+                return -1; /* unreadable, or the arguments together do not fit */
+            len += (unsigned)l + 1;
+        }
+    }
+    *len_out = len;
+    *argc_out = argc;
+    return 0;
+}
+
 /* SYS_SPAWN: path in rdi (as for SYS_OPEN), argv in rsi (a NULL-terminated array of string pointers, or 0 = just the path
  * as argv[0]). Starts the program as a child that shares this process's console. Returns the child's pid, or -1: no such
  * program, not a runnable file, bad pointers, too many or too long arguments, too many children not waited for yet, or no
@@ -501,37 +539,11 @@ static long long sys_spawn(const SyscallFrame *f)
     if (!n || n->is_dir)
         return -1;
 
-    /* the arguments, copied into one blob: "arg0\0arg1\0..." */
     char blob[PROCESS_ARGS_BYTES];
     unsigned len = 0;
     int argc = 0;
-    if (argv_ptr == 0)
-    {
-        int l = copy_string_from_user(blob, (int)sizeof(blob), path_ptr, as);
-        if (l < 0)
-            return -1;
-        len = (unsigned)l + 1;
-        argc = 1;
-    }
-    else
-    {
-        for (;; argc++)
-        {
-            if (argc == PROCESS_ARGS_MAX)
-                return -1; /* no terminating NULL within the limit */
-            ull slot_va = argv_ptr + (ull)argc * 8;
-            ull str;
-            if (slot_va < argv_ptr || !aspace_user_ok(as, slot_va, 8, 0))
-                return -1;
-            copy_from_user((char *)&str, slot_va, 8);
-            if (str == 0)
-                break;
-            int l = copy_string_from_user(blob + len, (int)(sizeof(blob) - len), str, as);
-            if (l < 0)
-                return -1; /* unreadable, or the arguments together do not fit */
-            len += (unsigned)l + 1;
-        }
-    }
+    if (collect_args(as, path_ptr, argv_ptr, blob, &len, &argc) != 0)
+        return -1;
 
     /* fd 0, 1, 2 of the child: the files the caller named (its own open descriptors, copied), else what the caller itself has
      * (a redirected shell passes it on), else the console */
@@ -848,6 +860,115 @@ static long long sys_lock(const SyscallFrame *f)
     return vfs_set_locked(vol, (int)f->rsi) == 0 ? 0 : -1;
 }
 
+/* ---- fork, exec, dup2, getpid ----------------------------------------------------------------------------------------------- */
+/* SYS_FORK: a copy of this process (see process_fork). The parent gets the child's pid, the child starts after the SYSCALL
+ * instruction with rax = 0 and the registers of the parent NOT preserved (the fork() of the user library saves them on the stack
+ * first). -1: too many children, no memory. */
+static long long sys_fork(const SyscallFrame *f)
+{
+    if (!process_current())
+        return -1;
+    return process_fork(f->rcx, f->user_rsp);
+}
+
+/* SYS_EXEC: rdi = path (as for SYS_SPAWN), rsi = argv. This process becomes that program: same pid, console, folder, open files
+ * and redirections. Does not return when it works. -1 (and nothing changed): no such program, not an ELF file, bad pointers, no
+ * memory. */
+static long long sys_exec(const SyscallFrame *f)
+{
+    ull path_ptr = f->rdi, argv_ptr = f->rsi;
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), path_ptr, as) < 0)
+        return -1;
+    int node = resolve_path(p, path, 1);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (!n || n->is_dir)
+        return -1;
+    char blob[PROCESS_ARGS_BYTES];
+    unsigned len = 0;
+    int argc = 0;
+    if (collect_args(as, path_ptr, argv_ptr, blob, &len, &argc) != 0)
+        return -1;
+    ProcessSpawn sp = {.argc = argc, .args = blob, .args_len = len};
+    int err = 0;
+    exec_replace_node(node, n->name, &sp, &err); /* returns only if it failed */
+    return -1;
+}
+
+/* SYS_GETPID: rdi = 0 for this process's pid, 1 for the parent's (0 if it has none or is gone). */
+static long long sys_getpid(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    if (!p || f->rdi > 1)
+        return -1;
+    return f->rdi == 0 ? p->pid : process_ppid();
+}
+
+/* Let go of the descriptor that stands in for fd k (0..2): its file is closed unless fd 1 and 2 still share it. */
+static void release_stdio(Process *p, int k)
+{
+    int slot = p->stdio[k];
+    p->stdio[k] = -1;
+    if (slot < 0)
+        return;
+    for (int j = 0; j < 3; j++)
+        if (p->stdio[j] == slot)
+            return;
+    pfile_close(&p->file[slot]);
+}
+
+/* SYS_DUP2: rdi = old descriptor, rsi = new = 0, 1 or 2. Afterwards fd `new` is the same open file as `old` (a copy in a slot of its
+ * own: closing `old` later does not close `new`, and a pipe end is counted for both). old = a file descriptor from SYS_OPEN or
+ * SYS_PIPE, or 0..2 (copy what that one is now: "2>&1"), or -1 = the console. Returns `new`, or -1 (no free slot, bad fd, the
+ * wrong direction: fd 0 must be readable, fd 1 and 2 writable). A child keeps these across SYS_EXEC: this is how a fork-and-exec
+ * shell makes redirections. */
+static long long sys_dup2(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    long long old = (long long)f->rdi;
+    ull nw = f->rsi;
+    if (!p || nw > 2)
+        return -1;
+    int src = -1; /* the file slot to copy, -1 = the console */
+    if (old == -1)
+        src = -1;
+    else if (old >= 0 && old <= 2)
+        src = p->stdio[old];
+    else if (old >= PROCESS_FD_FIRST && old < PROCESS_FD_FIRST + PROCESS_MAX_FILES && p->file[old - PROCESS_FD_FIRST].node >= 0)
+        src = (int)old - PROCESS_FD_FIRST;
+    else
+        return -1;
+    if (src >= 0 && ((p->file[src].flags & PFILE_WRITE) != 0) != (nw != 0))
+        return -1; /* input must be readable, output writable */
+    if (src >= 0 && p->stdio[nw] == src)
+        return (long long)nw; /* already so */
+    int slot = -1;
+    if (src >= 0)
+    {
+        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+            if (p->file[i].node < 0)
+            {
+                slot = i;
+                break;
+            }
+        if (slot < 0)
+            return -1;
+    }
+    release_stdio(p, (int)nw);
+    if (src >= 0)
+    {
+        p->file[slot] = p->file[src];
+        if (pfile_is_pipe(&p->file[slot]))
+            pipe_ref(pfile_pipe(&p->file[slot]), (p->file[slot].flags & PFILE_WRITE) != 0);
+        p->stdio[nw] = slot;
+    }
+    return (long long)nw;
+}
+
 /* ---- signals and process list ---------------------------------------------------------------------------------------- */
 static long long sys_kill(const SyscallFrame *f)
 {
@@ -966,6 +1087,14 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_sigignore(f);
     case SYS_PSINFO:
         return sys_psinfo(f);
+    case SYS_FORK:
+        return sys_fork(f);
+    case SYS_EXEC:
+        return sys_exec(f);
+    case SYS_GETPID:
+        return sys_getpid(f);
+    case SYS_DUP2:
+        return sys_dup2(f);
     default:
         return -1;
     }

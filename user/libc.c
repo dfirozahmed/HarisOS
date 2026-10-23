@@ -531,3 +531,61 @@ void *realloc(void *ptr, usize size)
     free(ptr);
     return n;
 }
+
+/* ---- processes ----------------------------------------------------------------------------------------------------------- */
+/* fork: see libc.h. The kernel starts the child after the SYSCALL instruction with only rax (= 0), rsp and rip set, so everything
+ * the C caller keeps in callee-saved registers is saved on the stack before the call (the child's stack is a copy) and put back
+ * after it, in both processes. The Microsoft x64 convention: rbx, rbp, rdi, rsi, r12-r15 and xmm6-xmm15 are callee-saved.
+ * Alignment: on entry rsp is 8 mod 16; eight pushes keep it so; 168 more make it 16-aligned for the movaps. */
+#define STRINGIFY2(x) #x
+#define STRINGIFY(x) STRINGIFY2(x)
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl fork\n"
+        "fork:\n"
+        "    pushq %rbx\n"
+        "    pushq %rbp\n"
+        "    pushq %rdi\n"
+        "    pushq %rsi\n"
+        "    pushq %r12\n"
+        "    pushq %r13\n"
+        "    pushq %r14\n"
+        "    pushq %r15\n"
+        "    subq $168, %rsp\n"
+        "    movaps %xmm6, 0(%rsp)\n"
+        "    movaps %xmm7, 16(%rsp)\n"
+        "    movaps %xmm8, 32(%rsp)\n"
+        "    movaps %xmm9, 48(%rsp)\n"
+        "    movaps %xmm10, 64(%rsp)\n"
+        "    movaps %xmm11, 80(%rsp)\n"
+        "    movaps %xmm12, 96(%rsp)\n"
+        "    movaps %xmm13, 112(%rsp)\n"
+        "    movaps %xmm14, 128(%rsp)\n"
+        "    movaps %xmm15, 144(%rsp)\n"
+        "    movl $" STRINGIFY(SYS_FORK) ", %eax\n"
+        "    syscall\n"
+        "    movaps 0(%rsp), %xmm6\n"
+        "    movaps 16(%rsp), %xmm7\n"
+        "    movaps 32(%rsp), %xmm8\n"
+        "    movaps 48(%rsp), %xmm9\n"
+        "    movaps 64(%rsp), %xmm10\n"
+        "    movaps 80(%rsp), %xmm11\n"
+        "    movaps 96(%rsp), %xmm12\n"
+        "    movaps 112(%rsp), %xmm13\n"
+        "    movaps 128(%rsp), %xmm14\n"
+        "    movaps 144(%rsp), %xmm15\n"
+        "    addq $168, %rsp\n"
+        "    popq %r15\n"
+        "    popq %r14\n"
+        "    popq %r13\n"
+        "    popq %r12\n"
+        "    popq %rsi\n"
+        "    popq %rdi\n"
+        "    popq %rbp\n"
+        "    popq %rbx\n"
+        "    ret\n");
+
+int execv(const char *path, const char *const *argv) { return (int)sys_exec(path, argv); }
+int dup2(int oldfd, int newfd) { return (int)sys_dup2(oldfd, newfd); }
+int getpid(void) { return (int)sys_getpid(0); }
+int getppid(void) { return (int)sys_getpid(1); }

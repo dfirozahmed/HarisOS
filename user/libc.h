@@ -50,4 +50,17 @@ void *calloc(usize count, usize size); /* zeroed; NULL if count * size overflows
 void *realloc(void *ptr, usize size);
 void free(void *ptr);
 
+/* Processes. fork() makes a copy of this process: it returns the child's pid in the parent and 0 in the child (-1 if it failed). Both
+ * continue after the call, each with its own copy of all memory (nothing is shared; a child that changes a variable does not change
+ * the parent's). The child is waited for with sys_wait(pid, &status) like a spawned one. execv() makes this process another program:
+ * it returns only on failure (-1). The open files and redirections stay, so the usual pattern for "cmd > file" is
+ *     pid = fork(); if (pid == 0) { dup2(fd, 1); sys_close(fd); execv("CMD.ELF", argv); sys_exit(1); }  // and the parent waits
+ * fork() saves the callee-saved registers (rbx, rbp, rdi, rsi, r12-r15, xmm6-xmm15) on the stack and restores them in both; the
+ * floating point control state of the child is the default one. */
+long long fork(void);
+int execv(const char *path, const char *const *argv);
+int dup2(int oldfd, int newfd);
+int getpid(void);
+int getppid(void);
+
 #endif

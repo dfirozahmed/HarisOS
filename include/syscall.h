@@ -71,6 +71,19 @@
  *                  the window, not the shell. Returns 0.
  *   SYS_PSINFO (23) rdi = index, rsi = pointer to a SysPsInfo: the index-th running process (in the order of their threads).
  *                  1, 0 when there is none with that index, -1 for a bad pointer.
+ *   SYS_FORK (24) a copy of this process: its own copy of every page, of the open files (a pipe end is counted for both) and of the
+ *                  redirections, working folder, console, ignored signals. The parent gets the child's pid (never 0; -1 on failure:
+ *                  too many children, no memory); the child starts after the SYSCALL instruction with rax = 0. The child's OTHER
+ *                  registers are not the parent's, so call the fork() of the user library (user/libc.c), which saves them on the
+ *                  stack (it is copied) and puts them back in both. The child is waited for like a spawned one.
+ *   SYS_EXEC (25)  rdi = path, rsi = argv (as for SYS_SPAWN): this process becomes that program (an ELF file) and starts it at its
+ *                  entry: same pid, parent, console, folder, open files and redirections (there is no close-on-exec). The old
+ *                  program is gone. Does not return when it works; -1, with nothing changed, if there is no such program, it is
+ *                  not an ELF program, or memory ran out.
+ *   SYS_GETPID (26) rdi = 0: this process's pid; rdi = 1: the parent's (0 = none).
+ *   SYS_DUP2 (27)  rdi = old descriptor (from SYS_OPEN / SYS_PIPE; 0..2 = what that one is now; -1 = the console), rsi = new, 0, 1
+ *                  or 2: afterwards fd new is the same open file as old (a copy in a slot of its own; closing old keeps new).
+ *                  Returns new, or -1. With SYS_FORK and SYS_EXEC this is how a shell redirects: fork, dup2, close, exec.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
  *
@@ -120,6 +133,10 @@
 #define SYS_KILL 21
 #define SYS_SIGIGNORE 22
 #define SYS_PSINFO 23
+#define SYS_FORK 24
+#define SYS_EXEC 25
+#define SYS_GETPID 26
+#define SYS_DUP2 27
 
 /* signals (the numbers of Unix) */
 #define SIGINT 2   /* Ctrl+C in the console */

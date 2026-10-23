@@ -285,3 +285,55 @@ void paging_destroy_range(u64 *pml4, int first, int last, PagingFreeFn free_fn)
         pml4[i] = 0;
     }
 }
+
+int paging_clone_user(const u64 *src, u64 *dst, int first, int last, PagingAllocFn table_alloc, PagingAllocFn page_alloc,
+                      PagingFreeFn page_free)
+{
+    for (int i = first; i <= last; i++)
+    {
+        if (!(src[i] & PTE_P))
+            continue;
+        const u64 *pdpt = (const u64 *)(src[i] & ADDR_MASK);
+        for (int j = 0; j < 512; j++)
+        {
+            if (!(pdpt[j] & PTE_P) || (pdpt[j] & PTE_PS))
+                continue; /* a big page cannot be one of ours */
+            const u64 *pd = (const u64 *)(pdpt[j] & ADDR_MASK);
+            for (int k = 0; k < 512; k++)
+            {
+                if (!(pd[k] & PTE_P) || (pd[k] & PTE_PS))
+                    continue;
+                const u64 *pt = (const u64 *)(pd[k] & ADDR_MASK);
+                for (int m = 0; m < 512; m++)
+                {
+                    u64 e = pt[m];
+                    if (!(e & PTE_P))
+                        continue;
+                    u64 virt = ((u64)i << 39) | ((u64)j << 30) | ((u64)k << 21) | ((u64)m << 12);
+                    unsigned flags = ((e & PTE_RW) ? PAGING_WRITE : 0) | ((e & PTE_NX) ? 0 : PAGING_EXEC);
+                    u64 phys = e & ADDR_MASK;
+                    if (e & PTE_OWNED)
+                    {
+                        u64 *copy = page_alloc();
+                        if (!copy)
+                            return -1;
+                        const volatile u64 *from = (const volatile u64 *)phys;
+                        volatile u64 *to = (volatile u64 *)copy;
+                        for (int w = 0; w < 512; w++)
+                            to[w] = from[w];
+                        phys = (u64)copy;
+                        flags |= PAGING_OWNED;
+                        if (paging_map_page(dst, virt, phys, flags, table_alloc) != 0)
+                        {
+                            page_free(phys); /* not in dst yet: nobody else would free it */
+                            return -1;
+                        }
+                    }
+                    else if (paging_map_page(dst, virt, phys, flags, table_alloc) != 0)
+                        return -1;
+                }
+            }
+        }
+    }
+    return 0;
+}

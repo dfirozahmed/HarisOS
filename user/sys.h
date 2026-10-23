@@ -30,6 +30,10 @@
 #define SYS_KILL 21
 #define SYS_SIGIGNORE 22
 #define SYS_PSINFO 23
+#define SYS_FORK 24
+#define SYS_EXEC 25
+#define SYS_GETPID 26
+#define SYS_DUP2 27
 
 #define SIGINT 2
 #define SIGKILL 9
@@ -93,6 +97,12 @@ static inline long long sys_kill(long long pid, int sig) { return syscall3(SYS_K
 static inline void sys_sigignore(unsigned mask) { syscall3(SYS_SIGIGNORE, mask, 0, 0); }
 /* the index-th process: 1 = filled in, 0 = no more */
 static inline long long sys_psinfo(unsigned index, PsInfo *p) { return syscall3(SYS_PSINFO, index, (long long)(usize)p, 0); }
+/* replace this process by another program (same pid, files, redirections); returns only on failure, -1 */
+static inline long long sys_exec(const char *path, const char *const *argv) { return syscall3(SYS_EXEC, (long long)(usize)path, (long long)(usize)argv, 0); }
+/* the pid of this process (which = 0) or of its parent (1) */
+static inline long long sys_getpid(int which) { return syscall3(SYS_GETPID, which, 0, 0); }
+/* fd new (0, 1, 2) becomes the same open file as fd old (-1 = the console): returns new or -1 */
+static inline long long sys_dup2(int old, int newfd) { return syscall3(SYS_DUP2, old, newfd, 0); }
 /* a pipe: fds[0] reads what is written to fds[1]; 0 or -1 */
 static inline long long sys_pipe(int *fds) { return syscall3(SYS_PIPE, (long long)(usize)fds, 0, 0); }
 /* sys_spawn with redirection: io[0..2] = open descriptors for the child's fd 0, 1, 2, or -1 to leave one alone */

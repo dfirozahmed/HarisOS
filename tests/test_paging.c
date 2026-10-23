@@ -28,7 +28,7 @@ static int fails;
 #define NX (1ULL << 63)
 
 static int TABLES_MADE, ALLOC_LIMIT = 1000;
-static void *MADE[64];
+static void *MADE[4096];
 
 static u64 *alloc_table(void)
 {
@@ -327,6 +327,74 @@ int main(void)
         TABLES_MADE = 0;
         ALLOC_LIMIT = limit;
         CHECK(paging_clone(o4, alloc_table) == 0);
+    }
+
+    /* paging_clone_user (fork): owned pages are copied, shared pages are mapped again, permissions and tables are right */
+    {
+        ALLOC_LIMIT = 100000;
+        TABLES_MADE = 0;
+        u64 *src = new_table(), *dst = new_table();
+        const u64 UBASE = PAGING_USER_BASE;
+        u64 *code = ALIGNED_ALLOC(4096, 4096), *data = ALIGNED_ALLOC(4096, 4096), *stack = ALIGNED_ALLOC(4096, 4096), *shared = ALIGNED_ALLOC(4096, 4096);
+        for (int w = 0; w < 512; w++)
+        {
+            code[w] = 0xC0DE0000ULL + (u64)w;
+            data[w] = 0xDA7A0000ULL + (u64)w;
+            stack[w] = 0x57AC0000ULL + (u64)w;
+            shared[w] = 0x5A4E0000ULL + (u64)w;
+        }
+        CHECK(paging_map_page(src, UBASE, (u64)code, PAGING_EXEC | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_map_page(src, UBASE + 0x1000, (u64)data, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_map_page(src, UBASE + (3ULL << 21), (u64)shared, PAGING_WRITE, alloc_table) == 0);     /* no OWNED: shared */
+        CHECK(paging_map_page(src, PAGING_USER_END - 0x1000, (u64)stack, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0); /* last slot */
+
+        FREED_N = 0;
+        TABLES_MADE = 0;
+        CHECK(paging_clone_user(src, dst, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record) == 0);
+
+        u64 phys = 0, ent = 0, sphys = 0, sent = 0;
+        /* owned pages: a different physical page with the same bytes and the same permissions */
+        CHECK(paging_translate(dst, UBASE, &phys, &ent) == 0 && paging_translate(src, UBASE, &sphys, &sent) == 0);
+        CHECK(phys != sphys && memcmp((void *)phys, code, 4096) == 0 && !(ent & NX) && !(ent & RW));
+        CHECK(paging_translate(dst, UBASE + 0x1000, &phys, &ent) == 0 && phys != (u64)data && memcmp((void *)phys, data, 4096) == 0 && (ent & RW) && (ent & NX));
+        CHECK(paging_translate(dst, PAGING_USER_END - 0x1000, &phys, &ent) == 0 && memcmp((void *)phys, stack, 4096) == 0 && (ent & RW));
+        /* the copy is independent: changing it does not change the original, and the other way round */
+        paging_translate(dst, UBASE + 0x1000, &phys, 0);
+        ((u64 *)phys)[7] = 0x1111;
+        CHECK(data[7] == 0xDA7A0007ULL);
+        data[9] = 0x2222;
+        CHECK(((u64 *)phys)[9] == 0xDA7A0009ULL);
+        /* a page without the mark is the same physical page (that is what shared memory is) */
+        CHECK(paging_translate(dst, UBASE + (3ULL << 21), &phys, &ent) == 0 && phys == (u64)shared && (ent & RW) && !(ent & (1ULL << 9)));
+        /* nothing else appeared, and the tables are the clone's own */
+        CHECK(paging_translate(dst, UBASE + 0x2000, &phys, 0) == -1);
+        CHECK(dst[PAGING_USER_SLOT_FIRST] != src[PAGING_USER_SLOT_FIRST] && (dst[PAGING_USER_SLOT_FIRST] & P));
+        CHECK(FREED_N == 0);
+        /* freeing the clone gives back its owned pages and tables, not the shared page, and the original is untouched */
+        FREED_N = 0;
+        paging_destroy_range(dst, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, free_record);
+        CHECK(paging_translate(src, UBASE, &sphys, 0) == 0 && sphys == (u64)code);
+        int shared_freed = 0;
+        for (int i = 0; i < FREED_N; i++)
+            shared_freed |= FREED[i] == (u64)shared;
+        CHECK(!shared_freed);
+
+        /* out of memory half way: -1 for every limit, the page that was copied but could not be mapped is given back */
+        int refused = 0;
+        for (int limit = 0; limit < 12; limit++)
+        {
+            u64 *d2 = new_table();
+            TABLES_MADE = 0;
+            ALLOC_LIMIT = limit;
+            FREED_N = 0;
+            int r = paging_clone_user(src, d2, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, alloc_table, alloc_table, free_record);
+            if (r == -1)
+                refused++;
+            paging_destroy_range(d2, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, free_record);
+            CHECK(r == 0 || r == -1);
+        }
+        CHECK(refused >= 8); /* it needs a dozen allocations: small limits fail */
+        ALLOC_LIMIT = 1000;
     }
 
     if (fails == 0)

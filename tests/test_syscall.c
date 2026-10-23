@@ -468,6 +468,36 @@ int process_info(int index, ProcessInfo *out)
     return 1;
 }
 
+/* fork / exec / getpid: process.c and exec.c are not part of this test; these fakes record what the calls asked for */
+static int FORK_RESULT = 5, FORK_CALLS;
+static ull FORK_RIP, FORK_RSP;
+int process_fork(ull rip, ull rsp)
+{
+    FORK_CALLS++;
+    FORK_RIP = rip;
+    FORK_RSP = rsp;
+    return FORK_RESULT;
+}
+
+static int EXEC_CALLS, EXEC_NODE, EXEC_ARGC;
+static unsigned EXEC_LEN;
+static char EXEC_ARGS[PROCESS_ARGS_BYTES], EXEC_NAME[64];
+int exec_replace_node(int node, const char *name, ProcessSpawn *args, int *err)
+{
+    (void)err;
+    CHECK(host_uaccess == 0);
+    EXEC_CALLS++;
+    EXEC_NODE = node;
+    strcpy(EXEC_NAME, name);
+    EXEC_ARGC = args->argc;
+    EXEC_LEN = args->args_len;
+    memcpy(EXEC_ARGS, args->args, args->args_len);
+    return -5; /* the real one does not return when it works; this fake always "fails" */
+}
+
+static int PPID = 77;
+int process_ppid(void) { return PPID; }
+
 /* the volume's lock: volume 0 (RAM Disk) */
 static int VOL_LOCKED = 1, VOL_WRITABLE = 1, VOL_LOCKABLE = 1;
 
@@ -1377,6 +1407,123 @@ int main(void)
         USER_OK = 1;
         CURRENT_PROC = 0;
         CHECK(call(SYS_PSINFO, 0, U(&pi), 0) == -1);
+        CURRENT_PROC = &PROC;
+    }
+
+    /* ================= fork, exec, getpid, dup2 ================= */
+    reset();
+    {
+        SyscallFrame fr;
+        memset(&fr, 0, sizeof(fr));
+        fr.rax = SYS_FORK;
+        fr.rcx = 0x400000001234ULL; /* the user RIP SYSCALL saved */
+        fr.user_rsp = 0x7FFFFFFFE000ULL;
+        FORK_CALLS = 0;
+        FORK_RESULT = 5;
+        CHECK(syscall_dispatch(&fr) == 5 && FORK_CALLS == 1 && FORK_RIP == 0x400000001234ULL && FORK_RSP == 0x7FFFFFFFE000ULL);
+        FORK_RESULT = -1;
+        fr.rax = SYS_FORK;
+        CHECK(syscall_dispatch(&fr) == -1);                                   /* the process layer refused */
+        CURRENT_PROC = 0;
+        fr.rax = SYS_FORK;
+        CHECK(syscall_dispatch(&fr) == -1 && FORK_CALLS == 2);                /* a kernel thread cannot fork */
+        CURRENT_PROC = &PROC;
+        FORK_RESULT = 5;
+
+        /* getpid */
+        PROC.pid = 33;
+        PPID = 77;
+        CHECK(call(SYS_GETPID, 0, 0, 0) == 33 && call(SYS_GETPID, 1, 0, 0) == 77 && call(SYS_GETPID, 2, 0, 0) == -1);
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_GETPID, 0, 0, 0) == -1);
+        CURRENT_PROC = &PROC;
+
+        /* exec: the fake returns, so the call fails; what it was asked for is what counts */
+        EXEC_CALLS = 0;
+        CHECK(call(SYS_EXEC, U("HELLO.ELF"), 0, 0) == -1 && EXEC_CALLS == 1 && EXEC_NODE == 1 && strcmp(EXEC_NAME, "HELLO.ELF") == 0);
+        CHECK(EXEC_ARGC == 1 && EXEC_LEN == 10 && strcmp(EXEC_ARGS, "HELLO.ELF") == 0);   /* no argv: the path */
+        const char *av[] = {"prog", "-x", "two words", 0};
+        CHECK(call(SYS_EXEC, U("hello.elf"), U(av), 0) == -1 && EXEC_CALLS == 2);
+        CHECK(EXEC_ARGC == 3 && EXEC_LEN == 5 + 3 + 10 && memcmp(EXEC_ARGS, "prog\0-x\0two words\0", 18) == 0);
+        CHECK(call(SYS_EXEC, U("NO-SUCH.ELF"), 0, 0) == -1 && call(SYS_EXEC, U("/RAM Disk/DIR"), 0, 0) == -1 && EXEC_CALLS == 2);
+        const char *many[40];
+        for (int i = 0; i < 39; i++)
+            many[i] = "a";
+        many[39] = 0;
+        CHECK(call(SYS_EXEC, U("HELLO.ELF"), U(many), 0) == -1 && EXEC_CALLS == 2);      /* too many arguments */
+        USER_OK = 0;
+        CHECK(call(SYS_EXEC, U("HELLO.ELF"), 0, 0) == -1 && EXEC_CALLS == 2);            /* bad pointer */
+        USER_OK = 1;
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_EXEC, U("HELLO.ELF"), 0, 0) == -1 && EXEC_CALLS == 2);
+        CURRENT_PROC = &PROC;
+
+        /* dup2: a fd 0, 1, 2 that is a file or a pipe end, in a slot of its own */
+        reset();
+        PROC.console = 4;
+        long long wfd = call(SYS_OPEN, U("/RAM Disk/dupw.txt"), SYS_O_WRITE | SYS_O_CREATE, 0);
+        long long rfd = call(SYS_OPEN, U("/RAM Disk/readme.txt"), 0, 0);
+        CHECK(wfd >= 3 && rfd >= 3);
+        CHECK(call(SYS_DUP2, (ull)wfd, 1, 0) == 1 && PROC.stdio[1] >= 0 && PROC.stdio[1] != (int)wfd - 3);
+        int copy_slot = PROC.stdio[1];
+        CHECK(PROC.file[copy_slot].node == PROC.file[wfd - 3].node && (PROC.file[copy_slot].flags & PFILE_WRITE));
+        CHECK(call(SYS_CLOSE, (ull)wfd, 0, 0) == 0 && PROC.stdio[1] == copy_slot && PROC.file[copy_slot].node >= 0); /* the copy lives on */
+        CON_WRITES = 0;
+        CHECK(call(SYS_WRITE, 1, U("via dup2"), 8) == 8 && CON_WRITES == 0);               /* to the file, not the window */
+        CHECK(call(SYS_DUP2, (ull)wfd, 1, 0) == -1);                                       /* a closed descriptor */
+        CHECK(call(SYS_DUP2, (ull)rfd, 1, 0) == -1 && call(SYS_DUP2, (ull)rfd, 2, 0) == -1);   /* a read-only file as output */
+        CHECK(call(SYS_DUP2, (ull)rfd, 0, 0) == 0 && PROC.stdio[0] >= 0);
+        CHECK(call(SYS_DUP2, 1, 2, 0) == 2 && PROC.stdio[2] >= 0 && PROC.stdio[2] != PROC.stdio[1]); /* 2>&1 */
+        CHECK(call(SYS_DUP2, 2, 2, 0) == 2);                                               /* onto itself */
+        CHECK(call(SYS_DUP2, 0, 1, 0) == -1);                                              /* an input as output */
+        CHECK(call(SYS_DUP2, 99, 1, 0) == -1 && call(SYS_DUP2, 10, 1, 0) == -1 && call(SYS_DUP2, (ull)-5, 1, 0) == -1);
+        CHECK(call(SYS_DUP2, (ull)rfd, 3, 0) == -1 && call(SYS_DUP2, (ull)rfd, 99, 0) == -1);   /* only 0, 1, 2 can be replaced */
+        CHECK(call(SYS_DUP2, (ull)-1, 1, 0) == 1 && PROC.stdio[1] == -1);                  /* the console again; the copy's slot is freed */
+        CHECK(PROC.file[copy_slot].node == -1);
+        CHECK(PROC.stdio[2] >= 0);                                                          /* fd 2 kept its own copy */
+        CHECK(call(SYS_WRITE, 1, U("x"), 1) == 1 && CON_WRITES == 1);
+        call(SYS_DUP2, (ull)-1, 2, 0);
+        call(SYS_DUP2, (ull)-1, 0, 0);
+        CHECK(PROC.stdio[0] == -1 && PROC.stdio[1] == -1 && PROC.stdio[2] == -1);
+        call(SYS_CLOSE, (ull)rfd, 0, 0);
+        int used = 0;
+        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+            used += PROC.file[i].node >= 0;
+        CHECK(used == 0);                                                                   /* nothing left behind */
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/dupw.txt"), 0, 0) == 0);
+
+        /* fd 1 and 2 that share one slot (from a spawn redirect) stay open until both let go */
+        PROC.file[0].node = 7;
+        PROC.file[0].pos = 0;
+        PROC.file[0].flags = PFILE_WRITE;
+        PROC.stdio[1] = PROC.stdio[2] = 0;
+        CHECK(call(SYS_DUP2, (ull)-1, 1, 0) == 1 && PROC.file[0].node == 7 && PROC.stdio[2] == 0);  /* fd 2 still holds it */
+        CHECK(call(SYS_DUP2, (ull)-1, 2, 0) == 2 && PROC.file[0].node == -1);
+        PROC.stdio[1] = PROC.stdio[2] = -1;
+
+        /* a pipe end through dup2: counted for both, the reader sees the end only when every copy is gone */
+        int pf[2];
+        CHECK(call(SYS_PIPE, U(pf), 0, 0) == 0);
+        int pipe_no = pfile_pipe(&PROC.file[pf[1] - 3]);
+        CHECK(call(SYS_DUP2, (ull)pf[1], 1, 0) == 1);
+        CHECK(call(SYS_CLOSE, (ull)pf[1], 0, 0) == 0);                                      /* the original write end is closed ... */
+        CHECK(call(SYS_WRITE, 1, U("hi"), 2) == 2);                                         /* ... fd 1 still writes into the pipe */
+        char got[8];
+        CHECK(pipe_read(pipe_no, got, 8) == 2);
+        CHECK(pipe_read(pipe_no, got, 8) == PIPE_WOULDBLOCK);                               /* a writer (fd 1) is still there */
+        CHECK(call(SYS_DUP2, (ull)-1, 1, 0) == 1);
+        CHECK(pipe_read(pipe_no, got, 8) == 0);                                             /* now: end of input */
+        CHECK(call(SYS_CLOSE, (ull)pf[0], 0, 0) == 0 && pipe_in_use() == 0);
+        /* no free slot: refused, and fd new is unchanged */
+        long long held[PROCESS_MAX_FILES];
+        int h = 0;
+        while (h < PROCESS_MAX_FILES && (held[h] = call(SYS_OPEN, U("HELLO.ELF"), 0, 0)) >= 3)
+            h++;
+        CHECK(h == PROCESS_MAX_FILES && call(SYS_DUP2, (ull)held[0], 0, 0) == -1 && PROC.stdio[0] == -1);
+        for (int i = 0; i < h; i++)
+            call(SYS_CLOSE, (ull)held[i], 0, 0);
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_DUP2, (ull)-1, 1, 0) == -1);
         CURRENT_PROC = &PROC;
     }
 

@@ -173,6 +173,17 @@ static int place_args(AddressSpace *as, const ProcessSpawn *sp, Start *st)
     return 0;
 }
 
+/* The heap of a program whose last segment ends at heap_base. It may not run into the stack: it stops below the 1 MiB the stack
+ * may grow into (ELF_STACK_RESERVE). */
+static void set_heap(Process *p, u64 heap_base)
+{
+    u64 stack_low = PAGING_USER_END - 1024ULL * 1024;
+    p->heap_base = p->heap_brk = p->heap_mapped = heap_base;
+    p->heap_limit = heap_base + PROCESS_HEAP_MAX < stack_low ? heap_base + PROCESS_HEAP_MAX : stack_low;
+    if (p->heap_limit < heap_base)
+        p->heap_limit = heap_base; /* the program sits that high: no heap */
+}
+
 static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *sp, u64 heap_base)
 {
     for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
@@ -213,12 +224,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->sig_ignore = 0;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         p->child[i] = 0;
-    /* The heap may not run into the stack: it stops below the 1 MiB the stack may grow into (ELF_STACK_RESERVE). */
-    u64 stack_low = PAGING_USER_END - 1024ULL * 1024;
-    p->heap_base = p->heap_brk = p->heap_mapped = heap_base;
-    p->heap_limit = heap_base + PROCESS_HEAP_MAX < stack_low ? heap_base + PROCESS_HEAP_MAX : stack_low;
-    if (p->heap_limit < heap_base)
-        p->heap_limit = heap_base; /* the program sits that high: no heap */
+    set_heap(p, heap_base);
     for (int i = 0; i < PROCESS_MAX_FILES; i++)
     {
         p->file[i].node = -1;
@@ -299,6 +305,29 @@ int process_start(const char *name, const void *image, u64 size)
     return launch(name, as, PAGING_USER_BASE, &sp, PAGING_USER_BASE + pages * 4096);
 }
 
+/* Each segment gets its own pages (elf_parse made sure no page is shared) with the permissions it asks for. A fresh page is zero,
+ * which is exactly what the bytes after filesz (.bss) must be; only the file's bytes are copied. *heap_base = the first page after
+ * the last segment. 0, or -1 (out of memory: the caller destroys `as`). */
+static int load_segments(AddressSpace *as, const ElfInfo *info, const void *file, u64 *heap_base)
+{
+    *heap_base = 0;
+    for (int i = 0; i < info->nseg; i++)
+    {
+        const ElfSegment *s = &info->seg[i];
+        u64 seg_end = (s->vaddr + s->memsz + 4095) & ~4095ULL;
+        if (seg_end > *heap_base)
+            *heap_base = seg_end;
+        unsigned flags = ((s->flags & ELF_PF_W) ? ASPACE_WRITE : 0) | ((s->flags & ELF_PF_X) ? ASPACE_EXEC : 0);
+        u64 first = s->vaddr & ~4095ULL, last = (s->vaddr + s->memsz - 1) & ~4095ULL;
+        for (u64 va = first; va <= last; va += 4096)
+            if (aspace_map_new(as, va, flags) != 0)
+                return -1;
+        if (copy_in(as, s->vaddr, (const unsigned char *)file + s->offset, s->filesz) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 int process_start_elf(const char *name, const void *file, u64 size, int console, int *err)
 {
     ProcessSpawn sp = {.console = console, .parent = -1};
@@ -317,30 +346,132 @@ int process_spawn_elf(const char *name, const void *file, u64 size, ProcessSpawn
     if (!as)
         return -1;
 
-    /* Each segment gets its own pages (elf_parse made sure no page is shared) with the permissions it asks for. A fresh
-     * page is zero, which is exactly what the bytes after filesz (.bss) must be; only the file's bytes are copied. */
-    u64 heap_base = 0; /* the first page after the last segment */
-    for (int i = 0; i < info.nseg; i++)
+    u64 heap_base;
+    if (load_segments(as, &info, file, &heap_base) != 0)
     {
-        const ElfSegment *s = &info.seg[i];
-        u64 seg_end = (s->vaddr + s->memsz + 4095) & ~4095ULL;
-        if (seg_end > heap_base)
-            heap_base = seg_end;
-        unsigned flags = ((s->flags & ELF_PF_W) ? ASPACE_WRITE : 0) | ((s->flags & ELF_PF_X) ? ASPACE_EXEC : 0);
-        u64 first = s->vaddr & ~4095ULL, last = (s->vaddr + s->memsz - 1) & ~4095ULL;
-        for (u64 va = first; va <= last; va += 4096)
-            if (aspace_map_new(as, va, flags) != 0)
-            {
-                aspace_destroy(as);
-                return -1;
-            }
-        if (copy_in(as, s->vaddr, (const unsigned char *)file + s->offset, s->filesz) != 0)
+        aspace_destroy(as);
+        return -1;
+    }
+    return launch(name, as, info.entry, sp, heap_base);
+}
+
+/* ---- exec: the running process becomes another program ------------------------------------------------------------------- */
+/* Builds the new program's address space (segments, stack, arguments) first; only when that has worked does it let go of the
+ * old one. So a file that is not a program, or not enough memory, is an error the caller can handle, with everything as it was.
+ * What stays: the pid, the parent, the console, the working folder, the open files and redirections, ignored signals.
+ * It does not return when it works: the thread goes on in ring 3 at the new program's entry. */
+int process_exec_elf(const char *name, const void *file, u64 size, const ProcessSpawn *args, int *err, int free_file)
+{
+    Process *p = process_current();
+    if (!p)
+        return -1;
+    ElfInfo info;
+    int e = elf_parse(file, size, &info);
+    if (err)
+        *err = e;
+    if (e != ELF_OK)
+        return -1;
+    AddressSpace *as = aspace_create();
+    if (!as)
+        return -1;
+    u64 heap_base;
+    if (load_segments(as, &info, file, &heap_base) != 0)
+    {
+        aspace_destroy(as);
+        return -1;
+    }
+    for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
+        if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
         {
             aspace_destroy(as);
             return -1;
         }
+    Start st;
+    st.entry = info.entry;
+    st.user_rsp = PAGING_USER_END - 8;
+    st.argc = st.argv = 0;
+    if (place_args(as, args, &st) != 0)
+    {
+        aspace_destroy(as);
+        return -1;
     }
-    return launch(name, as, info.entry, sp, heap_base);
+    /* no way back from here. The file's bytes are in the new pages now: the buffer they came from goes back to the heap before the
+     * old program does, since nothing after this point returns to the caller that would free it. */
+    if (free_file)
+        kfree((void *)file);
+    set_heap(p, heap_base);
+    task_exec_replace(as, name);
+    process_enter_user(st.entry, st.user_rsp, st.argc, st.argv);
+}
+
+/* ---- fork: a copy of the running process -------------------------------------------------------------------------------- */
+/* The child gets its own copy of every page (aspace_clone), a copy of the Process record (same console, folder, open files and
+ * redirections, ignored signals; the pipes it holds are counted for it), and a thread that goes on at user_rip with user_rsp,
+ * as if SYSCALL had returned there, with rax = 0. Its other registers are NOT the parent's: only a caller that saved them (the
+ * fork() of the user library does) can use the child. Returns the child's pid (the parent's return value) or -1: no slot for
+ * another child, no memory, no thread. */
+int process_fork(u64 user_rip, u64 user_rsp)
+{
+    Process *p = process_current();
+    AddressSpace *as = task_address_space();
+    if (!p || !as)
+        return -1;
+    int slot = -1;
+    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+        if (p->child[i] == 0)
+        {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return -1;
+    AddressSpace *cas = aspace_clone(as);
+    if (!cas)
+        return -1;
+    Start *st = kmalloc(sizeof(Start));
+    Process *cp = kmalloc(sizeof(Process));
+    if (!st || !cp)
+    {
+        kfree(st);
+        kfree(cp);
+        aspace_destroy(cas);
+        return -1;
+    }
+    {
+        const volatile unsigned char *from = (const volatile unsigned char *)p; /* (no memcpy in a freestanding build) */
+        volatile unsigned char *to = (volatile unsigned char *)cp;
+        for (unsigned i = 0; i < sizeof(Process); i++)
+            to[i] = from[i];
+    }
+    cp->pid = NEXT_PID;
+    cp->parent = task_current();
+    cp->own_console = 0; /* the window belongs to whoever opened it */
+    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+        cp->child[i] = 0;
+    st->entry = user_rip;
+    st->user_rsp = user_rsp;
+    st->argc = st->argv = 0;
+    int id = task_create_user(task_name(task_current()), user_thread_main, st, cas, cp, process_free);
+    if (id < 0)
+    {
+        kfree(st);
+        kfree(cp);
+        aspace_destroy(cas);
+        return -1;
+    }
+    for (int i = 0; i < PROCESS_MAX_FILES; i++) /* the child holds the pipe ends it inherited */
+        if (cp->file[i].node >= PROCESS_PIPE_NODE)
+            pipe_ref(pfile_pipe(&cp->file[i]), (cp->file[i].flags & PFILE_WRITE) != 0);
+    STATS.started++;
+    p->child[slot] = NEXT_PID;
+    return NEXT_PID++;
+}
+
+int process_ppid(void)
+{
+    const Process *p = process_current();
+    const Process *pp = p && p->parent > 0 ? task_data_of(p->parent) : 0;
+    return pp ? pp->pid : 0;
 }
 
 /* The exit codes of children that their parent has not collected yet (a ring: the oldest record is overwritten). The pid

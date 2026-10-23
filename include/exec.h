@@ -34,6 +34,9 @@ int exec_run_node(int node, const char *name, int console, int *err);
 /* The general form: arguments, a parent, the console to share (see ProcessSpawn in process.h). SYS_SPAWN uses it. */
 int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err);
 
+/* exec: the running process becomes the program of file `node` (SYS_EXEC); returns only if that failed (EXEC_ERR_*, *err as above). */
+int exec_replace_node(int node, const char *name, ProcessSpawn *args, int *err);
+
 /* A sentence for a failed exec_run / exec_run_node: the code it returned and the *err it set. */
 const char *exec_error_text(int code, int err);
 

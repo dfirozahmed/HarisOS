@@ -79,6 +79,11 @@ void *task_data_of(int id);                     /* the process record (see task_
  * doing is thrown away: it may only be in ring 3, or blocked in a system call, never inside a kernel lock (system calls run
  * with interrupts off and nothing is held while a thread waits). */
 int task_kill(int id);
+
+/* exec: the running process thread gets a new address space (already built, with the new program in it) and the name of the new
+ * program; its old space is freed and the floating point state starts clean. The caller then enters ring 3 in the new space
+ * and never returns to the old code. Interrupts must be off (a system call). */
+void task_exec_replace(struct AddressSpace *as, const char *name);
 void task_yield(void);
 
 /* Called by the timer interrupt (idle.c) on every tick, with interrupts off: switches away from a preemptible thread
