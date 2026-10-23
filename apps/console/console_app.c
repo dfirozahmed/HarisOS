@@ -65,6 +65,12 @@ static void on_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed)
         return;
+    /* Ctrl+C ends the program that runs here. (With Ctrl held ch is 0: the letter is in key.) */
+    if ((k->mods & KMOD_CTRL) && (k->key == 'c' || k->key == 'C'))
+    {
+        console_interrupt(handle_of(w));
+        return;
+    }
     int ch = 0;
     if (k->key == KEY_ENTER || k->ch == '\n')
         ch = '\n';

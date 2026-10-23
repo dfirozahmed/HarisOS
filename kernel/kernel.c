@@ -1,6 +1,7 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
 #include "blk.h"
 #include "bootinfo.h"
+#include "console.h"
 #include "cpuinfo.h"
 #include "cpuload.h"
 #include "desktop.h"
@@ -248,6 +249,7 @@ void kernel_main(const BootInfo *info)
         /* Ring 3: turn on SYSCALL, then run three small user programs (see process.h). Like the address space test,
          * a failure is logged, not fatal: nothing else depends on user mode yet. */
         syscall_init();
+        console_set_interrupt_hook(process_interrupt_console); /* Ctrl+C in a console window ends the programs that write to it */
         int ps = (as_init == 0 && gd == 0) ? process_selftest() : 1;
         if (ps == 0)
         {

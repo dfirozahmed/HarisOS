@@ -10,6 +10,7 @@
 
 __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
 {
+    sys_sigignore((1u << SIGINT) | (1u << SIGTERM)); /* a Ctrl+C in the window is for the shell's programs, not for init */
     puts("init: HarisOS is up. Starting the shell ('exit' restarts it).");
     int crashes = 0;
     for (;;)

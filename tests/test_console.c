@@ -14,6 +14,9 @@ void task_wake(int id)
         WOKEN[WOKEN_N++] = id;
 }
 
+static int HOOKED[8], HOOKED_N;
+static void on_interrupt(int con) { if (HOOKED_N < 8) HOOKED[HOOKED_N++] = con; }
+
 static void put(int con, const char *s) { console_write(con, s, (unsigned)strlen(s)); }
 
 static int row(int con, int back, char *out)
@@ -190,6 +193,29 @@ int main(void)
     CHECK(!console_valid(f) && console_valid(g));
     CHECK(row(g, 0, r) && r[0] == 0 && row(g, 1, r) == 0);   /* and it is empty: nothing of the old text */
     console_close(g);
+    /* Ctrl+C: "^C" on the screen, the line being typed is dropped (not sent to the reader), the hook is told which console */
+    {
+        int ic = console_open("INT");
+        CHECK(console_interrupt(ic) == 1);                       /* no hook yet: still shows it */
+        type(ic, "half a line");
+        CHECK(console_interrupt(ic) == 1);
+        CHECK(row(ic, 0, r) && r[0] == 0);                        /* back on a fresh row */
+        CHECK(row(ic, 1, r) && strcmp(r, "half a line^C") == 0);
+        char got[16];
+        CHECK(console_read(ic, got, sizeof(got)) == -1);          /* the dropped line was not queued */
+        type(ic, "ok\r");
+        CHECK(console_read(ic, got, sizeof(got)) == 3 && memcmp(got, "ok\n", 3) == 0);
+        console_set_interrupt_hook(on_interrupt);
+        HOOKED_N = 0;
+        CHECK(console_interrupt(ic) == 1 && HOOKED_N == 1 && HOOKED[0] == ic);
+        CHECK(console_interrupt(-1) == 0 && console_interrupt(ic + 100) == 0 && HOOKED_N == 1);
+        console_finish(ic, 0);
+        CHECK(console_interrupt(ic) == 0 && HOOKED_N == 1);       /* a finished console takes no more */
+        console_set_interrupt_hook(0);
+        console_close(ic);
+        CHECK(console_interrupt(ic) == 0);                        /* a stale handle */
+    }
+
 
     /* all slots in use */
     int h[CONSOLE_MAX + 1], opened = 0;

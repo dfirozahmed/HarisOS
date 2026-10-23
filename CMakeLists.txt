@@ -232,7 +232,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

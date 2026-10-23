@@ -210,6 +210,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->pid = NEXT_PID;
     p->parent = sp->parent;
     p->cwd = sp->cwd;
+    p->sig_ignore = 0;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         p->child[i] = 0;
     /* The heap may not run into the stack: it stops below the 1 MiB the stack may grow into (ELF_STACK_RESERVE). */
@@ -373,6 +374,105 @@ int process_reap(int pid, int *code)
             ZOMBIE[i].pid = 0;
             return 1;
         }
+    return 0;
+}
+
+/* ---- signals --------------------------------------------------------------------------------------------------------- */
+/* Ends the process of thread `tid` (not the running one) as if it had called SYS_EXIT(code): the same bookkeeping as
+ * process_exit, then the thread is marked DEAD and the next reap frees it. It was either in ring 3 (preempted by the timer) or
+ * blocked inside a system call; neither holds anything in the kernel. */
+static void terminate(int tid, int sig)
+{
+    Process *p = task_data_of(tid);
+    if (!p)
+        return;
+    int code = 128 + sig;
+    STATS.killed++;
+    EXIT_CODE_OF[tid] = code;
+    serial_puts("HARISOS: process ");
+    serial_puts(task_name(tid));
+    serial_puts(" ended by signal ");
+    serial_putd(sig);
+    serial_puts("\n");
+    if (p->own_console)
+        console_finish(p->console, code); /* "[process exited, code 130]" in its window */
+    process_release_files(p);
+    record_exit(p, code);
+    task_kill(tid);
+}
+
+/* one process: delivered unless ignored (SIGKILL cannot be) */
+static void deliver(int tid, int sig)
+{
+    Process *p = task_data_of(tid);
+    if (!p)
+        return;
+    if (sig != SIGKILL && (p->sig_ignore & (1u << sig)))
+        return;
+    if (tid == task_current())
+    {
+        STATS.killed++;
+        process_exit(128 + sig); /* does not return */
+    }
+    terminate(tid, sig);
+}
+
+int process_signal(int pid, int sig)
+{
+    if (pid <= 0 || sig < 0 || sig > 31)
+        return -1;
+    for (int tid = 1; tid < TASK_MAX; tid++)
+    {
+        const Process *p = task_data_of(tid);
+        if (p && p->pid == pid)
+        {
+            if (sig != 0)
+                deliver(tid, sig);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+void process_interrupt_console(int con)
+{
+    if (con < 0)
+        return;
+    for (int tid = 1; tid < TASK_MAX; tid++)
+    {
+        const Process *p = task_data_of(tid);
+        if (p && p->console == con)
+            deliver(tid, SIGINT);
+    }
+}
+
+int process_info(int index, ProcessInfo *out)
+{
+    int seen = 0;
+    for (int tid = 1; tid < TASK_MAX; tid++)
+    {
+        const Process *p = task_data_of(tid);
+        if (!p)
+            continue;
+        if (seen++ != index)
+            continue;
+        out->pid = p->pid;
+        out->ppid = 0;
+        if (p->parent > 0)
+        {
+            const Process *pp = task_data_of(p->parent);
+            out->ppid = pp ? pp->pid : 0;
+        }
+        TaskState st = task_state(tid);
+        out->running = st == TASK_READY || st == TASK_RUNNING;
+        out->console = p->console;
+        const char *name = task_name(tid);
+        int i = 0;
+        for (; name && name[i] && i < (int)sizeof(out->name) - 1; i++)
+            out->name[i] = name[i];
+        out->name[i] = 0;
+        return 1;
+    }
     return 0;
 }
 

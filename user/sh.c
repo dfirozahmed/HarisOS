@@ -265,6 +265,7 @@ static void help(int out)
     fdprintf(out, "built in: cd [FOLDER]  pwd  echo ARGS  help  exit [CODE]\n");
     fdprintf(out, "drives:   start locked. lock -u .  unlocks the drive you are in;  lock  lists them\n");
     fdprintf(out, "files:    ls [-l] [FOLDER]  cat FILE  cp [-r] A B  mv A B  rm [-r] [-f] PATH  mkdir [-p] DIR  touch FILE\n");
+    fdprintf(out, "processes: ps  kill [-KILL] PID  Ctrl+C ends the running program\n");
     fdprintf(out, "filters:  upper   (try: cat notes.txt | upper)\n");
     fdprintf(out, "programs: every NAME.ELF on the drive.  Join with  a | b | c   Redirect with  > file  >> file  < file  2> file  2>&1\n");
     fdprintf(out, "quote words with spaces: cd \"/RAM Disk\"\n");
@@ -320,6 +321,12 @@ static void report(long long pid, int is_last)
     }
     if (status == -1)
         printf("[crashed]\n");
+    else if (status == 128 + SIGINT)
+        printf("[interrupted]\n");
+    else if (status == 128 + SIGKILL)
+        printf("[killed]\n");
+    else if (status == 128 + SIGTERM)
+        printf("[terminated]\n");
     else if (status != 0 && is_last)
         printf("[exit %d]\n", status);
 }
@@ -416,6 +423,7 @@ static void run_line(Command *cmds, int n, const char *cwd)
 
 __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
 {
+    sys_sigignore(1u << SIGINT); /* Ctrl+C ends the program that runs, not the shell (a child starts with nothing ignored) */
     puts("HarisOS shell. 'help' lists the commands.");
     char line[LINE_MAX];
     char cwd[256];

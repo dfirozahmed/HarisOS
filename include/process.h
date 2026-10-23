@@ -102,6 +102,7 @@ typedef struct Process
     int pid;                          /* its number, see ProcessSpawn */
     int parent;                       /* thread id of the parent, -1 = none */
     int cwd;                          /* VFS node of the working folder (VFS_ROOT = "This PC"): relative paths start there */
+    unsigned sig_ignore;              /* bit n set: signal n is ignored (SYS_SIGIGNORE); 0 at the start of every process */
     int child[PROCESS_MAX_CHILDREN];  /* pids of children not yet waited for, 0 = free slot */
     /* The heap (SYS_BRK): heap_base is page aligned, just above the program's last segment. heap_brk is the program's
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
@@ -116,6 +117,21 @@ Process *process_current(void); /* the running process, NULL in a kernel thread 
 /* Close every open file of the process (pipes: the ends go back to the pipe). Called when it ends; harmless to call twice. */
 void process_release_files(Process *p);
 
+/* Signals (syscall.h): end process `pid` with exit code 128 + sig, unless it ignores sig (SIGKILL cannot be ignored); sig 0 only
+ * looks. 0, or -1 if there is no such process. A process that signals itself ends at once (does not return). */
+int process_signal(int pid, int sig);
+
+/* Ctrl+C in console `con`: SIGINT to every process that writes to it. (console_set_interrupt_hook installs this.) */
+void process_interrupt_console(int con);
+
+/* The index-th live process, for ps: 1 and *out filled, 0 when there is none. */
+typedef struct
+{
+    int pid, ppid, running, console;
+    char name[16];
+} ProcessInfo;
+int process_info(int index, ProcessInfo *out);
+
 /* End the running process (called by SYS_EXIT, and by the kernel itself). Does not return. */
 __attribute__((noreturn)) void process_exit(int code);
 
@@ -126,6 +142,7 @@ typedef struct
 {
     unsigned started, exited, faulted; /* processes started / ended by SYS_EXIT / ended by an exception */
     int last_exit;                     /* the exit code of the last one that ended by SYS_EXIT */
+    unsigned killed;                   /* processes ended by a signal (their code is 128 + the signal) */
 } ProcessStats;
 
 void process_stats(ProcessStats *out);

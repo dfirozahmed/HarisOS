@@ -62,6 +62,17 @@
  *                  then it returns 0); SYS_WRITE on the write end waits for room (and returns -1, or the bytes that went in, if
  *                  every holder of the read end is gone). Both ends can be given to children with SYS_SPAWN. A pipe holds 4096
  *                  bytes; it cannot be seeked.
+ *   SYS_KILL (21) rdi = pid, rsi = signal (SIGINT, SIGTERM, SIGKILL, or 0 to only ask whether the process exists). The process
+ *                  ends at once with exit code 128 + signal, unless it ignores the signal (SIGKILL cannot be ignored). Its pipes and
+ *                  files are closed; a parent waiting for it is woken. There are no handlers and no permissions yet: any process
+ *                  can signal any process. 0, or -1 (no such process, a signal that does not exist).
+ *   SYS_SIGIGNORE (22) rdi = bit mask: bit n set = ignore signal n (only SIGINT and SIGTERM can be). Replaces the old mask.
+ *                  A child starts with nothing ignored. The shell and init ignore SIGINT: Ctrl+C ends the program that runs in
+ *                  the window, not the shell. Returns 0.
+ *   SYS_PSINFO (23) rdi = index, rsi = pointer to a SysPsInfo: the index-th running process (in the order of their threads).
+ *                  1, 0 when there is none with that index, -1 for a bad pointer.
+ *
+ * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
  *
  * Writing: SYS_OPEN with SYS_O_WRITE (and CREATE / TRUNC / APPEND) gives a descriptor SYS_WRITE can use (any length up to
  * SYS_WRITE_MAX; it returns the bytes written, fewer if the drive refused part way, or -1: read only / locked / full
@@ -106,6 +117,14 @@
 #define SYS_RENAME 18
 #define SYS_LOCK 19
 #define SYS_PIPE 20
+#define SYS_KILL 21
+#define SYS_SIGIGNORE 22
+#define SYS_PSINFO 23
+
+/* signals (the numbers of Unix) */
+#define SIGINT 2   /* Ctrl+C in the console */
+#define SIGKILL 9  /* cannot be ignored */
+#define SIGTERM 15
 
 /* SYS_OPEN flags */
 #define SYS_O_WRITE 1  /* open for writing (then it cannot be read) */
@@ -115,6 +134,16 @@
 
 #define SYS_WRITE_MAX 4096 /* one write call sends at most this many bytes */
 #define SYS_READ_MAX 65536 /* one read call returns at most this many bytes */
+
+/* What SYS_PSINFO gives back (the same layout in user/sys.h). */
+typedef struct
+{
+    int pid;
+    int ppid;      /* pid of the parent, 0 = started by the kernel or the parent is gone */
+    int running;   /* 1 = ready or running, 0 = waiting (for input, a pipe, a child) */
+    int console;   /* -1 = none */
+    char name[16];
+} SysPsInfo;
 
 /* What SYS_READDIR and SYS_STAT give back (the same layout in user/sys.h). */
 typedef struct

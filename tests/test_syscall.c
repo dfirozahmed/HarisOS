@@ -445,6 +445,29 @@ int vfs_move(int id, int dest)
     return id;
 }
 
+/* signals and the process list: process.c is not part of this test, so these are fakes that record what the call asked for */
+static int SIG_PID, SIG_SIG, SIG_CALLS, SIG_RESULT;
+int process_signal(int pid, int sig)
+{
+    SIG_PID = pid;
+    SIG_SIG = sig;
+    SIG_CALLS++;
+    return SIG_RESULT;
+}
+
+#define PS_COUNT 3
+int process_info(int index, ProcessInfo *out)
+{
+    if (index < 0 || index >= PS_COUNT)
+        return 0;
+    out->pid = 10 + index;
+    out->ppid = index;
+    out->running = index & 1;
+    out->console = index - 1;
+    snprintf(out->name, sizeof(out->name), "proc%d", index);
+    return 1;
+}
+
 /* the volume's lock: volume 0 (RAM Disk) */
 static int VOL_LOCKED = 1, VOL_WRITABLE = 1, VOL_LOCKABLE = 1;
 
@@ -511,6 +534,7 @@ static void reset(void)
     CURRENT_PROC = &PROC;
     PROC.console = -1;
     PROC.own_console = 1;
+    PROC.sig_ignore = 0;
     PROC.stdio[0] = PROC.stdio[1] = PROC.stdio[2] = -1;
     PROC.cwd = 0;
     PROC.parent = -1;
@@ -1315,6 +1339,45 @@ int main(void)
         for (int i = 0; i < PROCESS_MAX_FILES; i++)
             pfile_close(&PROC.file[i]);
         CHECK(pipe_in_use() == 0);
+    }
+
+    /* ================= signals and ps ================= */
+    reset();
+    SIG_CALLS = 0;
+    SIG_RESULT = 0;
+    CHECK(call(SYS_KILL, 42, SIGKILL, 0) == 0 && SIG_PID == 42 && SIG_SIG == SIGKILL && SIG_CALLS == 1);
+    CHECK(call(SYS_KILL, 7, SIGINT, 0) == 0 && SIG_SIG == SIGINT && call(SYS_KILL, 7, SIGTERM, 0) == 0 && SIG_SIG == SIGTERM);
+    CHECK(call(SYS_KILL, 7, 0, 0) == 0 && SIG_SIG == 0);                            /* only ask */
+    SIG_CALLS = 0;
+    CHECK(call(SYS_KILL, 0, SIGKILL, 0) == -1 && call(SYS_KILL, (ull)-1, SIGKILL, 0) == -1 && call(SYS_KILL, 0x80000000ULL, SIGKILL, 0) == -1);
+    CHECK(call(SYS_KILL, 7, 1, 0) == -1 && call(SYS_KILL, 7, 3, 0) == -1 && call(SYS_KILL, 7, 31, 0) == -1 && call(SYS_KILL, 7, ~0ULL, 0) == -1);
+    CHECK(SIG_CALLS == 0);                                                          /* refused before the process layer */
+    SIG_RESULT = -1;
+    CHECK(call(SYS_KILL, 99, SIGTERM, 0) == -1 && SIG_CALLS == 1);                  /* no such process */
+    SIG_RESULT = 0;
+    CURRENT_PROC = 0;
+    CHECK(call(SYS_KILL, 42, SIGKILL, 0) == -1 && call(SYS_SIGIGNORE, 4, 0, 0) == -1);
+    CURRENT_PROC = &PROC;
+
+    PROC.sig_ignore = 0;
+    CHECK(call(SYS_SIGIGNORE, 1u << SIGINT, 0, 0) == 0 && PROC.sig_ignore == (1u << SIGINT));
+    CHECK(call(SYS_SIGIGNORE, 0xFFFFFFFFULL, 0, 0) == 0 && PROC.sig_ignore == ((1u << SIGINT) | (1u << SIGTERM))); /* SIGKILL is not ignorable */
+    CHECK(call(SYS_SIGIGNORE, 1u << SIGKILL, 0, 0) == 0 && PROC.sig_ignore == 0);   /* it replaces the old mask */
+    CHECK(call(SYS_SIGIGNORE, 0, 0, 0) == 0 && PROC.sig_ignore == 0);
+
+    {
+        SysPsInfo pi;
+        memset(&pi, 0x55, sizeof(pi));
+        CHECK(call(SYS_PSINFO, 0, U(&pi), 0) == 1 && pi.pid == 10 && pi.ppid == 0 && pi.running == 0 && pi.console == -1 && strcmp(pi.name, "proc0") == 0);
+        CHECK(call(SYS_PSINFO, 2, U(&pi), 0) == 1 && pi.pid == 12 && pi.ppid == 2 && pi.running == 0 && pi.console == 1);
+        CHECK(call(SYS_PSINFO, 1, U(&pi), 0) == 1 && pi.running == 1 && pi.name[5] == 0 && pi.name[15] == 0);
+        CHECK(call(SYS_PSINFO, 3, U(&pi), 0) == 0 && call(SYS_PSINFO, 100000, U(&pi), 0) == 0);
+        USER_OK = 0;
+        CHECK(call(SYS_PSINFO, 0, U(&pi), 0) == -1);
+        USER_OK = 1;
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_PSINFO, 0, U(&pi), 0) == -1);
+        CURRENT_PROC = &PROC;
     }
 
     /* ================= yield, exit, unknown ================= */

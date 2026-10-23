@@ -37,6 +37,11 @@ int console_write(int con, const char *text, unsigned n);
 void console_finish(int con, int exit_code);
 int console_finished(int con);
 
+/* Ctrl+C: "^C" is shown, the line being typed is dropped, and the hook (below) is called with the console: the process layer
+ * ends the programs that write to it. 1 if the screen changed. */
+int console_interrupt(int con);
+void console_set_interrupt_hook(void (*hook)(int con)); /* NULL = none (the host tests) */
+
 /* Input: one typed character (ch is a printable character, '\n' for Enter or '\b' for Backspace). 1 if the screen changed. */
 int console_key(int con, int ch);
 /* Up to len bytes of the lines that Enter has finished. Returns the count (> 0), 0 = end of input (the console is gone or

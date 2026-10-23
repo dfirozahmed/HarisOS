@@ -27,6 +27,13 @@
 #define SYS_RENAME 18
 #define SYS_LOCK 19
 #define SYS_PIPE 20
+#define SYS_KILL 21
+#define SYS_SIGIGNORE 22
+#define SYS_PSINFO 23
+
+#define SIGINT 2
+#define SIGKILL 9
+#define SIGTERM 15
 
 #define SYS_O_WRITE 1
 #define SYS_O_CREATE 2
@@ -74,6 +81,18 @@ static inline long long sys_rmdir(const char *path) { return syscall3(SYS_RMDIR,
 static inline long long sys_rename(const char *from, const char *to) { return syscall3(SYS_RENAME, (long long)(usize)from, (long long)(usize)to, 0); }
 /* drive lock: 1 = lock, 0 = unlock, 2 = ask (returns 1 if locked); see SYS_LOCK in include/syscall.h */
 static inline long long sys_lock(const char *path, int mode) { return syscall3(SYS_LOCK, (long long)(usize)path, mode, 0); }
+typedef struct
+{
+    int pid, ppid, running, console;
+    char name[16];
+} PsInfo;
+
+/* end process pid with signal sig (SIGINT, SIGTERM, SIGKILL; 0 = only check that it exists): 0 or -1 */
+static inline long long sys_kill(long long pid, int sig) { return syscall3(SYS_KILL, pid, sig, 0); }
+/* ignore the signals whose bits (1 << signal) are set in mask: this process only */
+static inline void sys_sigignore(unsigned mask) { syscall3(SYS_SIGIGNORE, mask, 0, 0); }
+/* the index-th process: 1 = filled in, 0 = no more */
+static inline long long sys_psinfo(unsigned index, PsInfo *p) { return syscall3(SYS_PSINFO, index, (long long)(usize)p, 0); }
 /* a pipe: fds[0] reads what is written to fds[1]; 0 or -1 */
 static inline long long sys_pipe(int *fds) { return syscall3(SYS_PIPE, (long long)(usize)fds, 0, 0); }
 /* sys_spawn with redirection: io[0..2] = open descriptors for the child's fd 0, 1, 2, or -1 to leave one alone */

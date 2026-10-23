@@ -382,6 +382,78 @@ static int init_test(int node)
     return result;
 }
 
+/* ---- Ctrl+C, end to end -----------------------------------------------------------------------------------------------------
+ * The shell ignores Ctrl+C; a program it runs does not. SPIN.ELF computes forever, so only the signal can end it. */
+static void give_cpu(int rounds)
+{
+    for (int i = 0; i < rounds; i++)
+        task_yield();
+}
+
+static int interrupt_test(int node)
+{
+    int con = console_open("interrupt test");
+    if (con < 0)
+        return -400;
+    int err = 0;
+    int id = exec_run_node(node, "SH.ELF", con, &err);
+    if (id < 0)
+    {
+        console_close(con);
+        return -401;
+    }
+    int result = 0;
+    if (!wait_prompt(con, id))
+        result = -402;
+    else
+    {
+        console_interrupt(con); /* at the prompt: the shell ignores it, shows ^C and goes on */
+        give_cpu(100);
+        TaskState s = task_state(id);
+        if (s == TASK_DEAD || s == TASK_UNUSED)
+            result = -403;
+        else if (!row_has(con, "^C"))
+            result = -404;
+        else
+        {
+            type_line(con, "echo alive");
+            if (!wait_prompt(con, id) || !row_has(con, "alive"))
+                result = -405;
+        }
+    }
+    if (result == 0)
+    {
+        type_line(con, "spin"); /* the shell waits for it; it never ends by itself */
+        give_cpu(300);
+        console_interrupt(con);
+        if (!wait_prompt(con, id))
+            result = -406;
+        else if (!row_has(con, "[interrupted]"))
+            result = -407;
+    }
+    if (result == 0)
+    {
+        type_line(con, "cat | upper"); /* two processes, the first waits for a line: both end */
+        give_cpu(300);
+        console_interrupt(con);
+        if (!wait_prompt(con, id))
+            result = -408;
+    }
+    if (result == 0)
+    {
+        type_line(con, "exit 9"); /* the shell still works and ends with the code it was given */
+        if (process_wait(id) != 0)
+            result = -409;
+        else if (process_exit_code(id) != 9)
+            result = -410;
+        console_close(con);
+        return result;
+    }
+    console_close(con);
+    process_wait(id);
+    return result;
+}
+
 /* ---- floating point state per process ----------------------------------------------------------------------------------
  * FPUA.ELF and FPUB.ELF fill xmm0-15, the x87 stack, MXCSR and the x87 control word with values of their own (a different
  * rounding mode each), spin, and check that nothing changed. They run at the same time, so the timer interrupt moves the CPU
@@ -535,6 +607,30 @@ int exec_selftest(void)
             return -332 - (s7.last_exit > 0 && s7.last_exit < 48 ? s7.last_exit : 0); /* -333 ... -379 */
         if (pipe_in_use() != 0)
             return -380; /* a pipe was not given back */
+    }
+
+    /* signals: SIGTEST.ELF ends SPIN.ELF in several states (optional); exits with 49 */
+    if (exec_find("SIGTEST.ELF") >= 0 && exec_find("SPIN.ELF") >= 0)
+    {
+        id = exec_run("SIGTEST.ELF", &err);
+        if (id < 0)
+            return -420;
+        if (process_wait(id) != 0)
+            return -421;
+        ProcessStats s8;
+        process_stats(&s8);
+        if (s8.last_exit != 49)
+            return -422 - (s8.last_exit > 0 && s8.last_exit < 49 ? s8.last_exit : 0); /* -423 ... -470 */
+        if (pipe_in_use() != 0)
+            return -471;
+    }
+
+    /* Ctrl+C on a console: needs the shell and the programs it runs */
+    if (sh_node >= 0 && exec_find("SPIN.ELF") >= 0 && exec_find("CAT.ELF") >= 0 && exec_find("UPPER.ELF") >= 0)
+    {
+        int ir = interrupt_test(sh_node);
+        if (ir != 0)
+            return ir;
     }
 
     /* init: INIT.ELF keeps the shell running (optional, needs the shell's files) */

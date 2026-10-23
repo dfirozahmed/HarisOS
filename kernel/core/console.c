@@ -219,6 +219,24 @@ int console_key(int h, int ch)
     return 0;
 }
 
+static void (*INTERRUPT_HOOK)(int);
+
+void console_set_interrupt_hook(void (*hook)(int con)) { INTERRUPT_HOOK = hook; }
+
+int console_interrupt(int h)
+{
+    Console *c = get(h);
+    if (!c || c->finished)
+        return 0;
+    c->line_len = 0; /* what was typed on this line is dropped, as a terminal does */
+    put_char(c, '^');
+    put_char(c, 'C');
+    put_char(c, '\n');
+    if (INTERRUPT_HOOK)
+        INTERRUPT_HOOK(h);
+    return 1;
+}
+
 int console_read(int h, void *buf, int len)
 {
     Console *c = get(h);

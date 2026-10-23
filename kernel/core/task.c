@@ -243,6 +243,26 @@ AddressSpace *task_address_space(void) { return TASKS[CUR].as; }
 
 void *task_user_data(void) { return TASKS[CUR].data; }
 
+void *task_data_of(int id)
+{
+    return id >= 0 && id < TASK_MAX && TASKS[id].state != TASK_UNUSED && TASKS[id].state != TASK_DEAD ? TASKS[id].data : 0;
+}
+
+int task_kill(int id)
+{
+    if (id <= 0 || id >= TASK_MAX || id == CUR)
+        return -1;
+    unsigned long long irq = irq_save();
+    if (TASKS[id].state == TASK_UNUSED || TASKS[id].state == TASK_DEAD)
+    {
+        irq_restore(irq);
+        return -1;
+    }
+    TASKS[id].state = TASK_DEAD; /* reap() (run by the next thread that runs) frees it */
+    irq_restore(irq);
+    return 0;
+}
+
 /* Blocking: a thread that waits for something (a key, a message) must not be READY, or the scheduler would keep running
  * it just to look again. It marks itself BLOCKED and gives up the CPU; whoever produces the event calls task_wake().
  * Interrupts are off from the check of the condition (the caller's) to here only if the caller keeps them off, as

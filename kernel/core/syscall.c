@@ -848,6 +848,48 @@ static long long sys_lock(const SyscallFrame *f)
     return vfs_set_locked(vol, (int)f->rsi) == 0 ? 0 : -1;
 }
 
+/* ---- signals and process list ---------------------------------------------------------------------------------------- */
+static long long sys_kill(const SyscallFrame *f)
+{
+    if (!process_current())
+        return -1;
+    ull pid = f->rdi, sig = f->rsi;
+    if (pid == 0 || pid > 0x7FFFFFFF || (sig != 0 && sig != SIGINT && sig != SIGKILL && sig != SIGTERM))
+        return -1;
+    return process_signal((int)pid, (int)sig) == 0 ? 0 : -1; /* (a process that signals itself does not come back) */
+}
+
+static long long sys_sigignore(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    if (!p)
+        return -1;
+    p->sig_ignore = (unsigned)f->rdi & ((1u << SIGINT) | (1u << SIGTERM)); /* SIGKILL cannot be ignored; no other exists */
+    return 0;
+}
+
+static long long sys_psinfo(const SyscallFrame *f)
+{
+    ull index = f->rdi, out_ptr = f->rsi;
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current() || !aspace_user_ok(as, out_ptr, sizeof(SysPsInfo), 1))
+        return -1;
+    if (index >= TASK_MAX)
+        return 0;
+    ProcessInfo pi;
+    if (!process_info((int)index, &pi))
+        return 0;
+    SysPsInfo e;
+    e.pid = pi.pid;
+    e.ppid = pi.ppid;
+    e.running = pi.running;
+    e.console = pi.console;
+    for (int i = 0; i < (int)sizeof(e.name); i++)
+        e.name[i] = i < (int)sizeof(pi.name) ? pi.name[i] : 0;
+    copy_to_user(out_ptr, (const char *)&e, sizeof(e));
+    return 1;
+}
+
 /* The heap. Pages are mapped one by one up to the new break; if memory runs out half way, the pages already mapped stay
  * (heap_mapped moves with them, so a retry does not map them twice) but the break does not move. */
 static long long sys_brk(const SyscallFrame *f)
@@ -918,6 +960,12 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_lock(f);
     case SYS_PIPE:
         return sys_pipe(f);
+    case SYS_KILL:
+        return sys_kill(f);
+    case SYS_SIGIGNORE:
+        return sys_sigignore(f);
+    case SYS_PSINFO:
+        return sys_psinfo(f);
     default:
         return -1;
     }

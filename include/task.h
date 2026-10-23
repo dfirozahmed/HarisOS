@@ -73,6 +73,12 @@ void *task_user_data(void);
 void task_block(void);
 void task_wake(int id);
 struct AddressSpace *task_space_of(int id);    /* the user space of thread id; NULL for kernel threads and ended ones */
+void *task_data_of(int id);                     /* the process record (see task_user_data) of thread id; NULL for kernel threads, ended and unused ones */
+/* End another thread at once (a signal, see process_signal): it is marked DEAD and the next reap frees its stack, pages and
+ * record. Only for a thread that is not running (not the caller) and is not the main thread. 0, or -1. Whatever the thread was
+ * doing is thrown away: it may only be in ring 3, or blocked in a system call, never inside a kernel lock (system calls run
+ * with interrupts off and nothing is held while a thread waits). */
+int task_kill(int id);
 void task_yield(void);
 
 /* Called by the timer interrupt (idle.c) on every tick, with interrupts off: switches away from a preemptible thread
