@@ -40,6 +40,21 @@ static u64 *alloc_table(void)
     return t;
 }
 
+static u64 FREED[64];
+static int FREED_N;
+static void free_record(u64 phys)
+{
+    if (FREED_N < 64)
+        FREED[FREED_N++] = phys;
+}
+static int freed(u64 phys)
+{
+    for (int i = 0; i < FREED_N; i++)
+        if (FREED[i] == phys)
+            return 1;
+    return 0;
+}
+
 static u64 *new_table(void)
 {
     u64 *t = ALIGNED_ALLOC(4096, 4096);
@@ -200,6 +215,111 @@ int main(void)
     u64 *dpt = (u64 *)(d2[2] & 0x000FFFFFFFFFF000ULL);
     CHECK(dpt != cpt[2] && dpt[100] == (cpt[2][100] | RW));
     CHECK(!(((u64 *)(d2[5] & 0x000FFFFFFFFFF000ULL))[7] & P)); /* the missing page is still missing */
+
+    /* ---- user address spaces ---- */
+    TABLES_MADE = 0;
+    ALLOC_LIMIT = 1000;
+    u64 *us = new_table();
+    const u64 UB = PAGING_USER_BASE;
+    CHECK(PAGING_USER_BASE == 0x0000400000000000ULL && PAGING_USER_END == 0x0000800000000000ULL);
+    CHECK(((PAGING_USER_BASE >> 39) & 511) == PAGING_USER_SLOT_FIRST);
+    CHECK((((PAGING_USER_END - 1) >> 39) & 511) == PAGING_USER_SLOT_LAST);
+
+    /* mapping: writable data, read-only data, and code */
+    CHECK(paging_map_page(us, UB + 0x1000, 0x123000, PAGING_WRITE, alloc_table) == 0);
+    CHECK(TABLES_MADE == 3); /* pdpt, pd, pt */
+    u64 ph = 0, en = 0;
+    CHECK(paging_translate(us, UB + 0x1000 + 0x234, &ph, &en) == 0 && ph == 0x123234);
+    CHECK((en & (P | RW | (1ULL << 2) | NX)) == (P | RW | (1ULL << 2) | NX)); /* present, writable, user, no-exec */
+    CHECK(!(en & (1ULL << 9))); /* not marked owned */
+    CHECK(paging_map_page(us, UB + 0x2000, 0x124000, 0, alloc_table) == 0);
+    CHECK(paging_translate(us, UB + 0x2000, &ph, &en) == 0 && !(en & RW) && (en & NX));
+    CHECK(paging_map_page(us, UB + 0x3000, 0x125000, PAGING_EXEC | PAGING_OWNED, alloc_table) == 0);
+    CHECK(paging_translate(us, UB + 0x3000, &ph, &en) == 0 && !(en & NX) && (en & (1ULL << 9)));
+    CHECK(TABLES_MADE == 3); /* the same pt: no new tables */
+    /* the tables on the way are open to ring 3 and writable (the page decides) */
+    {
+        u64 *p3 = (u64 *)(us[PAGING_USER_SLOT_FIRST] & 0x000FFFFFFFFFF000ULL);
+        CHECK((us[PAGING_USER_SLOT_FIRST] & (P | RW | (1ULL << 2))) == (P | RW | (1ULL << 2)));
+        CHECK((p3[0] & (P | RW | (1ULL << 2))) == (P | RW | (1ULL << 2)));
+    }
+
+    /* refused: already mapped, unaligned, outside the user part */
+    CHECK(paging_map_page(us, UB + 0x1000, 0x999000, 0, alloc_table) == -1);
+    CHECK(paging_map_page(us, UB + 0x1001, 0x999000, 0, alloc_table) == -1);
+    CHECK(paging_map_page(us, UB + 0x9000, 0x999001, 0, alloc_table) == -1);
+    CHECK(paging_map_page(us, UB - 0x1000, 0x999000, 0, alloc_table) == -1);
+    CHECK(paging_map_page(us, PAGING_USER_END, 0x999000, 0, alloc_table) == -1);
+    CHECK(paging_map_page(us, 0x1000, 0x999000, 0, alloc_table) == -1);
+    CHECK(paging_map_page(us, UB + 0x9000, 1ULL << 60, 0, alloc_table) == -1); /* not a physical address */
+    CHECK(paging_translate(us, UB + 0x9000, &ph, &en) == -1);
+
+    /* a table that ring 3 may not use (the kernel's) or a big page in the way is never modified */
+    {
+        u64 *k4 = new_table(), *k3 = new_table(), *b3 = new_table();
+        u64 va2 = UB + (5ULL << 39);                       /* slot 133 */
+        k4[133] = (u64)k3 | P | RW;                        /* no User bit */
+        CHECK(paging_map_page(k4, va2, 0x1000, 0, alloc_table) == -1);
+        CHECK(k4[133] == ((u64)k3 | P | RW)); /* untouched */
+        k4[134] = (u64)b3 | P | RW | (1ULL << 2);
+        b3[0] = 0x40000000ULL | P | RW | PS | (1ULL << 2); /* a 1 GiB page */
+        CHECK(paging_map_page(k4, UB + (6ULL << 39), 0x1000, 0, alloc_table) == -1);
+        CHECK(!paging_user_range_ok(k4, UB + (6ULL << 39), 8, 0)); /* a big page is not user memory either */
+    }
+
+    /* translate understands the big pages of the kernel's identity map */
+    {
+        u64 *t4 = new_table(), *t3 = new_table(), *t2 = new_table();
+        t4[0] = (u64)t3 | P | RW;
+        t3[0] = (u64)t2 | P | RW;
+        t3[2] = 0x80000000ULL | P | RW | PS;
+        t2[1] = 0x200000ULL | P | RW | PS;
+        CHECK(paging_translate(t4, 0x80012345ULL, &ph, 0) == 0 && ph == 0x80012345ULL);
+        CHECK(paging_translate(t4, 0x2ABCDEULL, &ph, &en) == 0 && ph == 0x2ABCDEULL && (en & PS));
+        CHECK(paging_translate(t4, 0x400000ULL, &ph, 0) == -1); /* t2[2] is empty */
+        CHECK(paging_translate(t4, 0x40000000ULL, &ph, 0) == -1);
+        CHECK(paging_translate(t4, 1ULL << 40, &ph, 0) == -1);
+    }
+
+    /* what a system call checks before it touches a pointer from ring 3 */
+    CHECK(paging_user_range_ok(us, UB + 0x1000, 1, 1));
+    CHECK(paging_user_range_ok(us, UB + 0x1000 + 0xFF8, 8, 1));            /* the last bytes of the page */
+    CHECK(paging_user_range_ok(us, UB + 0x1000 + 0xFF8, 9, 0));            /* one byte into the next page: it is mapped, read-only, so a read is fine */
+    CHECK(!paging_user_range_ok(us, UB + 0x1000 + 0xFF8, 9, 1));           /* ... but a write there is not */
+    CHECK(paging_user_range_ok(us, UB + 0x1800, 0x1000, 0));               /* two pages, both mapped, read */
+    CHECK(!paging_user_range_ok(us, UB + 0x1800, 0x1000, 1));              /* ... but the second is not writable */
+    CHECK(paging_user_range_ok(us, UB + 0x2000, 16, 0));                   /* read-only page, read */
+    CHECK(!paging_user_range_ok(us, UB + 0x2000, 16, 1));                  /* ... write */
+    CHECK(!paging_user_range_ok(us, UB + 0x4000, 1, 0));                   /* not mapped */
+    CHECK(!paging_user_range_ok(us, UB + 0x1000, 0, 0));                   /* empty range */
+    CHECK(!paging_user_range_ok(us, 0x1000, 8, 0));                        /* kernel address */
+    CHECK(!paging_user_range_ok(us, UB - 1, 2, 0));                        /* starts below the user part */
+    CHECK(!paging_user_range_ok(us, PAGING_USER_END - 4, 8, 0));           /* runs past the end */
+    CHECK(!paging_user_range_ok(us, UB + 0x1000, ~0ULL, 0));               /* length that wraps around */
+    CHECK(!paging_user_range_ok(us, UB + 0x1000, ~0ULL - UB, 0));
+
+    /* tearing down: owned pages and every table are freed, shared pages are not */
+    CHECK(paging_map_page(us, PAGING_USER_END - 0x1000, 0x777000, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0); /* slot 255 */
+    CHECK(paging_map_page(us, UB + 0x5000, 0x778000, PAGING_OWNED, alloc_table) == 0);
+    int tables = TABLES_MADE; /* pdpt+pd+pt for slot 128, the same again for slot 255 */
+    CHECK(tables == 6);
+    us[3] = 0xABCD000ULL | P | RW; /* a kernel slot: must stay as it is */
+    FREED_N = 0;
+    paging_destroy_range(us, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, free_record);
+    CHECK(FREED_N == 6 + 3); /* 6 tables + the owned pages 0x125000, 0x778000, 0x777000 */
+    CHECK(freed(0x125000) && freed(0x778000) && freed(0x777000));
+    CHECK(!freed(0x123000) && !freed(0x124000)); /* mapped without PAGING_OWNED: shared, left alone */
+    CHECK(us[PAGING_USER_SLOT_FIRST] == 0 && us[PAGING_USER_SLOT_LAST] == 0);
+    CHECK(us[3] == (0xABCD000ULL | P | RW));
+    CHECK(paging_translate(us, UB + 0x1000, &ph, 0) == -1); /* nothing is mapped any more */
+    int found = 0; /* every table the walk allocated was freed (the first one in MADE is us itself: made by new_table) */
+    for (int j = 0; j < FREED_N; j++)
+        for (int t = 0; t < TABLES_MADE; t++)
+            if (FREED[j] == (u64)MADE[t])
+                found++;
+    CHECK(found == 6);
+    paging_destroy_range(us, PAGING_USER_SLOT_FIRST, PAGING_USER_SLOT_LAST, free_record); /* nothing left: nothing freed */
+    CHECK(FREED_N == 9);
 
     /* not enough memory for the copy: NULL for every limit below what it needs, never a crash */
     for (int limit = 0; limit < 5; limit++)

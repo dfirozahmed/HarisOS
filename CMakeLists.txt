@@ -61,6 +61,7 @@ set(KERNEL_SOURCES
     kernel/memory/pmm.c
     kernel/memory/paging_walk.c     # page table walk: split big pages, map / unmap one page (host-tested)
     kernel/memory/paging.c          # page tables on the real CPU (CR3, invlpg): guard pages
+    kernel/memory/aspace.c          # user address spaces: one set of page tables per process, shared kernel half
     kernel/memory/heap.c           # kernel heap: kmalloc / kfree on top of the page allocator
     kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
     kernel/core/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack

@@ -12,6 +12,7 @@
 #include "fat32.h"
 #include "gdt.h"
 #include "acpi.h"
+#include "aspace.h"
 #include "gfx.h"
 #include "heap.h"
 #include "heapmon.h"
@@ -176,6 +177,22 @@ void kernel_main(const BootInfo *info)
         }
         else
             serial_puts("firmware's (no guard pages)\n");
+        /* User address spaces: build one, let the CPU walk it, free it. Failing here only means no user mode later,
+         * so it is logged, not fatal. */
+        int as_init = paging_ok ? aspace_init() : -1;
+        int as_test = as_init == 0 ? aspace_selftest() : 0;
+        serial_puts("HARISOS: address spaces ");
+        if (as_init != 0)
+            serial_puts("unavailable\n");
+        else if (as_test != 0)
+        {
+            serial_puts("self test FAILED ");
+            serial_putd(as_test);
+            serial_puts("\n");
+        }
+        else
+            serial_puts("ok\n");
+
         int gd = gdt_check(); /* the CPU accepts the ring 3 selectors and the TSS is loaded */
         serial_puts("HARISOS: GDT check ");
         serial_puts(gd == 0 ? "ok" : "FAILED ");

@@ -150,3 +150,138 @@ u64 *paging_clone(const u64 *old_pml4, PagingAllocFn alloc)
     }
     return pml4;
 }
+
+/* ---- user address spaces ------------------------------------------------------------------------------------- */
+
+#define PTE_OWNED (1ULL << 9) /* software bit (the CPU ignores bits 9-11): this page is ours to free */
+
+int paging_map_page(u64 *pml4, u64 virt, u64 phys, unsigned flags, PagingAllocFn alloc)
+{
+    if ((virt & 0xFFF) || (phys & 0xFFF) || (phys & ~ADDR_MASK) || virt < PAGING_USER_BASE || virt >= PAGING_USER_END)
+        return -1;
+    static const int shift[3] = {39, 30, 21};
+    u64 *table = pml4;
+    for (int level = 0; level < 3; level++)
+    {
+        volatile u64 *e = &table[(virt >> shift[level]) & 511];
+        if (!(*e & PTE_P))
+        {
+            u64 *next = alloc();
+            if (!next)
+                return -1;
+            /* Permissions are the AND of every level, so the tables on the way are as open as possible and the page
+             * itself says what is allowed. */
+            *e = (u64)next | PTE_P | PTE_RW | PTE_US;
+        }
+        else if (level > 0 && (*e & PTE_PS))
+            return -1; /* a big page is in the way */
+        else if (!(*e & PTE_US))
+            return -1; /* a table ring 3 may not use: not one of ours (the kernel's), never changed from here */
+        table = (u64 *)(*e & ADDR_MASK);
+    }
+    volatile u64 *leaf = &table[(virt >> 12) & 511];
+    if (*leaf & PTE_P)
+        return -1;
+    u64 v = phys | PTE_P | PTE_US;
+    if (flags & PAGING_WRITE)
+        v |= PTE_RW;
+    if (!(flags & PAGING_EXEC))
+        v |= PTE_NX;
+    if (flags & PAGING_OWNED)
+        v |= PTE_OWNED;
+    *leaf = v;
+    return 0;
+}
+
+int paging_translate(const u64 *pml4, u64 virt, u64 *phys, u64 *entry)
+{
+    static const int shift[4] = {39, 30, 21, 12};
+    const u64 *table = pml4;
+    for (int level = 0; level < 4; level++)
+    {
+        u64 e = table[(virt >> shift[level]) & 511];
+        if (!(e & PTE_P))
+            return -1;
+        u64 base = 0, off = 0;
+        int leaf = 0;
+        if (level == 1 && (e & PTE_PS))
+        {
+            base = e & 0x000FFFFFC0000000ULL;
+            off = virt & 0x3FFFFFFFULL;
+            leaf = 1;
+        }
+        else if (level == 2 && (e & PTE_PS))
+        {
+            base = e & 0x000FFFFFFFE00000ULL;
+            off = virt & 0x1FFFFFULL;
+            leaf = 1;
+        }
+        else if (level == 3)
+        {
+            base = e & ADDR_MASK;
+            off = virt & 0xFFFULL;
+            leaf = 1;
+        }
+        if (leaf)
+        {
+            if (phys)
+                *phys = base + off;
+            if (entry)
+                *entry = e;
+            return 0;
+        }
+        table = (const u64 *)(e & ADDR_MASK);
+    }
+    return -1;
+}
+
+int paging_user_range_ok(const u64 *pml4, u64 virt, u64 len, int write)
+{
+    if (len == 0 || virt < PAGING_USER_BASE || virt >= PAGING_USER_END || len > PAGING_USER_END - virt)
+        return 0; /* also catches virt + len wrapping around */
+    static const int shift[4] = {39, 30, 21, 12};
+    for (u64 a = virt & ~0xFFFULL; a < virt + len; a += 4096)
+    {
+        const u64 *table = pml4;
+        for (int level = 0; level < 4; level++)
+        {
+            u64 e = table[(a >> shift[level]) & 511];
+            if (!(e & PTE_P) || !(e & PTE_US) || (write && !(e & PTE_RW)))
+                return 0;
+            if (level == 1 || level == 2)
+                if (e & PTE_PS)
+                    return 0; /* user memory is made of 4 KiB pages only */
+            table = (const u64 *)(e & ADDR_MASK);
+        }
+    }
+    return 1;
+}
+
+void paging_destroy_range(u64 *pml4, int first, int last, PagingFreeFn free_fn)
+{
+    for (int i = first; i <= last; i++)
+    {
+        if (!(pml4[i] & PTE_P))
+            continue;
+        u64 *pdpt = (u64 *)(pml4[i] & ADDR_MASK);
+        for (int j = 0; j < 512; j++)
+        {
+            if (!(pdpt[j] & PTE_P) || (pdpt[j] & PTE_PS))
+                continue; /* a big page cannot be one of ours */
+            u64 *pd = (u64 *)(pdpt[j] & ADDR_MASK);
+            for (int k = 0; k < 512; k++)
+            {
+                if (!(pd[k] & PTE_P) || (pd[k] & PTE_PS))
+                    continue;
+                u64 *pt = (u64 *)(pd[k] & ADDR_MASK);
+                for (int m = 0; m < 512; m++)
+                    if ((pt[m] & PTE_P) && (pt[m] & PTE_OWNED))
+                        free_fn(pt[m] & ADDR_MASK);
+                free_fn((u64)pt);
+            }
+            free_fn((u64)pd);
+        }
+        free_fn((u64)pdpt);
+        pml4[i] = 0;
+    }
+}
