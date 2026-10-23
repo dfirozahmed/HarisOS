@@ -505,6 +505,7 @@ int wm_pointer(int x, int y, unsigned buttons)
 int wm_tick(void)
 {
     int changed = 0;
+    wm_reclaim_internal(); /* (no handler is running: nothing holds a window of a chunk that is given back) */
     for (int i = 0; i < WM_ZN; i++)
     {
         Window *w = WM_Z[i];

@@ -5,12 +5,17 @@
 #include "timer.h"
 #include "wm_internal.h"
 
-/* Windows live in chunks of WM_CHUNK, made with kmalloc when all the slots so far are in use. A chunk is never given back: a slot is reused
- * for the next window, so a Window pointer stays valid memory for ever (apps keep them and ask wm_is_open() before use). */
+/* Windows live in chunks of WM_CHUNK, made with kmalloc when all the slots so far are in use. A closed window's slot is reused for the next
+ * one. A chunk whose slots have all been free for WM_CHUNK_GRACE_MS is given back to the heap (see wm_reclaim_internal), but never while an
+ * event handler may still be running on one of its windows (a handler can close its own window and then go on using the pointer): it happens
+ * at the start of wm_tick, from the main loop. Apps that keep a Window pointer clear it in on_close or ask wm_is_open() before using it. */
 #define WM_CHUNK 8
+#define WM_CHUNK_GRACE_MS 3000
 typedef struct WinChunk
 {
     struct WinChunk *next;
+    int empty;                       /* 1 = every slot was free at the last look */
+    unsigned long long empty_since;  /* timer_ms() of the first look that found it so */
     Window win[WM_CHUNK];
 } WinChunk;
 static WinChunk *CHUNKS;
@@ -88,6 +93,54 @@ int wm_z_index_internal(const Window *w)
         if (WM_Z[i] == w)
             return i;
     return -1;
+}
+
+/* Give back what is not needed: chunks that have been entirely free for WM_CHUNK_GRACE_MS (always keeping one), and half of the z-order list
+ * when it is mostly empty. Call it from the main loop only - never from inside a window's handler. */
+void wm_reclaim_internal(void)
+{
+    unsigned long long now = timer_ms();
+    int chunks = 0;
+    for (WinChunk *c = CHUNKS; c; c = c->next)
+        chunks++;
+    WinChunk *prev = 0;
+    for (WinChunk *c = CHUNKS; c;)
+    {
+        WinChunk *next = c->next;
+        int empty = 1;
+        for (int i = 0; i < WM_CHUNK && empty; i++)
+            empty = !c->win[i].used;
+        if (!empty)
+            c->empty = 0;
+        else if (!c->empty)
+        {
+            c->empty = 1;
+            c->empty_since = now;
+        }
+        if (empty && chunks > 1 && now - c->empty_since >= WM_CHUNK_GRACE_MS)
+        {
+            if (prev)
+                prev->next = next;
+            else
+                CHUNKS = next;
+            SLOTS -= WM_CHUNK;
+            chunks--;
+            kfree(c);
+        }
+        else
+            prev = c;
+        c = next;
+    }
+    if (Z_CAP > 16 && WM_ZN * 4 <= Z_CAP)
+    {
+        int cap = Z_CAP / 2;
+        Window **nz = krealloc(WM_Z, (unsigned long long)cap * sizeof(Window *));
+        if (nz)
+        {
+            WM_Z = nz;
+            Z_CAP = cap;
+        }
+    }
 }
 
 /* ---- create / close / raise ---------------------------------- */

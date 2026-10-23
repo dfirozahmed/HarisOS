@@ -70,6 +70,7 @@ static int PROCS_CAP;
 static int NPROCS;
 static Window **PREV; /* the list before the last refresh, to see whether it changed */
 static int PREV_CAP;
+static void revalidate(void); /* (defined below) */
 static int SEL_ID = -1; /* id of the selected window (survives list refreshes), -1 = none */
 static unsigned long long LAST_MS;
 
@@ -642,6 +643,7 @@ static void draw_performance(UiRect body)
 
 static void tm_draw(Window *w, UiRect body)
 {
+    revalidate();
     (void)w;
     draw_tabs(body);
     if (TAB == TAB_PROCESSES)
@@ -650,6 +652,18 @@ static void tm_draw(Window *w, UiRect body)
         draw_threads(body);
     else
         draw_performance(body);
+}
+
+/* Windows close between two refreshes of the list, and the memory of a window that has been closed for a while goes back to the heap:
+ * before any use of PROCS, throw the list away if it names a window that is no longer open. (wm_is_open only compares addresses.) */
+static void revalidate(void)
+{
+    for (int i = 0; i < NPROCS; i++)
+        if (!wm_is_open(PROCS[i]))
+        {
+            reload();
+            return;
+        }
 }
 
 static void end_selected(void)
@@ -674,6 +688,7 @@ static void on_end_task(UiButton *b, void *user)
 
 static int tm_press(Window *w, int x, int y)
 {
+    revalidate();
     UiRect body = wm_content(w);
     for (int i = 0; i < TAB_COUNT; i++)
     {
@@ -714,6 +729,7 @@ static void tm_key(Window *w, const KeyEvent *k)
     (void)w;
     if (!k->pressed)
         return;
+    revalidate();
     switch (k->key)
     {
     case KEY_TAB:

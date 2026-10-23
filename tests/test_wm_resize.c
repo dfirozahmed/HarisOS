@@ -6,15 +6,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 /* Host-side tests for window resizing (kernel/window): edges, corners, minimum size, screen limits. */
-unsigned long long timer_ms(void){return 0;}
+static unsigned long long NOW; /* the test moves the clock */
+unsigned long long timer_ms(void){return NOW;}
 int timer_ready(void){return 0;}
 void timer_init(void){}
 #include <stdlib.h>
-void *kmalloc(unsigned long long n){ return malloc((size_t)n); } /* the clipboard (ui_edit.c) keeps its text in the kernel heap */
-void kfree(void *p){ free(p); }
+static int HEAP_LIVE; /* blocks given out and not freed */
+void *kmalloc(unsigned long long n){ void*p=malloc((size_t)n); if(p) HEAP_LIVE++; return p; } /* the clipboard (ui_edit.c) keeps its text in the kernel heap */
+void kfree(void *p){ if(p){ HEAP_LIVE--; free(p);} }
 static int HEAP_FAIL; /* 1 = the next heap requests fail */
-void *kcalloc(unsigned long long n, unsigned long long s){ return HEAP_FAIL ? 0 : calloc((size_t)n, (size_t)s); }
-void *krealloc(void *p, unsigned long long n){ return HEAP_FAIL ? 0 : realloc(p, (size_t)n); }
+void *kcalloc(unsigned long long n, unsigned long long s){ void*p=HEAP_FAIL ? 0 : calloc((size_t)n, (size_t)s); if(p) HEAP_LIVE++; return p; }
+void *krealloc(void *p, unsigned long long n){ if(HEAP_FAIL) return 0; void*q=realloc(p,(size_t)n); if(q && !p) HEAP_LIVE++; return q; }
 static void draw(Window*w,UiRect b){ ui_text(b.x+16,b.y+16,"Resizable window",UI_TEXT_HEADING); (void)w; }
 static void ptr(int x,int y,unsigned b){ wm_pointer(x,y,b); }
 static int wheel_steps, wheel_ret;
