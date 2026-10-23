@@ -76,6 +76,7 @@ set(KERNEL_SOURCES
     kernel/core/pipe.c              # pipes: the byte queue between processes (host-tested)
     kernel/core/shm.c               # shared memory segments (host-tested)
     kernel/core/mq.c                # message queues (host-tested)
+    kernel/core/gui.c               # GUI surfaces for user programs: pixels in shared memory, event queues (host-tested)
     kernel/core/sem.c               # semaphores (host-tested)
     kernel/core/mutex.c             # kernel mutex + condition variable (host-tested)
     kernel/core/usync.c             # named mutexes / condition variables for processes (host-tested through test_syscall)
@@ -167,7 +168,8 @@ set(KERNEL_SOURCES
     apps/taskmgr/taskmgr_app.c      # Task Manager app: processes and performance
     apps/notepad/notepad_app.c      # Notepad app: plain-text editor
     apps/console/console_app.c      # Console window: where a program started from the File Explorer prints and reads
-    apps/terminal/terminal_app.c)   # Terminal app: a console window running the shell; also starts INIT.ELF at boot
+    apps/terminal/terminal_app.c    # Terminal app: a console window running the shell; also starts INIT.ELF at boot
+    apps/gui/gui_app.c)             # Compositor: windows for the surfaces of user programs (SYS_GUI_*)
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h ${CMAKE_SOURCE_DIR}/apps/explorer/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
@@ -240,7 +242,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

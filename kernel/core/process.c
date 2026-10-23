@@ -3,6 +3,7 @@
 #include "aspace.h"
 #include "console.h"
 #include "elf.h"
+#include "gui.h"
 #include "heap.h"
 #include "idle.h"
 #include "pmm.h"
@@ -281,6 +282,7 @@ void process_release_files(Process *p)
     if (!p)
         return;
     process_release_shm(p);
+    gui_release_owner(p->pid); /* its windows go away with it */
     for (int i = 0; i < PROCESS_MAX_FILES; i++)
         pfile_close(&p->file[i]);
     for (int k = 0; k < 3; k++)
@@ -407,6 +409,7 @@ int process_exec_elf(const char *name, const void *file, u64 size, const Process
     if (free_file)
         kfree((void *)file);
     process_release_shm(p); /* the old address space (and the mappings in it) goes away below */
+    gui_release_owner(p->pid); /* its windows drew into those mappings */
     for (int i = 0; i < 32; i++) /* a new program has none of the old one's handlers (ignored signals stay ignored) */
         p->sig_handler[i] = 0;
     p->sig_entry = 0;

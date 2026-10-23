@@ -1,5 +1,6 @@
 /* Taskbar clock polling and caret blink updates. */
 #include "desktop.h"
+#include "guiapp.h"
 #include "taskbar.h"
 #include "startmenu.h"
 #include "ui.h"
@@ -58,7 +59,8 @@ int desktop_tick(void)
 {
     int clock_changed = refresh_taskbar_clock();
     int flipped = ui_caret_update();
-    int ticked = wm_tick(); /* windows that wait for time (tooltips) */
+    int ticked = gui_app_poll(); /* windows of user programs that appeared or went away */
+    ticked |= wm_tick();        /* windows that wait for time (tooltips) */
     Window *top = wm_top();
     startmenu_tick(flipped);
 

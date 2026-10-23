@@ -11,6 +11,8 @@
 #include "aspace.h"
 #include "console.h"
 #include "exec.h"
+#include "gui.h"
+#include "keyboard.h"
 #include "pmm.h"
 #include "process.h"
 #include "task.h"
@@ -687,6 +689,10 @@ static void cond_signaller(void)
 static void cond_broadcaster(void) { cond_broadcast(usync_cond(pfile_usync(&PROC.file[1]))); BLOCK_ACTION = 0; }
 static void sem_poster(void) { sem_post(pfile_sem(&PROC.file[0])); BLOCK_ACTION = 0; }
 static void pipe_feed_two(void) { int p = -1; for (int i = 0; i < PROCESS_MAX_FILES; i++) if (PROC.file[i].node >= PROCESS_PIPE_NODE && PROC.file[i].node < PROCESS_MQ_NODE && !(PROC.file[i].flags & PFILE_WRITE)) p = pfile_pipe(&PROC.file[i]); if (p >= 0) pipe_write(p, "ok", 2); BLOCK_ACTION = 0; }
+/* what the compositor does while the program sleeps in SYS_GUI_EVENT: the user turns the wheel / closes the window */
+static int GUI_TEST_HANDLE;
+static void gui_poster(void) { GuiEvent e = {GUI_EV_WHEEL, 3, 0, 0, 0, 0, 0, 0}; gui_post(GUI_TEST_HANDLE, &e); BLOCK_ACTION = 0; }
+static void gui_destroyer(void) { gui_destroy(GUI_TEST_HANDLE); BLOCK_ACTION = 0; }
 static void raise_int(void) { PROC.sig_pending |= 1u << SIGINT; BLOCK_ACTION = 0; }
 static void raise_then_feed(void)
 {
@@ -1709,6 +1715,116 @@ int main(void)
               call(SYS_SHM_UNLINK, U("k"), 0, 0) == -1 && call(SYS_SHM_SIZE, (ull)B, 0, 0) == -1);
         CURRENT_PROC = &PROC;
         CHECK(shm_in_use() == 0);
+    }
+
+    /* ================= GUI windows ================= */
+    reset();
+    {
+        MAPS_N = 0;
+        MAP_CALLS = 0;
+        MAP_FAIL_AT = -1;
+        PROC.pid = 44;
+        SysGuiInfo gi;
+        memset(&gi, 0, sizeof(gi));
+        strcpy(gi.title, "Demo");
+        gi.width = 100;
+        gi.height = 60;
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == 0);
+        int gh = gi.handle, x, y, w, h;
+        CHECK(gh > 0 && gi.stride == 100 && gi.pixels == PROCESS_SHM_BASE && gui_owner(gh) == 44 && gui_in_use() == 1);
+        CHECK(MAPS_N == 6 && MAPS[0].va == PROCESS_SHM_BASE && MAPS[0].flags == ASPACE_WRITE && PROC.shm[0].seg >= 0 && PROC.shm[0].pages == 6);
+        CHECK(shm_in_use() == 1 && PAGES_OUT == 6 && strcmp(gui_title(gh), "Demo") == 0);
+        CHECK(gui_take_dirty(gh, &x, &y, &w, &h) && w == 100 && h == 60); /* the first picture */
+
+        /* present: the rectangle is packed into two registers, 16 bits each */
+        CHECK(call(SYS_GUI_PRESENT, (ull)gh, 10 | (20u << 16), 30 | (40u << 16)) == 0);
+        CHECK(gui_take_dirty(gh, &x, &y, &w, &h) && x == 10 && y == 20 && w == 30 && h == 40);
+        CHECK(call(SYS_GUI_PRESENT, (ull)gh, 0, 0) == 0 && gui_take_dirty(gh, &x, &y, &w, &h) && w == 100 && h == 60);
+
+        /* a window of someone else, a bad handle: refused */
+        CHECK(call(SYS_GUI_PRESENT, 0, 0, 0) == -1 && call(SYS_GUI_PRESENT, (ull)-1, 0, 0) == -1);
+        CHECK(call(SYS_GUI_PRESENT, (ull)gh + ((ull)1 << 32), 0, 0) == -1); /* the upper half must not be ignored */
+        PROC.pid = 45;
+        GuiEvent ev = {0, 0, 0, 0, 0, 0, 0, 0};
+        CHECK(call(SYS_GUI_PRESENT, (ull)gh, 0, 0) == -1 && call(SYS_GUI_EVENT, (ull)gh, U(&ev), SYS_GUI_NOWAIT) == -1);
+        CHECK(call(SYS_GUI_CTL, (ull)gh, SYS_GUI_DESTROY, 0) == -1 && gui_valid(gh));
+        PROC.pid = 44;
+
+        /* events: none yet; a buffer that cannot be written; one that can; waiting for one */
+        CHECK(call(SYS_GUI_EVENT, (ull)gh, U(&ev), SYS_GUI_NOWAIT) == 0);
+        GuiEvent in = {GUI_EV_KEY, 0, 0, 0, 'q', 'q', 1, KMOD_CTRL};
+        CHECK(gui_post(gh, &in) == 1);
+        USER_OK = 0;
+        CHECK(call(SYS_GUI_EVENT, (ull)gh, U(&ev), SYS_GUI_NOWAIT) == -1);
+        USER_OK = 1;
+        memset(&ev, 0, sizeof(ev));
+        CHECK(call(SYS_GUI_EVENT, (ull)gh, U(&ev), SYS_GUI_NOWAIT) == 1 && ev.type == GUI_EV_KEY && ev.key == 'q' && ev.mods == KMOD_CTRL); /* it was still queued */
+        BLOCKS = 0;
+        WOKEN_TASKS_N = 0;
+        GUI_TEST_HANDLE = gh;
+        BLOCK_ACTION = gui_poster;
+        CHECK(call(SYS_GUI_EVENT, (ull)gh, U(&ev), 0) == 1 && BLOCKS == 1 && ev.type == GUI_EV_WHEEL && ev.x == 3);
+        CHECK(WOKEN_TASKS_N == 1 && WOKEN_TASKS[0] == 7); /* the sleeper (task 7) was the one woken */
+        BLOCK_ACTION = raise_int; /* a signal handler is due while it sleeps */
+        CHECK(call(SYS_GUI_EVENT, (ull)gh, U(&ev), 0) == -1);
+        PROC.sig_pending = 0;
+        BLOCK_ACTION = gui_destroyer; /* the window goes while it sleeps */
+        CHECK(call(SYS_GUI_EVENT, (ull)gh, U(&ev), 0) == -1 && !gui_valid(gh));
+        CHECK(maps_live() == 6 && shm_in_use() == 1 && PAGES_OUT == 6); /* the program's mapping keeps the pixels */
+        CHECK(call(SYS_SHM_UNMAP, gi.pixels, 0, 0) == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && maps_live() == 0);
+
+        /* title, destroy */
+        memset(&gi, 0, sizeof(gi));
+        strcpy(gi.title, "Second");
+        gi.width = 64;
+        gi.height = 48;
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == 0);
+        gh = gi.handle;
+        CHECK(call(SYS_GUI_CTL, (ull)gh, SYS_GUI_SET_TITLE, U("Renamed")) == 0 && strcmp(gui_title(gh), "Renamed") == 0);
+        CHECK(call(SYS_GUI_CTL, (ull)gh, SYS_GUI_SET_TITLE, U("")) == -1 && call(SYS_GUI_CTL, (ull)gh, 2, 0) == -1);
+        CHECK(call(SYS_GUI_CTL, (ull)gh, SYS_GUI_DESTROY, 0) == 0 && !gui_valid(gh));
+        CHECK(call(SYS_GUI_CTL, (ull)gh, SYS_GUI_DESTROY, 0) == -1 && call(SYS_GUI_PRESENT, (ull)gh, 0, 0) == -1);
+        CHECK(call(SYS_SHM_UNMAP, gi.pixels, 0, 0) == 0 && shm_in_use() == 0 && PAGES_OUT == 0);
+
+        /* what cannot be made leaves nothing behind */
+        memset(&gi, 0, sizeof(gi));
+        strcpy(gi.title, "Bad");
+        gi.width = 10;
+        gi.height = 60;
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);       /* too narrow */
+        gi.width = 100;
+        gi.height = 600;
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);       /* too high */
+        gi.height = 60;
+        memset(gi.title, 'x', sizeof(gi.title));
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);       /* no terminating 0 within the 32 bytes */
+        memset(gi.title, 0, sizeof(gi.title));
+        strcpy(gi.title, "Good");
+        USER_OK = 0;
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);
+        USER_OK = 1;
+        MAP_CALLS = 0;
+        MAP_FAIL_AT = 2;                                       /* the mapping fails half way */
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);
+        MAP_FAIL_AT = -1;
+        CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && maps_live() == 0);
+        for (int i = 0; i < PROCESS_MAX_SHM; i++)              /* no free mapping slot */
+            PROC.shm[i].seg = 0;
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1 && gui_in_use() == 0 && PAGES_OUT == 0);
+        for (int i = 0; i < PROCESS_MAX_SHM; i++)
+            PROC.shm[i].seg = -1;
+
+        /* a process that ends takes its windows with it; without a process there are no calls */
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == 0 && gui_in_use() == 1);
+        gh = gi.handle;
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1 && call(SYS_GUI_PRESENT, (ull)gh, 0, 0) == -1 &&
+              call(SYS_GUI_EVENT, (ull)gh, U(&ev), SYS_GUI_NOWAIT) == -1 && call(SYS_GUI_CTL, (ull)gh, SYS_GUI_DESTROY, 0) == -1);
+        CURRENT_PROC = &PROC;
+        gui_release_owner(44);
+        process_release_shm(&PROC);
+        CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0);
+        PROC.pid = 0;
     }
 
     /* ================= message queues ================= */

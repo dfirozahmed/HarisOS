@@ -125,6 +125,19 @@
  *   SYS_SETPRIO (49) rdi = pid (0 = the caller), rsi = priority 0 .. 4 (higher runs first, default 2; see task.h) or -1 to only read it.
  *                  Only the caller and its children that were not waited for yet. Returns the priority the process had, or -1.
  *                  A waiting thread that a better one needs (mutexes) may run higher for a while: that is not what this reads.
+ *   SYS_GUI_CREATE (50) rdi = pointer to a SysGuiInfo: title, width, height in; handle, stride (pixels per row) and pixels out. A window of
+ *                  that size (GUI_W_MIN..GUI_W_MAX by GUI_H_MIN..GUI_H_MAX, see gui.h) appears on the desktop. `pixels` is the address of
+ *                  its picture in this process: 32 bits per pixel (0x00RRGGBB), width * height of them, one row after the other
+ *                  (a shared memory mapping, so it counts against the 8 of SYS_SHM_MAP). Draw there, then SYS_GUI_PRESENT. 0, or -1
+ *                  (bad size or title, no free surface or mapping, no memory). At most GUI_MAX windows in all.
+ *   SYS_GUI_PRESENT (51) rdi = handle, rsi = x | y << 16, rdx = w | h << 16 (16 bits each): that part of the picture changed, show it.
+ *                  w or h 0 = all of it. 0, or -1 (not your window).
+ *   SYS_GUI_EVENT (52) rdi = handle, rsi = pointer to a GuiEvent, rdx = 1 to not wait. The oldest event of the window (keys, mouse, wheel,
+ *                  close request; see gui.h): 1 and *rsi filled; 0 when there is none and rdx = 1; otherwise sleeps until one arrives.
+ *                  -1: not your window, it was destroyed (also while sleeping), or a signal handler interrupted the sleep.
+ *   SYS_GUI_CTL (53) rdi = handle, rsi = 0: destroy the window (the program should also SYS_SHM_UNMAP its picture), or rsi = 1: the window's
+ *                  title is the string at rdx. 0, or -1. A process that ends loses its windows. The window's close button does not
+ *                  close it: it sends GUI_EV_CLOSE (and closes it at once if the program ignored the previous one).
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
@@ -201,6 +214,15 @@
 #define SYS_COND_SIGNAL 47
 #define SYS_SYNC_UNLINK 48
 #define SYS_SETPRIO 49
+#define SYS_GUI_CREATE 50
+#define SYS_GUI_PRESENT 51
+#define SYS_GUI_EVENT 52
+#define SYS_GUI_CTL 53
+
+/* SYS_GUI_CTL commands */
+#define SYS_GUI_DESTROY 0
+#define SYS_GUI_SET_TITLE 1
+#define SYS_GUI_NOWAIT 1 /* SYS_GUI_EVENT flag: return 0 instead of sleeping */
 
 /* flags of SYS_SHM_MAP and SYS_MQ_OPEN */
 #define SYS_CREATE 1 /* make it if there is none */
@@ -237,6 +259,16 @@ typedef struct
     unsigned is_dir; /* 1 = folder */
     char name[96];   /* NUL-terminated; "" for the root */
 } SysDirEntry;
+
+/* What SYS_GUI_CREATE reads and fills in (the same layout in user/sys.h). */
+typedef struct
+{
+    char title[32];             /* in: NUL-terminated, 1 .. 31 printable characters */
+    int width, height;          /* in */
+    int handle;                 /* out: for the other SYS_GUI_* calls */
+    int stride;                 /* out: pixels per row (= width) */
+    unsigned long long pixels;  /* out: address of the picture in this process */
+} SysGuiInfo;
 
 /* What the entry code saves on the kernel stack, lowest address first (the push order in syscall.c). */
 typedef struct

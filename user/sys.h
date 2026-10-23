@@ -56,6 +56,12 @@
 #define SYS_COND_SIGNAL 47
 #define SYS_SYNC_UNLINK 48
 #define SYS_SETPRIO 49
+#define SYS_GUI_CREATE 50
+#define SYS_GUI_PRESENT 51
+#define SYS_GUI_EVENT 52
+#define SYS_GUI_CTL 53
+#define SYS_GUI_DESTROY 0
+#define SYS_GUI_SET_TITLE 1
 
 #define SYS_CREATE 1
 #define SYS_EXCL 2
@@ -161,6 +167,40 @@ static inline long long sys_cond_unlink(const char *name) { return syscall3(SYS_
  * returns the old one, or -1. sys_getprio only reads it. */
 static inline long long sys_setprio(int pid, int prio) { return syscall3(SYS_SETPRIO, pid, prio, 0); }
 static inline long long sys_getprio(int pid) { return syscall3(SYS_SETPRIO, pid, -1, 0); }
+/* ---- GUI windows (gui.h, SYS_GUI_* in include/syscall.h) ---- */
+#define GUI_EV_KEY 1        /* key, ch, pressed, mods (KEY_* values of keyboard.h: KEY_ESC is 256) */
+#define GUI_EV_MOUSE_MOVE 2 /* x, y, buttons (bit 0 = left, bit 1 = right) */
+#define GUI_EV_MOUSE_DOWN 3 /* x, y, buttons = the button that went down */
+#define GUI_EV_MOUSE_UP 4   /* x, y; the left button went up */
+#define GUI_EV_WHEEL 5      /* x = steps, + = down */
+#define GUI_EV_CLOSE 6      /* the user asked to close the window: clean up and sys_gui_destroy */
+
+typedef struct
+{
+    char title[32];  /* in */
+    int width, height; /* in: 64..512 by 48..512 */
+    int handle;      /* out */
+    int stride;      /* out: pixels per row */
+    usize pixels;    /* out: address of width * height 32 bit pixels (0x00RRGGBB) */
+} GuiInfo;
+
+typedef struct
+{
+    int type;
+    int x, y;
+    int buttons;
+    int key, ch, pressed, mods;
+} GuiEvent;
+
+/* a window: fills *info; 0 or -1. Draw into (unsigned *)info->pixels, then sys_gui_present. */
+static inline long long sys_gui_create(GuiInfo *info) { return syscall3(SYS_GUI_CREATE, (long long)(usize)info, 0, 0); }
+/* this part of the picture changed (w or h 0 = all of it) */
+static inline long long sys_gui_present(int handle, int x, int y, int w, int h) { return syscall3(SYS_GUI_PRESENT, handle, (x & 0xFFFF) | ((long long)(y & 0xFFFF) << 16), (w & 0xFFFF) | ((long long)(h & 0xFFFF) << 16)); }
+/* the next event: 1 = in *ev, 0 = none (only with nowait = 1), -1 = the window is gone */
+static inline long long sys_gui_event(int handle, GuiEvent *ev, int nowait) { return syscall3(SYS_GUI_EVENT, handle, (long long)(usize)ev, nowait); }
+static inline long long sys_gui_destroy(int handle) { return syscall3(SYS_GUI_CTL, handle, SYS_GUI_DESTROY, 0); }
+static inline long long sys_gui_set_title(int handle, const char *title) { return syscall3(SYS_GUI_CTL, handle, SYS_GUI_SET_TITLE, (long long)(usize)title); }
+
 /* signal handlers: use signal() of libc.h. sigmask blocks the signals whose bits are set (returns the old mask) */
 static inline long long sys_sigaction(int sig, void *handler, void *entry) { return syscall3(SYS_SIGACTION, sig, (long long)(usize)handler, (long long)(usize)entry); }
 static inline unsigned sys_sigmask(unsigned mask) { return (unsigned)syscall3(SYS_SIGMASK, mask, 0, 0); }

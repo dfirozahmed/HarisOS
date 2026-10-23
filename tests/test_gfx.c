@@ -130,6 +130,29 @@ int main(void)
         for (int y = 0; y < SH - 2; ++y) assert(back[y * SW + 5] == gfx_rgb((unsigned char)((y + 2) * 10), 0, 0));
     }
 
+    /* gfx_put_pixels: 0x00RRGGBB in, the screen's own order out, clipped on both sides */
+    {
+        unsigned int scr[8 * 2];
+        for (int i = 0; i < 16; ++i) scr[i] = 0xDEADBEEFu;
+        gfx_init(scr, 8, 2, 8, 1);
+        gfx_reset_clip();
+        const unsigned int px[4] = {0x00112233u, 0xFF445566u, 0x00778899u, 0x00AABBCCu};
+        gfx_put_pixels(2, 0, px, 4);
+        assert(scr[1] == 0xDEADBEEFu && scr[6] == 0xDEADBEEFu);
+        assert(scr[2] == gfx_rgb(0x11, 0x22, 0x33) && scr[3] == gfx_rgb(0x44, 0x55, 0x66));   /* the top byte is dropped */
+        assert(scr[4] == gfx_rgb(0x77, 0x88, 0x99) && scr[5] == gfx_rgb(0xAA, 0xBB, 0xCC));
+        gfx_put_pixels(-2, 1, px, 4);                    /* the part left of the screen is cut off */
+        assert(scr[8] == gfx_rgb(0x77, 0x88, 0x99) && scr[9] == gfx_rgb(0xAA, 0xBB, 0xCC) && scr[10] == 0xDEADBEEFu);
+        gfx_put_pixels(6, 1, px, 4);                     /* ... and the part right of it */
+        assert(scr[14] == gfx_rgb(0x11, 0x22, 0x33) && scr[15] == gfx_rgb(0x44, 0x55, 0x66));
+        gfx_put_pixels(0, 2, px, 4);                     /* below the screen: nothing */
+        gfx_put_pixels(0, 0, px, 0);
+        gfx_set_clip(3, 0, 1, 2);
+        gfx_put_pixels(0, 0, px, 4);                     /* the clip rectangle applies */
+        assert(scr[3] == gfx_rgb(0xAA, 0xBB, 0xCC) && scr[0] == 0xDEADBEEFu && scr[2] == gfx_rgb(0x11, 0x22, 0x33));
+        gfx_reset_clip();
+    }
+
     puts("Graphics regression tests passed.");
     return 0;
 }

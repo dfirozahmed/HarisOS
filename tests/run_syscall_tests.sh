@@ -13,5 +13,6 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/kernel/core/sem.c" \
   "$ROOT/kernel/core/usync.c" \
   "$ROOT/kernel/core/mutex.c" \
+  "$ROOT/kernel/core/gui.c" \
   -o "$OUT"
 "$OUT"

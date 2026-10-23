@@ -126,6 +126,23 @@ void gfx_rect(int x, int y, int w, int h, GfxColor c)
     gfx_vline(x + w - 1, y + 1, h - 2, c);
 }
 
+void gfx_put_pixels(int x, int y, const unsigned int *src, int n)
+{
+    if (n <= 0)
+        return;
+    int x0 = x, y0 = y, x1 = x + n, y1 = y + 1;
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
+        return;
+    volatile unsigned int *row = ROW(y0);
+    const unsigned int *s = src + (x0 - x);
+    for (int xx = x0; xx < x1; xx++, s++)
+    {
+        unsigned int p = *s;
+        row[xx] = RED_FIRST ? (p & 0xFFFFFFu) : ((p & 0xFF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16));
+    }
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
+}
+
 void gfx_fill_rect_alpha(int x, int y, int w, int h,
                          unsigned char r, unsigned char g, unsigned char b,
                          unsigned char alpha)

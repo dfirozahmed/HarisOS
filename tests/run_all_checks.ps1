@@ -19,6 +19,7 @@ try {
         @('Kernel heap tests', 'tests/run_heap_tests.sh'),
         @('CPU exception report tests', 'tests/run_fault_tests.sh'),
         @('Console tests', 'tests/run_console_tests.sh'),
+        @('GUI surface tests', 'tests/run_gui_tests.sh'),
         @('ELF loader tests', 'tests/run_elf_tests.sh'),
         @('CPU protection tests', 'tests/run_protect_tests.sh'),
         @('System call tests', 'tests/run_syscall_tests.sh'),

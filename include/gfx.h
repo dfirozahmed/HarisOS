@@ -139,6 +139,10 @@ void gfx_vline(int x, int y, int len, GfxColor c);
 void gfx_rect(int x, int y, int w, int h, GfxColor c); /* 1px outline */
 void gfx_fill_rect(int x, int y, int w, int h, GfxColor c);
 
+/* Copy n pixels of 0x00RRGGBB (whatever the screen's own order is) to row y from x on, clipped. The picture of a window
+ * that a program draws itself (gui.h) is shown with this. */
+void gfx_put_pixels(int x, int y, const unsigned int *src, int n);
+
 /* Blend one pixel: alpha 0 = nothing, 255 = solid. */
 void gfx_blend_pixel(int x, int y, GfxColor c, unsigned char alpha);
 
