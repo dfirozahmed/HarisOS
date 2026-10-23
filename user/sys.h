@@ -55,6 +55,7 @@
 #define SYS_COND_WAIT 46
 #define SYS_COND_SIGNAL 47
 #define SYS_SYNC_UNLINK 48
+#define SYS_SETPRIO 49
 
 #define SYS_CREATE 1
 #define SYS_EXCL 2
@@ -156,6 +157,10 @@ static inline long long sys_cond_signal(int fd) { return syscall3(SYS_COND_SIGNA
 static inline long long sys_cond_broadcast(int fd) { return syscall3(SYS_COND_SIGNAL, fd, 1, 0); }
 static inline long long sys_mutex_unlink(const char *name) { return syscall3(SYS_SYNC_UNLINK, (long long)(usize)name, 0, 0); }
 static inline long long sys_cond_unlink(const char *name) { return syscall3(SYS_SYNC_UNLINK, (long long)(usize)name, 1, 0); }
+/* scheduling priority 0 .. 4 (higher runs first, default 2) of a process (pid 0 = this one; this one and its children only): sets it and
+ * returns the old one, or -1. sys_getprio only reads it. */
+static inline long long sys_setprio(int pid, int prio) { return syscall3(SYS_SETPRIO, pid, prio, 0); }
+static inline long long sys_getprio(int pid) { return syscall3(SYS_SETPRIO, pid, -1, 0); }
 /* signal handlers: use signal() of libc.h. sigmask blocks the signals whose bits are set (returns the old mask) */
 static inline long long sys_sigaction(int sig, void *handler, void *entry) { return syscall3(SYS_SIGACTION, sig, (long long)(usize)handler, (long long)(usize)entry); }
 static inline unsigned sys_sigmask(unsigned mask) { return (unsigned)syscall3(SYS_SIGMASK, mask, 0, 0); }

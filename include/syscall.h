@@ -122,6 +122,9 @@
  *                  Check the condition in a loop.
  *   SYS_COND_SIGNAL (47) rdi = condition variable, rsi = 0: wake one sleeper, 1: wake all. Lost if nobody sleeps. 0, or -1.
  *   SYS_SYNC_UNLINK (48) rdi = name, rsi = 0 (mutex) or 1 (condition variable): the name goes away; 0 or -1.
+ *   SYS_SETPRIO (49) rdi = pid (0 = the caller), rsi = priority 0 .. 4 (higher runs first, default 2; see task.h) or -1 to only read it.
+ *                  Only the caller and its children that were not waited for yet. Returns the priority the process had, or -1.
+ *                  A waiting thread that a better one needs (mutexes) may run higher for a while: that is not what this reads.
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
@@ -197,6 +200,7 @@
 #define SYS_COND_WAIT 46
 #define SYS_COND_SIGNAL 47
 #define SYS_SYNC_UNLINK 48
+#define SYS_SETPRIO 49
 
 /* flags of SYS_SHM_MAP and SYS_MQ_OPEN */
 #define SYS_CREATE 1 /* make it if there is none */

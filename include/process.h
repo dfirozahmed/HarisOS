@@ -192,6 +192,10 @@ static inline void process_release_shm(Process *p)
  * looks. 0, or -1 if there is no such process. A process that signals itself ends at once (does not return). */
 int process_signal(int pid, int sig);
 
+/* The scheduling priority (task.h) of process `pid`: returns the one it had (0 .. TASK_PRIO_MAX), and sets prio unless it is -1 (only
+ * look). -1 if there is no such process or prio is out of range. */
+int process_priority(int pid, int prio);
+
 /* Ctrl+C in console `con`: SIGINT to every process that writes to it. (console_set_interrupt_hook installs this.) */
 void process_interrupt_console(int con);
 

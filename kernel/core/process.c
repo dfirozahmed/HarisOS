@@ -592,6 +592,24 @@ int process_signal(int pid, int sig)
     return -1;
 }
 
+int process_priority(int pid, int prio)
+{
+    if (pid <= 0 || prio < -1 || prio > TASK_PRIO_MAX)
+        return -1;
+    for (int tid = 1; tid < TASK_MAX; tid++)
+    {
+        const Process *p = task_data_of(tid);
+        if (p && p->pid == pid)
+        {
+            int old = task_priority(tid);
+            if (old < 0 || (prio >= 0 && task_set_priority(tid, prio) != 0))
+                return -1;
+            return old;
+        }
+    }
+    return -1;
+}
+
 void process_interrupt_console(int con)
 {
     if (con < 0)

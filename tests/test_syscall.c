@@ -462,6 +462,19 @@ int process_signal(int pid, int sig)
     return SIG_RESULT;
 }
 
+/* priorities: process.c is a fake here too; pid 5 and 6 "exist" and start at the default */
+static int PRIO_OF[2] = {2, 2}, PRIO_CALLS;
+int process_priority(int pid, int prio)
+{
+    PRIO_CALLS++;
+    if (pid < 5 || pid > 6 || prio < -1 || prio > 4)
+        return -1;
+    int old = PRIO_OF[pid - 5];
+    if (prio >= 0)
+        PRIO_OF[pid - 5] = prio;
+    return old;
+}
+
 #define PS_COUNT 3
 int process_info(int index, ProcessInfo *out)
 {
@@ -1971,6 +1984,30 @@ int main(void)
         CHECK(call(SYS_MUTEX_OPEN, U("k"), SYS_CREATE, 0) == -1 && call(SYS_COND_OPEN, U("k"), SYS_CREATE, 0) == -1 &&
               call(SYS_MUTEX_LOCK, 3, 1, 0) == -1 && call(SYS_SYNC_UNLINK, U("k"), 0, 0) == -1);
         CURRENT_PROC = &PROC;
+    }
+
+    /* ================= scheduling priority ================= */
+    reset();
+    {
+        PROC.pid = 5;
+        PROC.child[0] = 6;
+        PRIO_OF[0] = PRIO_OF[1] = 2;
+        PRIO_CALLS = 0;
+        CHECK(call(SYS_SETPRIO, 0, (ull)-1, 0) == 2 && PRIO_CALLS == 1);                       /* read, the caller itself (pid 0) */
+        CHECK(call(SYS_SETPRIO, 0, 4, 0) == 2 && PRIO_OF[0] == 4);                              /* set: gives back the old one */
+        CHECK(call(SYS_SETPRIO, 5, 0, 0) == 4 && PRIO_OF[0] == 0);                              /* by its own pid */
+        CHECK(call(SYS_SETPRIO, 6, 3, 0) == 2 && PRIO_OF[1] == 3);                              /* a child */
+        CHECK(call(SYS_SETPRIO, 6, (ull)-1, 0) == 3 && PRIO_OF[1] == 3);
+        CHECK(call(SYS_SETPRIO, 0, 5, 0) == -1 && call(SYS_SETPRIO, 0, 99, 0) == -1 && call(SYS_SETPRIO, 0, ~0ULL - 1, 0) == -1 && PRIO_OF[0] == 0);
+        CHECK(call(SYS_SETPRIO, 0x80000000ULL, 1, 0) == -1 && call(SYS_SETPRIO, ~0ULL, 1, 0) == -1);
+        int calls = PRIO_CALLS;
+        CHECK(call(SYS_SETPRIO, 7, 1, 0) == -1 && call(SYS_SETPRIO, 1, 1, 0) == -1 && PRIO_CALLS == calls); /* not ours: refused before asking */
+        PROC.child[0] = 0;                                                                     /* the child was waited for */
+        CHECK(call(SYS_SETPRIO, 6, 1, 0) == -1 && PRIO_OF[1] == 3);
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_SETPRIO, 0, 1, 0) == -1);
+        CURRENT_PROC = &PROC;
+        PROC.pid = 0;
     }
 
     /* ================= signal handlers: the system call side ================= */

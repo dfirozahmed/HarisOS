@@ -151,6 +151,11 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(21, sys_mutex_try_lock((int)again) == 0 && sys_mutex_unlock((int)again) == 0); /* the descriptors keep it alive */
     CHECK(22, sys_read((int)again, &st, 4) == -1 && sys_write((int)again, "x", 1) == -1);
 
+    /* scheduling priority (SYS_SETPRIO): read, set, give back; bad values and strangers are refused. A mutex holder may run higher for a
+     * while (priority inheritance), but that is not what this reads. */
+    CHECK(23, sys_getprio(0) == 2 && sys_setprio(0, 3) == 2 && sys_getprio(0) == 3 && sys_setprio(0, 2) == 3);
+    CHECK(24, sys_setprio(0, 5) == -1 && sys_setprio(0x7FFFFFF0, 1) == -1 && sys_getprio(0) == 2);
+
     sys_mutex_unlink("muxtest.buf");
     sys_cond_unlink("muxtest.nf");
     sys_cond_unlink("muxtest.ne");

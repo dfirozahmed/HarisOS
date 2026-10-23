@@ -1438,6 +1438,22 @@ static long long sys_kill(const SyscallFrame *f)
     return process_signal((int)pid, (int)sig) == 0 ? 0 : -1; /* (a process that signals itself does not come back) */
 }
 
+/* SYS_SETPRIO: rdi = pid (0 = the caller), rsi = new priority (0 .. 4, higher runs first) or -1 to only read it. Only the caller itself and
+ * its children (not yet waited for) can be changed. Returns the priority the process had, or -1. */
+static long long sys_setprio(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    if (!p || f->rdi > 0x7FFFFFFF || (f->rsi != ~0ULL && f->rsi > (ull)TASK_PRIO_MAX))
+        return -1;
+    int pid = f->rdi == 0 ? p->pid : (int)f->rdi;
+    int allowed = pid == p->pid;
+    for (int i = 0; i < PROCESS_MAX_CHILDREN && !allowed; i++)
+        allowed = p->child[i] == pid;
+    if (!allowed)
+        return -1;
+    return process_priority(pid, f->rsi == ~0ULL ? -1 : (int)f->rsi);
+}
+
 static long long sys_sigignore(const SyscallFrame *f)
 {
     Process *p = process_current();
@@ -1589,6 +1605,8 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_cond_signal(f);
     case SYS_SYNC_UNLINK:
         return sys_sync_unlink(f);
+    case SYS_SETPRIO:
+        return sys_setprio(f);
     case SYS_SIGACTION:
         return sys_sigaction(f);
     case SYS_SIGRETURN:
