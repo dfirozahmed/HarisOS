@@ -17,7 +17,9 @@
 #define HARIS_PROCESS_H
 
 #include "fault.h"
+#include "mq.h"
 #include "pipe.h"
+#include "shm.h"
 
 #define PROCESS_IMAGE_MAX (64 * 1024)
 #define PROCESS_STACK_PAGES 4
@@ -59,14 +61,29 @@ typedef struct
 /* A slot can also hold one end of a pipe (pipe.h): node = PROCESS_PIPE_NODE + the pipe's number, flags has PFILE_WRITE for the
  * write end. Such a slot is "open" like any other (node >= 0) but is not a VFS node. */
 #define PROCESS_PIPE_NODE 0x40000000
-static inline int pfile_is_pipe(const ProcessFile *f) { return f->node >= PROCESS_PIPE_NODE; }
+/* ... or a message queue (mq.h): node = PROCESS_MQ_NODE + the queue's number; it is read and written like a pipe end that does both. */
+#define PROCESS_MQ_NODE 0x50000000
+static inline int pfile_is_pipe(const ProcessFile *f) { return f->node >= PROCESS_PIPE_NODE && f->node < PROCESS_MQ_NODE; }
+static inline int pfile_is_mq(const ProcessFile *f) { return f->node >= PROCESS_MQ_NODE; }
+static inline int pfile_mq(const ProcessFile *f) { return f->node - PROCESS_MQ_NODE; }
 static inline int pfile_pipe(const ProcessFile *f) { return f->node - PROCESS_PIPE_NODE; }
+
+/* One more holder of the pipe end or queue this slot names (a copy of the slot was made: fork, spawn, dup2). Nothing for a file. */
+static inline void pfile_ref(const ProcessFile *f)
+{
+    if (f->node >= 0 && pfile_is_pipe(f))
+        pipe_ref(pfile_pipe(f), (f->flags & PFILE_WRITE) != 0);
+    else if (f->node >= 0 && pfile_is_mq(f))
+        mq_ref(pfile_mq(f));
+}
 
 /* Close an open slot: a pipe end is given back to the pipe (waking whoever waits on it). Safe on a free slot. */
 static inline void pfile_close(ProcessFile *f)
 {
     if (f->node >= 0 && pfile_is_pipe(f))
         pipe_unref(pfile_pipe(f), (f->flags & PFILE_WRITE) != 0);
+    else if (f->node >= 0 && pfile_is_mq(f))
+        mq_unref(pfile_mq(f));
     f->node = -1;
     f->pos = f->flags = 0;
 }
@@ -95,6 +112,17 @@ int process_reap(int pid, int *code);
 /* What the kernel keeps for a running process besides its address space (the thread's `data`, see task.h). The system
  * calls reach it with process_current(). */
 #define PROCESS_HEAP_MAX (64ULL * 1024 * 1024) /* the most SYS_BRK lets a program grow its heap to */
+/* A mapping of a shared memory segment (shm.h) in this process: where, how many pages. */
+#define PROCESS_MAX_SHM 8
+#define PROCESS_SHM_BASE 0x0000500000000000ULL /* the area the kernel picks addresses from, far from the program and its stack */
+#define PROCESS_SHM_END 0x0000600000000000ULL
+typedef struct
+{
+    int seg; /* shm.h segment, -1 = this slot is free */
+    unsigned long long addr;
+    unsigned pages;
+} ProcessShm;
+
 typedef struct Process
 {
     int console; /* console.h handle of its window, -1 = none (output goes to the serial port, input is empty) */
@@ -103,6 +131,8 @@ typedef struct Process
     int parent;                       /* thread id of the parent, -1 = none */
     int cwd;                          /* VFS node of the working folder (VFS_ROOT = "This PC"): relative paths start there */
     unsigned sig_ignore;              /* bit n set: signal n is ignored (SYS_SIGIGNORE); 0 at the start of every process */
+    ProcessShm shm[PROCESS_MAX_SHM];  /* shared memory mapped here (SYS_SHM_MAP) */
+    unsigned long long shm_next;      /* where the next mapping goes (0 = PROCESS_SHM_BASE) */
     int child[PROCESS_MAX_CHILDREN];  /* pids of children not yet waited for, 0 = free slot */
     /* The heap (SYS_BRK): heap_base is page aligned, just above the program's last segment. heap_brk is the program's
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
@@ -116,6 +146,21 @@ Process *process_current(void); /* the running process, NULL in a kernel thread 
 
 /* Close every open file of the process (pipes: the ends go back to the pipe). Called when it ends; harmless to call twice. */
 void process_release_files(Process *p);
+
+/* Let go of the shared memory segments this process maps (their reference counts; the pages go away with its address space).
+ * process_release_files does this too; exec calls it alone, because its files stay. */
+static inline void process_release_shm(Process *p)
+{
+    if (!p)
+        return;
+    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+        if (p->shm[i].seg >= 0)
+        {
+            shm_unref(p->shm[i].seg);
+            p->shm[i].seg = -1;
+        }
+    p->shm_next = 0;
+}
 
 /* Signals (syscall.h): end process `pid` with exit code 128 + sig, unless it ignores sig (SIGKILL cannot be ignored); sig 0 only
  * looks. 0, or -1 if there is no such process. A process that signals itself ends at once (does not return). */

@@ -397,6 +397,26 @@ int main(void)
         ALLOC_LIMIT = 1000;
     }
 
+    /* paging_unmap_page: a shared page can be taken out and mapped again; an owned page, an empty address and bad addresses cannot */
+    {
+        ALLOC_LIMIT = 100000;
+        TABLES_MADE = 0;
+        u64 *sp = new_table();
+        const u64 U0 = PAGING_USER_BASE + 0x500000;
+        u64 got = 0, ph = 0;
+        CHECK(paging_map_page(sp, U0, 0x321000, PAGING_WRITE, alloc_table) == 0);
+        CHECK(paging_map_page(sp, U0 + 0x1000, 0x322000, PAGING_WRITE | PAGING_OWNED, alloc_table) == 0);
+        CHECK(paging_unmap_page(sp, U0, &got) == 0 && got == 0x321000);
+        CHECK(paging_translate(sp, U0, &ph, 0) == -1);                          /* gone */
+        CHECK(paging_unmap_page(sp, U0, &got) == -1);                           /* nothing there now */
+        CHECK(paging_map_page(sp, U0, 0x321000, PAGING_WRITE, alloc_table) == 0); /* the slot can be used again */
+        CHECK(paging_unmap_page(sp, U0 + 0x1000, &got) == -1 && paging_translate(sp, U0 + 0x1000, &ph, 0) == 0); /* owned: stays */
+        CHECK(paging_unmap_page(sp, U0 + 0x2000, &got) == -1);                  /* never mapped (same tables) */
+        CHECK(paging_unmap_page(sp, U0 + (1ULL << 30), &got) == -1);            /* no tables there at all */
+        CHECK(paging_unmap_page(sp, U0 + 1, &got) == -1 && paging_unmap_page(sp, 0x1000, &got) == -1 && paging_unmap_page(sp, PAGING_USER_END, &got) == -1);
+        CHECK(paging_unmap_page(sp, U0, 0) == 0);                               /* the phys pointer is optional */
+    }
+
     if (fails == 0)
         printf("paging tests passed\n");
     return fails ? 1 : 0;

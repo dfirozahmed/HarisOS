@@ -222,6 +222,9 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->parent = sp->parent;
     p->cwd = sp->cwd;
     p->sig_ignore = 0;
+    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+        p->shm[i].seg = -1;
+    p->shm_next = 0;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         p->child[i] = 0;
     set_heap(p, heap_base);
@@ -261,8 +264,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
         return -1;
     }
     for (int i = 0; i < PROCESS_MAX_FILES; i++) /* the child holds the pipe ends it was given */
-        if (p->file[i].node >= PROCESS_PIPE_NODE)
-            pipe_ref(pfile_pipe(&p->file[i]), (p->file[i].flags & PFILE_WRITE) != 0);
+        pfile_ref(&p->file[i]);
     STATS.started++;
     sp->pid = NEXT_PID++;
     return id;
@@ -274,6 +276,7 @@ void process_release_files(Process *p)
 {
     if (!p)
         return;
+    process_release_shm(p);
     for (int i = 0; i < PROCESS_MAX_FILES; i++)
         pfile_close(&p->file[i]);
     for (int k = 0; k < 3; k++)
@@ -399,6 +402,7 @@ int process_exec_elf(const char *name, const void *file, u64 size, const Process
      * old program does, since nothing after this point returns to the caller that would free it. */
     if (free_file)
         kfree((void *)file);
+    process_release_shm(p); /* the old address space (and the mappings in it) goes away below */
     set_heap(p, heap_base);
     task_exec_replace(as, name);
     process_enter_user(st.entry, st.user_rsp, st.argc, st.argv);
@@ -460,8 +464,10 @@ int process_fork(u64 user_rip, u64 user_rsp)
         return -1;
     }
     for (int i = 0; i < PROCESS_MAX_FILES; i++) /* the child holds the pipe ends it inherited */
-        if (cp->file[i].node >= PROCESS_PIPE_NODE)
-            pipe_ref(pfile_pipe(&cp->file[i]), (cp->file[i].flags & PFILE_WRITE) != 0);
+        pfile_ref(&cp->file[i]);
+    for (int i = 0; i < PROCESS_MAX_SHM; i++) /* ... and the shared memory it inherited (the pages are shared by the clone) */
+        if (cp->shm[i].seg >= 0)
+            shm_ref(cp->shm[i].seg);
     STATS.started++;
     p->child[slot] = NEXT_PID;
     return NEXT_PID++;

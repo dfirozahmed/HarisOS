@@ -34,6 +34,15 @@
 #define SYS_EXEC 25
 #define SYS_GETPID 26
 #define SYS_DUP2 27
+#define SYS_SHM_MAP 28
+#define SYS_SHM_UNMAP 29
+#define SYS_SHM_UNLINK 30
+#define SYS_SHM_SIZE 31
+#define SYS_MQ_OPEN 32
+#define SYS_MQ_UNLINK 33
+
+#define SYS_CREATE 1
+#define SYS_EXCL 2
 
 #define SIGINT 2
 #define SIGKILL 9
@@ -103,6 +112,14 @@ static inline long long sys_exec(const char *path, const char *const *argv) { re
 static inline long long sys_getpid(int which) { return syscall3(SYS_GETPID, which, 0, 0); }
 /* fd new (0, 1, 2) becomes the same open file as fd old (-1 = the console): returns new or -1 */
 static inline long long sys_dup2(int old, int newfd) { return syscall3(SYS_DUP2, old, newfd, 0); }
+/* shared memory: the address of the mapped segment, or (void *)-1; flags SYS_CREATE / SYS_EXCL */
+static inline void *sys_shm_map(const char *name, usize size, unsigned flags) { return (void *)syscall3(SYS_SHM_MAP, (long long)(usize)name, (long long)size, flags); }
+static inline long long sys_shm_unmap(void *addr) { return syscall3(SYS_SHM_UNMAP, (long long)(usize)addr, 0, 0); }
+static inline long long sys_shm_unlink(const char *name) { return syscall3(SYS_SHM_UNLINK, (long long)(usize)name, 0, 0); }
+static inline long long sys_shm_size(void *addr) { return syscall3(SYS_SHM_SIZE, (long long)(usize)addr, 0, 0); }
+/* a message queue: a descriptor (sys_write sends one message, sys_read receives one), or -1 */
+static inline long long sys_mq_open(const char *name, unsigned flags) { return syscall3(SYS_MQ_OPEN, (long long)(usize)name, flags, 0); }
+static inline long long sys_mq_unlink(const char *name) { return syscall3(SYS_MQ_UNLINK, (long long)(usize)name, 0, 0); }
 /* a pipe: fds[0] reads what is written to fds[1]; 0 or -1 */
 static inline long long sys_pipe(int *fds) { return syscall3(SYS_PIPE, (long long)(usize)fds, 0, 0); }
 /* sys_spawn with redirection: io[0..2] = open descriptors for the child's fd 0, 1, 2, or -1 to leave one alone */

@@ -82,6 +82,11 @@ int paging_user_range_ok(const unsigned long long *pml4, unsigned long long virt
 typedef void (*PagingFreeFn)(unsigned long long phys);
 void paging_destroy_range(unsigned long long *pml4, int first, int last, PagingFreeFn free_fn);
 
+/* Take the 4 KiB page at virt out of a user space: its entry is cleared (the tables stay; no TLB flush: the caller does that). Only a page
+ * that is not marked PAGING_OWNED (shared memory) can be taken out this way. 0 and *phys, or -1 if nothing is mapped there or the page
+ * is owned. */
+int paging_unmap_page(unsigned long long *pml4, unsigned long long virt, unsigned long long *phys);
+
 /* Copy the user part (top-level slots first..last) of src into dst, whose slots there are empty: every page marked PAGING_OWNED
  * gets a fresh copy of its 4096 bytes (page_alloc gives the new physical page; its old contents do not matter; page_free takes
  * back one that could not be mapped), every other page (shared memory) is mapped again as it is, and the tables are new

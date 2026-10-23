@@ -73,6 +73,8 @@ set(KERNEL_SOURCES
     kernel/core/syscall.c           # system calls: SYSCALL entry, write / read / open / close / seek / exit / yield
     kernel/core/console.c           # console: character grid, cursor and line editor for a program's window (host-tested)
     kernel/core/pipe.c              # pipes: the byte queue between processes (host-tested)
+    kernel/core/shm.c               # shared memory segments (host-tested)
+    kernel/core/mq.c                # message queues (host-tested)
     kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
     kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start
     kernel/core/process.c          # user processes: address space + thread, ring 3 entry, boot self test
@@ -232,7 +234,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

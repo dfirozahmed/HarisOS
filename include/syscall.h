@@ -84,6 +84,20 @@
  *   SYS_DUP2 (27)  rdi = old descriptor (from SYS_OPEN / SYS_PIPE; 0..2 = what that one is now; -1 = the console), rsi = new, 0, 1
  *                  or 2: afterwards fd new is the same open file as old (a copy in a slot of its own; closing old keeps new).
  *                  Returns new, or -1. With SYS_FORK and SYS_EXEC this is how a shell redirects: fork, dup2, close, exec.
+ *   SYS_SHM_MAP (28) rdi = name (1..31 characters, no '/'), rsi = size in bytes, rdx = flags (SYS_CREATE, SYS_EXCL): shared memory. Finds
+ *                  the named segment (or, with CREATE, makes it: rsi bytes rounded up to pages, at most 1 MiB, zeroed) and maps all of it
+ *                  readable and writable into this process at an address the kernel chooses (the area from 0x500000000000, with one
+ *                  unmapped page after each mapping). Several processes that map the same name see the same bytes at once; a
+ *                  forked child keeps the mapping, shared with its parent. Returns the address, or -1. At most 8 mappings.
+ *   SYS_SHM_UNMAP (29) rdi = an address SYS_SHM_MAP returned: the pages leave this process.
+ *   SYS_SHM_UNLINK (30) rdi = name: the name goes away; the segment lives while anything maps it (and is zero-filled again only by a new
+ *                  segment of that name). 0, or -1.
+ *   SYS_SHM_SIZE (31) rdi = an address SYS_SHM_MAP returned: the size of the mapping in bytes, or -1.
+ *   SYS_MQ_OPEN (32) rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL): a descriptor for a message queue. SYS_WRITE on it sends ONE message
+ *                  (1 .. 256 bytes; waits while 16 messages are queued), SYS_READ receives ONE message (waits while there is none; -1,
+ *                  and the message stays, if the buffer is smaller than it). Messages keep their boundaries and their order. SYS_CLOSE
+ *                  lets go; fork copies the descriptor. At most 8 queues. It cannot be seeked, redirected or given to SYS_SPAWN.
+ *   SYS_MQ_UNLINK (33) rdi = name: the name goes away; the queue lives while a descriptor is open. 0, or -1.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
  *
@@ -137,6 +151,16 @@
 #define SYS_EXEC 25
 #define SYS_GETPID 26
 #define SYS_DUP2 27
+#define SYS_SHM_MAP 28
+#define SYS_SHM_UNMAP 29
+#define SYS_SHM_UNLINK 30
+#define SYS_SHM_SIZE 31
+#define SYS_MQ_OPEN 32
+#define SYS_MQ_UNLINK 33
+
+/* flags of SYS_SHM_MAP and SYS_MQ_OPEN */
+#define SYS_CREATE 1 /* make it if there is none */
+#define SYS_EXCL 2   /* with CREATE: fail if it exists */
 
 /* signals (the numbers of Unix) */
 #define SIGINT 2   /* Ctrl+C in the console */

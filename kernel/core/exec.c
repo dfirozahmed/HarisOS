@@ -4,7 +4,9 @@
 #include "elf.h"
 #include "heap.h"
 #include "paging.h"
+#include "mq.h"
 #include "pipe.h"
+#include "shm.h"
 #include "pmm.h"
 #include "process.h"
 #include "serial.h"
@@ -625,6 +627,22 @@ int exec_selftest(void)
             return -332 - (s7.last_exit > 0 && s7.last_exit < 48 ? s7.last_exit : 0); /* -333 ... -379 */
         if (pipe_in_use() != 0)
             return -380; /* a pipe was not given back */
+    }
+
+    /* shared memory and message queues: IPCTEST.ELF with IPCCHILD.ELF (optional); exits with 51; nothing may be left behind */
+    if (exec_find("IPCTEST.ELF") >= 0 && exec_find("IPCCHILD.ELF") >= 0)
+    {
+        id = exec_run("IPCTEST.ELF", &err);
+        if (id < 0)
+            return -540;
+        if (process_wait(id) != 0)
+            return -541;
+        ProcessStats s10;
+        process_stats(&s10);
+        if (s10.last_exit != 51)
+            return -542 - (s10.last_exit > 0 && s10.last_exit < 51 ? s10.last_exit : 0); /* -543 ... -592 */
+        if (shm_in_use() != 0 || mq_in_use() != 0)
+            return -593; /* a segment or a queue was not given back */
     }
 
     /* fork and exec: FORKTEST.ELF copies itself, becomes ARGTEST / UPPER (optional); exits with 50 */

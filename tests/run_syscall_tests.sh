@@ -8,5 +8,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/tests/test_syscall.c" \
   "$ROOT/kernel/core/syscall.c" \
   "$ROOT/kernel/core/pipe.c" \
+  "$ROOT/kernel/core/shm.c" \
+  "$ROOT/kernel/core/mq.c" \
   -o "$OUT"
 "$OUT"

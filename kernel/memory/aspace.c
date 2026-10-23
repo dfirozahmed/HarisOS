@@ -87,6 +87,20 @@ AddressSpace *aspace_clone(const AddressSpace *src)
     return as;
 }
 
+int aspace_map_shared(AddressSpace *as, u64 va, u64 phys, unsigned flags)
+{
+    return paging_map_page(as->entry, va, phys, flags & ~(unsigned)PAGING_OWNED, alloc_page);
+}
+
+int aspace_unmap_shared(AddressSpace *as, u64 va)
+{
+    u64 phys;
+    if (paging_unmap_page(as->entry, va, &phys) != 0)
+        return -1;
+    __asm__ volatile("invlpg (%0)" : : "r"(va) : "memory"); /* (this is the space in use: a system call of the process that owns it) */
+    return 0;
+}
+
 int aspace_map_new(AddressSpace *as, u64 va, unsigned flags)
 {
     u64 *page = alloc_page();
@@ -178,6 +192,8 @@ int aspace_selftest(void)
 
 int aspace_init(void) { return -1; }
 AddressSpace *aspace_clone(const AddressSpace *src) { (void)src; return 0; }
+int aspace_map_shared(AddressSpace *as, u64 va, u64 phys, unsigned flags) { (void)as; (void)va; (void)phys; (void)flags; return -1; }
+int aspace_unmap_shared(AddressSpace *as, u64 va) { (void)as; (void)va; return -1; }
 AddressSpace *aspace_create(void) { return 0; }
 int aspace_selftest(void) { return -1; }
 

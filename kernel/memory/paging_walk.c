@@ -337,3 +337,25 @@ int paging_clone_user(const u64 *src, u64 *dst, int first, int last, PagingAlloc
     }
     return 0;
 }
+
+int paging_unmap_page(u64 *pml4, u64 virt, u64 *phys)
+{
+    if ((virt & 0xFFF) || virt < PAGING_USER_BASE || virt >= PAGING_USER_END)
+        return -1;
+    static const int shift[3] = {39, 30, 21};
+    u64 *table = pml4;
+    for (int level = 0; level < 3; level++)
+    {
+        u64 e = table[(virt >> shift[level]) & 511];
+        if (!(e & PTE_P) || (level > 0 && (e & PTE_PS)))
+            return -1;
+        table = (u64 *)(e & ADDR_MASK);
+    }
+    volatile u64 *leaf = &table[(virt >> 12) & 511];
+    if (!(*leaf & PTE_P) || (*leaf & PTE_OWNED))
+        return -1;
+    if (phys)
+        *phys = *leaf & ADDR_MASK;
+    *leaf = 0;
+    return 0;
+}

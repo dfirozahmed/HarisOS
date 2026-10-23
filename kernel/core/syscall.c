@@ -4,7 +4,9 @@
 #include "console.h"
 #include "exec.h"
 #include "gdt.h"
+#include "mq.h"
 #include "pipe.h"
+#include "shm.h"
 #include "process.h"
 #include "serial.h"
 #include "task.h"
@@ -126,6 +128,41 @@ static int resolve_path(const Process *p, const char *in, int bare_ok)
 }
 
 /* ---- open files ----------------------------------------------------------------------------------------------------- */
+/* A message queue descriptor: one write = one message (1 .. MQ_MSG_MAX bytes), one read = one message (the buffer must hold it, else
+ * -1 and the message stays). They wait like pipes do. */
+static long long mq_read_user(Process *p, ull idx, ull ptr, ull len)
+{
+    int q = pfile_mq(&p->file[idx]);
+    unsigned char buf[MQ_MSG_MAX];
+    unsigned cap = len < MQ_MSG_MAX ? (unsigned)len : MQ_MSG_MAX;
+    int got;
+    while ((got = mq_recv(q, buf, cap)) == MQ_WOULDBLOCK)
+    {
+        mq_wait(q, 0, task_current());
+        task_block();
+    }
+    if (got < 0)
+        return -1;
+    copy_to_user(ptr, (const char *)buf, (unsigned)got);
+    return got;
+}
+
+static long long mq_write_user(Process *p, ull idx, ull ptr, ull len)
+{
+    int q = pfile_mq(&p->file[idx]);
+    if (len == 0 || len > MQ_MSG_MAX)
+        return -1;
+    unsigned char buf[MQ_MSG_MAX];
+    copy_from_user((char *)buf, ptr, (unsigned)len);
+    int r;
+    while ((r = mq_send(q, buf, (unsigned)len)) == MQ_WOULDBLOCK)
+    {
+        mq_wait(q, 1, task_current());
+        task_block();
+    }
+    return r < 0 ? -1 : (long long)len;
+}
+
 /* Read from / write to open file slot `idx` of process p (descriptor PROCESS_FD_FIRST + idx, or a redirected fd 0 / 1 / 2).
  * The user buffer was checked by the caller. Positions are 32 bit (a FAT file cannot be bigger). */
 /* Reading and writing a pipe end. They wait (the thread is BLOCKED, not spinning) until the pipe has data / room or the other end
@@ -180,6 +217,8 @@ static long long pipe_write_user(Process *p, ull idx, ull ptr, ull len)
 
 static long long file_read(Process *p, ull idx, ull ptr, ull len)
 {
+    if (pfile_is_mq(&p->file[idx]))
+        return mq_read_user(p, idx, ptr, len);
     if (pfile_is_pipe(&p->file[idx]))
         return pipe_read_user(p, idx, ptr, len);
     if (p->file[idx].flags & PFILE_WRITE)
@@ -215,6 +254,8 @@ static long long file_read(Process *p, ull idx, ull ptr, ull len)
  * the file is gone, the drive is read only / locked / full, the RAM Disk has no content, or the file would pass 4 GiB). */
 static long long file_write(Process *p, ull idx, ull ptr, ull len)
 {
+    if (pfile_is_mq(&p->file[idx]))
+        return mq_write_user(p, idx, ptr, len);
     if (pfile_is_pipe(&p->file[idx]))
         return pipe_write_user(p, idx, ptr, len);
     if (!(p->file[idx].flags & PFILE_WRITE))
@@ -449,8 +490,8 @@ static long long sys_seek(const SyscallFrame *f)
     ull whence = f->rdx;
     Process *p = process_current();
     ull idx = fd - PROCESS_FD_FIRST;
-    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0 || pfile_is_pipe(&p->file[idx]))
-        return -1; /* (a pipe has no position) */
+    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0 || p->file[idx].node >= PROCESS_PIPE_NODE)
+        return -1; /* (a pipe or a message queue has no position) */
     const VfsNode *n = vfs_node(p->file[idx].node);
     if (!n)
         return -1;
@@ -566,7 +607,7 @@ static long long sys_spawn(const SyscallFrame *f)
             if (io[k] < PROCESS_FD_FIRST || io[k] >= PROCESS_FD_FIRST + PROCESS_MAX_FILES)
                 return -1;
             idx = io[k] - PROCESS_FD_FIRST;
-            if (p->file[idx].node < 0 || ((p->file[idx].flags & PFILE_WRITE) != 0) != (k != 0))
+            if (p->file[idx].node < 0 || pfile_is_mq(&p->file[idx]) || ((p->file[idx].flags & PFILE_WRITE) != 0) != (k != 0))
                 return -1; /* not open, or opened the wrong way round (input must be readable, output writable) */
         }
         if (idx >= 0)
@@ -942,8 +983,8 @@ static long long sys_dup2(const SyscallFrame *f)
         src = (int)old - PROCESS_FD_FIRST;
     else
         return -1;
-    if (src >= 0 && ((p->file[src].flags & PFILE_WRITE) != 0) != (nw != 0))
-        return -1; /* input must be readable, output writable */
+    if (src >= 0 && (pfile_is_mq(&p->file[src]) || ((p->file[src].flags & PFILE_WRITE) != 0) != (nw != 0)))
+        return -1; /* input must be readable, output writable; a message queue is neither */
     if (src >= 0 && p->stdio[nw] == src)
         return (long long)nw; /* already so */
     int slot = -1;
@@ -962,11 +1003,151 @@ static long long sys_dup2(const SyscallFrame *f)
     if (src >= 0)
     {
         p->file[slot] = p->file[src];
-        if (pfile_is_pipe(&p->file[slot]))
-            pipe_ref(pfile_pipe(&p->file[slot]), (p->file[slot].flags & PFILE_WRITE) != 0);
+        pfile_ref(&p->file[slot]);
         p->stdio[nw] = slot;
     }
     return (long long)nw;
+}
+
+/* ---- shared memory and message queues ---------------------------------------------------------------------------------------- */
+static ProcessShm *shm_slot_of(Process *p, ull addr)
+{
+    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+        if (p->shm[i].seg >= 0 && p->shm[i].addr == addr)
+            return &p->shm[i];
+    return 0;
+}
+
+/* SYS_SHM_MAP: rdi = name, rsi = size in bytes (for a segment that is made: rounded up to pages, at most SHM_MAX_PAGES), rdx = flags
+ * (SHM_CREATE, SHM_EXCL). Finds or makes the segment and maps all of it, readable and writable, into this process at an address the
+ * kernel picks. Returns the address, or -1. A segment made here starts as zeros. */
+static long long sys_shm_map(const SyscallFrame *f)
+{
+    ull name_ptr = f->rdi, size = f->rsi, flags = f->rdx;
+    AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || (flags & ~(ull)(SHM_CREATE | SHM_EXCL)))
+        return -1;
+    char name[SHM_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), name_ptr, as) < 0 || !shm_valid_name(name))
+        return -1;
+    ProcessShm *slot = 0;
+    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+        if (p->shm[i].seg < 0)
+        {
+            slot = &p->shm[i];
+            break;
+        }
+    if (!slot)
+        return -1;
+    int existed = shm_open(name, 0, 0) >= 0;
+    int s = shm_open(name, size, (unsigned)flags);
+    if (s < 0)
+        return -1;
+    unsigned pages = shm_pages(s);
+    ull addr = p->shm_next ? p->shm_next : PROCESS_SHM_BASE;
+    int ok = addr + (ull)pages * 4096 <= PROCESS_SHM_END;
+    unsigned done = 0;
+    for (; ok && done < pages; done++)
+        if (aspace_map_shared(as, addr + (ull)done * 4096, shm_page(s, done), ASPACE_WRITE) != 0)
+            ok = 0;
+    if (!ok)
+    {
+        for (unsigned i = 0; i < done; i++)
+            aspace_unmap_shared(as, addr + (ull)i * 4096);
+        if (!existed)
+            shm_unlink(name); /* made just now and not usable: do not leave it behind */
+        return -1;
+    }
+    shm_ref(s);
+    slot->seg = s;
+    slot->addr = addr;
+    slot->pages = pages;
+    p->shm_next = addr + (ull)(pages + 1) * 4096; /* one page of nothing after it, so a run past the end faults */
+    return (long long)addr;
+}
+
+/* SYS_SHM_UNMAP: rdi = an address SYS_SHM_MAP returned. The pages leave this process (the segment lives on for others and by name). */
+static long long sys_shm_unmap(const SyscallFrame *f)
+{
+    AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    ProcessShm *slot = shm_slot_of(p, f->rdi);
+    if (!slot)
+        return -1;
+    for (unsigned i = 0; i < slot->pages; i++)
+        aspace_unmap_shared(as, slot->addr + (ull)i * 4096);
+    shm_unref(slot->seg);
+    slot->seg = -1;
+    int any = 0;
+    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+        any |= p->shm[i].seg >= 0;
+    if (!any)
+        p->shm_next = 0;
+    return 0;
+}
+
+/* SYS_SHM_SIZE: rdi = an address SYS_SHM_MAP returned: the size of the mapping in bytes (a whole number of pages), or -1. */
+static long long sys_shm_size(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    ProcessShm *slot = p ? shm_slot_of(p, f->rdi) : 0;
+    return slot ? (long long)slot->pages * 4096 : -1;
+}
+
+/* SYS_SHM_UNLINK: rdi = name. The name goes away; the pages stay until nobody maps them. 0 or -1. */
+static long long sys_shm_unlink(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current())
+        return -1;
+    char name[SHM_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !shm_valid_name(name))
+        return -1;
+    return shm_unlink(name);
+}
+
+/* SYS_MQ_OPEN: rdi = name, rsi = flags (MQ_CREATE, MQ_EXCL). A descriptor for the queue: SYS_WRITE sends one message, SYS_READ
+ * receives one (see mq.h); SYS_CLOSE lets go. -1: no such queue, bad name, no free descriptor or queue. */
+static long long sys_mq_open(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || (f->rsi & ~(ull)(MQ_CREATE | MQ_EXCL)))
+        return -1;
+    char name[MQ_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !mq_valid_name(name))
+        return -1;
+    int slot = -1;
+    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        if (p->file[i].node < 0)
+        {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return -1;
+    int q = mq_open(name, (unsigned)f->rsi);
+    if (q < 0)
+        return -1;
+    p->file[slot].node = PROCESS_MQ_NODE + q;
+    p->file[slot].pos = 0;
+    p->file[slot].flags = 0;
+    mq_ref(q);
+    return PROCESS_FD_FIRST + slot;
+}
+
+static long long sys_mq_unlink(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current())
+        return -1;
+    char name[MQ_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !mq_valid_name(name))
+        return -1;
+    return mq_unlink(name);
 }
 
 /* ---- signals and process list ---------------------------------------------------------------------------------------- */
@@ -1095,6 +1276,18 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_getpid(f);
     case SYS_DUP2:
         return sys_dup2(f);
+    case SYS_SHM_MAP:
+        return sys_shm_map(f);
+    case SYS_SHM_UNMAP:
+        return sys_shm_unmap(f);
+    case SYS_SHM_UNLINK:
+        return sys_shm_unlink(f);
+    case SYS_SHM_SIZE:
+        return sys_shm_size(f);
+    case SYS_MQ_OPEN:
+        return sys_mq_open(f);
+    case SYS_MQ_UNLINK:
+        return sys_mq_unlink(f);
     default:
         return -1;
     }

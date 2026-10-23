@@ -11,6 +11,7 @@
 #include "aspace.h"
 #include "console.h"
 #include "exec.h"
+#include "pmm.h"
 #include "process.h"
 #include "task.h"
 #include "vfs.h"
@@ -498,6 +499,64 @@ int exec_replace_node(int node, const char *name, ProcessSpawn *args, int *err)
 static int PPID = 77;
 int process_ppid(void) { return PPID; }
 
+/* shared memory: the page allocator is real host memory, and the mapping calls only record what was asked */
+#include <stdlib.h>
+static int PAGES_OUT;
+unsigned long long pmm_alloc_page_tag(PmmTag tag)
+{
+    (void)tag;
+    void *p = calloc(1, 4096);
+    if (p)
+        PAGES_OUT++;
+    return (unsigned long long)p;
+}
+void pmm_free_page(unsigned long long phys)
+{
+    free((void *)phys);
+    PAGES_OUT--;
+}
+
+#define MAPS_MAX 64
+static struct { ull va, phys; unsigned flags; int live; } MAPS[MAPS_MAX];
+static int MAPS_N, MAP_FAIL_AT = -1; /* the Nth call of aspace_map_shared fails (-1 = never) */
+static int MAP_CALLS;
+
+int aspace_map_shared(AddressSpace *as, ull va, ull phys, unsigned flags)
+{
+    CHECK(as == &FAKE_AS && (va & 4095) == 0);
+    if (MAP_CALLS++ == MAP_FAIL_AT)
+        return -1;
+    if (MAPS_N < MAPS_MAX)
+    {
+        MAPS[MAPS_N].va = va;
+        MAPS[MAPS_N].phys = phys;
+        MAPS[MAPS_N].flags = flags;
+        MAPS[MAPS_N].live = 1;
+        MAPS_N++;
+    }
+    return 0;
+}
+
+int aspace_unmap_shared(AddressSpace *as, ull va)
+{
+    CHECK(as == &FAKE_AS);
+    for (int i = 0; i < MAPS_N; i++)
+        if (MAPS[i].live && MAPS[i].va == va)
+        {
+            MAPS[i].live = 0;
+            return 0;
+        }
+    return -1;
+}
+
+static int maps_live(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAPS_N; i++)
+        n += MAPS[i].live;
+    return n;
+}
+
 /* the volume's lock: volume 0 (RAM Disk) */
 static int VOL_LOCKED = 1, VOL_WRITABLE = 1, VOL_LOCKABLE = 1;
 
@@ -565,6 +624,9 @@ static void reset(void)
     PROC.console = -1;
     PROC.own_console = 1;
     PROC.sig_ignore = 0;
+    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+        PROC.shm[i].seg = -1;
+    PROC.shm_next = 0;
     PROC.stdio[0] = PROC.stdio[1] = PROC.stdio[2] = -1;
     PROC.cwd = 0;
     PROC.parent = -1;
@@ -587,6 +649,9 @@ static void feed(void) { pipe_write(pfile_pipe(&PROC.file[1]), "late", 4); BLOCK
 static void drain(void) { drained += pipe_read(pfile_pipe(&PROC.file[0]), PIPE_OUT + drained, 3000); }
 static void drop_reader(void) { pfile_close(&PROC.file[0]); BLOCK_ACTION = 0; }
 static void drop_writer(void) { pfile_close(&PROC.file[1]); BLOCK_ACTION = 0; }
+
+static void mq_feed(void) { mq_send(pfile_mq(&PROC.file[0]), "fed!", 4); BLOCK_ACTION = 0; }
+static void mq_drain(void) { char b[300]; mq_recv(pfile_mq(&PROC.file[0]), b, sizeof(b)); BLOCK_ACTION = 0; }
 
 static ull U(const void *p) { return (ull)(unsigned long long)p; }
 
@@ -1524,6 +1589,171 @@ int main(void)
             call(SYS_CLOSE, (ull)held[i], 0, 0);
         CURRENT_PROC = 0;
         CHECK(call(SYS_DUP2, (ull)-1, 1, 0) == -1);
+        CURRENT_PROC = &PROC;
+    }
+
+    /* ================= shared memory ================= */
+    reset();
+    {
+        MAPS_N = 0;
+        MAP_CALLS = 0;
+        MAP_FAIL_AT = -1;
+        const ull B = PROCESS_SHM_BASE;
+        long long a = call(SYS_SHM_MAP, U("frame"), 5000, SYS_CREATE);
+        CHECK(a == (long long)B && shm_in_use() == 1 && PAGES_OUT == 2);
+        CHECK(MAPS_N == 2 && MAPS[0].va == B && MAPS[1].va == B + 4096 && MAPS[0].flags == ASPACE_WRITE && MAPS[0].phys != MAPS[1].phys); /* writable, not executable */
+        CHECK(call(SYS_SHM_SIZE, (ull)a, 0, 0) == 8192 && call(SYS_SHM_SIZE, (ull)a + 4096, 0, 0) == -1 && call(SYS_SHM_SIZE, 0, 0, 0) == -1);
+        long long b = call(SYS_SHM_MAP, U("other"), 4096, SYS_CREATE);
+        CHECK(b == (long long)(B + 3 * 4096));                                  /* after the first one and a page of nothing */
+        long long a2 = call(SYS_SHM_MAP, U("frame"), 0, 0);                    /* the same segment again: its own address, the same pages */
+        CHECK(a2 > b && MAPS_N == 5 && MAPS[3].phys == MAPS[0].phys && MAPS[4].phys == MAPS[1].phys);
+        CHECK(shm_in_use() == 2 && PAGES_OUT == 3);
+
+        /* refused */
+        CHECK(call(SYS_SHM_MAP, U("nothing"), 4096, 0) == -1);                  /* no CREATE */
+        CHECK(call(SYS_SHM_MAP, U("empty"), 0, SYS_CREATE) == -1);              /* nothing to make */
+        CHECK(call(SYS_SHM_MAP, U("huge"), 1024 * 1024 + 1, SYS_CREATE) == -1);
+        CHECK(call(SYS_SHM_MAP, U("a/b"), 4096, SYS_CREATE) == -1 && call(SYS_SHM_MAP, U(""), 4096, SYS_CREATE) == -1);
+        CHECK(call(SYS_SHM_MAP, U("frame"), 4096, SYS_CREATE | SYS_EXCL) == -1);   /* it exists */
+        CHECK(call(SYS_SHM_MAP, U("frame"), 4096, 4) == -1);                    /* no such flag */
+        USER_OK = 0;
+        CHECK(call(SYS_SHM_MAP, U("frame"), 0, 0) == -1);
+        USER_OK = 1;
+        CHECK(shm_in_use() == 2 && PAGES_OUT == 3 && MAPS_N == 5);              /* nothing was left behind */
+
+        /* a mapping that fails half way: what was mapped is unmapped, a segment made for it is removed */
+        MAP_CALLS = 0;
+        MAP_FAIL_AT = 2;
+        CHECK(call(SYS_SHM_MAP, U("partial"), 3 * 4096, SYS_CREATE) == -1);
+        MAP_FAIL_AT = -1;
+        CHECK(shm_in_use() == 2 && PAGES_OUT == 3 && maps_live() == 5);
+        MAP_CALLS = 0;
+        MAP_FAIL_AT = 1;
+        CHECK(call(SYS_SHM_MAP, U("frame"), 0, 0) == -1);                       /* an existing one: it stays */
+        MAP_FAIL_AT = -1;
+        CHECK(shm_in_use() == 2 && maps_live() == 5);
+
+        /* unmap, unlink, lifetime */
+        CHECK(call(SYS_SHM_UNMAP, (ull)b, 0, 0) == 0 && maps_live() == 4);
+        CHECK(call(SYS_SHM_UNMAP, (ull)b, 0, 0) == -1 && call(SYS_SHM_UNMAP, (ull)b + 1, 0, 0) == -1 && call(SYS_SHM_UNMAP, 0, 0, 0) == -1);
+        CHECK(shm_in_use() == 2);                                               /* "other" is still named */
+        CHECK(call(SYS_SHM_UNLINK, U("other"), 0, 0) == 0 && shm_in_use() == 1 && call(SYS_SHM_UNLINK, U("other"), 0, 0) == -1);
+        CHECK(call(SYS_SHM_UNLINK, U("frame"), 0, 0) == 0);
+        CHECK(call(SYS_SHM_MAP, U("frame"), 0, 0) == -1);                       /* the name is gone ... */
+        CHECK(shm_in_use() == 1 && PAGES_OUT == 2 && call(SYS_SHM_SIZE, (ull)a, 0, 0) == 8192); /* ... the mappings are not */
+        CHECK(call(SYS_SHM_UNMAP, (ull)a, 0, 0) == 0 && shm_in_use() == 1);     /* one mapping left */
+        CHECK(call(SYS_SHM_UNMAP, (ull)a2, 0, 0) == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && maps_live() == 0); /* the last: freed */
+        CHECK(PROC.shm_next == 0);                                              /* addresses start over when nothing is mapped */
+        CHECK(call(SYS_SHM_MAP, U("again"), 4096, SYS_CREATE) == (long long)B);
+        CHECK(call(SYS_SHM_UNLINK, U("again"), 0, 0) == 0);
+        process_release_shm(&PROC);                                             /* what a process that ends does */
+        CHECK(shm_in_use() == 0 && PAGES_OUT == 0);
+
+        /* only PROCESS_MAX_SHM mappings */
+        int made = 0;
+        for (int i = 0; i < PROCESS_MAX_SHM + 1; i++)
+            if (call(SYS_SHM_MAP, U("same"), 4096, SYS_CREATE) > 0)
+                made++;
+        CHECK(made == PROCESS_MAX_SHM && shm_in_use() == 1);
+        CHECK(call(SYS_SHM_UNLINK, U("same"), 0, 0) == 0);
+        process_release_shm(&PROC);
+        CHECK(shm_in_use() == 0 && PAGES_OUT == 0);
+        for (int i = 0; i < PROCESS_MAX_SHM; i++)
+            CHECK(PROC.shm[i].seg == -1);
+
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_SHM_MAP, U("k"), 4096, SYS_CREATE) == -1 && call(SYS_SHM_UNMAP, (ull)B, 0, 0) == -1 &&
+              call(SYS_SHM_UNLINK, U("k"), 0, 0) == -1 && call(SYS_SHM_SIZE, (ull)B, 0, 0) == -1);
+        CURRENT_PROC = &PROC;
+        CHECK(shm_in_use() == 0);
+    }
+
+    /* ================= message queues ================= */
+    reset();
+    {
+        char rb[300];
+        long long q = call(SYS_MQ_OPEN, U("jobs"), SYS_CREATE, 0);
+        CHECK(q == 3 && PROC.file[0].node == PROCESS_MQ_NODE + 0 && mq_in_use() == 1);
+        long long q2 = call(SYS_MQ_OPEN, U("jobs"), 0, 0);                      /* a second descriptor for the same queue */
+        CHECK(q2 == 4 && PROC.file[1].node == PROC.file[0].node);
+
+        /* messages keep their boundaries */
+        BLOCKS = 0;
+        CHECK(call(SYS_WRITE, (ull)q, U("one"), 3) == 3 && call(SYS_WRITE, (ull)q2, U("two!"), 4) == 4);
+        memset(rb, 0, sizeof(rb));
+        CHECK(call(SYS_READ, (ull)q2, U(rb), 100) == 3 && strcmp(rb, "one") == 0);
+        CHECK(call(SYS_READ, (ull)q, U(rb), 100) == 4 && strcmp(rb, "two!") == 0 && BLOCKS == 0);
+
+        /* a buffer that is too small: -1, and the message is still there */
+        CHECK(call(SYS_WRITE, (ull)q, U("0123456789"), 10) == 10);
+        CHECK(call(SYS_READ, (ull)q, U(rb), 4) == -1);
+        CHECK(call(SYS_READ, (ull)q, U(rb), 10) == 10 && memcmp(rb, "0123456789", 10) == 0);
+        CHECK(call(SYS_WRITE, (ull)q, U(rb), 0) == 0 && call(SYS_WRITE, (ull)q, U(rb), 257) == -1);   /* an empty write sends nothing; too long is refused */
+        static char max[256];
+        memset(max, 'm', sizeof(max));
+        CHECK(call(SYS_WRITE, (ull)q, U(max), 256) == 256 && call(SYS_READ, (ull)q, U(rb), 300) == 256 && memcmp(rb, max, 256) == 0);
+
+        /* an empty queue: the receiver sleeps until a message comes; a full one: the sender sleeps until there is room */
+        BLOCK_ACTION = mq_feed;
+        BLOCKS = 0;
+        CHECK(call(SYS_READ, (ull)q, U(rb), 300) == 4 && memcmp(rb, "fed!", 4) == 0 && BLOCKS == 1);
+        for (int i = 0; i < MQ_DEPTH; i++)
+            CHECK(call(SYS_WRITE, (ull)q, U("x"), 1) == 1);
+        BLOCK_ACTION = mq_drain;
+        BLOCKS = 0;
+        CHECK(call(SYS_WRITE, (ull)q, U("last"), 4) == 4 && BLOCKS == 1);
+        BLOCK_ACTION = 0;
+        int n = 0;
+        while (mq_recv(pfile_mq(&PROC.file[0]), rb, sizeof(rb)) > 0)
+            n++;
+        CHECK(n == MQ_DEPTH);                                                    /* the drain made room for "last": the queue is full again */
+
+        /* what a queue cannot do */
+        CHECK(call(SYS_SEEK, (ull)q, 0, 0) == -1);
+        CHECK(call(SYS_DUP2, (ull)q, 1, 0) == -1 && call(SYS_DUP2, (ull)q, 0, 0) == -1);   /* not a stdin / stdout */
+        int io[3] = {(int)q, -1, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io)) == -1);
+        int io2[3] = {-1, (int)q, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io2)) == -1);
+
+        /* closing: a queue lives while a descriptor is open; unlink removes the name */
+        CHECK(call(SYS_MQ_UNLINK, U("jobs"), 0, 0) == 0 && call(SYS_MQ_OPEN, U("jobs"), 0, 0) == -1);
+        CHECK(mq_in_use() == 1);
+        CHECK(call(SYS_WRITE, (ull)q, U("z"), 1) == 1);                          /* still works */
+        CHECK(call(SYS_CLOSE, (ull)q, 0, 0) == 0 && mq_in_use() == 1);           /* the other descriptor holds it */
+        CHECK(call(SYS_CLOSE, (ull)q2, 0, 0) == 0 && mq_in_use() == 0);
+        CHECK(call(SYS_MQ_UNLINK, U("jobs"), 0, 0) == -1);
+
+        /* refused opens */
+        CHECK(call(SYS_MQ_OPEN, U("nothing"), 0, 0) == -1);
+        CHECK(call(SYS_MQ_OPEN, U("a/b"), SYS_CREATE, 0) == -1 && call(SYS_MQ_OPEN, U(""), SYS_CREATE, 0) == -1);
+        CHECK(call(SYS_MQ_OPEN, U("q"), 4, 0) == -1);                            /* no such flag */
+        q = call(SYS_MQ_OPEN, U("q"), SYS_CREATE, 0);
+        CHECK(q >= 3 && call(SYS_MQ_OPEN, U("q"), SYS_CREATE | SYS_EXCL, 0) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_MQ_OPEN, U("q"), 0, 0) == -1);
+        USER_OK = 1;
+        long long held[PROCESS_MAX_FILES];
+        int h = 0;
+        while (h < PROCESS_MAX_FILES - 1 && (held[h] = call(SYS_OPEN, U("HELLO.ELF"), 0, 0)) >= 3)
+            h++;
+        CHECK(h == PROCESS_MAX_FILES - 1 && call(SYS_MQ_OPEN, U("q"), 0, 0) == -1);   /* no free descriptor */
+        for (int i = 0; i < h; i++)
+            call(SYS_CLOSE, (ull)held[i], 0, 0);
+        /* a process that ends gives its queues back (process_release_files) */
+        CHECK(mq_in_use() == 1);
+        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+            pfile_close(&PROC.file[i]);
+        CHECK(call(SYS_MQ_UNLINK, U("q"), 0, 0) == 0 && mq_in_use() == 0);
+        /* a copy of a descriptor (fork, dup2) counts as a holder */
+        q = call(SYS_MQ_OPEN, U("copy"), SYS_CREATE, 0);
+        ProcessFile dup = PROC.file[q - 3];
+        pfile_ref(&dup);
+        CHECK(call(SYS_MQ_UNLINK, U("copy"), 0, 0) == 0 && call(SYS_CLOSE, (ull)q, 0, 0) == 0 && mq_in_use() == 1);
+        pfile_close(&dup);
+        CHECK(mq_in_use() == 0);
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_MQ_OPEN, U("k"), SYS_CREATE, 0) == -1 && call(SYS_MQ_UNLINK, U("k"), 0, 0) == -1);
         CURRENT_PROC = &PROC;
     }
 
