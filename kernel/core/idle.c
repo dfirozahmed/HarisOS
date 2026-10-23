@@ -208,7 +208,8 @@ int idle_init(void)
     for (int i = 0; i < IDT_COUNT; i++)
         idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
     idt_set(VEC_TIMER, idle_isr_timer);
-    IDT[8].ist = 1; /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
+    IDT[8].ist = 1;  /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
+    IDT[14].ist = 2; /* so does #PF (IST2): a thread stack that overflowed into its guard page cannot take the frame */
     idt_set(VEC_SPURIOUS, idle_isr_spurious);
     idt_load();
 

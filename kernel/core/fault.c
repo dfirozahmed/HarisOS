@@ -1,6 +1,7 @@
 /* HarisOS CPU exception handling: see include/fault.h. */
 #include "fault.h"
 #include "serial.h"
+#include "task.h"
 
 #if defined(__x86_64__)
 
@@ -88,11 +89,13 @@ typedef struct
 } __attribute__((packed)) Tss;
 
 static unsigned char DF_STACK[4096] __attribute__((aligned(16)));
+static unsigned char PF_STACK[4096] __attribute__((aligned(16))); /* IST2: a page fault from a stack overflow */
 static Tss TSS;
 
 void fault_tss_descriptor(unsigned long long out[2])
 {
     TSS.ist[0] = (unsigned long long)(DF_STACK + sizeof(DF_STACK));
+    TSS.ist[1] = (unsigned long long)(PF_STACK + sizeof(PF_STACK));
     TSS.iomap_base = sizeof(Tss); /* no I/O permission bitmap */
 
     unsigned long long base = (unsigned long long)&TSS;
@@ -203,7 +206,21 @@ __attribute__((noreturn)) void fault_dispatch(FaultFrame *f)
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 
     static char text[1024];
-    fault_format(text, sizeof(text), f, cr2);
+    int len = fault_format(text, sizeof(text), f, cr2);
+
+    /* A page fault inside a thread's guard page is a stack overflow: say so and whose it is. */
+    const char *owner = f->vector == 14 ? task_guard_hit(cr2) : 0;
+    if (owner)
+    {
+        static const char NOTE[] = "\nSTACK OVERFLOW IN THREAD: ";
+        int n = len;
+        for (int i = 0; NOTE[i] && n < (int)sizeof(text) - 2; i++)
+            text[n++] = NOTE[i];
+        for (int i = 0; owner[i] && n < (int)sizeof(text) - 2; i++)
+            text[n++] = owner[i];
+        text[n++] = '\n';
+        text[n] = 0;
+    }
 
     serial_init();
     serial_puts(text); /* first: the serial port is the most robust output */

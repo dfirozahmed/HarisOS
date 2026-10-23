@@ -31,7 +31,7 @@
 #define HARIS_TASK_H
 
 #define TASK_MAX 16
-#define TASK_STACK_SIZE (32 * 1024)
+#define TASK_STACK_SIZE (32 * 1024) /* usable bytes; a 4 KiB guard page (unmapped) sits below, see paging.h */
 #define TASK_NAME_MAX 16
 
 #define TASK_PREEMPTIBLE 1  /* flag for task_create_flags */
@@ -66,6 +66,9 @@ int task_count(void);   /* threads that are not finished */
 TaskState task_state(int id);
 const char *task_name(int id); /* NULL for an unused slot */
 unsigned long long task_switches(void);
+/* The name of the thread whose stack guard page contains addr (a page fault with CR2 = addr means that thread's stack
+ * overflowed), or NULL. For the crash screen. */
+const char *task_guard_hit(unsigned long long addr);
 
 /* Quick check at boot: starts two threads that take turns, 0 = they did. Needs task_init and a working heap. */
 int task_selftest(void);

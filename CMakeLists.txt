@@ -59,13 +59,16 @@ set(KERNEL_SOURCES
     boot/efi_entry.c            # UEFI entry: collects BootInfo, calls kernel_main
     kernel/kernel.c
     kernel/memory/pmm.c
-    kernel/memory/heap.c            # kernel heap: kmalloc / kfree on top of the page allocator
+    kernel/memory/paging_walk.c     # page table walk: split big pages, map / unmap one page (host-tested)
+    kernel/memory/paging.c          # page tables on the real CPU (CR3, invlpg): guard pages
+    kernel/memory/heap.c           # kernel heap: kmalloc / kfree on top of the page allocator
     kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
     kernel/core/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
     kernel/core/serial.c            # COM1 output for debugging (boot self test, crash report)
     kernel/core/fault_fmt.c        # CPU exceptions: report text (host-tested)
     kernel/core/task.c             # kernel threads (cooperative): task table, round-robin scheduler, boot self test
     kernel/core/task_ctx.c          # kernel threads: the register-saving context switch
+    kernel/core/heapmon.c           # background thread: checks the kernel heap once a second
     kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)

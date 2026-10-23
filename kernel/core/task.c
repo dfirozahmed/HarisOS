@@ -1,15 +1,22 @@
 /* HarisOS kernel threads (cooperative): see include/task.h. */
 #include "task.h"
-#include "heap.h"
 #include "idle.h"
 #include "irq.h"
+#include "paging.h"
+#include "pmm.h"
 #include "preempt.h"
 #include "timer.h"
+
+/* A stack is a run of whole pages from the page allocator: one guard page at the bottom, then TASK_STACK_SIZE bytes.
+ * The guard page is made not present (paging.h), so a stack that grows past its end stops with a page fault. */
+#define STACK_USABLE_PAGES (TASK_STACK_SIZE / PMM_PAGE_SIZE)
+#define STACK_BLOCK_PAGES (STACK_USABLE_PAGES + 1)
 
 typedef struct
 {
     unsigned long long rsp; /* saved stack pointer while the thread is not running */
-    unsigned char *stack;   /* kmalloc block, NULL for task 0 (it runs on the stack the firmware gave us) */
+    unsigned char *stack;   /* start of the stack block (the guard page), NULL for task 0 (the firmware's stack) */
+    int guarded;            /* the guard page really is unmapped (needs the page tables to be reachable) */
     TaskState state;
     unsigned flags;         /* TASK_PREEMPTIBLE */
     unsigned long long wake_us; /* TASK_SLEEPING: when to become ready */
@@ -18,10 +25,11 @@ typedef struct
     char name[TASK_NAME_MAX];
 } Task;
 
-/* Written at the lowest address of every stack. The stack grows down towards it, so an overflow damages it first;
- * schedule() checks it whenever a thread leaves the CPU. Not as good as an unmapped guard page (that needs our own
- * page tables), but it turns "random corruption later" into a report at the next switch. */
+/* Written at the lowest usable address, just above the guard page. The guard page catches a stack that grows into it
+ * one step at a time; a function with a huge local array can jump over it, and then this value is what gets damaged:
+ * schedule() checks it whenever a thread leaves the CPU. */
 #define STACK_CANARY 0x48617269734F5321ULL /* "HarisOS!" */
+#define CANARY_AT(stack) (*(unsigned long long *)((stack) + PMM_PAGE_SIZE))
 
 /* Interrupt rules. TASKS, CUR and SLICE_LEFT are changed by the scheduler, which the timer interrupt can also start
  * (task_tick). So every path into schedule() runs with interrupts off (irq_save), and so does everything that edits
@@ -58,8 +66,11 @@ static void reap(void)
         Task *t = &TASKS[i];
         if (t->state == TASK_DEAD && i != CUR)
         {
-            kfree(t->stack);
+            if (t->guarded)
+                paging_set_present((unsigned long long)t->stack, 1); /* the page goes back to the allocator: map it again */
+            pmm_free_contiguous((unsigned long long)t->stack, STACK_BLOCK_PAGES);
             t->stack = 0;
+            t->guarded = 0;
             t->state = TASK_UNUSED;
         }
     }
@@ -97,7 +108,7 @@ static void schedule(void)
         reap(); /* nobody else to run, but a thread that just ended can be cleaned up */
         return;
     }
-    if (old->stack && *(unsigned long long *)old->stack != STACK_CANARY)
+    if (old->stack && CANARY_AT(old->stack) != STACK_CANARY)
         __builtin_trap(); /* the leaving thread overflowed its stack: shows up as #UD on the crash screen */
 
     TASKS[next].state = TASK_RUNNING;
@@ -125,6 +136,7 @@ int task_init(void)
     {
         TASKS[i].state = TASK_UNUSED;
         TASKS[i].stack = 0;
+        TASKS[i].guarded = 0;
         TASKS[i].flags = 0;
     }
     SLICE_LEFT = TASK_SLICE_TICKS;
@@ -147,10 +159,13 @@ int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags)
 {
     if (!fn)
         return -1;
-    unsigned char *stack = kmalloc(TASK_STACK_SIZE); /* before the table is touched: the heap has its own lock */
+    /* The page allocator has no lock of its own: keep the timer from switching to a thread that uses it too. */
+    preempt_disable();
+    unsigned char *stack = (unsigned char *)pmm_alloc_contiguous_tag(STACK_BLOCK_PAGES, PMM_TAG_SYSTEM);
+    preempt_enable();
     if (!stack)
         return -1;
-    *(unsigned long long *)stack = STACK_CANARY;
+    CANARY_AT(stack) = STACK_CANARY;
 
     unsigned long long irq = irq_save(); /* the slot search and the fill below must not be interleaved with another create */
     reap();
@@ -163,17 +178,18 @@ int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags)
         }
     if (id < 0)
     {
+        pmm_free_contiguous((unsigned long long)stack, STACK_BLOCK_PAGES); /* interrupts are off: no switch inside */
         irq_restore(irq);
-        kfree(stack);
         return -1;
     }
+    int guarded = paging_set_present((unsigned long long)stack, 0) == 0; /* if it fails the stack just has no guard */
 
     /* Layout at the top of the stack (top is 16-aligned), highest address first:
      *   top-8 .. top-40  32 bytes of "shadow space" the Microsoft ABI gives every callee above its return address
      *   top-40           fake return address of task_main (it never returns: it ends in task_exit)
      *   top-48           ret slot of the frame below = task_main's address
      * task_main starts as if it had been called: RSP = top-40, which is 8 mod 16 like at any function entry. */
-    unsigned long long top = ((unsigned long long)stack + TASK_STACK_SIZE) & ~15ULL;
+    unsigned long long top = ((unsigned long long)stack + STACK_BLOCK_PAGES * PMM_PAGE_SIZE) & ~15ULL;
     unsigned long long *ret_slot = (unsigned long long *)(top - 48);
     TaskInitFrame *fr = (TaskInitFrame *)((unsigned char *)ret_slot - __builtin_offsetof(TaskInitFrame, ret));
     fill_zero(fr, (unsigned long long)((unsigned char *)(top) - (unsigned char *)fr));
@@ -181,6 +197,7 @@ int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags)
 
     Task *t = &TASKS[id];
     t->stack = stack;
+    t->guarded = guarded;
     t->rsp = (unsigned long long)fr;
     t->fn = fn;
     t->arg = arg;
@@ -274,6 +291,18 @@ const char *task_name(int id)
 }
 
 unsigned long long task_switches(void) { return SWITCHES; }
+
+const char *task_guard_hit(unsigned long long addr)
+{
+    for (int i = 0; i < TASK_MAX; i++)
+    {
+        const Task *t = &TASKS[i];
+        unsigned long long base = (unsigned long long)t->stack;
+        if (t->guarded && t->state != TASK_UNUSED && addr >= base && addr < base + PMM_PAGE_SIZE)
+            return t->name;
+    }
+    return 0;
+}
 
 /* ---- boot self test ----------------------------------------- */
 static void selftest_worker(void *arg)

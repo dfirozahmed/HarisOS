@@ -13,10 +13,12 @@
 #include "acpi.h"
 #include "gfx.h"
 #include "heap.h"
+#include "heapmon.h"
 #include "idle.h"
 #include "keyboard.h"
 #include "mouse.h"
 #include "ntfs.h"
+#include "paging.h"
 #include "pci.h"
 #include "pmm.h"
 #include "power.h"
@@ -71,6 +73,11 @@ void kernel_main(const BootInfo *info)
     acpi_init(info->acpi_rsdp); /* device tables: where the I2C touchpad is described */
 
     int pmm_ok = (pmm_init(info) == 0);
+
+    /* Page tables of our own, before the allocator gives out memory that gets used: the firmware's tables can be
+     * read-only, and so can the free pages around them (see paging.h). If this fails everything still runs, only
+     * without guard pages. */
+    int paging_ok = pmm_ok && paging_init() == 0;
 
     /* Double buffering: needs a contiguous block of RAM, so it comes after pmm_init.
      * If no block is found we simply keep drawing directly to the screen. */
@@ -159,6 +166,15 @@ void kernel_main(const BootInfo *info)
     if (pmm_ok)
     {
         serial_init();
+        serial_puts("HARISOS: page tables: ");
+        if (paging_ok)
+        {
+            serial_puts("own copy, ");
+            serial_putd(paging_tables());
+            serial_puts(" pages\n");
+        }
+        else
+            serial_puts("firmware's (no guard pages)\n");
         task_init();
         int st = task_selftest();
         int sp = st == 0 ? task_selftest_preempt() : 0;
@@ -171,6 +187,7 @@ void kernel_main(const BootInfo *info)
         serial_puts(")\n");
         if (st != 0 || sp != 0)
             __builtin_trap();
+        heapmon_start(); /* background thread: kernel heap integrity check once a second (shown in Task Manager) */
     }
 
     {

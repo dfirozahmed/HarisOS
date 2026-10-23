@@ -2,10 +2,21 @@
  * made by task_create(). The heap and the clock are replaced by host versions so the test can find leaks and move time. */
 #include "task.h"
 #include "irq.h"
+#include "pmm.h"
 #include "preempt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* the Windows C runtime has no aligned_alloc */
+#ifdef _WIN32
+#include <malloc.h>
+#define ALIGNED_ALLOC(a, s) _aligned_malloc((s), (a))
+#define ALIGNED_FREE(p) _aligned_free(p)
+#else
+#define ALIGNED_ALLOC(a, s) aligned_alloc((a), (s))
+#define ALIGNED_FREE(p) free(p)
+#endif
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -20,20 +31,45 @@ static unsigned long long TIME_STEP; /* the clock moves this much on every timer
 static int TICK_EVERY;               /* > 0: every N-th timer_us() call acts like a timer interrupt (task_tick) */
 static int TICK_CALLS, IN_TICK;
 
-void *kmalloc(unsigned long long size)
+/* The page allocator: stacks are runs of whole pages. */
+unsigned long long pmm_alloc_contiguous_tag(unsigned long long count, PmmTag tag)
 {
+    (void)tag;
     if (ALLOC_FAIL)
         return 0;
     BLOCKS_OUT++;
-    return malloc((size_t)size);
+    return (unsigned long long)ALIGNED_ALLOC(4096, count * 4096);
 }
 
-void kfree(void *p)
+void pmm_free_contiguous(unsigned long long phys, unsigned long long count)
 {
-    if (!p)
-        return;
+    (void)count;
     BLOCKS_OUT--;
-    free(p);
+    ALIGNED_FREE((void *)phys);
+}
+
+/* Page tables: the test only records which pages were made not present (the host memory stays usable). */
+static unsigned long long GUARDS[64];
+static int GUARDS_OUT, PAGING_FAIL, WRONG_UNGUARD;
+static unsigned long long LAST_GUARD;
+
+int paging_set_present(unsigned long long virt, int present)
+{
+    if (PAGING_FAIL)
+        return -1;
+    if (!present)
+    {
+        GUARDS[GUARDS_OUT++] = LAST_GUARD = virt;
+        return 0;
+    }
+    for (int i = 0; i < GUARDS_OUT; i++)
+        if (GUARDS[i] == virt)
+        {
+            GUARDS[i] = GUARDS[--GUARDS_OUT];
+            return 0;
+        }
+    WRONG_UNGUARD++; /* mapping a page that was never unmapped */
+    return 0;
 }
 
 /* A spinning thread calls this over and over, so a "tick" injected here hits it at an arbitrary point, like a real
@@ -406,6 +442,36 @@ int main(void)
     TIME_STEP = 0;
     CHECK(BLOCKS_OUT == 0 && task_count() == 1);
     CHECK(preempt_count == 0 && host_if == 1);
+
+    /* ---- guard pages ---- */
+    CHECK(GUARDS_OUT == 0 && WRONG_UNGUARD == 0); /* everything so far was unmapped again when its stack was freed */
+    int g = task_create("GUARDED", quick_worker, (void *)&ran);
+    CHECK(g > 0 && GUARDS_OUT == 1);
+    CHECK(LAST_GUARD % 4096 == 0);
+    CHECK(task_guard_hit(LAST_GUARD) != 0 && strcmp(task_guard_hit(LAST_GUARD), "GUARDED") == 0);
+    CHECK(task_guard_hit(LAST_GUARD + 4095) != 0);  /* the whole guard page */
+    CHECK(task_guard_hit(LAST_GUARD + 4096) == 0);  /* the first usable stack page is not it */
+    CHECK(task_guard_hit(LAST_GUARD - 1) == 0);
+    drain();
+    CHECK(GUARDS_OUT == 0 && WRONG_UNGUARD == 0); /* mapped again before the page went back to the allocator */
+    CHECK(task_guard_hit(LAST_GUARD) == 0);       /* and no longer attributed to a thread */
+
+    /* page tables that cannot be changed: the thread runs without a guard */
+    PAGING_FAIL = 1;
+    ran = 0;
+    CHECK(task_create("NOGUARD", quick_worker, (void *)&ran) > 0);
+    drain();
+    PAGING_FAIL = 0;
+    CHECK(ran == 1 && GUARDS_OUT == 0 && WRONG_UNGUARD == 0 && BLOCKS_OUT == 0);
+
+    /* a full table gives the block back, guard not touched */
+    for (int i = 0; i < TASK_MAX - 1; i++)
+        task_create("Q", quick_worker, (void *)&ran);
+    int guards_before = GUARDS_OUT;
+    CHECK(task_create("Q", quick_worker, (void *)&ran) == -1);
+    CHECK(GUARDS_OUT == guards_before);
+    drain();
+    CHECK(GUARDS_OUT == 0 && BLOCKS_OUT == 0);
 
     /* the same self test the kernel runs at boot */
     CHECK(task_selftest() == 0);
