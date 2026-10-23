@@ -231,7 +231,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone
@@ -258,7 +258,7 @@ foreach(PROG ${USER_PROGRAMS})
         OUTPUT  ${PROG_OBJ}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
         COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
-        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fputest.h
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fsutil.h ${CMAKE_SOURCE_DIR}/user/fputest.h
         COMMENT "Compiling user/${PROG}.c"
         VERBATIM
     )

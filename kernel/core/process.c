@@ -218,6 +218,27 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     {
         p->file[i].node = -1;
         p->file[i].pos = 0;
+        p->file[i].flags = 0;
+    }
+    for (int k = 0; k < 3; k++)
+        p->stdio[k] = -1;
+    if (sp->redirect) /* shell redirection: files stand in for fd 0, 1, 2 (more than PROCESS_MAX_FILES cannot happen: only 3) */
+    {
+        int used = 0;
+        for (int k = 0; k < 3; k++)
+        {
+            const ProcessFile *r = &sp->redirect[k];
+            if (r->node < 0)
+                continue;
+            int slot = -1;
+            for (int j = 0; j < k; j++) /* the same file and mode as an earlier one: share it */
+                if (sp->redirect[j].node == r->node && sp->redirect[j].flags == r->flags && p->stdio[j] >= 0)
+                    slot = p->stdio[j];
+            if (slot < 0)
+                slot = used++;
+            p->file[slot] = *r;
+            p->stdio[k] = slot;
+        }
     }
     /* the Process record belongs to the thread from here on: process_free is called when the thread is cleaned up */
     int id = task_create_user(name, user_thread_main, st, as, p, process_free);

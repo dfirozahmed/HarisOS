@@ -124,20 +124,99 @@ static int resolve_path(const Process *p, const char *in, int bare_ok)
     return node;
 }
 
+/* ---- open files ----------------------------------------------------------------------------------------------------- */
+/* Read from / write to open file slot `idx` of process p (descriptor PROCESS_FD_FIRST + idx, or a redirected fd 0 / 1 / 2).
+ * The user buffer was checked by the caller. Positions are 32 bit (a FAT file cannot be bigger). */
+static long long file_read(Process *p, ull idx, ull ptr, ull len)
+{
+    if (p->file[idx].flags & PFILE_WRITE)
+        return -1; /* opened for writing only */
+    const VfsNode *vn = vfs_node(p->file[idx].node);
+    if (!vn)
+        return -1; /* the file was deleted while open */
+    char buf[CHUNK];
+    ull total = 0;
+    while (total < len)
+    {
+        if (p->file[idx].pos >= vn->size)
+            break; /* at or past the end: 0 bytes, whatever a drive's read would say about such an offset */
+        ull left = vn->size - p->file[idx].pos;
+        unsigned n = (len - total) < CHUNK ? (unsigned)(len - total) : CHUNK;
+        if (n > left)
+            n = (unsigned)left;
+        int got = vfs_read(p->file[idx].node, p->file[idx].pos, buf, n);
+        if (got < 0)
+            return total ? (long long)total : -1;
+        if (got == 0)
+            break; /* end of the file */
+        copy_to_user(ptr + total, buf, (unsigned)got);
+        p->file[idx].pos += (unsigned)got;
+        total += (ull)got;
+        if ((unsigned)got < n)
+            break;
+    }
+    return (long long)total;
+}
+
+/* Returns the bytes written (a short count if the drive refused part way), or -1 if none could be (not opened for writing,
+ * the file is gone, the drive is read only / locked / full, the RAM Disk has no content, or the file would pass 4 GiB). */
+static long long file_write(Process *p, ull idx, ull ptr, ull len)
+{
+    if (!(p->file[idx].flags & PFILE_WRITE))
+        return -1; /* opened for reading */
+    const VfsNode *vn = vfs_node(p->file[idx].node);
+    if (!vn || vn->is_dir)
+        return -1;
+    char buf[CHUNK];
+    ull total = 0;
+    while (total < len)
+    {
+        if (p->file[idx].flags & PFILE_APPEND)
+            p->file[idx].pos = vn->size;
+        unsigned n = (len - total) < CHUNK ? (unsigned)(len - total) : CHUNK;
+        if ((ull)p->file[idx].pos + n > 0xFFFFFFFFULL)
+            break;
+        copy_from_user(buf, ptr + total, n);
+        int put = vfs_write(p->file[idx].node, p->file[idx].pos, buf, n);
+        if (put <= 0)
+            break;
+        p->file[idx].pos += (unsigned)put;
+        total += (ull)put;
+        if ((unsigned)put < n)
+            break;
+        vn = vfs_node(p->file[idx].node); /* (a drive may have changed the node) */
+        if (!vn)
+            break;
+    }
+    return total || len == 0 ? (long long)total : -1;
+}
+
 /* ---- the calls ----------------------------------------------------------------------------------------------------- */
+/* fd 1 and 2: the console, or a file if the shell redirected them. fd 3 and up: an open file. */
 static long long sys_write(const SyscallFrame *f)
 {
     ull fd = f->rdi, ptr = f->rsi, len = f->rdx;
-    if (fd != 1 && fd != 2) /* standard output and standard error: the console */
+    Process *p = process_current();
+    if (fd == 0 || fd >= PROCESS_FD_FIRST + PROCESS_MAX_FILES)
         return -1;
     if (len > SYS_WRITE_MAX)
         return -1;
+    if (fd >= PROCESS_FD_FIRST && (!p || p->file[fd - PROCESS_FD_FIRST].node < 0))
+        return -1; /* not an open file */
     if (len == 0)
         return 0;
     const AddressSpace *as = task_address_space();
     if (!as || !aspace_user_ok(as, ptr, len, 0))
         return -1;
-    const Process *p = process_current();
+    if (fd >= PROCESS_FD_FIRST || (p && p->stdio[fd] >= 0))
+    {
+        if (!p)
+            return -1;
+        ull idx = fd >= PROCESS_FD_FIRST ? fd - PROCESS_FD_FIRST : (ull)p->stdio[fd];
+        if (p->file[idx].node < 0)
+            return -1;
+        return file_write(p, idx, ptr, len);
+    }
     char buf[CHUNK];
     for (ull done = 0; done < len;)
     {
@@ -168,10 +247,12 @@ static long long sys_read(const SyscallFrame *f)
     Process *p = process_current();
     if (!as || !p || !aspace_user_ok(as, ptr, len, 1))
         return -1;
-    char buf[CHUNK];
 
+    if (fd == 0 && p->stdio[0] >= 0) /* input redirected from a file ("cmd < file") */
+        return file_read(p, (ull)p->stdio[0], ptr, len);
     if (fd == 0) /* standard input: a line typed in the console window */
     {
+        char buf[CHUNK];
         if (p->console < 0)
             return 0; /* no window: no input */
         int want = len < CHUNK ? (int)len : CHUNK;
@@ -194,38 +275,57 @@ static long long sys_read(const SyscallFrame *f)
     ull idx = fd - PROCESS_FD_FIRST;
     if (fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
         return -1;
-    const VfsNode *vn = vfs_node(p->file[idx].node);
-    if (!vn)
-        return -1; /* the file was deleted while open */
-    ull total = 0;
-    while (total < len)
-    {
-        if (p->file[idx].pos >= vn->size)
-            break; /* at or past the end: 0 bytes, whatever a drive's read would say about such an offset */
-        ull left = vn->size - p->file[idx].pos;
-        unsigned n = (len - total) < CHUNK ? (unsigned)(len - total) : CHUNK;
-        if (n > left)
-            n = (unsigned)left;
-        int got = vfs_read(p->file[idx].node, p->file[idx].pos, buf, n);
-        if (got < 0)
-            return total ? (long long)total : -1;
-        if (got == 0)
-            break; /* end of the file */
-        copy_to_user(ptr + total, buf, (unsigned)got);
-        p->file[idx].pos += (unsigned)got;
-        total += (ull)got;
-        if ((unsigned)got < n)
-            break;
-    }
-    return (long long)total;
+    return file_read(p, idx, ptr, len);
 }
 
-/* Paths: a name without a slash ("HELLO.ELF") is looked up in the top folder of every drive, like exec does; a path that
- * starts with '/' is a VFS path ("/RAM Disk/Documents/readme.txt"). Files are opened for reading only. */
+/* The folder and the name that a path which may not exist yet means: the folder part is resolved like any path, the name is
+ * the last component. Returns the folder's node, or -1 if the path has no usable last component (empty, a dot, two dots, a
+ * trailing slash), the folder part is not a folder, or it is "This PC" (only drives live there). */
+static int split_parent(const Process *p, const char *path, char *name_out, int name_cap)
+{
+    int len = 0;
+    while (path[len])
+        len++;
+    if (len == 0 || path[len - 1] == '/')
+        return -1;
+    int cut = len;
+    while (cut > 0 && path[cut - 1] != '/')
+        cut--;
+    const char *name = path + cut;
+    int nlen = len - cut;
+    if (nlen >= name_cap || (nlen == 1 && name[0] == '.') || (nlen == 2 && name[0] == '.' && name[1] == '.'))
+        return -1;
+    char dir[256];
+    if (cut == 0) /* no folder part: the working folder */
+    {
+        dir[0] = '.';
+        dir[1] = 0;
+    }
+    else
+    {
+        if (cut >= (int)sizeof(dir))
+            return -1;
+        for (int i = 0; i < cut; i++)
+            dir[i] = path[i];
+        dir[cut] = 0; /* ends with the slash that separated it ("/" alone stays "/") */
+    }
+    int parent = resolve_path(p, dir, 0);
+    const VfsNode *d = parent >= 0 ? vfs_node(parent) : 0;
+    if (!d || !d->is_dir || parent == VFS_ROOT)
+        return -1;
+    for (int i = 0; i <= nlen; i++)
+        name_out[i] = name[i];
+    return parent;
+}
+
+/* Paths: see syscall.h. flags: 0 = read only; SYS_O_WRITE = write, SYS_O_CREATE = make the file if it is not there,
+ * SYS_O_TRUNC = cut it to nothing, SYS_O_APPEND = writes go to the end. CREATE, TRUNC and APPEND need WRITE. */
 static long long sys_open(const SyscallFrame *f)
 {
     ull ptr = f->rdi, flags = f->rsi;
-    if (flags != 0) /* O_RDONLY is all there is */
+    if (flags & ~(ull)(SYS_O_WRITE | SYS_O_CREATE | SYS_O_TRUNC | SYS_O_APPEND))
+        return -1;
+    if ((flags & (SYS_O_CREATE | SYS_O_TRUNC | SYS_O_APPEND)) && !(flags & SYS_O_WRITE))
         return -1;
     const AddressSpace *as = task_address_space();
     Process *p = process_current();
@@ -234,18 +334,37 @@ static long long sys_open(const SyscallFrame *f)
     char path[256];
     if (copy_string_from_user(path, (int)sizeof(path), ptr, as) < 0)
         return -1;
-    int node = resolve_path(p, path, 1);
-    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
-    if (!n || n->is_dir)
-        return -1;
+    int slot = -1;
     for (int i = 0; i < PROCESS_MAX_FILES; i++)
         if (p->file[i].node < 0)
         {
-            p->file[i].node = node;
-            p->file[i].pos = 0;
-            return PROCESS_FD_FIRST + i;
+            slot = i;
+            break;
         }
-    return -1; /* too many open files */
+    if (slot < 0)
+        return -1; /* too many open files */
+    /* a plain name is searched among the programs only for reading: a file to change belongs to the working folder */
+    int node = resolve_path(p, path, !(flags & SYS_O_WRITE));
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (n && n->is_dir)
+        return -1;
+    if (!n && (flags & SYS_O_CREATE))
+    {
+        char name[VFS_NAME_MAX];
+        int parent = split_parent(p, path, name, (int)sizeof(name));
+        if (parent < 0)
+            return -1;
+        node = vfs_add(parent, name, 0, 0);
+        n = node >= 0 ? vfs_node(node) : 0;
+    }
+    if (!n)
+        return -1;
+    if ((flags & SYS_O_TRUNC) && n->size > 0 && vfs_truncate(node, 0) != 0)
+        return -1;
+    p->file[slot].node = node;
+    p->file[slot].pos = 0;
+    p->file[slot].flags = ((flags & SYS_O_WRITE) ? PFILE_WRITE : 0) | ((flags & SYS_O_APPEND) ? PFILE_APPEND : 0);
+    return PROCESS_FD_FIRST + slot;
 }
 
 static long long sys_close(const SyscallFrame *f)
@@ -260,6 +379,10 @@ static long long sys_close(const SyscallFrame *f)
     if (idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
         return -1;
     p->file[idx].node = -1;
+    p->file[idx].flags = 0;
+    for (int k = 0; k < 3; k++)
+        if (p->stdio[k] == (int)idx)
+            p->stdio[k] = -1; /* closing the file that stood in for fd k puts the console back */
     return 0;
 }
 
@@ -302,7 +425,7 @@ static long long sys_seek(const SyscallFrame *f)
  * memory / thread slot. Reading the program file happens inside this call. */
 static long long sys_spawn(const SyscallFrame *f)
 {
-    ull path_ptr = f->rdi, argv_ptr = f->rsi;
+    ull path_ptr = f->rdi, argv_ptr = f->rsi, io_ptr = f->rdx;
     const AddressSpace *as = task_address_space();
     Process *p = process_current();
     if (!as || !p)
@@ -356,8 +479,39 @@ static long long sys_spawn(const SyscallFrame *f)
         }
     }
 
+    /* fd 0, 1, 2 of the child: the files the caller named (its own open descriptors, copied), else what the caller itself has
+     * (a redirected shell passes it on), else the console */
+    int io[3] = {-1, -1, -1};
+    if (io_ptr)
+    {
+        if (!aspace_user_ok(as, io_ptr, sizeof(io), 0))
+            return -1;
+        copy_from_user((char *)io, io_ptr, sizeof(io));
+    }
+    ProcessFile redir[3];
+    int any_redirect = 0;
+    for (int k = 0; k < 3; k++)
+    {
+        redir[k].node = -1;
+        redir[k].pos = redir[k].flags = 0;
+        int idx = p->stdio[k];
+        if (io[k] != -1)
+        {
+            if (io[k] < PROCESS_FD_FIRST || io[k] >= PROCESS_FD_FIRST + PROCESS_MAX_FILES)
+                return -1;
+            idx = io[k] - PROCESS_FD_FIRST;
+            if (p->file[idx].node < 0 || ((p->file[idx].flags & PFILE_WRITE) != 0) != (k != 0))
+                return -1; /* not open, or opened the wrong way round (input must be readable, output writable) */
+        }
+        if (idx >= 0)
+        {
+            redir[k] = p->file[idx];
+            any_redirect = 1;
+        }
+    }
+
     ProcessSpawn sp = {.console = p->console, .argc = argc, .args = blob, .args_len = len, .parent = task_current(),
-                       .cwd = p->cwd};
+                       .cwd = p->cwd, .redirect = any_redirect ? redir : 0};
     int err = 0;
     int id = exec_spawn_node(node, n->name, &sp, &err);
     if (id < 0)
@@ -491,6 +645,126 @@ static long long sys_getcwd(const SyscallFrame *f)
     return n;
 }
 
+/* ---- changing the tree ---------------------------------------------------------------------------------------------- */
+/* Are any of the open files of this process (or the working folder) this node? Deleting or renaming it would leave a stale
+ * descriptor, so it is refused. (Other processes' files are not checked: a read of a deleted file fails cleanly instead,
+ * see file_read.) */
+static int in_use_here(const Process *p, int node)
+{
+    if (p->cwd == node)
+        return 1;
+    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        if (p->file[i].node == node)
+            return 1;
+    return 0;
+}
+
+/* SYS_MKDIR: rdi = path of a new folder inside an existing folder of a drive. 0, or -1 (exists, no such folder, "This PC",
+ * a read-only / locked / full drive, a bad name). */
+static long long sys_mkdir(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    char path[256], name[VFS_NAME_MAX];
+    if (copy_string_from_user(path, (int)sizeof(path), f->rdi, as) < 0)
+        return -1;
+    if (resolve_path(p, path, 0) >= 0)
+        return -1; /* it exists (a file or a folder) */
+    int parent = split_parent(p, path, name, (int)sizeof(name));
+    if (parent < 0)
+        return -1;
+    return vfs_add(parent, name, 1, 0) >= 0 ? 0 : -1;
+}
+
+/* SYS_UNLINK deletes a file, SYS_RMDIR an empty folder. Neither touches a drive's root, and neither follows a path through
+ * a name that does not exist. A file or folder that this process still has open (or is in) is refused. */
+static long long remove_node(const SyscallFrame *f, int want_dir)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), f->rdi, as) < 0)
+        return -1;
+    int node = resolve_path(p, path, 0);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (!n || node == VFS_ROOT || vfs_is_volume_root(node) || (n->is_dir != 0) != want_dir || in_use_here(p, node))
+        return -1;
+    if (want_dir && vfs_subtree_count(node) != 0)
+        return -1; /* not empty */
+    return vfs_remove(node) >= 0 ? 0 : -1;
+}
+
+static long long sys_unlink(const SyscallFrame *f) { return remove_node(f, 0); }
+static long long sys_rmdir(const SyscallFrame *f) { return remove_node(f, 1); }
+
+static int same_name(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++)
+        if ((*a | 32) != (*b | 32))
+            return 0;
+    return *a == *b;
+}
+
+/* SYS_RENAME: rdi = old path, rsi = new path. Either a new name in the same folder, or the same name in another folder of
+ * the same drive (a move); not both at once, and the new path must not exist. 0 or -1. */
+static long long sys_rename(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    char from[256], to[256], name[VFS_NAME_MAX];
+    if (copy_string_from_user(from, (int)sizeof(from), f->rdi, as) < 0 || copy_string_from_user(to, (int)sizeof(to), f->rsi, as) < 0)
+        return -1;
+    int node = resolve_path(p, from, 0);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (!n || node == VFS_ROOT || vfs_is_volume_root(node) || in_use_here(p, node))
+        return -1;
+    int parent = split_parent(p, to, name, (int)sizeof(name));
+    if (parent < 0)
+        return -1;
+    int existing = resolve_path(p, to, 0);
+    if (existing >= 0 && existing != node)
+        return -1; /* the name is taken */
+    int old_parent = n->parent;
+    if (parent == old_parent)
+        return vfs_rename(node, name) >= 0 ? 0 : -1; /* (the same name with other capitals is allowed) */
+    if (!same_name(n->name, name) || n->name[0] == 0)
+        return -1; /* a move that also renames: do it in two steps */
+    if (vfs_volume_of(parent) != vfs_volume_of(node))
+        return -1; /* between drives: copy and delete is the program's job */
+    int moved = vfs_move(node, parent);
+    return moved >= 0 ? 0 : -1;
+}
+
+/* SYS_LOCK: rdi = a path on a drive, rsi = 1 lock writing, 0 unlock it, 2 ask. Drives start LOCKED (blk.h): a mistake in a file
+ * system driver cannot damage a disk nobody has unlocked. Returns the lock state (1 = locked) for 2, 0 for a change that was
+ * made, or -1 (not on a drive, the drive cannot be written at all, cannot be locked / unlocked). */
+static long long sys_lock(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || f->rsi > 2)
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), f->rdi, as) < 0)
+        return -1;
+    int node = resolve_path(p, path, 0);
+    int vol = node >= 0 ? vfs_volume_of(node) : -1;
+    VfsVolInfo info;
+    if (vol < 0 || vfs_volume_info(vol, &info) != 0)
+        return -1;
+    if (f->rsi == 2)
+        return info.locked ? 1 : 0;
+    if (!info.writable || !info.lockable)
+        return -1;
+    return vfs_set_locked(vol, (int)f->rsi) == 0 ? 0 : -1;
+}
+
 /* The heap. Pages are mapped one by one up to the new break; if memory runs out half way, the pages already mapped stay
  * (heap_mapped moves with them, so a retry does not map them twice) but the break does not move. */
 static long long sys_brk(const SyscallFrame *f)
@@ -549,6 +823,16 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_chdir(f);
     case SYS_GETCWD:
         return sys_getcwd(f);
+    case SYS_MKDIR:
+        return sys_mkdir(f);
+    case SYS_UNLINK:
+        return sys_unlink(f);
+    case SYS_RMDIR:
+        return sys_rmdir(f);
+    case SYS_RENAME:
+        return sys_rename(f);
+    case SYS_LOCK:
+        return sys_lock(f);
     default:
         return -1;
     }

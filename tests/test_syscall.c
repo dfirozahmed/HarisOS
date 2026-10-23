@@ -150,6 +150,8 @@ void task_block(void)
 /* ---- spawn and wait: the loader and the exit records are fakes ---- */
 static int SPAWN_CALLS, SPAWN_FAIL, SPAWN_NEXT_PID = 100;
 static int SP_NODE, SP_ARGC, SP_CONSOLE, SP_PARENT, SP_CWD;
+static ProcessFile SP_REDIR[3];
+static int SP_REDIR_N; /* 3 if the last spawn had a redirect array, else 0 */
 static unsigned SP_LEN;
 static char SP_ARGS[PROCESS_ARGS_BYTES], SP_NAME[64];
 
@@ -168,6 +170,9 @@ int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
     SP_CONSOLE = sp->console;
     SP_PARENT = sp->parent;
     SP_CWD = sp->cwd;
+    SP_REDIR_N = sp->redirect ? 3 : 0;
+    if (sp->redirect)
+        memcpy(SP_REDIR, sp->redirect, sizeof(SP_REDIR));
     memcpy(SP_ARGS, sp->args, sp->args_len);
     sp->pid = SPAWN_NEXT_PID++;
     return 3;
@@ -182,25 +187,37 @@ int process_reap(int pid, int *code)
     return 1;
 }
 
-/* ---- the file system: four files and a folder ---- */
-static VfsNode NODES[7]; /* 0 = the root, 6 = the folder "RAM Disk" (holds DIR and readme.txt) */
+/* ---- the file system: a small tree that can change ----
+ *   0 /                 the root
+ *   6   RAM Disk        the one volume
+ *   2     DIR           an empty folder
+ *   3     readme.txt    20 bytes (reads give a pattern)
+ *   1 HELLO.ELF, 4 BAD.BIN, 5 EMPTY.BIN   not in the tree: only exec_find reaches them (like programs on the boot drive)
+ * Nodes made by vfs_add are 7 and up; they keep their bytes (up to FDATA_MAX), so what a program wrote can be read back. */
+#define NNODES 24
+#define FDATA_MAX 4096
+static VfsNode NODES[NNODES];
+static unsigned char FDATA[NNODES][FDATA_MAX];
 static int READ_CALLS;
+static int VFS_READONLY;   /* 1 = every change is refused (a locked drive) */
+static int WRITES, ADDS, REMOVES;
 
 static unsigned char pattern(int id, unsigned off) { return (unsigned char)(off * 7 + 3 + (unsigned)id); }
 
 static void setup_vfs(void)
 {
     memset(NODES, 0, sizeof(NODES));
-    strcpy(NODES[1].name, "HELLO.ELF"); NODES[1].used = 1; NODES[1].size = 600;
-    strcpy(NODES[2].name, "DIR");       NODES[2].used = 1; NODES[2].is_dir = 1;
-    strcpy(NODES[3].name, "readme.txt"); NODES[3].used = 1; NODES[3].size = 20;
-    strcpy(NODES[4].name, "BAD.BIN");   NODES[4].used = 1; NODES[4].size = 2000;
-    strcpy(NODES[5].name, "EMPTY.BIN"); NODES[5].used = 1; NODES[5].size = 0;
+    strcpy(NODES[1].name, "HELLO.ELF"); NODES[1].used = 1; NODES[1].size = 600;  NODES[1].parent = -2;
+    strcpy(NODES[2].name, "DIR");       NODES[2].used = 1; NODES[2].is_dir = 1;  NODES[2].parent = 6;
+    strcpy(NODES[3].name, "readme.txt"); NODES[3].used = 1; NODES[3].size = 20;  NODES[3].parent = 6;
+    strcpy(NODES[4].name, "BAD.BIN");   NODES[4].used = 1; NODES[4].size = 2000; NODES[4].parent = -2;
+    strcpy(NODES[5].name, "EMPTY.BIN"); NODES[5].used = 1; NODES[5].size = 0;    NODES[5].parent = -2;
     NODES[0].used = 1; NODES[0].is_dir = 1; NODES[0].parent = -1;
-    strcpy(NODES[6].name, "RAM Disk"); NODES[6].used = 1; NODES[6].is_dir = 1;
+    strcpy(NODES[6].name, "RAM Disk"); NODES[6].used = 1; NODES[6].is_dir = 1; NODES[6].parent = 0;
+    VFS_READONLY = 0;
 }
 
-const VfsNode *vfs_node(int id) { return id >= 0 && id <= 6 ? &NODES[id] : 0; }
+const VfsNode *vfs_node(int id) { return id >= 0 && id < NNODES && NODES[id].used ? &NODES[id] : 0; }
 
 static int ieq(const char *a, const char *b)
 {
@@ -218,29 +235,60 @@ int exec_find(const char *name)
     return -1;
 }
 
-int vfs_lookup(const char *path)
+static int child_named(int dir, const char *name)
 {
-    if (strcmp(path, "/") == 0)
-        return 0;
-    if (ieq(path, "/RAM Disk"))
-        return 6;
-    if (ieq(path, "/RAM Disk/readme.txt"))
-        return 3;
-    if (ieq(path, "/RAM Disk/DIR"))
-        return 2;
+    for (int i = 0; i < NNODES; i++)
+        if (NODES[i].used && NODES[i].parent == dir && i != dir && ieq(NODES[i].name, name))
+            return i;
     return -1;
 }
 
-/* the tree: / -> RAM Disk -> { DIR, readme.txt }; every other folder is empty */
+int vfs_lookup(const char *path)
+{
+    if (path[0] != '/')
+        return -1;
+    int cur = 0;
+    while (*path)
+    {
+        while (*path == '/')
+            path++;
+        if (!*path)
+            break;
+        char part[96];
+        int n = 0;
+        while (*path && *path != '/')
+        {
+            if (n >= 95)
+                return -1; /* a name longer than the VFS keeps */
+            part[n++] = *path++;
+        }
+        part[n] = 0;
+        if (!NODES[cur].is_dir)
+            return -1;
+        cur = child_named(cur, part);
+        if (cur < 0)
+            return -1;
+    }
+    return cur;
+}
+
+/* children: folders first, then files, each by name */
 int vfs_list(int dir, int *out, int max)
 {
-    int all[2], n = 0;
-    if (dir == 0)
-        all[n++] = 6;
-    else if (dir == 6)
+    int all[NNODES], n = 0;
+    for (int pass = 0; pass < 2; pass++)
     {
-        all[n++] = 2;
-        all[n++] = 3;
+        int first = n;
+        for (int i = 0; i < NNODES; i++)
+            if (NODES[i].used && NODES[i].parent == dir && i != dir && (NODES[i].is_dir != 0) == (pass == 0))
+                all[n++] = i;
+        for (int a = first + 1; a < n; a++) /* insertion sort by name */
+            for (int b = a; b > first && strcmp(NODES[all[b]].name, NODES[all[b - 1]].name) < 0; b--)
+            {
+                int t = all[b];
+                all[b] = all[b - 1];
+                all[b - 1] = t;
+            }
     }
     for (int i = 0; i < n && i < max; i++)
         out[i] = all[i];
@@ -249,13 +297,28 @@ int vfs_list(int dir, int *out, int max)
 
 int vfs_path(int id, char *out, int cap)
 {
-    const char *p = id == 0 ? "/" : id == 6 ? "/RAM Disk" : id == 2 ? "/RAM Disk/DIR" : id == 3 ? "/RAM Disk/readme.txt" : "";
-    int n = (int)strlen(p);
-    if (n + 1 > cap)
-        n = cap - 1;
-    memcpy(out, p, (size_t)n);
-    out[n] = 0;
-    return n;
+    char tmp[256];
+    int len = 0;
+    int chain[16], depth = 0;
+    for (int n = id; n > 0 && depth < 16; n = NODES[n].parent)
+        chain[depth++] = n;
+    if (depth == 0)
+        strcpy(tmp, "/");
+    else
+    {
+        tmp[0] = 0;
+        for (int d = depth - 1; d >= 0; d--)
+        {
+            strcat(tmp, "/");
+            strcat(tmp, NODES[chain[d]].name);
+        }
+    }
+    len = (int)strlen(tmp);
+    if (len + 1 > cap)
+        len = cap - 1;
+    memcpy(out, tmp, (size_t)len);
+    out[len] = 0;
+    return len;
 }
 
 int vfs_read(int id, unsigned offset, void *buf, unsigned len)
@@ -265,16 +328,148 @@ int vfs_read(int id, unsigned offset, void *buf, unsigned len)
     const VfsNode *n = vfs_node(id);
     if (!n)
         return -1;
+    unsigned char *p = (unsigned char *)buf;
+    if (id >= 7) /* a file made here: its own bytes */
+    {
+        if (offset >= n->size)
+            return 0;
+        unsigned got = n->size - offset < len ? n->size - offset : len;
+        memcpy(p, FDATA[id] + offset, got);
+        return (int)got;
+    }
     if (id == 4 && offset >= 1024)
         return -1; /* a drive error half way through the file */
     unsigned end = id == 4 ? 1024 : n->size;
     if (offset >= end)
         return 0;
     unsigned got = end - offset < len ? end - offset : len;
-    unsigned char *p = (unsigned char *)buf;
     for (unsigned i = 0; i < got; i++)
         p[i] = pattern(id, offset + i);
     return (int)got;
+}
+
+int vfs_add(int parent, const char *name, int is_dir, unsigned size)
+{
+    CHECK(host_uaccess == 0);
+    const VfsNode *d = vfs_node(parent);
+    if (VFS_READONLY || !d || !d->is_dir || !name[0] || strchr(name, '/') || child_named(parent, name) >= 0)
+        return -1;
+    for (int i = 7; i < NNODES; i++)
+        if (!NODES[i].used)
+        {
+            memset(&NODES[i], 0, sizeof(NODES[i]));
+            strcpy(NODES[i].name, name);
+            NODES[i].used = 1;
+            NODES[i].is_dir = is_dir;
+            NODES[i].size = size;
+            NODES[i].parent = parent;
+            memset(FDATA[i], 0, FDATA_MAX);
+            ADDS++;
+            return i;
+        }
+    return -1;
+}
+
+int vfs_write(int id, unsigned offset, const void *buf, unsigned len)
+{
+    CHECK(host_uaccess == 0);
+    const VfsNode *n = vfs_node(id);
+    if (VFS_READONLY || !n || n->is_dir || id < 7 || offset > FDATA_MAX)
+        return -1; /* (the ready-made files have no bytes, like the RAM Disk's) */
+    unsigned put = FDATA_MAX - offset < len ? FDATA_MAX - offset : len;
+    if (put == 0)
+        return -1; /* the drive is full */
+    memcpy(FDATA[id] + offset, buf, put);
+    if (offset + put > NODES[id].size)
+        NODES[id].size = offset + put;
+    WRITES++;
+    return (int)put;
+}
+
+int vfs_truncate(int id, unsigned size)
+{
+    if (VFS_READONLY || id < 7 || !vfs_node(id) || size >= NODES[id].size)
+        return -1;
+    NODES[id].size = size;
+    return 0;
+}
+
+static int descendants(int id)
+{
+    int n = 0;
+    for (int i = 0; i < NNODES; i++)
+        if (NODES[i].used && i != id && NODES[i].parent == id && i != 0)
+            n += 1 + descendants(i);
+    return n;
+}
+
+int vfs_subtree_count(int id) { return descendants(id); }
+
+int vfs_remove(int id)
+{
+    CHECK(host_uaccess == 0);
+    if (VFS_READONLY || !vfs_node(id) || id < 7)
+        return -1; /* (the ready-made nodes are not removable here) */
+    int count = 1 + descendants(id);
+    for (int i = 0; i < NNODES; i++)
+        if (NODES[i].used && NODES[i].parent == id)
+            NODES[i].used = 0;
+    NODES[id].used = 0;
+    REMOVES++;
+    return count;
+}
+
+int vfs_rename(int id, const char *name)
+{
+    const VfsNode *n = vfs_node(id);
+    if (VFS_READONLY || !n || !name[0] || strchr(name, '/'))
+        return -1;
+    int other = child_named(n->parent, name);
+    if (other >= 0 && other != id)
+        return -1;
+    strcpy(NODES[id].name, name);
+    return 0;
+}
+
+int vfs_move(int id, int dest)
+{
+    const VfsNode *n = vfs_node(id), *d = vfs_node(dest);
+    if (VFS_READONLY || !n || !d || !d->is_dir || child_named(dest, n->name) >= 0)
+        return -1;
+    NODES[id].parent = dest;
+    return id;
+}
+
+/* the volume's lock: volume 0 (RAM Disk) */
+static int VOL_LOCKED = 1, VOL_WRITABLE = 1, VOL_LOCKABLE = 1;
+
+int vfs_volume_info(int vol, VfsVolInfo *out)
+{
+    if (vol != 0)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    out->node = 6;
+    out->writable = VOL_WRITABLE;
+    out->locked = VOL_LOCKED;
+    out->lockable = VOL_LOCKABLE;
+    return 0;
+}
+
+int vfs_set_locked(int vol, int locked)
+{
+    if (vol != 0 || !VOL_WRITABLE || !VOL_LOCKABLE)
+        return -1;
+    VOL_LOCKED = locked;
+    return 0;
+}
+
+int vfs_is_volume_root(int id) { return id == 6; }
+int vfs_volume_of(int id)
+{
+    for (int n = id; n > 0 && n < NNODES; n = NODES[n].parent)
+        if (n == 6)
+            return 0;
+    return -1;
 }
 
 /* ---- helpers ---- */
@@ -311,6 +506,7 @@ static void reset(void)
     CURRENT_PROC = &PROC;
     PROC.console = -1;
     PROC.own_console = 1;
+    PROC.stdio[0] = PROC.stdio[1] = PROC.stdio[2] = -1;
     PROC.cwd = 0;
     PROC.parent = -1;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
@@ -319,6 +515,7 @@ static void reset(void)
     {
         PROC.file[i].node = -1;
         PROC.file[i].pos = 0;
+        PROC.file[i].flags = 0;
     }
     READ_CALLS = 0;
     host_uaccess = 0;
@@ -760,6 +957,229 @@ int main(void)
         CHECK(call(SYS_CHDIR, U("/"), 0, 0) == -1 && call(SYS_GETCWD, U(cwd), sizeof(cwd), 0) == -1);
         CURRENT_PROC = &PROC;
     }
+
+    /* ================= writing files, mkdir, unlink, rmdir, rename, redirection ================= */
+    reset();
+    {
+        SysDirEntry e;
+        memset(&e, 0, sizeof(e));
+        char rb[64];
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/W"), 0, 0) == 0);
+        CHECK(call(SYS_STAT, U("/RAM Disk/W"), U(&e), 0) == 0 && e.is_dir == 1);
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/W"), 0, 0) == -1);                 /* exists */
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/readme.txt"), 0, 0) == -1);        /* a file is there */
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/W/"), 0, 0) == -1);                /* exists, with a trailing slash */
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/no/such"), 0, 0) == -1);           /* the folder part is missing */
+        CHECK(call(SYS_MKDIR, U("/Top"), 0, 0) == -1 && call(SYS_MKDIR, U("Top"), 0, 0) == -1); /* nothing but drives in "This PC" */
+        CHECK(call(SYS_MKDIR, U(""), 0, 0) == -1 && call(SYS_MKDIR, U("/RAM Disk/."), 0, 0) == -1);
+        VFS_READONLY = 1;
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/X"), 0, 0) == -1);                 /* a locked drive */
+        VFS_READONLY = 0;
+        USER_OK = 0;
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/Y"), 0, 0) == -1);                 /* bad pointer */
+        USER_OK = 1;
+
+        CHECK(call(SYS_CHDIR, U("/RAM Disk/W"), 0, 0) == 0);
+
+        /* create, write, read back */
+        CHECK(call(SYS_OPEN, U("f.txt"), 0, 0) == -1);                        /* there is no such file */
+        long long fd = call(SYS_OPEN, U("f.txt"), SYS_O_WRITE | SYS_O_CREATE, 0);
+        CHECK(fd >= 3 && PROC.file[fd - 3].flags == PFILE_WRITE);
+        CHECK(call(SYS_WRITE, (ull)fd, U("hello"), 5) == 5 && call(SYS_WRITE, (ull)fd, U(" world"), 6) == 6);
+        CHECK(call(SYS_WRITE, (ull)fd, U("x"), 0) == 0);
+        CHECK(call(SYS_READ, (ull)fd, U(rb), 4) == -1);                        /* opened for writing only */
+        CHECK(call(SYS_SEEK, (ull)fd, 0, 2) == 11);
+        CHECK(call(SYS_STAT, U("f.txt"), U(&e), 0) == 0 && e.size == 11 && !e.is_dir);
+        CHECK(call(SYS_CLOSE, (ull)fd, 0, 0) == 0);
+        fd = call(SYS_OPEN, U("f.txt"), 0, 0);
+        memset(rb, 0, sizeof(rb));
+        CHECK(fd >= 3 && call(SYS_READ, (ull)fd, U(rb), 32) == 11 && strcmp(rb, "hello world") == 0);
+        CHECK(call(SYS_WRITE, (ull)fd, U("zz"), 2) == -1);                     /* opened for reading */
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+
+        /* flags */
+        CHECK(call(SYS_OPEN, U("f.txt"), 16, 0) == -1);                        /* no such flag */
+        CHECK(call(SYS_OPEN, U("f.txt"), SYS_O_CREATE, 0) == -1 && call(SYS_OPEN, U("f.txt"), SYS_O_TRUNC, 0) == -1 &&
+              call(SYS_OPEN, U("f.txt"), SYS_O_APPEND, 0) == -1);              /* they need WRITE */
+        fd = call(SYS_OPEN, U("f.txt"), SYS_O_WRITE | SYS_O_CREATE, 0);        /* existing: kept, position 0 */
+        CHECK(fd >= 3 && call(SYS_STAT, U("f.txt"), U(&e), 0) == 0 && e.size == 11);
+        CHECK(call(SYS_WRITE, (ull)fd, U("J"), 1) == 1);                       /* overwrites the first byte */
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+        fd = call(SYS_OPEN, U("f.txt"), SYS_O_WRITE | SYS_O_APPEND, 0);
+        CHECK(fd >= 3 && call(SYS_WRITE, (ull)fd, U("!"), 1) == 1 && call(SYS_WRITE, (ull)fd, U("?"), 1) == 1);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+        fd = call(SYS_OPEN, U("f.txt"), 0, 0);
+        memset(rb, 0, sizeof(rb));
+        CHECK(call(SYS_READ, (ull)fd, U(rb), 32) == 13 && strcmp(rb, "Jello world!?") == 0);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+        fd = call(SYS_OPEN, U("f.txt"), SYS_O_WRITE | SYS_O_TRUNC, 0);
+        CHECK(fd >= 3 && call(SYS_STAT, U("f.txt"), U(&e), 0) == 0 && e.size == 0);
+        CHECK(call(SYS_WRITE, (ull)fd, U("xy"), 2) == 2);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+
+        /* what cannot be opened for writing / created */
+        CHECK(call(SYS_OPEN, U("/RAM Disk/W"), SYS_O_WRITE, 0) == -1);         /* a folder */
+        CHECK(call(SYS_OPEN, U("/nodir/f"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
+        CHECK(call(SYS_OPEN, U("/f"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);   /* "This PC" holds drives only */
+        CHECK(call(SYS_OPEN, U("a/b"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
+        CHECK(call(SYS_OPEN, U("dir/"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
+        CHECK(call(SYS_OPEN, U(".."), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
+        char longname[120];
+        memset(longname, 'n', sizeof(longname) - 1);
+        longname[sizeof(longname) - 1] = 0;
+        CHECK(call(SYS_OPEN, U(longname), SYS_O_WRITE | SYS_O_CREATE, 0) == -1); /* longer than a VFS name */
+        VFS_READONLY = 1;
+        CHECK(call(SYS_OPEN, U("new.txt"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
+        fd = call(SYS_OPEN, U("f.txt"), SYS_O_WRITE, 0);
+        CHECK(fd >= 3 && call(SYS_WRITE, (ull)fd, U("q"), 1) == -1);           /* the drive refuses the write */
+        CHECK(call(SYS_OPEN, U("f.txt"), SYS_O_WRITE | SYS_O_TRUNC, 0) == -1);
+        VFS_READONLY = 0;
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+
+        /* a plain name for writing is the working folder, never the programs' folder */
+        fd = call(SYS_OPEN, U("HELLO.ELF"), SYS_O_WRITE | SYS_O_CREATE, 0);
+        CHECK(fd >= 3 && PROC.file[fd - 3].node != 1 && PROC.file[fd - 3].node >= 7);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+        CHECK(call(SYS_UNLINK, U("HELLO.ELF"), 0, 0) == 0);
+
+        /* a full drive: a short write, then nothing */
+        fd = call(SYS_OPEN, U("big"), SYS_O_WRITE | SYS_O_CREATE, 0);
+        static char blk[4096];
+        memset(blk, 'b', sizeof(blk));
+        CHECK(fd >= 3 && call(SYS_WRITE, (ull)fd, U(blk), 4000) == 4000);
+        CHECK(call(SYS_WRITE, (ull)fd, U(blk), 200) == 96);                    /* only 96 bytes were left */
+        CHECK(call(SYS_WRITE, (ull)fd, U(blk), 10) == -1);
+        call(SYS_CLOSE, (ull)fd, 0, 0);
+
+        /* redirection: a file standing in for fd 1 and fd 0 */
+        reset();
+        PROC.console = 4;
+        CHECK(call(SYS_CHDIR, U("/RAM Disk/W"), 0, 0) == 0);
+        long long out = call(SYS_OPEN, U("out.txt"), SYS_O_WRITE | SYS_O_CREATE, 0);
+        long long in = call(SYS_OPEN, U("f.txt"), 0, 0);
+        CHECK(out >= 3 && in >= 3);
+        PROC.stdio[1] = (int)out - 3;
+        PROC.stdio[0] = (int)in - 3;
+        CON_OUT_N = 0;
+        CHECK(call(SYS_WRITE, 1, U("to file"), 7) == 7 && CON_OUT_N == 0 && CON_WRITES == 0);
+        CHECK(call(SYS_STAT, U("out.txt"), U(&e), 0) == 0 && e.size == 7);
+        CHECK(call(SYS_READ, 0, U(rb), 2) == 2 && rb[0] == 'x' && rb[1] == 'y');   /* fd 0 is f.txt now */
+        CHECK(call(SYS_WRITE, 2, U("!"), 1) == 1 && CON_WRITES == 1);                /* fd 2 is still the console */
+        CHECK(call(SYS_CLOSE, (ull)out, 0, 0) == 0 && PROC.stdio[1] == -1);         /* closing puts the console back */
+        CHECK(call(SYS_WRITE, 1, U("back"), 4) == 4 && CON_WRITES == 2);
+        PROC.stdio[0] = -1;
+        call(SYS_CLOSE, (ull)in, 0, 0);
+
+        /* SYS_SPAWN with io: the caller's descriptors become the child's fd 0 / 1 / 2 */
+        out = call(SYS_OPEN, U("out2.txt"), SYS_O_WRITE | SYS_O_CREATE, 0);
+        in = call(SYS_OPEN, U("f.txt"), 0, 0);
+        int io[3] = {(int)in, (int)out, (int)out};
+        SP_REDIR_N = 0;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io)) > 0 && SP_REDIR_N == 3);
+        CHECK(SP_REDIR[0].node == PROC.file[in - 3].node && !(SP_REDIR[0].flags & PFILE_WRITE));
+        CHECK(SP_REDIR[1].node == PROC.file[out - 3].node && (SP_REDIR[1].flags & PFILE_WRITE) && SP_REDIR[2].node == SP_REDIR[1].node);
+        PROC.child[0] = 0;
+        int only_out[3] = {-1, (int)out, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(only_out)) > 0 && SP_REDIR[0].node < 0 && SP_REDIR[1].node >= 7 && SP_REDIR[2].node < 0);
+        PROC.child[0] = 0;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U((int[3]){-1, -1, -1})) > 0 && SP_REDIR_N == 0); /* nothing redirected */
+        PROC.child[0] = 0;
+        PROC.stdio[1] = (int)out - 3; /* the caller is redirected itself: the child inherits it */
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) > 0 && SP_REDIR_N == 3 && SP_REDIR[1].node >= 7 && SP_REDIR[0].node < 0);
+        PROC.child[0] = 0;
+        PROC.stdio[1] = -1;
+        int wrong_way[3] = {(int)out, -1, -1}; /* an output file as input */
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(wrong_way)) == -1);
+        int wrong_way2[3] = {-1, (int)in, -1}; /* an input file as output */
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(wrong_way2)) == -1);
+        int bad_fd[3] = {-1, 2, -1}, closed_fd[3] = {-1, 7, -1}, far_fd[3] = {-1, 99, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(bad_fd)) == -1 && call(SYS_SPAWN, U("HELLO.ELF"), 0, U(closed_fd)) == -1 &&
+              call(SYS_SPAWN, U("HELLO.ELF"), 0, U(far_fd)) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0x1000) == -1);               /* bad pointer for io */
+        USER_OK = 1;
+        call(SYS_CLOSE, (ull)out, 0, 0);
+        call(SYS_CLOSE, (ull)in, 0, 0);
+
+        /* rename and move */
+        reset();
+        CHECK(call(SYS_CHDIR, U("/RAM Disk/W"), 0, 0) == 0);
+        CHECK(call(SYS_RENAME, U("f.txt"), U("g.txt"), 0) == 0 && call(SYS_STAT, U("g.txt"), U(&e), 0) == 0 && e.size == 2);
+        CHECK(call(SYS_STAT, U("f.txt"), U(&e), 0) == -1);
+        CHECK(call(SYS_RENAME, U("g.txt"), U("out.txt"), 0) == -1);              /* the name is taken */
+        CHECK(call(SYS_RENAME, U("g.txt"), U("G.TXT"), 0) == 0 && call(SYS_STAT, U("g.txt"), U(&e), 0) == 0);
+        CHECK(call(SYS_RENAME, U("nothing"), U("x"), 0) == -1);
+        CHECK(call(SYS_RENAME, U("g.txt"), U(""), 0) == -1 && call(SYS_RENAME, U("g.txt"), U("a/"), 0) == -1);
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/W2"), 0, 0) == 0);
+        CHECK(call(SYS_RENAME, U("g.txt"), U("/RAM Disk/W2/g.txt"), 0) == 0);    /* a move */
+        CHECK(call(SYS_STAT, U("/RAM Disk/W2/g.txt"), U(&e), 0) == 0 && e.size == 2 && call(SYS_STAT, U("g.txt"), U(&e), 0) == -1);
+        CHECK(call(SYS_RENAME, U("/RAM Disk/W2/g.txt"), U("/RAM Disk/W/h.txt"), 0) == -1); /* move and rename at once */
+        CHECK(call(SYS_RENAME, U("/RAM Disk/W2/g.txt"), U("/RAM Disk/W2/g.txt"), 0) == 0); /* onto itself: nothing to do */
+        CHECK(call(SYS_RENAME, U("/RAM Disk"), U("/Disk2"), 0) == -1 && call(SYS_RENAME, U("/"), U("/x"), 0) == -1); /* drives stay */
+        long long held = call(SYS_OPEN, U("/RAM Disk/W2/g.txt"), 0, 0);
+        CHECK(held >= 3 && call(SYS_RENAME, U("/RAM Disk/W2/g.txt"), U("/RAM Disk/W2/k.txt"), 0) == -1); /* open here */
+        call(SYS_CLOSE, (ull)held, 0, 0);
+        VFS_READONLY = 1;
+        CHECK(call(SYS_RENAME, U("/RAM Disk/W2/g.txt"), U("/RAM Disk/W2/k.txt"), 0) == -1);
+        VFS_READONLY = 0;
+
+        /* delete */
+        held = call(SYS_OPEN, U("/RAM Disk/W2/g.txt"), 0, 0);
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/W2/g.txt"), 0, 0) == -1);            /* still open */
+        call(SYS_CLOSE, (ull)held, 0, 0);
+        CHECK(call(SYS_RMDIR, U("/RAM Disk/W2"), 0, 0) == -1);                   /* not empty */
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/W2"), 0, 0) == -1);                  /* a folder: that is rmdir */
+        CHECK(call(SYS_RMDIR, U("/RAM Disk/W2/g.txt"), 0, 0) == -1);             /* a file: that is unlink */
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/W2/g.txt"), 0, 0) == 0 && call(SYS_STAT, U("/RAM Disk/W2/g.txt"), U(&e), 0) == -1);
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/W2/g.txt"), 0, 0) == -1);            /* gone */
+        CHECK(call(SYS_UNLINK, U("/RAM Disk"), 0, 0) == -1 && call(SYS_RMDIR, U("/RAM Disk"), 0, 0) == -1 &&
+              call(SYS_RMDIR, U("/"), 0, 0) == -1);                              /* never a drive or the top */
+        CHECK(call(SYS_UNLINK, U("nothing"), 0, 0) == -1 && call(SYS_UNLINK, U(""), 0, 0) == -1);
+        CHECK(call(SYS_RMDIR, U("/RAM Disk/DIR"), 0, 0) == -1);                  /* (the fake refuses ready-made nodes) */
+        CHECK(call(SYS_CHDIR, U("/RAM Disk/W2"), 0, 0) == 0);
+        CHECK(call(SYS_RMDIR, U("/RAM Disk/W2"), 0, 0) == -1);                   /* it is the working folder */
+        CHECK(call(SYS_CHDIR, U("/"), 0, 0) == 0);
+        VFS_READONLY = 1;
+        CHECK(call(SYS_RMDIR, U("/RAM Disk/W2"), 0, 0) == -1);
+        VFS_READONLY = 0;
+        CHECK(call(SYS_RMDIR, U("/RAM Disk/W2"), 0, 0) == 0);
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/W/out.txt"), 0, 0) == 0);
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/W/out2.txt"), 0, 0) == 0);
+        CHECK(call(SYS_UNLINK, U("/RAM Disk/W/big"), 0, 0) == 0);
+        CHECK(call(SYS_RMDIR, U("/RAM Disk/W"), 0, 0) == 0);
+        CHECK(call(SYS_STAT, U("/RAM Disk/W"), U(&e), 0) == -1);
+
+        /* a kernel thread cannot change anything */
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_MKDIR, U("/RAM Disk/Z"), 0, 0) == -1 && call(SYS_UNLINK, U("/RAM Disk/readme.txt"), 0, 0) == -1 &&
+              call(SYS_RENAME, U("/RAM Disk/readme.txt"), U("/RAM Disk/r"), 0) == -1 && call(SYS_OPEN, U("/RAM Disk/n"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
+        CURRENT_PROC = &PROC;
+    }
+
+    /* ================= lock ================= */
+    reset();
+    VOL_LOCKED = 1;
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 2, 0) == 1);                          /* ask: locked */
+    CHECK(call(SYS_LOCK, U("/RAM Disk/DIR"), 0, 0) == 0 && VOL_LOCKED == 0);   /* any path on the drive */
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 2, 0) == 0);
+    CHECK(call(SYS_LOCK, U("/RAM Disk/readme.txt"), 1, 0) == 0 && VOL_LOCKED == 1);
+    CHECK(call(SYS_CHDIR, U("/RAM Disk"), 0, 0) == 0 && call(SYS_LOCK, U("."), 0, 0) == 0 && VOL_LOCKED == 0); /* the drive I am in */
+    CHECK(call(SYS_CHDIR, U("/"), 0, 0) == 0);
+    CHECK(call(SYS_LOCK, U("/"), 2, 0) == -1 && call(SYS_LOCK, U("/nothing"), 0, 0) == -1);  /* not a drive */
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 3, 0) == -1 && call(SYS_LOCK, U("/RAM Disk"), ~0ULL, 0) == -1);
+    VOL_LOCKABLE = 0;
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 1, 0) == -1 && VOL_LOCKED == 0);      /* cannot be locked: unchanged */
+    VOL_LOCKABLE = 1;
+    VOL_WRITABLE = 0;
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 0, 0) == -1);                         /* no write driver at all */
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 2, 0) == 0);                          /* asking still works */
+    VOL_WRITABLE = 1;
+    USER_OK = 0;
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 0, 0) == -1);
+    USER_OK = 1;
+    CURRENT_PROC = 0;
+    CHECK(call(SYS_LOCK, U("/RAM Disk"), 2, 0) == -1);
+    CURRENT_PROC = &PROC;
 
     /* ================= yield, exit, unknown ================= */
     reset();

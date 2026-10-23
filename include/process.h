@@ -42,6 +42,19 @@ int process_start_elf(const char *name, const void *file, unsigned long long siz
 #define PROCESS_ARGS_MAX 32
 #define PROCESS_ARGS_BYTES 2048
 #define PROCESS_MAX_CHILDREN 8
+
+/* An open file of a process. */
+#define PROCESS_MAX_FILES 5
+#define PROCESS_FD_FIRST 3 /* file descriptors 0, 1 and 2 are the console: input, output, errors (unless redirected) */
+#define PFILE_WRITE 1      /* opened for writing (SYS_O_WRITE): reads are refused */
+#define PFILE_APPEND 2     /* every write goes to the end */
+typedef struct
+{
+    int node;       /* VFS node, -1 = this slot is free */
+    unsigned pos;   /* the read / write position */
+    unsigned flags; /* PFILE_* */
+} ProcessFile;
+
 typedef struct
 {
     int console;
@@ -51,6 +64,9 @@ typedef struct
     int parent;
     int cwd; /* working folder (a VFS node id, 0 = the root); a child normally gets its parent's */
     int pid;
+    /* NULL, or three files that stand in for fd 0, 1, 2 of the child (node < 0 = leave that one on the console). Two entries
+     * with the same node and flags share one open file (and so one position): "cmd > out 2>&1". */
+    const ProcessFile *redirect;
 } ProcessSpawn;
 
 /* process_start_elf with a ProcessSpawn: returns the thread id or -1 (*err as there). */
@@ -62,8 +78,6 @@ int process_reap(int pid, int *code);
 
 /* What the kernel keeps for a running process besides its address space (the thread's `data`, see task.h). The system
  * calls reach it with process_current(). */
-#define PROCESS_MAX_FILES 5
-#define PROCESS_FD_FIRST 3 /* file descriptors 0, 1 and 2 are the console: input, output, errors */
 #define PROCESS_HEAP_MAX (64ULL * 1024 * 1024) /* the most SYS_BRK lets a program grow its heap to */
 typedef struct Process
 {
@@ -77,11 +91,8 @@ typedef struct Process
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
      * rounded up). Lowering the break keeps the pages: they are given back when the process ends. */
     unsigned long long heap_base, heap_brk, heap_mapped, heap_limit;
-    struct
-    {
-        int node;     /* VFS node of an open file, -1 = this slot is free (file descriptor PROCESS_FD_FIRST + index) */
-        unsigned pos; /* the read position */
-    } file[PROCESS_MAX_FILES];
+    ProcessFile file[PROCESS_MAX_FILES]; /* file descriptor PROCESS_FD_FIRST + index */
+    int stdio[3]; /* fd 0, 1, 2: -1 = the console, else the index in file[] that stands in for it (shell redirection) */
 } Process;
 
 Process *process_current(void); /* the running process, NULL in a kernel thread */

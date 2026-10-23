@@ -17,7 +17,7 @@
  *                  newline included, at most one line per call; 0 when the window is closed or there is no window.
  *                  A file descriptor from SYS_OPEN reads the file from its current position and moves it; a call may
  *                  return fewer bytes than asked (at most SYS_READ_MAX at once). -1 for a bad fd or buffer.
- *   SYS_OPEN  (5)  rdi = pointer to a NUL-terminated path, rsi = flags (0 = read only, the only kind). Returns a file
+ *   SYS_OPEN  (5)  rdi = pointer to a NUL-terminated path, rsi = flags (see SYS_O_*; 0 = read only). Returns a file
  *                  descriptor (3 and up) or -1. A path without '/' is a file name looked up in the top folder of every
  *                  drive ("HELLO.ELF"); a path starting with '/' is a VFS path ("/RAM Disk/Documents/readme.txt").
  *                  At most PROCESS_MAX_FILES files are open at once.
@@ -49,6 +49,24 @@
  * Paths (SYS_OPEN, SYS_SPAWN, SYS_READDIR, SYS_STAT, SYS_CHDIR): one that starts with '/' is absolute. Any other is
  * relative to the working folder; "." and ".." are understood. SYS_OPEN and SYS_SPAWN also accept a plain file name that
  * is not found there and look it up in the top folder of every drive ("HELLO.ELF": where the programs are).
+ *   SYS_MKDIR (15) rdi = path of a new folder (inside an existing folder of a drive). 0, or -1.
+ *   SYS_UNLINK (16) rdi = path of a file to delete. 0, or -1 (not a file, a drive root, in use by this process).
+ *   SYS_RMDIR (17) rdi = path of an EMPTY folder to delete. 0, or -1.
+ *   SYS_RENAME (18) rdi = old path, rsi = new path (must not exist): a new name in the same folder, or the same name in
+ *                  another folder of the same drive. 0, or -1.
+ *   SYS_LOCK (19) rdi = a path on a drive, rsi = 1 lock writing, 0 unlock, 2 ask. Drives start locked (blk.h), so a program that
+ *                  writes must unlock the drive first (the "lock" program does). Returns 1 / 0 for "ask" (locked or not), 0 for
+ *                  a change, -1 if the path is not on a drive, the drive cannot be written, or the lock cannot be changed.
+ *
+ * Writing: SYS_OPEN with SYS_O_WRITE (and CREATE / TRUNC / APPEND) gives a descriptor SYS_WRITE can use (any length up to
+ * SYS_WRITE_MAX; it returns the bytes written, fewer if the drive refused part way, or -1: read only / locked / full
+ * drive, the RAM Disk (its files have no content), not opened for writing). A plain name for writing means the working
+ * folder, never the programs' folder. Changes reach the drive at once.
+ *
+ * SYS_SPAWN (9) takes a third argument, rdx: 0, or a pointer to three ints = the caller's open descriptors that become the
+ * child's fd 0 (readable file), fd 1 and fd 2 (files opened for writing); -1 leaves that one as it is (the caller's own
+ * redirection if it has one, else the console). The caller closes its copies afterwards. This is how a shell does
+ * "cmd > file", "cmd >> file" and "cmd < file".
  *   anything else  returns -1.
  *
  * What the CPU does on SYSCALL: RIP goes to LSTAR, CS / SS are loaded from STAR (kernel code / data), the return address
@@ -77,6 +95,17 @@
 #define SYS_STAT 12
 #define SYS_CHDIR 13
 #define SYS_GETCWD 14
+#define SYS_MKDIR 15
+#define SYS_UNLINK 16
+#define SYS_RMDIR 17
+#define SYS_RENAME 18
+#define SYS_LOCK 19
+
+/* SYS_OPEN flags */
+#define SYS_O_WRITE 1  /* open for writing (then it cannot be read) */
+#define SYS_O_CREATE 2 /* with WRITE: make the file if there is none */
+#define SYS_O_TRUNC 4  /* with WRITE: cut it to nothing */
+#define SYS_O_APPEND 8 /* with WRITE: every write goes to the end */
 
 #define SYS_WRITE_MAX 4096 /* one write call sends at most this many bytes */
 #define SYS_READ_MAX 65536 /* one read call returns at most this many bytes */

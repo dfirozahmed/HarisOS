@@ -21,6 +21,16 @@
 #define SYS_STAT 12
 #define SYS_CHDIR 13
 #define SYS_GETCWD 14
+#define SYS_MKDIR 15
+#define SYS_UNLINK 16
+#define SYS_RMDIR 17
+#define SYS_RENAME 18
+#define SYS_LOCK 19
+
+#define SYS_O_WRITE 1
+#define SYS_O_CREATE 2
+#define SYS_O_TRUNC 4
+#define SYS_O_APPEND 8
 
 typedef unsigned long long usize;
 
@@ -55,6 +65,16 @@ static inline long long sys_stat(const char *path, DirEntry *e) { return syscall
 static inline long long sys_chdir(const char *path) { return syscall3(SYS_CHDIR, (long long)(usize)path, 0, 0); }
 /* the working folder into buf (NUL-terminated); its length, or -1 */
 static inline long long sys_getcwd(char *buf, usize size) { return syscall3(SYS_GETCWD, (long long)(usize)buf, (long long)size, 0); }
+/* open with flags (SYS_O_*): sys_open(path) is the read-only form */
+static inline long long sys_open_flags(const char *path, unsigned flags) { return syscall3(SYS_OPEN, (long long)(usize)path, flags, 0); }
+static inline long long sys_mkdir(const char *path) { return syscall3(SYS_MKDIR, (long long)(usize)path, 0, 0); }
+static inline long long sys_unlink(const char *path) { return syscall3(SYS_UNLINK, (long long)(usize)path, 0, 0); }
+static inline long long sys_rmdir(const char *path) { return syscall3(SYS_RMDIR, (long long)(usize)path, 0, 0); }
+static inline long long sys_rename(const char *from, const char *to) { return syscall3(SYS_RENAME, (long long)(usize)from, (long long)(usize)to, 0); }
+/* drive lock: 1 = lock, 0 = unlock, 2 = ask (returns 1 if locked); see SYS_LOCK in include/syscall.h */
+static inline long long sys_lock(const char *path, int mode) { return syscall3(SYS_LOCK, (long long)(usize)path, mode, 0); }
+/* sys_spawn with redirection: io[0..2] = open descriptors for the child's fd 0, 1, 2, or -1 to leave one alone */
+static inline long long sys_spawn_io(const char *path, const char *const *argv, const int *io) { return syscall3(SYS_SPAWN, (long long)(usize)path, (long long)(usize)argv, (long long)(usize)io); }
 static inline void sys_yield(void) { syscall3(SYS_YIELD, 0, 0, 0); }
 
 __attribute__((noreturn)) static inline void sys_exit(int code)
