@@ -314,6 +314,20 @@ int exec_selftest(void)
     if (s2.exited != s1.exited + 1 || s2.last_exit != 43)
         return -12 - (s2.last_exit > 0 && s2.last_exit < 43 ? s2.last_exit : 0); /* -13 ... -54: which check failed */
 
+    /* the user C library: LIBCTEST.ELF checks string / memory / number / printf functions (optional); exits with 44 */
+    if (exec_find("LIBCTEST.ELF") >= 0)
+    {
+        id = exec_run("LIBCTEST.ELF", &err);
+        if (id < 0)
+            return -60;
+        if (process_wait(id) != 0)
+            return -61;
+        ProcessStats s3;
+        process_stats(&s3);
+        if (s3.last_exit != 44)
+            return -62 - (s3.last_exit > 0 && s3.last_exit < 44 ? s3.last_exit : 0); /* -63 ... -105: which check failed */
+    }
+
     /* floating point / SSE registers are kept apart per process (FPUA.ELF and FPUB.ELF are optional) */
     if (exec_find("FPUA.ELF") >= 0 && exec_find("FPUB.ELF") >= 0)
     {
