@@ -20,6 +20,7 @@
 #include "mq.h"
 #include "pipe.h"
 #include "sem.h"
+#include "usync.h"
 #include "shm.h"
 
 #define PROCESS_IMAGE_MAX (64 * 1024)
@@ -68,7 +69,15 @@ static inline int pfile_is_pipe(const ProcessFile *f) { return f->node >= PROCES
 /* ... or a semaphore (sem.h): node = PROCESS_SEM_NODE + its number. SYS_SEM_* work on it; it cannot be read, written or seeked. */
 #define PROCESS_SEM_NODE 0x60000000
 static inline int pfile_is_mq(const ProcessFile *f) { return f->node >= PROCESS_MQ_NODE && f->node < PROCESS_SEM_NODE; }
-static inline int pfile_is_sem(const ProcessFile *f) { return f->node >= PROCESS_SEM_NODE; }
+/* ... or a named mutex (usync.h): node = PROCESS_MUTEX_NODE + its number; or a condition variable: node = PROCESS_COND_NODE + its number.
+ * SYS_MUTEX_* / SYS_COND_* work on them; they cannot be read, written or seeked. */
+#define PROCESS_MUTEX_NODE 0x70000000
+#define PROCESS_COND_NODE 0x78000000
+static inline int pfile_is_sem(const ProcessFile *f) { return f->node >= PROCESS_SEM_NODE && f->node < PROCESS_MUTEX_NODE; }
+static inline int pfile_is_mutex(const ProcessFile *f) { return f->node >= PROCESS_MUTEX_NODE && f->node < PROCESS_COND_NODE; }
+static inline int pfile_is_cond(const ProcessFile *f) { return f->node >= PROCESS_COND_NODE; }
+static inline int pfile_is_usync(const ProcessFile *f) { return f->node >= PROCESS_MUTEX_NODE; }
+static inline int pfile_usync(const ProcessFile *f) { return f->node >= PROCESS_COND_NODE ? f->node - PROCESS_COND_NODE : f->node - PROCESS_MUTEX_NODE; }
 static inline int pfile_sem(const ProcessFile *f) { return f->node - PROCESS_SEM_NODE; }
 static inline int pfile_is_object(const ProcessFile *f) { return f->node >= PROCESS_MQ_NODE; } /* a queue or a semaphore: not a stdin / stdout */
 static inline int pfile_mq(const ProcessFile *f) { return f->node - PROCESS_MQ_NODE; }
@@ -83,6 +92,8 @@ static inline void pfile_ref(const ProcessFile *f)
         mq_ref(pfile_mq(f));
     else if (f->node >= 0 && pfile_is_sem(f))
         sem_ref(pfile_sem(f));
+    else if (f->node >= 0 && pfile_is_usync(f))
+        usync_ref(pfile_usync(f));
 }
 
 /* Close an open slot: a pipe end is given back to the pipe (waking whoever waits on it). Safe on a free slot. */
@@ -94,6 +105,8 @@ static inline void pfile_close(ProcessFile *f)
         mq_unref(pfile_mq(f));
     else if (f->node >= 0 && pfile_is_sem(f))
         sem_unref(pfile_sem(f));
+    else if (f->node >= 0 && pfile_is_usync(f))
+        usync_unref(pfile_usync(f));
     f->node = -1;
     f->pos = f->flags = 0;
 }

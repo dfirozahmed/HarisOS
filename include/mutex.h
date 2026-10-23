@@ -16,8 +16,9 @@
  * several threads wait, the one with the highest priority (task_priority) is woken first; a thread that ended while waiting is
  * skipped. A woken thread checks again, so another thread may take the lock first ("barging"); it then sleeps again.
  *
- * Limits: no priority inheritance (a low-priority holder can keep a high-priority waiter waiting), no recursive locking, and a
- * lock whose holder is killed stays locked. The main loop (thread 0) never blocks: task_block() only yields there, so it spins
+ * Limits: no priority inheritance (a low-priority holder can keep a high-priority waiter waiting) and no recursive locking. A
+ * holder that ended or was killed loses the lock (the next lock / trylock takes it back); only the thread id is remembered, so
+ * a new thread that reuses that slot would look like the old holder. The main loop (thread 0) never blocks: task_block() only yields there, so it spins
  * politely instead of sleeping. Do not lock from an interrupt handler.
  * ============================================================ */
 #ifndef HARIS_MUTEX_H
@@ -42,6 +43,14 @@ int mutex_lock(Mutex *m);
 int mutex_trylock(Mutex *m);
 int mutex_unlock(Mutex *m);
 int mutex_held(const Mutex *m); /* 1 if the running thread holds it */
+
+/* For the system call layer (usync.h), which sleeps in its own loop so that a signal can end the wait: register / forget `task` as
+ * a sleeper. The caller loops on mutex_trylock (or cond_waiting) and calls task_block() with interrupts off. */
+void mutex_wait_for(Mutex *m, int task);
+void mutex_cancel_wait(Mutex *m, int task);
+void cond_wait_for(CondVar *c, int task);
+void cond_cancel_wait(CondVar *c, int task);
+int cond_waiting(const CondVar *c, int task);
 
 void cond_init(CondVar *c);
 int cond_wait(CondVar *c, Mutex *m);

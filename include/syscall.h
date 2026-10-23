@@ -110,6 +110,18 @@
  *   SYS_SIGRETURN (40) only for the stub: back to where the process was when the handler started (see usersig.h).
  *   SYS_SIGMASK (41) rdi = mask (bit n = block signal n; only SIGINT and SIGTERM): a blocked signal waits until it is unblocked. Returns
  *                  the old mask. (A handler runs with its own signal blocked.)
+ *   SYS_MUTEX_OPEN (42) rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL): a descriptor for a named mutex (see mutex.h, usync.h), or -1. At most 16
+ *                  mutexes and condition variables together. SYS_CLOSE lets go; fork copies it. It cannot be read, written or seeked.
+ *   SYS_MUTEX_LOCK (43) rdi = descriptor, rsi = 0: take it, sleeping while another process holds it (0 returned); rsi = 1: only try (1 if it is
+ *                  held). -1: not a mutex, the caller holds it already, or a signal handler interrupted the wait. A holder that ends or is
+ *                  killed loses it.
+ *   SYS_MUTEX_UNLOCK (44) rdi = descriptor: release it and wake the waiter with the highest priority. 0, or -1 if the caller does not hold it.
+ *   SYS_COND_OPEN (45) rdi = name, rsi = flags: a descriptor for a named condition variable (a separate namespace from mutexes), or -1.
+ *   SYS_COND_WAIT (46) rdi = condition variable, rsi = mutex held by the caller: release the mutex, sleep until signalled, take the mutex again.
+ *                  0, or -1 (wrong descriptors, mutex not held, or a signal handler interrupted the sleep: the mutex is held again then too).
+ *                  Check the condition in a loop.
+ *   SYS_COND_SIGNAL (47) rdi = condition variable, rsi = 0: wake one sleeper, 1: wake all. Lost if nobody sleeps. 0, or -1.
+ *   SYS_SYNC_UNLINK (48) rdi = name, rsi = 0 (mutex) or 1 (condition variable): the name goes away; 0 or -1.
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
@@ -178,6 +190,13 @@
 #define SYS_SIGACTION 39
 #define SYS_SIGRETURN 40
 #define SYS_SIGMASK 41
+#define SYS_MUTEX_OPEN 42
+#define SYS_MUTEX_LOCK 43
+#define SYS_MUTEX_UNLOCK 44
+#define SYS_COND_OPEN 45
+#define SYS_COND_WAIT 46
+#define SYS_COND_SIGNAL 47
+#define SYS_SYNC_UNLINK 48
 
 /* flags of SYS_SHM_MAP and SYS_MQ_OPEN */
 #define SYS_CREATE 1 /* make it if there is none */

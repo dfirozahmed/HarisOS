@@ -78,6 +78,7 @@ set(KERNEL_SOURCES
     kernel/core/mq.c                # message queues (host-tested)
     kernel/core/sem.c               # semaphores (host-tested)
     kernel/core/mutex.c             # kernel mutex + condition variable (host-tested)
+    kernel/core/usync.c             # named mutexes / condition variables for processes (host-tested through test_syscall)
     kernel/core/signal.c            # signal handlers: frames on the user stack, sigreturn
     kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
     kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start
@@ -238,7 +239,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

@@ -231,8 +231,8 @@ static long long pipe_write_user(Process *p, ull idx, ull ptr, ull len)
 
 static long long file_read(Process *p, ull idx, ull ptr, ull len)
 {
-    if (pfile_is_sem(&p->file[idx]))
-        return -1; /* a semaphore holds no bytes */
+    if (pfile_is_sem(&p->file[idx]) || pfile_is_usync(&p->file[idx]))
+        return -1; /* a semaphore, mutex or condition variable holds no bytes */
     if (pfile_is_mq(&p->file[idx]))
         return mq_read_user(p, idx, ptr, len);
     if (pfile_is_pipe(&p->file[idx]))
@@ -270,7 +270,7 @@ static long long file_read(Process *p, ull idx, ull ptr, ull len)
  * the file is gone, the drive is read only / locked / full, the RAM Disk has no content, or the file would pass 4 GiB). */
 static long long file_write(Process *p, ull idx, ull ptr, ull len)
 {
-    if (pfile_is_sem(&p->file[idx]))
+    if (pfile_is_sem(&p->file[idx]) || pfile_is_usync(&p->file[idx]))
         return -1;
     if (pfile_is_mq(&p->file[idx]))
         return mq_write_user(p, idx, ptr, len);
@@ -1259,6 +1259,143 @@ static long long sys_sem_unlink(const SyscallFrame *f)
     return sem_unlink(name);
 }
 
+/* ---- mutexes and condition variables ------------------------------------------------------------------------------------------ */
+/* SYS_MUTEX_OPEN / SYS_COND_OPEN: rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL). A descriptor for the named object, or -1. SYS_CLOSE lets go;
+ * fork copies the descriptor. Names are per kind: a mutex and a condition variable may have the same name. */
+static long long usync_open_fd(const SyscallFrame *f, int kind)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || (f->rsi & ~(ull)(USYNC_CREATE | USYNC_EXCL)))
+        return -1;
+    char name[USYNC_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !usync_valid_name(name))
+        return -1;
+    int slot = -1;
+    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        if (p->file[i].node < 0)
+        {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return -1;
+    int s = usync_open(name, kind, (unsigned)f->rsi);
+    if (s < 0)
+        return -1;
+    p->file[slot].node = (kind == USYNC_MUTEX ? PROCESS_MUTEX_NODE : PROCESS_COND_NODE) + s;
+    p->file[slot].pos = 0;
+    p->file[slot].flags = 0;
+    usync_ref(s);
+    return PROCESS_FD_FIRST + slot;
+}
+
+static long long sys_mutex_open(const SyscallFrame *f) { return usync_open_fd(f, USYNC_MUTEX); }
+static long long sys_cond_open(const SyscallFrame *f) { return usync_open_fd(f, USYNC_COND); }
+
+/* The object number behind descriptor fd if it is a mutex (kind USYNC_MUTEX) or condition variable (USYNC_COND), else -1. */
+static int usync_of(Process *p, ull fd, int kind)
+{
+    ull idx = fd - PROCESS_FD_FIRST;
+    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
+        return -1;
+    if (kind == USYNC_MUTEX ? !pfile_is_mutex(&p->file[idx]) : !pfile_is_cond(&p->file[idx]))
+        return -1;
+    return pfile_usync(&p->file[idx]);
+}
+
+/* SYS_MUTEX_LOCK: rdi = descriptor, rsi = 0 to wait (sleeps while another process holds it), 1 to only try. 0: it is yours now. With rsi = 1
+ * and the mutex held: 1. -1: not a mutex, you hold it already, or a signal handler interrupted the wait. */
+static long long sys_mutex_lock(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    int s = usync_of(p, f->rdi, USYNC_MUTEX);
+    if (s < 0 || f->rsi > 1)
+        return -1;
+    Mutex *m = usync_mutex(s);
+    int me = task_current();
+    if (m->owner == me)
+        return -1; /* it would wait for itself for ever */
+    while (mutex_trylock(m) != 0)
+    {
+        if (f->rsi == 1)
+            return 1;
+        mutex_wait_for(m, me);
+        task_block(); /* an unlock wakes it; interrupts are off, so the unlock cannot slip in between the check and here */
+        if (sig_interrupted(p))
+        {
+            mutex_cancel_wait(m, me);
+            return -1;
+        }
+    }
+    mutex_cancel_wait(m, me);
+    return 0;
+}
+
+/* SYS_MUTEX_UNLOCK: rdi = descriptor. 0, or -1 (not a mutex, or this process does not hold it). */
+static long long sys_mutex_unlock(const SyscallFrame *f)
+{
+    int s = usync_of(process_current(), f->rdi, USYNC_MUTEX);
+    return s >= 0 && mutex_unlock(usync_mutex(s)) == 0 ? 0 : -1;
+}
+
+/* SYS_COND_WAIT: rdi = condition variable descriptor, rsi = mutex descriptor (held by the caller): lets the mutex go and sleeps until a
+ * SYS_COND_SIGNAL, then takes the mutex again. 0. -1 if the descriptors are wrong or the mutex is not held by the caller. A signal handler
+ * that interrupts the sleep gives -1 as well, but the mutex is held again then, as after 0: check the condition in a loop either way. */
+static long long sys_cond_wait(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    int sc = usync_of(p, f->rdi, USYNC_COND), sm = usync_of(p, f->rsi, USYNC_MUTEX);
+    if (sc < 0 || sm < 0)
+        return -1;
+    CondVar *c = usync_cond(sc);
+    Mutex *m = usync_mutex(sm);
+    int me = task_current();
+    if (m->owner != me)
+        return -1;
+    cond_wait_for(c, me); /* registered before the mutex is let go: a signal sent after the unlock cannot be missed */
+    mutex_unlock(m);
+    int interrupted = 0;
+    while (cond_waiting(c, me))
+    {
+        task_block();
+        if (sig_interrupted(p))
+        {
+            cond_cancel_wait(c, me);
+            interrupted = 1;
+        }
+    }
+    mutex_lock(m); /* the mutex comes back whatever woke us (it may sleep until its holder lets go) */
+    return interrupted ? -1 : 0;
+}
+
+/* SYS_COND_SIGNAL: rdi = descriptor, rsi = 0 wakes one sleeper (the one with the highest priority), 1 wakes all. 0, or -1. A signal with
+ * nobody waiting is lost. */
+static long long sys_cond_signal(const SyscallFrame *f)
+{
+    int s = usync_of(process_current(), f->rdi, USYNC_COND);
+    if (s < 0 || f->rsi > 1)
+        return -1;
+    if (f->rsi == 0)
+        cond_signal(usync_cond(s));
+    else
+        cond_broadcast(usync_cond(s));
+    return 0;
+}
+
+/* SYS_SYNC_UNLINK: rdi = name, rsi = 0 for a mutex, 1 for a condition variable: the name goes away; the object lives while a descriptor is
+ * open. 0, or -1. */
+static long long sys_sync_unlink(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current() || f->rsi > 1)
+        return -1;
+    char name[USYNC_NAME_MAX + 1];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) < 0 || !usync_valid_name(name))
+        return -1;
+    return usync_unlink(name, (int)f->rsi);
+}
+
 /* ---- signal handlers --------------------------------------------------------------------------------------------------------- */
 static long long sys_sigaction(const SyscallFrame *f)
 {
@@ -1438,6 +1575,20 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_sem_value(f);
     case SYS_SEM_UNLINK:
         return sys_sem_unlink(f);
+    case SYS_MUTEX_OPEN:
+        return sys_mutex_open(f);
+    case SYS_MUTEX_LOCK:
+        return sys_mutex_lock(f);
+    case SYS_MUTEX_UNLOCK:
+        return sys_mutex_unlock(f);
+    case SYS_COND_OPEN:
+        return sys_cond_open(f);
+    case SYS_COND_WAIT:
+        return sys_cond_wait(f);
+    case SYS_COND_SIGNAL:
+        return sys_cond_signal(f);
+    case SYS_SYNC_UNLINK:
+        return sys_sync_unlink(f);
     case SYS_SIGACTION:
         return sys_sigaction(f);
     case SYS_SIGRETURN:

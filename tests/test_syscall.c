@@ -71,6 +71,11 @@ int task_current(void) { return 7; }
 void task_yield(void) { YIELDS++; }
 static int WOKEN_TASKS[16], WOKEN_TASKS_N;
 void task_wake(int id) { if (WOKEN_TASKS_N < 16) WOKEN_TASKS[WOKEN_TASKS_N++] = id; } /* (pipes wake waiters) */
+/* mutex.c: every thread sleeps (so a wake-up is worth sending) except DEAD_TASK, which has ended; interrupts are a flag it can look at */
+volatile int host_if = 1;
+static int DEAD_TASK = -1;
+TaskState task_state(int id) { return id == DEAD_TASK ? TASK_DEAD : TASK_BLOCKED; }
+int task_priority(int id) { (void)id; return TASK_PRIO_DEFAULT; }
 
 void process_exit(int code)
 {
@@ -656,6 +661,16 @@ static void drain(void) { drained += pipe_read(pfile_pipe(&PROC.file[0]), PIPE_O
 static void drop_reader(void) { pfile_close(&PROC.file[0]); BLOCK_ACTION = 0; }
 static void drop_writer(void) { pfile_close(&PROC.file[1]); BLOCK_ACTION = 0; }
 
+/* what "another process" does while the caller sleeps: lets the mutex go / signals the condition variable (descriptor slots 0 and 1) */
+static void mutex_releaser(void) { usync_mutex(pfile_usync(&PROC.file[0]))->owner = -1; BLOCK_ACTION = 0; }
+static int SAW_RELEASED;
+static void cond_signaller(void)
+{
+    SAW_RELEASED = usync_mutex(pfile_usync(&PROC.file[0]))->owner == -1; /* the sleeper let the mutex go */
+    cond_signal(usync_cond(pfile_usync(&PROC.file[1])));
+    BLOCK_ACTION = 0;
+}
+static void cond_broadcaster(void) { cond_broadcast(usync_cond(pfile_usync(&PROC.file[1]))); BLOCK_ACTION = 0; }
 static void sem_poster(void) { sem_post(pfile_sem(&PROC.file[0])); BLOCK_ACTION = 0; }
 static void pipe_feed_two(void) { int p = -1; for (int i = 0; i < PROCESS_MAX_FILES; i++) if (PROC.file[i].node >= PROCESS_PIPE_NODE && PROC.file[i].node < PROCESS_MQ_NODE && !(PROC.file[i].flags & PFILE_WRITE)) p = pfile_pipe(&PROC.file[i]); if (p >= 0) pipe_write(p, "ok", 2); BLOCK_ACTION = 0; }
 static void raise_int(void) { PROC.sig_pending |= 1u << SIGINT; BLOCK_ACTION = 0; }
@@ -1848,6 +1863,115 @@ int main(void)
         CURRENT_PROC = &PROC;
     }
 
+    /* ================= mutexes and condition variables ================= */
+    reset();
+    {
+        char rb[8];
+        long long m = call(SYS_MUTEX_OPEN, U("lk"), SYS_CREATE, 0);
+        CHECK(m == 3 && PROC.file[0].node == PROCESS_MUTEX_NODE + 0 && usync_in_use() == 1);
+        long long cv = call(SYS_COND_OPEN, U("lk"), SYS_CREATE, 0); /* the same name, the other kind: a different object */
+        CHECK(cv == 4 && PROC.file[1].node == PROCESS_COND_NODE + 1 && usync_in_use() == 2);
+        long long m2 = call(SYS_MUTEX_OPEN, U("lk"), 0, 0); /* the same mutex through a second descriptor */
+        CHECK(m2 == 5 && pfile_usync(&PROC.file[2]) == 0);
+        Mutex *mx = usync_mutex(0);
+        CHECK(mx && !usync_cond(0) && usync_cond(1) && !usync_mutex(1) && !usync_mutex(9));
+
+        /* lock and unlock */
+        BLOCKS = 0;
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 0, 0) == 0 && mx->owner == 7 && BLOCKS == 0);
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 0, 0) == -1 && call(SYS_MUTEX_LOCK, (ull)m2, 1, 0) == -1); /* ours already: no waiting for ourselves */
+        CHECK(call(SYS_MUTEX_UNLOCK, (ull)m2, 0, 0) == 0 && mx->owner == -1);
+        CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == -1); /* not held */
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 1, 0) == 0 && mx->owner == 7 && call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0);
+
+        /* held by another process: try says 1, unlock is refused, lock sleeps until it is let go */
+        mx->owner = 3;
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 1, 0) == 1 && BLOCKS == 0);
+        CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == -1 && mx->owner == 3);
+        BLOCK_ACTION = mutex_releaser;
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 0, 0) == 0 && BLOCKS == 1 && mx->owner == 7 && mx->waiters == 0);
+        CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0);
+
+        /* a holder that ended does not keep it */
+        mx->owner = 3;
+        DEAD_TASK = 3;
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 1, 0) == 0 && mx->owner == 7 && BLOCKS == 1);
+        CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0);
+        DEAD_TASK = -1;
+
+        /* condition variable: wait lets the mutex go, sleeps until the signal, takes the mutex again */
+        CHECK(call(SYS_COND_WAIT, (ull)cv, (ull)m, 0) == -1); /* the mutex is not held */
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 0, 0) == 0);
+        CHECK(call(SYS_COND_WAIT, (ull)m, (ull)cv, 0) == -1 && call(SYS_COND_WAIT, (ull)cv, (ull)cv, 0) == -1 && call(SYS_COND_WAIT, (ull)m, (ull)m, 0) == -1);
+        CHECK(call(SYS_COND_WAIT, 99, (ull)m, 0) == -1 && call(SYS_COND_WAIT, (ull)cv, 99, 0) == -1);
+        BLOCKS = 0;
+        SAW_RELEASED = 0;
+        BLOCK_ACTION = cond_signaller;
+        CHECK(call(SYS_COND_WAIT, (ull)cv, (ull)m, 0) == 0 && BLOCKS == 1 && SAW_RELEASED && mx->owner == 7);
+        CHECK(usync_cond(1)->waiters == 0);
+        BLOCK_ACTION = cond_broadcaster;
+        CHECK(call(SYS_COND_WAIT, (ull)cv, (ull)m, 0) == 0 && BLOCKS == 2 && mx->owner == 7);
+        CHECK(call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0);
+
+        /* signal and broadcast: nothing to wake is fine, bad arguments are not */
+        CHECK(call(SYS_COND_SIGNAL, (ull)cv, 0, 0) == 0 && call(SYS_COND_SIGNAL, (ull)cv, 1, 0) == 0);
+        CHECK(call(SYS_COND_SIGNAL, (ull)cv, 2, 0) == -1 && call(SYS_COND_SIGNAL, (ull)m, 0, 0) == -1 && call(SYS_COND_SIGNAL, 99, 0, 0) == -1);
+
+        /* what these descriptors cannot do */
+        CHECK(call(SYS_READ, (ull)m, U(rb), 4) == -1 && call(SYS_WRITE, (ull)cv, U("x"), 1) == -1 && call(SYS_SEEK, (ull)m, 0, 0) == -1);
+        CHECK(call(SYS_DUP2, (ull)m, 1, 0) == -1 && call(SYS_DUP2, (ull)cv, 0, 0) == -1);
+        int io[3] = {(int)m, -1, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io)) == -1);
+        CHECK(call(SYS_SEM_WAIT, (ull)m, 1, 0) == -1 && call(SYS_SEM_VALUE, (ull)cv, 0, 0) == -1);   /* not semaphores */
+        CHECK(call(SYS_MUTEX_LOCK, (ull)cv, 1, 0) == -1 && call(SYS_MUTEX_UNLOCK, (ull)cv, 0, 0) == -1); /* a condition variable is no mutex */
+        CHECK(call(SYS_MUTEX_LOCK, 0, 1, 0) == -1 && call(SYS_MUTEX_LOCK, 99, 1, 0) == -1 && call(SYS_MUTEX_LOCK, 7, 1, 0) == -1);
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 2, 0) == -1);
+
+        /* names, flags, limits */
+        CHECK(call(SYS_MUTEX_OPEN, U("nothing"), 0, 0) == -1 && call(SYS_MUTEX_OPEN, U("a/b"), SYS_CREATE, 0) == -1 && call(SYS_COND_OPEN, U(""), SYS_CREATE, 0) == -1);
+        CHECK(call(SYS_MUTEX_OPEN, U("lk"), SYS_CREATE | SYS_EXCL, 0) == -1 && call(SYS_COND_OPEN, U("lk"), 4, 0) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_MUTEX_OPEN, U("lk"), 0, 0) == -1);
+        USER_OK = 1;
+        CHECK(call(SYS_SYNC_UNLINK, U("lk"), 2, 0) == -1 && call(SYS_SYNC_UNLINK, U("zz"), 0, 0) == -1);
+
+        /* unlink is per kind, the objects live while a descriptor is open */
+        CHECK(call(SYS_SYNC_UNLINK, U("lk"), 0, 0) == 0 && call(SYS_SYNC_UNLINK, U("lk"), 0, 0) == -1 && call(SYS_MUTEX_OPEN, U("lk"), 0, 0) == -1);
+        CHECK(call(SYS_COND_OPEN, U("lk"), 0, 0) >= 3); /* the condition variable of that name is still there */
+        CHECK(call(SYS_MUTEX_LOCK, (ull)m, 1, 0) == 0 && call(SYS_MUTEX_UNLOCK, (ull)m, 0, 0) == 0); /* the unlinked mutex still works */
+        for (int i = 0; i < PROCESS_MAX_FILES; i++)
+            pfile_close(&PROC.file[i]); /* a process that ends */
+        CHECK(usync_in_use() == 1); /* the condition variable's name is still linked */
+        CHECK(call(SYS_SYNC_UNLINK, U("lk"), 1, 0) == 0 && usync_in_use() == 0);
+
+        /* the table is full after 16 objects */
+        long long fds[PROCESS_MAX_FILES];
+        int n = 0;
+        char nm[4] = {'a', 0, 0, 0};
+        for (int i = 0; i < USYNC_MAX; i++)
+        {
+            nm[0] = (char)('a' + i);
+            long long fd = call(i & 1 ? SYS_COND_OPEN : SYS_MUTEX_OPEN, U(nm), SYS_CREATE, 0);
+            CHECK(fd >= 3 || fd == -1);
+            if (fd >= 3 && n < PROCESS_MAX_FILES)
+                fds[n++] = fd;
+            if (fd >= 3)
+                call(SYS_CLOSE, (ull)fd, 0, 0); /* closed again: only the names keep them */
+        }
+        CHECK(usync_in_use() == USYNC_MAX && call(SYS_MUTEX_OPEN, U("zz"), SYS_CREATE, 0) == -1);
+        for (int i = 0; i < USYNC_MAX; i++)
+        {
+            nm[0] = (char)('a' + i);
+            CHECK(call(SYS_SYNC_UNLINK, U(nm), i & 1, 0) == 0);
+        }
+        CHECK(usync_in_use() == 0);
+
+        CURRENT_PROC = 0;
+        CHECK(call(SYS_MUTEX_OPEN, U("k"), SYS_CREATE, 0) == -1 && call(SYS_COND_OPEN, U("k"), SYS_CREATE, 0) == -1 &&
+              call(SYS_MUTEX_LOCK, 3, 1, 0) == -1 && call(SYS_SYNC_UNLINK, U("k"), 0, 0) == -1);
+        CURRENT_PROC = &PROC;
+    }
+
     /* ================= signal handlers: the system call side ================= */
     reset();
     {
@@ -1927,6 +2051,24 @@ int main(void)
         call(SYS_SEM_UNLINK, U("sigs"), 0, 0);
         call(SYS_CLOSE, (ull)s, 0, 0);
         PROC.sig_pending = 0;
+
+        long long sm = call(SYS_MUTEX_OPEN, U("sigm"), SYS_CREATE, 0), sc = call(SYS_COND_OPEN, U("sigm"), SYS_CREATE, 0);
+        Mutex *smx = usync_mutex(pfile_usync(&PROC.file[sm - 3]));
+        smx->owner = 3; /* held by someone else: the lock sleeps, a signal ends the wait and nothing stays registered */
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_MUTEX_LOCK, (ull)sm, 0, 0) == -1 && smx->owner == 3 && smx->waiters == 0);
+        PROC.sig_pending = 0;
+        smx->owner = -1;
+        CHECK(call(SYS_MUTEX_LOCK, (ull)sm, 0, 0) == 0);
+        BLOCK_ACTION = raise_int;
+        CHECK(call(SYS_COND_WAIT, (ull)sc, (ull)sm, 0) == -1);                  /* a condition wait: interrupted ... */
+        CHECK(smx->owner == 7 && usync_cond(pfile_usync(&PROC.file[sc - 3]))->waiters == 0); /* ... with the mutex held again, nobody registered */
+        PROC.sig_pending = 0;
+        call(SYS_MUTEX_UNLOCK, (ull)sm, 0, 0);
+        call(SYS_SYNC_UNLINK, U("sigm"), 0, 0);
+        call(SYS_SYNC_UNLINK, U("sigm"), 1, 0);
+        call(SYS_CLOSE, (ull)sm, 0, 0);
+        call(SYS_CLOSE, (ull)sc, 0, 0);
 
         PROC.child[0] = 1234; /* a child that is not finished: wait sleeps ... */
         BLOCK_ACTION = raise_int;

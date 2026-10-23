@@ -48,6 +48,13 @@
 #define SYS_SIGACTION 39
 #define SYS_SIGRETURN 40
 #define SYS_SIGMASK 41
+#define SYS_MUTEX_OPEN 42
+#define SYS_MUTEX_LOCK 43
+#define SYS_MUTEX_UNLOCK 44
+#define SYS_COND_OPEN 45
+#define SYS_COND_WAIT 46
+#define SYS_COND_SIGNAL 47
+#define SYS_SYNC_UNLINK 48
 
 #define SYS_CREATE 1
 #define SYS_EXCL 2
@@ -136,6 +143,19 @@ static inline long long sys_sem_try_wait(int fd) { return syscall3(SYS_SEM_WAIT,
 static inline long long sys_sem_post(int fd) { return syscall3(SYS_SEM_POST, fd, 0, 0); }
 static inline long long sys_sem_value(int fd) { return syscall3(SYS_SEM_VALUE, fd, 0, 0); }
 static inline long long sys_sem_unlink(const char *name) { return syscall3(SYS_SEM_UNLINK, (long long)(usize)name, 0, 0); }
+/* a named mutex and condition variable: descriptors (sys_close lets go), or -1. lock sleeps while another process holds the mutex; try_lock
+ * returns 1 instead. cond_wait(cv, mutex) releases the held mutex, sleeps until a signal, takes the mutex again: call it in a loop that
+ * checks the condition. cond_signal wakes one sleeper, cond_broadcast all. unlink: the name goes away (mutex = 0, condition variable = 1). */
+static inline long long sys_mutex_open(const char *name, unsigned flags) { return syscall3(SYS_MUTEX_OPEN, (long long)(usize)name, flags, 0); }
+static inline long long sys_mutex_lock(int fd) { return syscall3(SYS_MUTEX_LOCK, fd, 0, 0); }
+static inline long long sys_mutex_try_lock(int fd) { return syscall3(SYS_MUTEX_LOCK, fd, 1, 0); }
+static inline long long sys_mutex_unlock(int fd) { return syscall3(SYS_MUTEX_UNLOCK, fd, 0, 0); }
+static inline long long sys_cond_open(const char *name, unsigned flags) { return syscall3(SYS_COND_OPEN, (long long)(usize)name, flags, 0); }
+static inline long long sys_cond_wait(int cond_fd, int mutex_fd) { return syscall3(SYS_COND_WAIT, cond_fd, mutex_fd, 0); }
+static inline long long sys_cond_signal(int fd) { return syscall3(SYS_COND_SIGNAL, fd, 0, 0); }
+static inline long long sys_cond_broadcast(int fd) { return syscall3(SYS_COND_SIGNAL, fd, 1, 0); }
+static inline long long sys_mutex_unlink(const char *name) { return syscall3(SYS_SYNC_UNLINK, (long long)(usize)name, 0, 0); }
+static inline long long sys_cond_unlink(const char *name) { return syscall3(SYS_SYNC_UNLINK, (long long)(usize)name, 1, 0); }
 /* signal handlers: use signal() of libc.h. sigmask blocks the signals whose bits are set (returns the old mask) */
 static inline long long sys_sigaction(int sig, void *handler, void *entry) { return syscall3(SYS_SIGACTION, sig, (long long)(usize)handler, (long long)(usize)entry); }
 static inline unsigned sys_sigmask(unsigned mask) { return (unsigned)syscall3(SYS_SIGMASK, mask, 0, 0); }
