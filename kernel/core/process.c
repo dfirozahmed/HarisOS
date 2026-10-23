@@ -227,8 +227,8 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
         p->sig_handler[i] = 0;
     p->sig_entry = 0;
     p->sig_pending = p->sig_blocked = 0;
-    for (int i = 0; i < PROCESS_MAX_SHM; i++)
-        p->shm[i].seg = -1;
+    p->shm = 0; /* (the list of shared memory mappings is made by the first SYS_SHM_MAP) */
+    p->shm_cap = 0;
     p->shm_next = 0;
     for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
         p->child[i] = 0;
@@ -458,6 +458,22 @@ int process_fork(u64 user_rip, u64 user_rsp)
         for (unsigned i = 0; i < sizeof(Process); i++)
             to[i] = from[i];
     }
+    cp->shm = 0; /* the clone gets a list of its own: it maps the same segments, but unmaps them independently */
+    cp->shm_cap = 0;
+    if (p->shm_cap > 0)
+    {
+        cp->shm = kmalloc((unsigned long long)p->shm_cap * sizeof(ProcessShm));
+        if (!cp->shm)
+        {
+            kfree(st);
+            kfree(cp);
+            aspace_destroy(cas);
+            return -1;
+        }
+        for (int i = 0; i < p->shm_cap; i++)
+            cp->shm[i] = p->shm[i];
+        cp->shm_cap = p->shm_cap;
+    }
     cp->pid = NEXT_PID;
     cp->parent = task_current();
     cp->own_console = 0; /* the window belongs to whoever opened it */
@@ -471,13 +487,14 @@ int process_fork(u64 user_rip, u64 user_rsp)
     if (id < 0)
     {
         kfree(st);
+        kfree(cp->shm);
         kfree(cp);
         aspace_destroy(cas);
         return -1;
     }
     for (int i = 0; i < PROCESS_MAX_FILES; i++) /* the child holds the pipe ends it inherited */
         pfile_ref(&cp->file[i]);
-    for (int i = 0; i < PROCESS_MAX_SHM; i++) /* ... and the shared memory it inherited (the pages are shared by the clone) */
+    for (int i = 0; i < cp->shm_cap; i++) /* ... and the shared memory it inherited (the pages are shared by the clone) */
         if (cp->shm[i].seg >= 0)
             shm_ref(cp->shm[i].seg);
     STATS.started++;

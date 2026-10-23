@@ -1037,7 +1037,7 @@ static long long sys_dup2(const SyscallFrame *f)
 /* ---- shared memory and message queues ---------------------------------------------------------------------------------------- */
 static ProcessShm *shm_slot_of(Process *p, ull addr)
 {
-    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+    for (int i = 0; i < p->shm_cap; i++)
         if (p->shm[i].seg >= 0 && p->shm[i].addr == addr)
             return &p->shm[i];
     return 0;
@@ -1081,13 +1081,7 @@ static long long sys_shm_map(const SyscallFrame *f)
     char name[SHM_NAME_MAX + 1];
     if (copy_string_from_user(name, (int)sizeof(name), name_ptr, as) < 0 || !shm_valid_name(name))
         return -1;
-    ProcessShm *slot = 0;
-    for (int i = 0; i < PROCESS_MAX_SHM; i++)
-        if (p->shm[i].seg < 0)
-        {
-            slot = &p->shm[i];
-            break;
-        }
+    ProcessShm *slot = process_shm_slot(p); /* a free entry; the list grows when all are in use */
     if (!slot)
         return -1;
     int existed = shm_open(name, 0, 0) >= 0;
@@ -1119,7 +1113,7 @@ static long long sys_shm_unmap(const SyscallFrame *f)
     shm_unref(slot->seg);
     slot->seg = -1;
     int any = 0;
-    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+    for (int i = 0; i < p->shm_cap; i++)
         any |= p->shm[i].seg >= 0;
     if (!any)
         p->shm_next = 0;
@@ -1521,13 +1515,7 @@ static long long sys_gui_create(const SyscallFrame *f)
     copy_from_user((char *)&info, f->rdi, sizeof(info));
     if (info.title[sizeof(info.title) - 1] != 0) /* not NUL-terminated within its 32 bytes */
         return -1;
-    ProcessShm *slot = 0;
-    for (int i = 0; i < PROCESS_MAX_SHM; i++)
-        if (p->shm[i].seg < 0)
-        {
-            slot = &p->shm[i];
-            break;
-        }
+    ProcessShm *slot = process_shm_slot(p); /* a free entry; the list grows when all are in use */
     if (!slot)
         return -1;
     int seg;

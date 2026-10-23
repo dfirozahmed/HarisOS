@@ -17,6 +17,7 @@
 #define HARIS_PROCESS_H
 
 #include "fault.h"
+#include "heap.h"
 #include "mq.h"
 #include "pipe.h"
 #include "sem.h"
@@ -136,7 +137,7 @@ int process_reap(int pid, int *code);
  * calls reach it with process_current(). */
 #define PROCESS_HEAP_MAX (64ULL * 1024 * 1024) /* the most SYS_BRK lets a program grow its heap to */
 /* A mapping of a shared memory segment (shm.h) in this process: where, how many pages. */
-#define PROCESS_MAX_SHM 16
+#define PROCESS_MAX_SHM 1024 /* the most mappings one process can have: a sanity cap, the list below grows as needed */
 #define PROCESS_SHM_BASE 0x0000500000000000ULL /* the area the kernel picks addresses from, far from the program and its stack */
 #define PROCESS_SHM_END 0x0000600000000000ULL
 typedef struct
@@ -157,7 +158,8 @@ typedef struct Process
     unsigned long long sig_handler[32]; /* handlers (SYS_SIGACTION), 0 = none: the default action; only SIGINT and SIGTERM can have one */
     unsigned long long sig_entry;     /* the user code stub that calls a handler and then SYS_SIGRETURN (usersig.h) */
     unsigned sig_pending, sig_blocked; /* bit n: signal n waits for its handler / must wait (it is being handled) */
-    ProcessShm shm[PROCESS_MAX_SHM];  /* shared memory mapped here (SYS_SHM_MAP) */
+    ProcessShm *shm;                  /* shared memory mapped here (SYS_SHM_MAP): a heap block of shm_cap entries (NULL when none), grown when full */
+    int shm_cap;
     unsigned long long shm_next;      /* where the next mapping goes (0 = PROCESS_SHM_BASE) */
     int child[PROCESS_MAX_CHILDREN];  /* pids of children not yet waited for, 0 = free slot */
     /* The heap (SYS_BRK): heap_base is page aligned, just above the program's last segment. heap_brk is the program's
@@ -173,18 +175,41 @@ Process *process_current(void); /* the running process, NULL in a kernel thread 
 /* Close every open file of the process (pipes: the ends go back to the pipe). Called when it ends; harmless to call twice. */
 void process_release_files(Process *p);
 
+/* A free entry of p->shm for a new mapping: the list is doubled (8, 16, ...) when every entry is in use, up to PROCESS_MAX_SHM. The
+ * pointer is good until the next call (the list may move). NULL at the limit or when the heap is out of memory (nothing changed). */
+static inline ProcessShm *process_shm_slot(Process *p)
+{
+    for (int i = 0; i < p->shm_cap; i++)
+        if (p->shm[i].seg < 0)
+            return &p->shm[i];
+    if (p->shm_cap >= PROCESS_MAX_SHM)
+        return 0;
+    int cap = p->shm_cap ? p->shm_cap * 2 : 8;
+    if (cap > PROCESS_MAX_SHM)
+        cap = PROCESS_MAX_SHM;
+    ProcessShm *n = krealloc(p->shm, (unsigned long long)cap * sizeof(ProcessShm));
+    if (!n)
+        return 0;
+    for (int i = p->shm_cap; i < cap; i++)
+        n[i].seg = -1;
+    p->shm = n;
+    int first = p->shm_cap;
+    p->shm_cap = cap;
+    return &n[first];
+}
+
 /* Let go of the shared memory segments this process maps (their reference counts; the pages go away with its address space).
  * process_release_files does this too; exec calls it alone, because its files stay. */
 static inline void process_release_shm(Process *p)
 {
     if (!p)
         return;
-    for (int i = 0; i < PROCESS_MAX_SHM; i++)
+    for (int i = 0; i < p->shm_cap; i++)
         if (p->shm[i].seg >= 0)
-        {
             shm_unref(p->shm[i].seg);
-            p->shm[i].seg = -1;
-        }
+    kfree(p->shm); /* the list itself (NULL is fine) */
+    p->shm = 0;
+    p->shm_cap = 0;
     p->shm_next = 0;
 }
 

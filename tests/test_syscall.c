@@ -680,8 +680,9 @@ static void reset(void)
     PROC.console = -1;
     PROC.own_console = 1;
     PROC.sig_ignore = 0;
-    for (int i = 0; i < PROCESS_MAX_SHM; i++)
-        PROC.shm[i].seg = -1;
+    kfree(PROC.shm); /* the list of mappings is made by the first one */
+    PROC.shm = 0;
+    PROC.shm_cap = 0;
     PROC.shm_next = 0;
     PROC.stdio[0] = PROC.stdio[1] = PROC.stdio[2] = -1;
     PROC.cwd = 0;
@@ -1732,12 +1733,27 @@ int main(void)
         for (int i = 0; i < PROCESS_MAX_SHM + 1; i++)
             if (call(SYS_SHM_MAP, U("same"), 4096, SYS_CREATE) > 0)
                 made++;
-        CHECK(made == PROCESS_MAX_SHM && shm_in_use() == 1);
+        CHECK(made == PROCESS_MAX_SHM && shm_in_use() == 1 && PROC.shm_cap == PROCESS_MAX_SHM); /* the list doubled its way up to the limit */
         CHECK(call(SYS_SHM_UNLINK, U("same"), 0, 0) == 0);
         process_release_shm(&PROC);
         CHECK(shm_in_use() == 0 && PAGES_OUT == 0);
-        for (int i = 0; i < PROCESS_MAX_SHM; i++)
-            CHECK(PROC.shm[i].seg == -1);
+        CHECK(PROC.shm == 0 && PROC.shm_cap == 0); /* the list went back to the heap */
+
+        /* the list grows by doubling and keeps what it holds: the first mapping is still found after it moved */
+        long long first = call(SYS_SHM_MAP, U("grow"), 4096, SYS_CREATE);
+        CHECK(first > 0 && PROC.shm_cap == 8);
+        for (int i = 0; i < 8; i++)
+            CHECK(call(SYS_SHM_MAP, U("grow"), 0, 0) > 0);
+        CHECK(PROC.shm_cap == 16 && call(SYS_SHM_SIZE, (ull)first, 0, 0) == 4096);
+        CHECK(call(SYS_SHM_UNLINK, U("grow"), 0, 0) == 0);
+        process_release_shm(&PROC);
+        CHECK(shm_in_use() == 0 && PAGES_OUT == 0 && PROC.shm == 0);
+
+        /* the heap is out of memory: no list, no mapping, no segment left behind */
+        HEAP_FAIL = 1;
+        CHECK(call(SYS_SHM_MAP, U("nolist"), 4096, SYS_CREATE) == -1);
+        HEAP_FAIL = 0;
+        CHECK(PROC.shm == 0 && shm_in_use() == 0 && PAGES_OUT == 0);
 
         CURRENT_PROC = 0;
         CHECK(call(SYS_SHM_MAP, U("k"), 4096, SYS_CREATE) == -1 && call(SYS_SHM_UNMAP, (ull)B, 0, 0) == -1 &&
@@ -1837,11 +1853,17 @@ int main(void)
         CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);
         MAP_FAIL_AT = -1;
         CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0 && maps_live() == 0);
-        for (int i = 0; i < PROCESS_MAX_SHM; i++)              /* no free mapping slot */
+        PROC.shm = kmalloc(PROCESS_MAX_SHM * sizeof(ProcessShm));          /* no free mapping slot, and the list cannot grow */
+        PROC.shm_cap = PROCESS_MAX_SHM;
+        for (int i = 0; i < PROCESS_MAX_SHM; i++)
             PROC.shm[i].seg = 0;
         CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1 && gui_in_use() == 0 && PAGES_OUT == 0);
-        for (int i = 0; i < PROCESS_MAX_SHM; i++)
-            PROC.shm[i].seg = -1;
+        kfree(PROC.shm);
+        PROC.shm = 0;
+        PROC.shm_cap = 0;
+        HEAP_FAIL = 1;                                                      /* no list can be made */
+        CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1 && gui_in_use() == 0 && PAGES_OUT == 0);
+        HEAP_FAIL = 0;
 
         /* a process that ends takes its windows with it; without a process there are no calls */
         CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == 0 && gui_in_use() == 1);
