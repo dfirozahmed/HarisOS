@@ -398,6 +398,31 @@ static void tick_preempt_worker(void *arg)
     TK_P3 = 1;   /* reached only after we were switched back in */
 }
 
+/* priority tests: a thread that yields until the low-priority one has run (which only aging can allow) */
+static volatile int LOW_RAN, HI_LOOPS;
+static void hi_worker(void *arg)
+{
+    (void)arg;
+    while (!LOW_RAN)
+    {
+        HI_LOOPS++;
+        task_yield();
+    }
+}
+static void low_worker(void *arg)
+{
+    (void)arg;
+    LOW_RAN = 1;
+}
+
+/* like drain(), for threads that have to wait for aging before they get the CPU */
+static void drain_long(void)
+{
+    for (int i = 0; i < 2000 && task_count() > 1; i++)
+        task_yield();
+    task_yield();
+}
+
 static void drain(void)
 {
     for (int i = 0; i < 50 && task_count() > 1; i++)
@@ -718,6 +743,57 @@ int main(void)
     CHECK(GUARDS_OUT == guards_before);
     drain();
     CHECK(GUARDS_OUT == 0 && BLOCKS_OUT == 0);
+
+    /* ---- priorities ---- */
+    {
+        CHECK(task_priority(0) == TASK_PRIO_DEFAULT && task_priority(5) == -1 && task_priority(-1) == -1 && task_priority(TASK_MAX) == -1);
+        CHECK(task_set_priority(5, 3) == -1);               /* unused slot */
+        CHECK(task_set_priority(-1, 3) == -1 && task_set_priority(TASK_MAX, 3) == -1);
+        CHECK(task_set_priority(0, TASK_PRIO_MAX + 1) == -1 && task_set_priority(0, TASK_PRIO_MIN - 1) == -1);
+        CHECK(task_priority(0) == TASK_PRIO_DEFAULT);       /* a refused change leaves it alone */
+
+        /* the highest priority runs to the end first, then the default one, then the lowest */
+        LOGN = 0;
+        int a = task_create("A", turn_worker, (void *)1);
+        int b = task_create("B", turn_worker, (void *)2);
+        int c = task_create("C", turn_worker, (void *)3);
+        CHECK(a > 0 && b > 0 && c > 0 && task_priority(a) == TASK_PRIO_DEFAULT);
+        CHECK(task_set_priority(b, TASK_PRIO_MAX) == 0 && task_set_priority(c, TASK_PRIO_MIN) == 0);
+        CHECK(task_priority(b) == TASK_PRIO_MAX && task_priority(c) == TASK_PRIO_MIN);
+        drain_long();
+        CHECK(LOGN == 9);
+        static const int want[9] = {2, 2, 2, 1, 1, 1, 3, 3, 3};
+        for (int i = 0; i < 9 && i < LOGN; i++)
+            CHECK(LOG[i] == want[i]);
+        CHECK(task_priority(b) == -1 && task_set_priority(b, 1) == -1); /* finished: gone */
+        CHECK(task_count() == 1 && BLOCKS_OUT == 0);
+
+        /* equal priorities (whatever the level) still take turns: 1 2 3 1 2 3 1 2 3 */
+        LOGN = 0;
+        for (int i = 1; i <= 3; i++)
+        {
+            int t = task_create("E", turn_worker, (void *)(long long)i);
+            CHECK(t > 0 && task_set_priority(t, TASK_PRIO_MAX) == 0);
+        }
+        drain_long();
+        CHECK(LOGN == 9);
+        for (int i = 0; i < 9 && i < LOGN; i++)
+            CHECK(LOG[i] == i % 3 + 1);
+
+        /* aging: a thread that always has something better to run against still gets the CPU (here the best one never
+         * stops until the lowest has run) */
+        LOW_RAN = 0;
+        HI_LOOPS = 0;
+        int hi = task_create("HI", hi_worker, 0);
+        int lo = task_create("LO", low_worker, 0);
+        CHECK(hi > 0 && lo > 0 && task_set_priority(hi, TASK_PRIO_MAX) == 0 && task_set_priority(lo, TASK_PRIO_MIN) == 0);
+        for (int i = 0; i < 1000 && !LOW_RAN; i++)
+            task_yield();
+        CHECK(LOW_RAN);
+        CHECK(HI_LOOPS >= TASK_AGE_PASSES); /* ... but not at once: it had to wait for its boost */
+        drain_long();
+        CHECK(task_count() == 1 && BLOCKS_OUT == 0);
+    }
 
     /* the same self test the kernel runs at boot */
     CHECK(task_selftest() == 0);

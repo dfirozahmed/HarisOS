@@ -26,6 +26,8 @@ typedef struct
     unsigned long long kstack_top; /* top of the stack above: where the CPU lands when ring 3 code traps (TSS rsp0) */
     TaskState state;
     unsigned flags;         /* TASK_PREEMPTIBLE */
+    int prio;               /* TASK_PRIO_MIN..TASK_PRIO_MAX */
+    unsigned waited;        /* schedule() passes in which this thread was READY but another one was chosen (aging) */
     unsigned long long wake_us; /* TASK_SLEEPING: when to become ready */
     TaskFn fn;
     void *arg;
@@ -133,18 +135,30 @@ static void schedule(void)
     if (old->state == TASK_RUNNING)
         old->state = TASK_READY;
 
-    int next = -1;
+    /* Highest effective priority wins. The scan starts after the current thread and only a strictly better one replaces the
+     * candidate, so equal threads keep their round robin order (and the current thread, last in the scan, loses ties). */
+    int next = -1, best = 0;
     for (int i = 1; i <= TASK_MAX; i++) /* i == TASK_MAX comes back to the current thread */
     {
         int k = (CUR + i) % TASK_MAX;
         if (TASKS[k].state == TASK_READY)
         {
-            next = k;
-            break;
+            int eff = TASKS[k].prio + (int)(TASKS[k].waited / TASK_AGE_PASSES);
+            if (next < 0 || eff > best)
+            {
+                next = k;
+                best = eff;
+            }
         }
     }
     if (next < 0)
         __builtin_trap(); /* cannot happen: task 0 never sleeps or ends, so it is always ready or running */
+
+    /* Aging: everyone left waiting counts the pass (capped, so the counter cannot overflow); the winner starts over. */
+    for (int i = 0; i < TASK_MAX; i++)
+        if (i != next && TASKS[i].state == TASK_READY && TASKS[i].waited < TASK_AGE_PASSES * (TASK_PRIO_MAX + 1))
+            TASKS[i].waited++;
+    TASKS[next].waited = 0;
 
     if (next == CUR)
     {
@@ -206,6 +220,8 @@ int task_init(void)
         TASKS[i].data = 0;
         TASKS[i].free_data = 0;
         TASKS[i].flags = 0;
+        TASKS[i].prio = TASK_PRIO_DEFAULT;
+        TASKS[i].waited = 0;
     }
     ACTIVE_AS = 0;
     FPU_HOLDS_PROCESS = 0;
@@ -365,6 +381,8 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     t->fn = fn;
     t->arg = arg;
     t->flags = flags;
+    t->prio = TASK_PRIO_DEFAULT;
+    t->waited = 0;
     t->wake_us = 0;
     int n = 0;
     for (; name && name[n] && n < TASK_NAME_MAX - 1; n++)
@@ -380,6 +398,27 @@ void task_yield(void)
     unsigned long long irq = irq_save();
     schedule();
     irq_restore(irq);
+}
+
+int task_set_priority(int id, int prio)
+{
+    if (id < 0 || id >= TASK_MAX || prio < TASK_PRIO_MIN || prio > TASK_PRIO_MAX)
+        return -1;
+    unsigned long long irq = irq_save();
+    if (TASKS[id].state == TASK_UNUSED || TASKS[id].state == TASK_DEAD)
+    {
+        irq_restore(irq);
+        return -1;
+    }
+    TASKS[id].prio = prio;
+    TASKS[id].waited = 0; /* an old boost belonged to the old level */
+    irq_restore(irq);
+    return 0;
+}
+
+int task_priority(int id)
+{
+    return id >= 0 && id < TASK_MAX && TASKS[id].state != TASK_UNUSED && TASKS[id].state != TASK_DEAD ? TASKS[id].prio : -1;
 }
 
 void task_sleep_ms(unsigned ms)

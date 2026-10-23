@@ -37,6 +37,15 @@
 #define TASK_PREEMPTIBLE 1  /* flag for task_create_flags */
 #define TASK_SLICE_TICKS 5  /* a preemptible thread runs this many 1 ms timer ticks before the next thread gets a turn */
 
+/* Priorities: the scheduler gives the CPU to the READY thread with the highest priority; equal ones take turns (round robin).
+ * A thread that is READY but passed over TASK_AGE_PASSES times gets one level of boost, so a busy high-priority thread cannot
+ * starve the others for ever (the boost is lost when it runs). TASK_AGE_PASSES >= TASK_MAX keeps plain round robin exact among
+ * threads of equal priority: none of them waits that long. */
+#define TASK_PRIO_MIN 0
+#define TASK_PRIO_DEFAULT 2 /* every new thread, and the main loop */
+#define TASK_PRIO_MAX 4
+#define TASK_AGE_PASSES 16
+
 struct AddressSpace; /* aspace.h */
 
 typedef void (*TaskFn)(void *arg);
@@ -85,6 +94,12 @@ int task_kill(int id);
  * and never returns to the old code. Interrupts must be off (a system call). */
 void task_exec_replace(struct AddressSpace *as, const char *name);
 void task_yield(void);
+
+/* Change / read the priority (TASK_PRIO_MIN..TASK_PRIO_MAX, higher runs first). It takes effect at the next scheduling decision:
+ * a running thread is not cut short when a better one becomes ready, it keeps the CPU until it yields, blocks or its slice ends.
+ * task_set_priority: 0, or -1 for a bad id / value or a slot that is unused or finished. task_priority: -1 for those ids. */
+int task_set_priority(int id, int prio);
+int task_priority(int id);
 
 /* Called by the timer interrupt (idle.c) on every tick, with interrupts off: switches away from a preemptible thread
  * whose slice is over, unless preempt_disable() is in force. Does nothing for normal threads and the main loop. */
