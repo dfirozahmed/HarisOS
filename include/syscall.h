@@ -85,10 +85,10 @@
  *                  or 2: afterwards fd new is the same open file as old (a copy in a slot of its own; closing old keeps new).
  *                  Returns new, or -1. With SYS_FORK and SYS_EXEC this is how a shell redirects: fork, dup2, close, exec.
  *   SYS_SHM_MAP (28) rdi = name (1..31 characters, no '/'), rsi = size in bytes, rdx = flags (SYS_CREATE, SYS_EXCL): shared memory. Finds
- *                  the named segment (or, with CREATE, makes it: rsi bytes rounded up to pages, at most 1 MiB, zeroed) and maps all of it
+ *                  the named segment (or, with CREATE, makes it: rsi bytes rounded up to pages, at most 16 MiB, zeroed) and maps all of it
  *                  readable and writable into this process at an address the kernel chooses (the area from 0x500000000000, with one
  *                  unmapped page after each mapping). Several processes that map the same name see the same bytes at once; a
- *                  forked child keeps the mapping, shared with its parent. Returns the address, or -1. At most 8 mappings.
+ *                  forked child keeps the mapping, shared with its parent. Returns the address, or -1. At most PROCESS_MAX_SHM (16) mappings.
  *   SYS_SHM_UNMAP (29) rdi = an address SYS_SHM_MAP returned: the pages leave this process.
  *   SYS_SHM_UNLINK (30) rdi = name: the name goes away; the segment lives while anything maps it (and is zero-filled again only by a new
  *                  segment of that name). 0, or -1.
@@ -128,8 +128,8 @@
  *   SYS_GUI_CREATE (50) rdi = pointer to a SysGuiInfo: title, width, height in; handle, stride (pixels per row) and pixels out. A window of
  *                  that size (GUI_W_MIN..GUI_W_MAX by GUI_H_MIN..GUI_H_MAX, see gui.h) appears on the desktop. `pixels` is the address of
  *                  its picture in this process: 32 bits per pixel (0x00RRGGBB), width * height of them, one row after the other
- *                  (a shared memory mapping, so it counts against the 8 of SYS_SHM_MAP). Draw there, then SYS_GUI_PRESENT. 0, or -1
- *                  (bad size or title, no free surface or mapping, no memory). At most GUI_MAX windows in all.
+ *                  (a shared memory mapping, so it counts against the 16 of SYS_SHM_MAP). Draw there, then SYS_GUI_PRESENT. 0, or -1
+ *                  (bad size or title, no free surface or mapping, no memory). At most GUI_MAX (32) windows in all.
  *   SYS_GUI_PRESENT (51) rdi = handle, rsi = x | y << 16, rdx = w | h << 16 (16 bits each): that part of the picture changed, show it.
  *                  w or h 0 = all of it. 0, or -1 (not your window).
  *   SYS_GUI_EVENT (52) rdi = handle, rsi = pointer to a GuiEvent, rdx = 1 to not wait. The oldest event of the window (keys, mouse, wheel,

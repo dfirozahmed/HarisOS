@@ -14,9 +14,9 @@
 #ifndef HARIS_SHM_H
 #define HARIS_SHM_H
 
-#define SHM_MAX 16
+#define SHM_MAX 64
 #define SHM_NAME_MAX 32          /* including the final 0 */
-#define SHM_MAX_PAGES 256        /* 1 MiB per segment */
+#define SHM_MAX_PAGES 4096       /* 16 MiB per segment */
 
 #define SHM_CREATE 1             /* shm_open: make it if it does not exist */
 #define SHM_EXCL 2               /* with SHM_CREATE: fail if it exists */

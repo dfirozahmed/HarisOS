@@ -18,6 +18,14 @@ static int OPENED;            /* windows opened so far: each new one starts a bi
 
 static int handle_of(const Window *w) { return (int)(unsigned long long)w->user; }
 
+/* The left-button flag of the window's surface (a spare one if the surface is already gone). */
+static int *left_of(const Window *w)
+{
+    static int spare;
+    int slot = gui_slot(handle_of(w));
+    return slot >= 0 ? &LEFT[slot] : &spare;
+}
+
 static void draw(Window *w, UiRect body)
 {
     int h = handle_of(w), sw = 0, sh = 0;
@@ -82,7 +90,7 @@ static void on_key(Window *w, const KeyEvent *k)
 
 static int on_press(Window *w, int x, int y)
 {
-    LEFT[handle_of(w) & 15] = 1;
+    *left_of(w) = 1;
     mouse_event(w, GUI_EV_MOUSE_DOWN, x, y, 1);
     return 0;
 }
@@ -90,7 +98,7 @@ static int on_press(Window *w, int x, int y)
 static int on_drag(Window *w, int x, int y, unsigned buttons)
 {
     int left = (buttons & 1) != 0;
-    LEFT[handle_of(w) & 15] = left;
+    *left_of(w) = left;
     mouse_event(w, left ? GUI_EV_MOUSE_MOVE : GUI_EV_MOUSE_UP, x, y, left ? 1 : 0);
     return 0;
 }
@@ -107,7 +115,7 @@ static int on_hover(Window *w, int x, int y)
         return 0;
     UiRect c = wm_content(w);
     if (x >= c.x && y >= c.y && x < c.x + c.w && y < c.y + c.h) /* (the title bar is not the program's) */
-        mouse_event(w, GUI_EV_MOUSE_MOVE, x, y, LEFT[handle_of(w) & 15]);
+        mouse_event(w, GUI_EV_MOUSE_MOVE, x, y, *left_of(w));
     return 0;
 }
 

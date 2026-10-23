@@ -21,7 +21,7 @@
 
 #include "ui.h"
 
-#define WM_MAX_WINDOWS 8
+#define WM_MAX_WINDOWS 32
 #define WM_MAX_BUTTONS 14 /* per window */
 #define WM_TITLE_MAX 32
 #define WM_MAX_EDITS 3 /* text inputs per window */

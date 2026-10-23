@@ -1,5 +1,6 @@
 /* HarisOS GUI surfaces: see include/gui.h. A table of surfaces, their pixel segments and event queues. No window code. */
 #include "gui.h"
+#include "heap.h"
 #include "shm.h"
 #include "task.h"
 
@@ -7,7 +8,6 @@ typedef unsigned long long u64;
 
 typedef struct
 {
-    int used;
     unsigned gen; /* part of the handle: changes every time the slot is destroyed */
     int owner;    /* pid of the client */
     int w, h;
@@ -22,18 +22,18 @@ typedef struct
     int waiter;        /* thread to wake, -1 = none */
 } Surface;
 
-static Surface S[GUI_MAX];
+static Surface *S[GUI_MAX]; /* made with kmalloc when a window is created, freed when it is destroyed */
 static unsigned NEXT_GEN = 1;
 
-/* The handle is gen * 16 + slot; generations start at 1, so a valid handle is never 0 and -1 is never valid. */
+/* The handle is gen * 256 + slot; generations start at 1, so a valid handle is never 0 and -1 is never valid. */
 static Surface *get(int hnd)
 {
     if (hnd < 0)
         return 0;
-    unsigned slot = (unsigned)hnd & 15u, gen = (unsigned)hnd >> 4;
-    if (slot >= GUI_MAX || !S[slot].used || S[slot].gen != gen)
+    unsigned slot = (unsigned)hnd & 255u, gen = (unsigned)hnd >> 8;
+    if (slot >= GUI_MAX || !S[slot] || S[slot]->gen != gen)
         return 0;
-    return &S[slot];
+    return S[slot];
 }
 
 static int title_ok(const char *t)
@@ -62,16 +62,14 @@ static void wake(Surface *s)
     }
 }
 
-/* "gui.<slot>.<generation>": the segment's name only lives for a moment (it is unlinked as soon as the surface holds it). */
-static void seg_name(char *out, int slot, unsigned gen)
+/* "gui.<generation>": the segment's name only lives for a moment (it is unlinked as soon as the surface holds it). */
+static void seg_name(char *out, unsigned gen)
 {
     char digits[12];
     int n = 0, k = 0;
     out[k++] = 'g';
     out[k++] = 'u';
     out[k++] = 'i';
-    out[k++] = '.';
-    out[k++] = (char)('0' + slot);
     out[k++] = '.';
     do
     {
@@ -88,23 +86,28 @@ int gui_create(const char *title, int w, int h, int pid, int *seg)
     if (!title || !title_ok(title) || w < GUI_W_MIN || w > GUI_W_MAX || h < GUI_H_MIN || h > GUI_H_MAX)
         return -1;
     int slot = 0;
-    while (slot < GUI_MAX && S[slot].used)
+    while (slot < GUI_MAX && S[slot])
         slot++;
     if (slot == GUI_MAX)
         return -1;
+    Surface *s = kmalloc(sizeof(Surface));
+    if (!s)
+        return -1;
     unsigned gen = NEXT_GEN++;
-    if (NEXT_GEN > 0x7FFFFFF)
+    if (NEXT_GEN > 0x7FFFFF)
         NEXT_GEN = 1;
     char name[SHM_NAME_MAX];
-    seg_name(name, slot, gen);
+    seg_name(name, gen);
     int sg = shm_open(name, (u64)w * (u64)h * 4, SHM_CREATE | SHM_EXCL);
     if (sg < 0)
+    {
+        kfree(s);
         return -1;
+    }
     shm_ref(sg);      /* the compositor's own mapping: keeps the pixels alive ... */
     shm_unlink(name); /* ... and the name is not needed again (the client is given the segment, not the name) */
 
-    Surface *s = &S[slot];
-    s->used = 1;
+    S[slot] = s;
     s->gen = gen;
     s->owner = pid;
     s->w = w;
@@ -121,7 +124,7 @@ int gui_create(const char *title, int w, int h, int pid, int *seg)
     s->waiter = -1;
     if (seg)
         *seg = sg;
-    return (int)(gen << 4) | slot;
+    return (int)(gen << 8) | slot;
 }
 
 void gui_destroy(int hnd)
@@ -131,17 +134,20 @@ void gui_destroy(int hnd)
         return;
     wake(s); /* a client waiting for events now finds the handle invalid */
     shm_unref(s->seg);
-    s->used = 0;
+    S[(unsigned)hnd & 255u] = 0;
+    kfree(s);
 }
 
 void gui_release_owner(int pid)
 {
     for (int i = 0; i < GUI_MAX; i++)
-        if (S[i].used && S[i].owner == pid)
-            gui_destroy((int)(S[i].gen << 4) | i);
+        if (S[i] && S[i]->owner == pid)
+            gui_destroy((int)(S[i]->gen << 8) | i);
 }
 
 int gui_valid(int hnd) { return get(hnd) != 0; }
+
+int gui_slot(int hnd) { return get(hnd) ? (int)((unsigned)hnd & 255u) : -1; }
 
 int gui_owner(int hnd)
 {
@@ -282,9 +288,9 @@ int gui_request_close(int hnd)
 
 int gui_handle_at(int slot)
 {
-    if (slot < 0 || slot >= GUI_MAX || !S[slot].used)
+    if (slot < 0 || slot >= GUI_MAX || !S[slot])
         return -1;
-    return (int)(S[slot].gen << 4) | slot;
+    return (int)(S[slot]->gen << 8) | slot;
 }
 
 int gui_take_dirty(int hnd, int *x, int *y, int *w, int *h)
@@ -330,6 +336,6 @@ int gui_in_use(void)
 {
     int n = 0;
     for (int i = 0; i < GUI_MAX; i++)
-        n += S[i].used ? 1 : 0;
+        n += S[i] ? 1 : 0;
     return n;
 }

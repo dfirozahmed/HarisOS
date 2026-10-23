@@ -13,7 +13,7 @@
  *   gui_destroy(h);                                  either side is done; gui_release_owner(pid) when a process ends
  *
  * Pixels: 32 bits each, 0x00RRGGBB, row after row, no padding between rows (a row is width * 4 bytes). A surface is GUI_W_MIN ..
- * GUI_W_MAX wide and GUI_H_MIN .. GUI_H_MAX high (the segment is at most 1 MiB).
+ * GUI_W_MAX wide and GUI_H_MIN .. GUI_H_MAX high (the segment is at most SHM_MAX_PAGES pages = 16 MiB: the largest surface, 1920 x 1200 x 4 bytes, fits).
  *
  * A surface is named by a handle: slot and generation, like a console (console.h), so a stale handle is simply invalid. Every
  * function accepts an invalid handle and does nothing / says so. gui.c has no window code: it is a table, a queue and some
@@ -23,12 +23,12 @@
 #ifndef HARIS_GUI_H
 #define HARIS_GUI_H
 
-#define GUI_MAX 4
+#define GUI_MAX 32
 #define GUI_TITLE_MAX 32
 #define GUI_W_MIN 64
 #define GUI_H_MIN 48
-#define GUI_W_MAX 512
-#define GUI_H_MAX 512
+#define GUI_W_MAX 1920
+#define GUI_H_MAX 1200
 #define GUI_EVENTS 32 /* events kept per surface; when the client is too slow the newest are dropped (not a close request) */
 
 /* Event types (GuiEvent.type). Positions are in the surface's own pixels, (0,0) = its top-left corner. */
@@ -56,6 +56,7 @@ int gui_create(const char *title, int w, int h, int pid, int *seg);
 void gui_destroy(int hnd);       /* the surface is gone: a client waiting for events is woken and sees -1 */
 void gui_release_owner(int pid); /* gui_destroy for every surface of that process */
 int gui_valid(int hnd);
+int gui_slot(int hnd);           /* the number of its slot (0 .. GUI_MAX-1), -1 for an invalid handle: an index for tables */
 int gui_owner(int hnd);          /* pid, -1 for an invalid handle */
 int gui_size(int hnd, int *w, int *h); /* 1, or 0 for an invalid handle */
 const char *gui_title(int hnd);

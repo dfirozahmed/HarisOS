@@ -1,5 +1,6 @@
 /* HarisOS shared memory segments: see include/shm.h. */
 #include "shm.h"
+#include "heap.h"
 #include "pmm.h"
 
 typedef unsigned long long u64;
@@ -11,7 +12,7 @@ typedef struct
     int refs;   /* mappings */
     unsigned pages;
     char name[SHM_NAME_MAX];
-    u64 phys[SHM_MAX_PAGES];
+    u64 *phys; /* physical address of each page: a heap block of `pages` entries, made with the segment */
 } Segment;
 
 static Segment SEGS[SHM_MAX];
@@ -40,6 +41,8 @@ static void release(Segment *s)
     for (unsigned i = 0; i < s->pages; i++)
         if (s->phys[i])
             pmm_free_page(s->phys[i]);
+    kfree(s->phys); /* (NULL if the list was never made) */
+    s->phys = 0;
     s->used = 0;
     s->pages = 0;
 }
@@ -75,6 +78,12 @@ int shm_open(const char *name, u64 size, unsigned flags)
     for (; name[n]; n++)
         g->name[n] = name[n]; /* (shm_valid_name checked the length) */
     g->name[n] = 0;
+    g->phys = kmalloc((u64)pages * sizeof(u64));
+    if (!g->phys)
+    {
+        release(g);
+        return -1;
+    }
     for (unsigned i = 0; i < pages; i++)
     {
         u64 p = pmm_alloc_page_tag(PMM_TAG_OTHER);

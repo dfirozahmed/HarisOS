@@ -537,6 +537,26 @@ void pmm_free_page(unsigned long long phys)
     PAGES_OUT--;
 }
 
+/* the kernel heap (shm.c keeps its page lists there, gui.c its surfaces): host memory, counted, with a switch that makes it fail */
+static int HEAP_BLOCKS, HEAP_FAIL;
+void *kmalloc(unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *p = calloc(1, size ? (size_t)size : 1);
+    if (p)
+        HEAP_BLOCKS++;
+    return p;
+}
+void kfree(void *p)
+{
+    if (p)
+    {
+        free(p);
+        HEAP_BLOCKS--;
+    }
+}
+
 #define MAPS_MAX 64
 static struct { ull va, phys; unsigned flags; int live; } MAPS[MAPS_MAX];
 static int MAPS_N, MAP_FAIL_AT = -1; /* the Nth call of aspace_map_shared fails (-1 = never) */
@@ -1661,7 +1681,7 @@ int main(void)
         /* refused */
         CHECK(call(SYS_SHM_MAP, U("nothing"), 4096, 0) == -1);                  /* no CREATE */
         CHECK(call(SYS_SHM_MAP, U("empty"), 0, SYS_CREATE) == -1);              /* nothing to make */
-        CHECK(call(SYS_SHM_MAP, U("huge"), 1024 * 1024 + 1, SYS_CREATE) == -1);
+        CHECK(call(SYS_SHM_MAP, U("huge"), (ull)SHM_MAX_PAGES * 4096 + 1, SYS_CREATE) == -1);
         CHECK(call(SYS_SHM_MAP, U("a/b"), 4096, SYS_CREATE) == -1 && call(SYS_SHM_MAP, U(""), 4096, SYS_CREATE) == -1);
         CHECK(call(SYS_SHM_MAP, U("frame"), 4096, SYS_CREATE | SYS_EXCL) == -1);   /* it exists */
         CHECK(call(SYS_SHM_MAP, U("frame"), 4096, 4) == -1);                    /* no such flag */
@@ -1793,7 +1813,7 @@ int main(void)
         gi.height = 60;
         CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);       /* too narrow */
         gi.width = 100;
-        gi.height = 600;
+        gi.height = GUI_H_MAX + 1;
         CHECK(call(SYS_GUI_CREATE, U(&gi), 0, 0) == -1);       /* too high */
         gi.height = 60;
         memset(gi.title, 'x', sizeof(gi.title));

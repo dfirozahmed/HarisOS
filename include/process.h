@@ -136,7 +136,7 @@ int process_reap(int pid, int *code);
  * calls reach it with process_current(). */
 #define PROCESS_HEAP_MAX (64ULL * 1024 * 1024) /* the most SYS_BRK lets a program grow its heap to */
 /* A mapping of a shared memory segment (shm.h) in this process: where, how many pages. */
-#define PROCESS_MAX_SHM 8
+#define PROCESS_MAX_SHM 16
 #define PROCESS_SHM_BASE 0x0000500000000000ULL /* the area the kernel picks addresses from, far from the program and its stack */
 #define PROCESS_SHM_END 0x0000600000000000ULL
 typedef struct
