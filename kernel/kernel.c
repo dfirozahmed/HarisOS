@@ -26,7 +26,9 @@
 #include "power.h"
 #include "rtc.h"
 #include "serial.h"
+#include "process.h"
 #include "storage.h"
+#include "syscall.h"
 #include "task.h"
 #include "taskbar.h"
 #include "timer.h"
@@ -213,6 +215,22 @@ void kernel_main(const BootInfo *info)
         serial_puts(")\n");
         if (st != 0 || sp != 0)
             __builtin_trap();
+
+        /* Ring 3: turn on SYSCALL, then run three small user programs (see process.h). Like the address space test,
+         * a failure is logged, not fatal: nothing else depends on user mode yet. */
+        syscall_init();
+        int ps = (as_init == 0 && gd == 0) ? process_selftest() : 1;
+        serial_puts("HARISOS: user mode self test ");
+        if (ps == 1)
+            serial_puts("skipped\n");
+        else if (ps == 0)
+            serial_puts("ok\n");
+        else
+        {
+            serial_puts("FAILED ");
+            serial_putd(ps);
+            serial_puts("\n");
+        }
         heapmon_start(); /* background thread: kernel heap integrity check once a second (shown in Task Manager) */
     }
 

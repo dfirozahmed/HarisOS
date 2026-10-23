@@ -1,10 +1,12 @@
 /* HarisOS kernel threads (cooperative): see include/task.h. */
 #include "task.h"
+#include "aspace.h"
 #include "idle.h"
 #include "irq.h"
 #include "paging.h"
 #include "pmm.h"
 #include "preempt.h"
+#include "syscall.h"
 #include "timer.h"
 
 /* A stack is a run of whole pages from the page allocator: one guard page at the bottom, then TASK_STACK_SIZE bytes.
@@ -17,6 +19,8 @@ typedef struct
     unsigned long long rsp; /* saved stack pointer while the thread is not running */
     unsigned char *stack;   /* start of the stack block (the guard page), NULL for task 0 (the firmware's stack) */
     int guarded;            /* the guard page really is unmapped (needs the page tables to be reachable) */
+    AddressSpace *as;       /* the user address space of a process thread, NULL for kernel threads (kernel tables) */
+    unsigned long long kstack_top; /* top of the stack above: where the CPU lands when ring 3 code traps (TSS rsp0) */
     TaskState state;
     unsigned flags;         /* TASK_PREEMPTIBLE */
     unsigned long long wake_us; /* TASK_SLEEPING: when to become ready */
@@ -39,6 +43,7 @@ static Task TASKS[TASK_MAX];
 static int CUR;
 static unsigned long long SWITCHES;
 static unsigned long long TICKS; /* timer interrupts seen by task_tick, for the boot log */
+static AddressSpace *ACTIVE_AS;  /* the address space loaded in CR3 (NULL = the kernel's own tables) */
 static unsigned SLICE_LEFT = TASK_SLICE_TICKS;
 volatile int preempt_count; /* see preempt.h */
 
@@ -67,6 +72,11 @@ static void reap(void)
         Task *t = &TASKS[i];
         if (t->state == TASK_DEAD && i != CUR)
         {
+            if (t->as) /* the process's pages and tables. Its space is not loaded: schedule() switched to another one. */
+            {
+                aspace_destroy(t->as);
+                t->as = 0;
+            }
             if (t->guarded)
                 paging_set_present((unsigned long long)t->stack, 1); /* the page goes back to the allocator: map it again */
             pmm_free_contiguous((unsigned long long)t->stack, STACK_BLOCK_PAGES);
@@ -112,6 +122,17 @@ static void schedule(void)
     if (old->stack && CANARY_AT(old->stack) != STACK_CANARY)
         __builtin_trap(); /* the leaving thread overflowed its stack: shows up as #UD on the crash screen */
 
+    /* The next thread runs in its own address space (kernel threads in the kernel's). The kernel half is the same in
+     * all of them, so this code and the stack we are on stay valid across the switch. Ring 3 code of the next thread
+     * will trap onto the next thread's kernel stack. */
+    if (TASKS[next].as != ACTIVE_AS)
+    {
+        aspace_switch(TASKS[next].as);
+        ACTIVE_AS = TASKS[next].as;
+    }
+    if (TASKS[next].as)
+        syscall_set_kernel_stack(TASKS[next].kstack_top);
+
     TASKS[next].state = TASK_RUNNING;
     CUR = next;
     SWITCHES++;
@@ -138,8 +159,10 @@ int task_init(void)
         TASKS[i].state = TASK_UNUSED;
         TASKS[i].stack = 0;
         TASKS[i].guarded = 0;
+        TASKS[i].as = 0;
         TASKS[i].flags = 0;
     }
+    ACTIVE_AS = 0;
     SLICE_LEFT = TASK_SLICE_TICKS;
     preempt_count = 0;
     Task *t = &TASKS[0];
@@ -154,9 +177,26 @@ int task_init(void)
     return 0;
 }
 
-int task_create(const char *name, TaskFn fn, void *arg) { return task_create_flags(name, fn, arg, 0); }
+static int create(const char *name, TaskFn fn, void *arg, unsigned flags, AddressSpace *as);
 
-int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags)
+int task_create(const char *name, TaskFn fn, void *arg) { return create(name, fn, arg, 0, 0); }
+
+int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags) { return create(name, fn, arg, flags, 0); }
+
+/* A process thread must be preemptible: its ring 3 code never yields by itself. */
+int task_create_user(const char *name, TaskFn fn, void *arg, AddressSpace *as)
+{
+    return as ? create(name, fn, arg, TASK_PREEMPTIBLE, as) : -1;
+}
+
+AddressSpace *task_address_space(void) { return TASKS[CUR].as; }
+
+AddressSpace *task_space_of(int id)
+{
+    return id >= 0 && id < TASK_MAX && TASKS[id].state != TASK_UNUSED && TASKS[id].state != TASK_DEAD ? TASKS[id].as : 0;
+}
+
+static int create(const char *name, TaskFn fn, void *arg, unsigned flags, AddressSpace *as)
 {
     if (!fn)
         return -1;
@@ -199,6 +239,8 @@ int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags)
     Task *t = &TASKS[id];
     t->stack = stack;
     t->guarded = guarded;
+    t->as = as; /* set before the state says READY: the scheduler never sees a process thread without its space */
+    t->kstack_top = top;
     t->rsp = (unsigned long long)fr;
     t->fn = fn;
     t->arg = arg;

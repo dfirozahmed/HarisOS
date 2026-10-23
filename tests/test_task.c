@@ -1,7 +1,9 @@
 /* Host test for the kernel threads (kernel/core/task.c + task_ctx.c): the real context switch runs here, on stacks
  * made by task_create(). The heap and the clock are replaced by host versions so the test can find leaks and move time. */
 #include "task.h"
+#include "aspace.h"
 #include "irq.h"
+#include "syscall.h"
 #include "pmm.h"
 #include "preempt.h"
 #include <stdio.h>
@@ -46,6 +48,29 @@ void pmm_free_contiguous(unsigned long long phys, unsigned long long count)
     (void)count;
     BLOCKS_OUT--;
     ALIGNED_FREE((void *)phys);
+}
+
+/* Address spaces and the kernel stack of ring 3 traps: only recorded (nothing here runs in ring 3). */
+static AddressSpace *LOADED;
+static int AS_SWITCHES, AS_DESTROYED, KSTACK_SETS;
+static unsigned long long LAST_KSTACK;
+
+void aspace_switch(AddressSpace *as)
+{
+    LOADED = as;
+    AS_SWITCHES++;
+}
+
+void aspace_destroy(AddressSpace *as)
+{
+    (void)as;
+    AS_DESTROYED++;
+}
+
+void syscall_set_kernel_stack(unsigned long long top)
+{
+    LAST_KSTACK = top;
+    KSTACK_SETS++;
 }
 
 /* Page tables: the test only records which pages were made not present (the host memory stays usable). */
@@ -260,6 +285,29 @@ static void sleep_worker(void *arg)
 
 static void quick_worker(void *arg) { (*(volatile int *)arg)++; }
 
+/* ---- process threads ---- */
+static AddressSpace *SEEN_AS;
+static int SEEN_LOADED, SEEN_IF;
+static void user_worker(void *arg)
+{
+    (void)arg;
+    SEEN_AS = task_address_space();
+    SEEN_LOADED = LOADED == SEEN_AS;
+    SEEN_IF = host_if;
+}
+
+static int SEEN_N, SEEN_BAD;
+static void user_pair_worker(void *arg)
+{
+    for (int i = 0; i < 2; i++)
+    {
+        SEEN_N++;
+        if (task_address_space() != arg || LOADED != arg)
+            SEEN_BAD++;
+        task_yield();
+    }
+}
+
 /* ---- timer tick behaviour (task_tick called by hand) ---- */
 static volatile int TK_IF_NORMAL = -1, TK_IF_PREEMPT = -1;
 static volatile int TK_NORMAL_OK, TK_P1, TK_P2, TK_P3;
@@ -442,6 +490,46 @@ int main(void)
     TIME_STEP = 0;
     CHECK(BLOCKS_OUT == 0 && task_count() == 1);
     CHECK(preempt_count == 0 && host_if == 1);
+
+    /* ---- process threads: their own address space ---- */
+    static AddressSpace fake_as; /* only a pointer to compare: the scheduler hands it to aspace_switch, never reads it */
+    CHECK(task_address_space() == 0);
+    AS_SWITCHES = AS_DESTROYED = KSTACK_SETS = 0;
+    LOADED = 0;
+    CHECK(task_create_user("USER", user_worker, 0, 0) == -1); /* no space: not a process thread */
+    CHECK(BLOCKS_OUT == 0);
+    int u = task_create_user("USER", user_worker, 0, &fake_as);
+    CHECK(u > 0);
+    CHECK(task_state(u) == TASK_READY);
+    CHECK(task_space_of(u) == &fake_as && task_space_of(0) == 0 && task_space_of(-1) == 0 && task_space_of(99) == 0);
+    task_yield();   /* it runs in its space: the scheduler loaded it before the switch */
+    CHECK(SEEN_AS == &fake_as && SEEN_LOADED);
+    CHECK(SEEN_IF == 1); /* a process thread is preemptible: its ring 3 code runs with interrupts on */
+    CHECK(task_address_space() == 0); /* ... and we are the main thread again, in the kernel's tables */
+    CHECK(LOADED == 0 && AS_SWITCHES == 2); /* into the process's space, and back out */
+    CHECK(KSTACK_SETS == 1 && LAST_KSTACK != 0 && LAST_KSTACK % 16 == 0); /* the thread's kernel stack, once */
+    drain();
+    CHECK(AS_DESTROYED == 1); /* freed with the thread */
+    CHECK(task_space_of(u) == 0);
+    CHECK(task_state(u) == TASK_UNUSED && BLOCKS_OUT == 0);
+
+    /* kernel threads never change the address space or the trap stack */
+    AS_SWITCHES = KSTACK_SETS = 0;
+    ran = 0;
+    task_create("K", quick_worker, (void *)&ran);
+    drain();
+    CHECK(ran == 1 && AS_SWITCHES == 0 && KSTACK_SETS == 0);
+
+    /* two process threads: each switch loads the other's space, and the trap stack follows */
+    static AddressSpace fake_as2;
+    AS_SWITCHES = AS_DESTROYED = KSTACK_SETS = 0;
+    SEEN_N = 0;
+    task_create_user("U1", user_pair_worker, &fake_as, &fake_as);
+    task_create_user("U2", user_pair_worker, &fake_as2, &fake_as2);
+    drain();
+    CHECK(SEEN_N == 4 && SEEN_BAD == 0); /* every time a thread ran, its own space was the loaded one */
+    CHECK(AS_DESTROYED == 2 && LOADED == 0);
+    CHECK(KSTACK_SETS >= 4);
 
     /* ---- guard pages ---- */
     CHECK(GUARDS_OUT == 0 && WRONG_UNGUARD == 0); /* everything so far was unmapped again when its stack was freed */

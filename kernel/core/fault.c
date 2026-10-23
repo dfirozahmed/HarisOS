@@ -1,5 +1,6 @@
 /* HarisOS CPU exception handling: see include/fault.h. */
 #include "fault.h"
+#include "process.h"
 #include "serial.h"
 #include "task.h"
 
@@ -199,6 +200,16 @@ static volatile int IN_FAULT;
 
 __attribute__((noreturn)) void fault_dispatch(FaultFrame *f)
 {
+    /* An exception that ring 3 code caused is that process's problem, not the kernel's: the process is ended and the
+     * system goes on. (Not for the vectors that mean the machine itself is in trouble: NMI, double fault, machine
+     * check.) Anything that happens in ring 0 is a kernel bug and stops everything, below. */
+    if ((f->cs & 3) == 3 && f->vector != 2 && f->vector != 8 && f->vector != 18)
+    {
+        unsigned long long fault_cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(fault_cr2));
+        process_fault(f, fault_cr2);
+    }
+
     if (IN_FAULT) /* the report itself faulted (bad framebuffer?): stop, do not loop */
         for (;;)
             __asm__ volatile("cli; hlt");

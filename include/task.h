@@ -37,6 +37,8 @@
 #define TASK_PREEMPTIBLE 1  /* flag for task_create_flags */
 #define TASK_SLICE_TICKS 5  /* a preemptible thread runs this many 1 ms timer ticks before the next thread gets a turn */
 
+struct AddressSpace; /* aspace.h */
+
 typedef void (*TaskFn)(void *arg);
 
 typedef enum
@@ -51,6 +53,13 @@ typedef enum
 int task_init(void);
 int task_create(const char *name, TaskFn fn, void *arg);
 int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags);
+/* A thread that belongs to a user process: it runs (and its ring 3 code runs) in the address space `as`, which the
+ * scheduler loads on every switch to it, and its kernel stack becomes the one the CPU uses when that code traps. It is
+ * preemptible. The space is freed together with the thread (reap). The thread's function normally ends by entering ring
+ * 3 (process.c); it never returns there. -1 if as is NULL or there is no slot or memory (as is then still the caller's). */
+int task_create_user(const char *name, TaskFn fn, void *arg, struct AddressSpace *as);
+struct AddressSpace *task_address_space(void); /* the running thread's user space, NULL for a kernel thread */
+struct AddressSpace *task_space_of(int id);    /* the user space of thread id; NULL for kernel threads and ended ones */
 void task_yield(void);
 
 /* Called by the timer interrupt (idle.c) on every tick, with interrupts off: switches away from a preemptible thread
