@@ -77,7 +77,7 @@ static unsigned char *read_whole(int node, unsigned *size_out, int *err)
     return buf;
 }
 
-int exec_run_node(int node, const char *name, int console, int *err)
+int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
 {
     int e = 0;
     if (err)
@@ -87,7 +87,7 @@ int exec_run_node(int node, const char *name, int console, int *err)
     if (!buf)
         return e;
     int elf_err = 0;
-    int id = process_start_elf(name, buf, size, console, &elf_err);
+    int id = process_spawn_elf(name, buf, size, sp, &elf_err);
     kfree(buf); /* the process has its own copy of every segment */
     if (id < 0)
     {
@@ -96,6 +96,12 @@ int exec_run_node(int node, const char *name, int console, int *err)
         return EXEC_ERR_LOAD;
     }
     return id;
+}
+
+int exec_run_node(int node, const char *name, int console, int *err)
+{
+    ProcessSpawn sp = {.console = console, .parent = -1};
+    return exec_spawn_node(node, name, &sp, err);
 }
 
 int exec_run(const char *name, int *err)
@@ -340,6 +346,21 @@ int exec_selftest(void)
         process_stats(&s4);
         if (s4.last_exit != 45)
             return -112 - (s4.last_exit > 0 && s4.last_exit < 45 ? s4.last_exit : 0); /* -113 ... -156 */
+    }
+
+    /* SYS_SPAWN / SYS_WAIT and program arguments: PROCTEST.ELF starts HELLO, ARGTEST and CRASH as children (optional,
+     * needs all four files); exits with 46 if all checks held */
+    if (exec_find("PROCTEST.ELF") >= 0 && exec_find("ARGTEST.ELF") >= 0 && exec_find("CRASH.ELF") >= 0)
+    {
+        id = exec_run("PROCTEST.ELF", &err);
+        if (id < 0)
+            return -160;
+        if (process_wait(id) != 0)
+            return -161;
+        ProcessStats s5;
+        process_stats(&s5);
+        if (s5.last_exit != 46) /* the parent ends last, so its code is the last one */
+            return -162 - (s5.last_exit > 0 && s5.last_exit < 46 ? s5.last_exit : 0); /* -163 ... -207 */
     }
 
     /* floating point / SSE registers are kept apart per process (FPUA.ELF and FPUB.ELF are optional) */

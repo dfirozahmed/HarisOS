@@ -1,6 +1,9 @@
 /* System call wrappers for HarisOS user programs (see include/syscall.h for what each call does). No C library: a program
  * is one C file that includes this header and defines _start. Built for the same 64-bit Windows-style target as the kernel,
- * where "long" is 32 bits, so every value that can be a pointer or a position is "long long" here. */
+ * where "long" is 32 bits, so every value that can be a pointer or a position is "long long" here.
+ *
+ * A program may start as   void _start(long long argc, char **argv)   (the kernel passes them in rcx / rdx and rdi / rsi; argv[argc] is
+ * NULL). A program started by the File Explorer gets argc = 0. A program that declares _start(void) just ignores them. */
 #ifndef HARIS_USER_SYS_H
 #define HARIS_USER_SYS_H
 
@@ -12,6 +15,8 @@
 #define SYS_CLOSE 6
 #define SYS_SEEK 7
 #define SYS_BRK 8
+#define SYS_SPAWN 9
+#define SYS_WAIT 10
 
 typedef unsigned long long usize;
 
@@ -28,6 +33,10 @@ static inline long long sys_open(const char *path) { return syscall3(SYS_OPEN, (
 static inline long long sys_close(int fd) { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline long long sys_seek(int fd, long long offset, int whence) { return syscall3(SYS_SEEK, fd, offset, whence); }
 static inline long long sys_brk(long long addr) { return syscall3(SYS_BRK, addr, 0, 0); }
+/* argv: a NULL-terminated array of strings, or 0 for just the path. Returns the child's pid or -1. */
+static inline long long sys_spawn(const char *path, const char *const *argv) { return syscall3(SYS_SPAWN, (long long)(usize)path, (long long)(usize)argv, 0); }
+/* Waits for child `pid`; its exit code goes to *status (if not 0). Returns pid or -1. */
+static inline long long sys_wait(long long pid, int *status) { return syscall3(SYS_WAIT, pid, (long long)(usize)status, 0); }
 static inline void sys_yield(void) { syscall3(SYS_YIELD, 0, 0, 0); }
 
 __attribute__((noreturn)) static inline void sys_exit(int code)

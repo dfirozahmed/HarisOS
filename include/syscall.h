@@ -29,6 +29,14 @@
  *                  0 returns the current break. A value outside heap_base ... heap_limit returns -1 and changes
  *                  nothing; otherwise the break becomes rdi and that is returned. Lowering the break does not give
  *                  pages back (they stay mapped, not cleared again, until the process ends). malloc is built on this.
+ *   SYS_SPAWN (9)  rdi = path (as for SYS_OPEN), rsi = argv: a NULL-terminated array of string pointers (up to
+ *                  PROCESS_ARGS_MAX strings, PROCESS_ARGS_BYTES bytes together), or 0 for just the path as argv[0].
+ *                  Starts the program as a child; it shares this process's console. The child begins at _start(argc,
+ *                  argv) (rcx, rdx and rdi, rsi). Returns the child's pid (1, 2, ... never reused) or -1. At most
+ *                  PROCESS_MAX_CHILDREN children can be outstanding (started and not yet waited for).
+ *   SYS_WAIT (10)  rdi = pid, rsi = pointer to an int for the exit code, or 0. Blocks until that child has ended, stores
+ *                  its exit code (-1 = ended by a CPU exception) and returns the pid. A child is waited for once. -1 for
+ *                  a pid that is not an outstanding child, or a bad pointer (the child stays waitable).
  *   anything else  returns -1.
  *
  * What the CPU does on SYSCALL: RIP goes to LSTAR, CS / SS are loaded from STAR (kernel code / data), the return address
@@ -51,6 +59,8 @@
 #define SYS_CLOSE 6
 #define SYS_SEEK 7
 #define SYS_BRK 8
+#define SYS_SPAWN 9
+#define SYS_WAIT 10
 
 #define SYS_WRITE_MAX 4096 /* one write call sends at most this many bytes */
 #define SYS_READ_MAX 65536 /* one read call returns at most this many bytes */

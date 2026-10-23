@@ -14,6 +14,8 @@
 #ifndef HARIS_EXEC_H
 #define HARIS_EXEC_H
 
+#include "process.h"
+
 #define EXEC_MAX_FILE (2 * 1024 * 1024)
 
 #define EXEC_ERR_NOTFOUND -1 /* no such file on any drive */
@@ -28,6 +30,9 @@ int exec_run(const char *name, int *err); /* the program's output goes to the se
 /* The same for a file that is already known (a double click in the File Explorer): VFS node `node`, shown as `name`.
  * `console` is the handle of the console window it should write to and read from (console.h), or -1 for none. */
 int exec_run_node(int node, const char *name, int console, int *err);
+
+/* The general form: arguments, a parent, the console to share (see ProcessSpawn in process.h). SYS_SPAWN uses it. */
+int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err);
 
 /* A sentence for a failed exec_run / exec_run_node: the code it returned and the *err it set. */
 const char *exec_error_text(int code, int err);

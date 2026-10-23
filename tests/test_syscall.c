@@ -131,12 +131,54 @@ void console_wait(int con, int task_id)
     CON_WAITS++;
 }
 
+static int PENDING_PID, PENDING_CODE, DONE_PID, DONE_CODE; /* a child that "ends" while the parent sleeps in task_block */
+
 void task_block(void)
 {
     CHECK(host_uaccess == 0);
     BLOCKS++;
     if (CON_BLOCKS_BEFORE_DATA > 0)
         CON_BLOCKS_BEFORE_DATA--; /* "the user pressed Enter while we slept" */
+    if (PENDING_PID)
+    {
+        DONE_PID = PENDING_PID;
+        DONE_CODE = PENDING_CODE;
+        PENDING_PID = 0;
+    }
+}
+
+/* ---- spawn and wait: the loader and the exit records are fakes ---- */
+static int SPAWN_CALLS, SPAWN_FAIL, SPAWN_NEXT_PID = 100;
+static int SP_NODE, SP_ARGC, SP_CONSOLE, SP_PARENT;
+static unsigned SP_LEN;
+static char SP_ARGS[PROCESS_ARGS_BYTES], SP_NAME[64];
+
+
+int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
+{
+    (void)err;
+    CHECK(host_uaccess == 0);
+    SPAWN_CALLS++;
+    if (SPAWN_FAIL)
+        return -5;
+    SP_NODE = node;
+    strcpy(SP_NAME, name);
+    SP_ARGC = sp->argc;
+    SP_LEN = sp->args_len;
+    SP_CONSOLE = sp->console;
+    SP_PARENT = sp->parent;
+    memcpy(SP_ARGS, sp->args, sp->args_len);
+    sp->pid = SPAWN_NEXT_PID++;
+    return 3;
+}
+
+int process_reap(int pid, int *code)
+{
+    if (pid != DONE_PID || DONE_PID == 0)
+        return 0;
+    *code = DONE_CODE;
+    DONE_PID = 0;
+    return 1;
 }
 
 /* ---- the file system: four files and a folder ---- */
@@ -234,6 +276,10 @@ static void reset(void)
     CURRENT_AS = &FAKE_AS;
     CURRENT_PROC = &PROC;
     PROC.console = -1;
+    PROC.own_console = 1;
+    PROC.parent = -1;
+    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+        PROC.child[i] = 0;
     for (int i = 0; i < PROCESS_MAX_FILES; i++)
     {
         PROC.file[i].node = -1;
@@ -524,6 +570,85 @@ int main(void)
     CHECK(call(SYS_BRK, HB + 5 * 4096, 0, 0) == (long long)(HB + 5 * 4096) && MAPPED_PAGES == 5);
     CURRENT_PROC = 0;
     CHECK(call(SYS_BRK, 0, 0, 0) == -1);                                                 /* a kernel thread has no heap */
+    CURRENT_PROC = &PROC;
+
+    /* ================= spawn and wait ================= */
+    reset();
+    PROC.console = 4;
+    SPAWN_CALLS = 0;
+    CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == 100);               /* no argv: the path is argv[0] */
+    CHECK(SPAWN_CALLS == 1 && SP_NODE == 1 && strcmp(SP_NAME, "HELLO.ELF") == 0);
+    CHECK(SP_ARGC == 1 && SP_LEN == 10 && strcmp(SP_ARGS, "HELLO.ELF") == 0);
+    CHECK(SP_CONSOLE == 4 && SP_PARENT == 7);                          /* shares the console; parent = this thread */
+    CHECK(PROC.child[0] == 100 && PROC.child[1] == 0);
+    {
+        const char *argv[] = {"one", "two words", 0};
+        CHECK(call(SYS_SPAWN, U("hello.elf"), U(argv), 0) == 101);     /* the case of the path does not matter */
+        CHECK(SP_ARGC == 2 && SP_LEN == 14 && memcmp(SP_ARGS, "one\0two words\0", 14) == 0);
+        CHECK(PROC.child[1] == 101);
+        const char *none[] = {0};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(none), 0) == 102);     /* an empty argv: argc 0 */
+        CHECK(SP_ARGC == 0 && SP_LEN == 0);
+        const char *many[40];
+        for (int i = 0; i < 39; i++)
+            many[i] = "a";
+        many[39] = 0;
+        int calls = SPAWN_CALLS;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(many), 0) == -1 && SPAWN_CALLS == calls); /* over PROCESS_ARGS_MAX */
+        static char longarg[2100];
+        memset(longarg, 'z', sizeof(longarg) - 1);
+        const char *big[] = {longarg, 0};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(big), 0) == -1 && SPAWN_CALLS == calls); /* over PROCESS_ARGS_BYTES */
+        const char *four[] = {"a", "b", "c", "d", 0};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(four), 0) == 103 && PROC.child[3] == 103); /* the 4th slot */
+    }
+    CHECK(call(SYS_SPAWN, U("NO-SUCH.ELF"), 0, 0) == -1);
+    CHECK(call(SYS_SPAWN, U("/RAM Disk/DIR"), 0, 0) == -1);           /* a folder */
+    CHECK(call(SYS_SPAWN, U(""), 0, 0) == -1);
+    USER_OK = 0;
+    CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1);               /* bad path pointer */
+    USER_OK = 1;
+    SPAWN_FAIL = 1;
+    CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1 && PROC.child[4] == 0); /* the loader said no: no slot taken */
+    SPAWN_FAIL = 0;
+    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+        PROC.child[i] = 900 + i;
+    {
+        int calls = SPAWN_CALLS;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1 && SPAWN_CALLS == calls); /* all slots used: nothing is started */
+    }
+    CURRENT_PROC = 0;
+    CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1 && call(SYS_WAIT, 100, 0, 0) == -1); /* kernel thread */
+    CURRENT_PROC = &PROC;
+
+    /* wait: the child ends while we sleep */
+    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+        PROC.child[i] = 0;
+    PROC.child[2] = 200;
+    PENDING_PID = 200;
+    PENDING_CODE = 42;
+    int st = 0;
+    BLOCKS = 0;
+    CHECK(call(SYS_WAIT, 200, U(&st), 0) == 200 && st == 42 && BLOCKS == 1 && PROC.child[2] == 0);
+    CHECK(call(SYS_WAIT, 200, U(&st), 0) == -1);                       /* once only */
+    PROC.child[2] = 201;
+    DONE_PID = 201;                                                    /* already ended: no sleep at all */
+    DONE_CODE = -1;
+    BLOCKS = 0;
+    CHECK(call(SYS_WAIT, 201, U(&st), 0) == 201 && st == -1 && BLOCKS == 0);
+    PROC.child[2] = 202;
+    DONE_PID = 202;
+    DONE_CODE = 9;
+    CHECK(call(SYS_WAIT, 202, 0, 0) == 202);                           /* no place for the code is fine */
+    PROC.child[0] = 300;
+    CHECK(call(SYS_WAIT, 301, U(&st), 0) == -1 && call(SYS_WAIT, 0, U(&st), 0) == -1); /* not our child */
+    CHECK(call(SYS_WAIT, ~0ULL, U(&st), 0) == -1 && call(SYS_WAIT, 0x100000000ULL + 300, U(&st), 0) == -1);
+    DONE_PID = 300;
+    DONE_CODE = 5;
+    USER_OK = 0;
+    CHECK(call(SYS_WAIT, 300, U(&st), 0) == -1 && PROC.child[0] == 300); /* bad pointer: the child can still be waited for */
+    USER_OK = 1;
+    CHECK(call(SYS_WAIT, 300, U(&st), 0) == 300 && st == 5);
     CURRENT_PROC = &PROC;
 
     /* ================= yield, exit, unknown ================= */

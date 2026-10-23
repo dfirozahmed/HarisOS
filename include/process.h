@@ -30,6 +30,35 @@ int process_start(const char *name, const void *image, unsigned long long size);
  * not acceptable) or 0 (out of memory or thread slots). Nothing stays allocated on failure. */
 int process_start_elf(const char *name, const void *file, unsigned long long size, int console, int *err);
 
+/* How a process is started when it is more than a file: with arguments, and as the child of another process.
+ *   console   handle of the console window it writes to / reads from (console.h), -1 = none
+ *   argc,args the arguments: `args` holds argc NUL-terminated strings one after the other, args_len bytes in all (at most
+ *             PROCESS_ARGS_MAX strings and PROCESS_ARGS_BYTES bytes). They are copied to the top of the new stack and the
+ *             program starts as _start(argc, argv): rcx / rdi = argc, rdx / rsi = argv (argv[argc] = NULL).
+ *   parent    thread id of the process that spawned it, -1 = started by the kernel. A child shares its parent's console
+ *             (and does not write the "[process exited]" line: the owner of the window does), and when it ends its
+ *             exit code is kept for the parent's SYS_WAIT (process_reap) and the parent is woken.
+ *   pid       out: the new process's number (1, 2, 3 ... never reused), set when the start succeeds. */
+#define PROCESS_ARGS_MAX 32
+#define PROCESS_ARGS_BYTES 2048
+#define PROCESS_MAX_CHILDREN 8
+typedef struct
+{
+    int console;
+    int argc;
+    const char *args;
+    unsigned args_len;
+    int parent;
+    int pid;
+} ProcessSpawn;
+
+/* process_start_elf with a ProcessSpawn: returns the thread id or -1 (*err as there). */
+int process_spawn_elf(const char *name, const void *file, unsigned long long size, ProcessSpawn *sp, int *err);
+
+/* Has the child `pid` ended? If so: 1, its exit code in *code (-1 = ended by a CPU exception), and the record is used up
+ * (a second call says 0). 0 = still running or unknown. The records of the last few dozen children are kept. */
+int process_reap(int pid, int *code);
+
 /* What the kernel keeps for a running process besides its address space (the thread's `data`, see task.h). The system
  * calls reach it with process_current(). */
 #define PROCESS_MAX_FILES 5
@@ -38,6 +67,10 @@ int process_start_elf(const char *name, const void *file, unsigned long long siz
 typedef struct Process
 {
     int console; /* console.h handle of its window, -1 = none (output goes to the serial port, input is empty) */
+    int own_console;                  /* 1 = started by the kernel / File Explorer: it writes the "[process exited]" line */
+    int pid;                          /* its number, see ProcessSpawn */
+    int parent;                       /* thread id of the parent, -1 = none */
+    int child[PROCESS_MAX_CHILDREN];  /* pids of children not yet waited for, 0 = free slot */
     /* The heap (SYS_BRK): heap_base is page aligned, just above the program's last segment. heap_brk is the program's
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
      * rounded up). Lowering the break keeps the pages: they are given back when the process ends. */

@@ -232,6 +232,103 @@ static long long sys_seek(const SyscallFrame *f)
     return pos;
 }
 
+/* SYS_SPAWN: path in rdi (as for SYS_OPEN), argv in rsi (a NULL-terminated array of string pointers, or 0 = just the path
+ * as argv[0]). Starts the program as a child that shares this process's console. Returns the child's pid, or -1: no such
+ * program, not a runnable file, bad pointers, too many or too long arguments, too many children not waited for yet, or no
+ * memory / thread slot. Reading the program file happens inside this call. */
+static long long sys_spawn(const SyscallFrame *f)
+{
+    ull path_ptr = f->rdi, argv_ptr = f->rsi;
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), path_ptr, as) < 0)
+        return -1;
+    int slot = -1;
+    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+        if (p->child[i] == 0)
+        {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return -1; /* wait for some of them first */
+    int node = path[0] == '/' ? vfs_lookup(path) : exec_find(path);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (!n || n->is_dir)
+        return -1;
+
+    /* the arguments, copied into one blob: "arg0\0arg1\0..." */
+    char blob[PROCESS_ARGS_BYTES];
+    unsigned len = 0;
+    int argc = 0;
+    if (argv_ptr == 0)
+    {
+        int l = copy_string_from_user(blob, (int)sizeof(blob), path_ptr, as);
+        if (l < 0)
+            return -1;
+        len = (unsigned)l + 1;
+        argc = 1;
+    }
+    else
+    {
+        for (;; argc++)
+        {
+            if (argc == PROCESS_ARGS_MAX)
+                return -1; /* no terminating NULL within the limit */
+            ull slot_va = argv_ptr + (ull)argc * 8;
+            ull str;
+            if (slot_va < argv_ptr || !aspace_user_ok(as, slot_va, 8, 0))
+                return -1;
+            copy_from_user((char *)&str, slot_va, 8);
+            if (str == 0)
+                break;
+            int l = copy_string_from_user(blob + len, (int)(sizeof(blob) - len), str, as);
+            if (l < 0)
+                return -1; /* unreadable, or the arguments together do not fit */
+            len += (unsigned)l + 1;
+        }
+    }
+
+    ProcessSpawn sp = {.console = p->console, .argc = argc, .args = blob, .args_len = len, .parent = task_current()};
+    int err = 0;
+    int id = exec_spawn_node(node, n->name, &sp, &err);
+    if (id < 0)
+        return -1;
+    p->child[slot] = sp.pid;
+    return sp.pid;
+}
+
+/* SYS_WAIT: pid in rdi (from SYS_SPAWN), a pointer for the exit code in rsi (or 0). Waits, without using the CPU, until
+ * that child has ended; then returns the pid and stores the exit code (-1 if a CPU exception ended it). Each child can be
+ * waited for once. -1 if pid is not a child of this process that was not waited for, or the pointer is bad (the child is
+ * then still there to wait for). */
+static long long sys_wait(const SyscallFrame *f)
+{
+    ull want = f->rdi, status_ptr = f->rsi;
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || want == 0 || want > 0x7FFFFFFF)
+        return -1;
+    int slot = -1;
+    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+        if (p->child[i] == (int)want)
+            slot = i;
+    if (slot < 0)
+        return -1;
+    if (status_ptr && !aspace_user_ok(as, status_ptr, 4, 1))
+        return -1;
+    int code;
+    while (!process_reap((int)want, &code))
+        task_block(); /* the child's exit wakes this thread; interrupts are off, so that cannot slip in between */
+    p->child[slot] = 0;
+    if (status_ptr)
+        copy_to_user(status_ptr, (const char *)&code, 4);
+    return (long long)want;
+}
+
 /* The heap. Pages are mapped one by one up to the new break; if memory runs out half way, the pages already mapped stay
  * (heap_mapped moves with them, so a retry does not map them twice) but the break does not move. */
 static long long sys_brk(const SyscallFrame *f)
@@ -278,6 +375,10 @@ long long syscall_dispatch(SyscallFrame *f)
         return sys_seek(f);
     case SYS_BRK:
         return sys_brk(f);
+    case SYS_SPAWN:
+        return sys_spawn(f);
+    case SYS_WAIT:
+        return sys_wait(f);
     default:
         return -1;
     }
