@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+CC=${CC:-clang}
+OUT=${TMPDIR:-/tmp}/harisos-mutex-tests-$$
+trap 'rm -f "$OUT"' EXIT HUP INT TERM
+# Runs on the real scheduler (task.c, task_ctx.c) like run_task_tests.sh, so it needs the same x86_64 Microsoft-ABI clang.
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 -DHARIS_HOST -I"$ROOT/include" \
+  "$ROOT/tests/test_mutex.c" \
+  "$ROOT/kernel/core/mutex.c" \
+  "$ROOT/kernel/core/task.c" \
+  "$ROOT/kernel/core/task_ctx.c" \
+  -o "$OUT"
+"$OUT"

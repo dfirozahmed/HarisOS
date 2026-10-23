@@ -77,6 +77,7 @@ set(KERNEL_SOURCES
     kernel/core/shm.c               # shared memory segments (host-tested)
     kernel/core/mq.c                # message queues (host-tested)
     kernel/core/sem.c               # semaphores (host-tested)
+    kernel/core/mutex.c             # kernel mutex + condition variable (host-tested)
     kernel/core/signal.c            # signal handlers: frames on the user stack, sigreturn
     kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
     kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start

@@ -25,6 +25,7 @@ try {
         @('GDT layout tests', 'tests/run_gdt_tests.sh'),
         @('Page table tests', 'tests/run_paging_tests.sh'),
         @('Kernel thread tests', 'tests/run_task_tests.sh'),
+        @('Mutex / condvar tests', 'tests/run_mutex_tests.sh'),
         @('Notepad tests', 'tests/run_notepad_tests.sh'),
         @('Window manager tests', 'tests/run_wm_tests.sh'),
         @('Power tests', 'tests/run_power_tests.sh'),
