@@ -50,7 +50,23 @@ void fault_tss_descriptor(unsigned long long out[2]);
  * running thread's kernel stack. */
 void fault_tss_set_rsp0(unsigned long long rsp0);
 
-/* Called by the stub with the saved registers. Never returns. */
-__attribute__((noreturn)) void fault_dispatch(FaultFrame *f);
+/* Called by the stub with the saved registers. Returns only in the two cases that are not fatal: a non-maskable
+ * interrupt, and a ring 0 page fault that a self test asked for (fault_probe_*); the stub then resumes the interrupted
+ * code. Every other exception ends the system (ring 0) or the process (ring 3) here. */
+void fault_dispatch(FaultFrame *f);
+
+/* NMIs seen so far, and whether the last one ran on its own stack (IST3) rather than on whatever stack was current. */
+unsigned fault_nmi_count(void);
+int fault_nmi_on_own_stack(void);
+
+/* Page faults that are expected: for self tests of protections (SMEP, SMAP). One try, no side effects.
+ *   fault_probe_read: read one byte at addr;  fault_probe_exec: call the code at addr (it must just return).
+ * 1 = it worked, 0 = it caused a ring 0 page fault; then info (if not NULL) holds CR2 and the error code of the fault. */
+typedef struct
+{
+    unsigned long long cr2, error;
+} FaultProbe;
+int fault_probe_read(unsigned long long addr, FaultProbe *info);
+int fault_probe_exec(unsigned long long addr, FaultProbe *info);
 
 #endif

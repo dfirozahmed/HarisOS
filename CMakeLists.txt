@@ -73,7 +73,8 @@ set(KERNEL_SOURCES
     kernel/core/syscall.c           # system calls: SYSCALL entry, SYS_WRITE / SYS_EXIT / SYS_YIELD
     kernel/core/process.c           # user processes: address space + thread, ring 3 entry, boot self test
     kernel/core/user_demo.c         # ring 3 demo programs for the self test
-    kernel/core/gdt.c              # GDT: kernel + user segments, TSS (host-tested layout)
+    kernel/core/protect.c           # SMEP / SMAP, boot self test of the protections and the NMI stack
+    kernel/core/gdt.c             # GDT: kernel + user segments, TSS (host-tested layout)
     kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)

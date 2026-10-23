@@ -34,8 +34,13 @@ int aspace_user_ok(const AddressSpace *as, unsigned long long va, unsigned long 
     return USER_OK;
 }
 
+volatile int host_uaccess; /* uaccess.h (HARIS_HOST): how many user_access_begin calls are open */
+static int BAD_WINDOW;     /* serial_putc calls made while the user-memory window was not open exactly once */
+
 void serial_putc(char c)
 {
+    if (host_uaccess != 1)
+        BAD_WINDOW++;
     if (OUT_N < (int)sizeof(OUT) - 1)
         OUT[OUT_N++] = c;
     OUT[OUT_N] = 0;
@@ -88,12 +93,14 @@ int main(void)
     CHECK(USER_OK_CALLS == 1 && OK_VA == (unsigned long long)buf && OK_LEN == 8 && OK_WRITE == 0);
     CHECK(strcmp(OUT, "hi\r\nthere") == 0);
     CHECK(syscall_count() == c0 + 1);
+    /* SMAP: the user buffer is read inside exactly one open window, and the window is closed afterwards */
+    CHECK(BAD_WINDOW == 0 && host_uaccess == 0);
 
-    /* a buffer the user may not read: refused, nothing sent */
+    /* a buffer the user may not read: refused, nothing sent, and the window was never opened */
     reset();
     USER_OK = 0;
     CHECK(call(SYS_WRITE, 0x1000, 16) == -1);
-    CHECK(USER_OK_CALLS == 1 && OUT_N == 0);
+    CHECK(USER_OK_CALLS == 1 && OUT_N == 0 && host_uaccess == 0);
 
     /* too long: refused before even looking at the pointer */
     reset();

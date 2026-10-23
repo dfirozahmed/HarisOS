@@ -5,6 +5,7 @@
 #include "process.h"
 #include "serial.h"
 #include "task.h"
+#include "uaccess.h"
 
 static unsigned long long COUNT;
 
@@ -29,12 +30,14 @@ long long syscall_dispatch(SyscallFrame *f)
         if (!as || !aspace_user_ok(as, ptr, len, 0))
             return -1;
         const volatile char *p = (const volatile char *)ptr;
+        user_access_begin(); /* SMAP: the kernel opens the window for exactly the loop that reads the user's buffer */
         for (unsigned long long i = 0; i < len; i++)
         {
             if (p[i] == '\n')
                 serial_putc('\r');
             serial_putc(p[i]);
         }
+        user_access_end();
         return (long long)len;
     }
     case SYS_EXIT:

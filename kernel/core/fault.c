@@ -56,8 +56,26 @@ __asm__(".text\n" FAULT_STUB_NOERR(0) FAULT_STUB_NOERR(1) FAULT_STUB_NOERR(2) FA
         "    cld\n"
         "    subq $32, %rsp\n"
         "    call fault_dispatch\n"
-        "1:  hlt\n" /* fault_dispatch never returns */
-        "    jmp 1b\n"
+        /* It comes back only for the two cases that are not fatal: an NMI, and a page fault that a self test expected
+         * (fault_probe_*). Undo the stub and return to the interrupted code, possibly with a changed RIP / RSP. */
+        "    addq $32, %rsp\n"
+        "    popq %r15\n"
+        "    popq %r14\n"
+        "    popq %r13\n"
+        "    popq %r12\n"
+        "    popq %r11\n"
+        "    popq %r10\n"
+        "    popq %r9\n"
+        "    popq %r8\n"
+        "    popq %rdi\n"
+        "    popq %rsi\n"
+        "    popq %rbp\n"
+        "    popq %rbx\n"
+        "    popq %rdx\n"
+        "    popq %rcx\n"
+        "    popq %rax\n"
+        "    addq $16, %rsp\n" /* the vector and the error code */
+        "    iretq\n"
         ".data\n"
         ".p2align 3\n"
         ".globl fault_stub_table\n"
@@ -91,12 +109,17 @@ typedef struct
 
 static unsigned char DF_STACK[4096] __attribute__((aligned(16)));
 static unsigned char PF_STACK[4096] __attribute__((aligned(16))); /* IST2: a page fault from a stack overflow */
+/* IST3: a non-maskable interrupt can arrive at any instruction, including the ones in the system call entry between
+ * SYSCALL and the switch to the kernel stack (RSP is still the user's) and the last instructions before SYSRET (RSP
+ * is the user's again). Without its own stack the handler would run on a stack ring 3 controls. */
+static unsigned char NMI_STACK[4096] __attribute__((aligned(16)));
 static Tss TSS;
 
 void fault_tss_descriptor(unsigned long long out[2])
 {
     TSS.ist[0] = (unsigned long long)(DF_STACK + sizeof(DF_STACK));
     TSS.ist[1] = (unsigned long long)(PF_STACK + sizeof(PF_STACK));
+    TSS.ist[2] = (unsigned long long)(NMI_STACK + sizeof(NMI_STACK));
     TSS.iomap_base = sizeof(Tss); /* no I/O permission bitmap */
 
     unsigned long long base = (unsigned long long)&TSS;
@@ -198,8 +221,104 @@ static void screen_text(const char *s)
 
 static volatile int IN_FAULT;
 
-__attribute__((noreturn)) void fault_dispatch(FaultFrame *f)
+/* ---- exceptions that are expected --------------------------------------------------------------------------------
+ * A self test sometimes has to do something that must fault (read a user page with SMAP on, run code on a user page
+ * with SMEP on) to prove that the protection works. fault_probe_read / _exec arm a one-shot fixup, do the access in a
+ * few instructions of assembly, and the handler below turns the page fault into "return 0" instead of a crash. Only a
+ * ring 0 page fault while armed is redirected, and the redirect goes to the code right after the one instruction. */
+static volatile unsigned long long PROBE_CR2, PROBE_ERR;
+extern volatile unsigned long long fault_probe_armed, fault_probe_rip, fault_probe_rsp_add;
+
+__asm__(".data\n"
+        ".p2align 3\n"
+        ".globl fault_probe_armed\n"
+        ".globl fault_probe_rip\n"
+        ".globl fault_probe_rsp_add\n"
+        "fault_probe_armed:   .quad 0\n"
+        "fault_probe_rip:     .quad 0\n"
+        "fault_probe_rsp_add: .quad 0\n"
+        ".text\n"
+        ".p2align 4\n"
+        /* int fault_probe_load(addr): 1 if the byte could be read, 0 if it faulted (rcx = addr) */
+        ".globl fault_probe_load\n"
+        "fault_probe_load:\n"
+        "    leaq 1f(%rip), %rax\n"
+        "    movq %rax, fault_probe_rip(%rip)\n"
+        "    movq $0, fault_probe_rsp_add(%rip)\n"
+        "    movq $1, fault_probe_armed(%rip)\n"
+        "    movb (%rcx), %dl\n" /* the one instruction that may fault */
+        "    movq $0, fault_probe_armed(%rip)\n"
+        "    movl $1, %eax\n"
+        "    ret\n"
+        "1:  movq $0, fault_probe_armed(%rip)\n"
+        "    xorl %eax, %eax\n"
+        "    ret\n"
+        /* int fault_probe_call(addr): 1 if code at addr ran (it must just return), 0 if the fetch faulted. A fault on
+         * the fetch comes after the CALL pushed its return address: the fixup drops it (rsp += 8). */
+        ".p2align 4\n"
+        ".globl fault_probe_call\n"
+        "fault_probe_call:\n"
+        "    leaq 1f(%rip), %rax\n"
+        "    movq %rax, fault_probe_rip(%rip)\n"
+        "    movq $8, fault_probe_rsp_add(%rip)\n"
+        "    movq $1, fault_probe_armed(%rip)\n"
+        "    callq *%rcx\n"
+        "    movq $0, fault_probe_armed(%rip)\n"
+        "    movl $1, %eax\n"
+        "    ret\n"
+        "1:  movq $0, fault_probe_armed(%rip)\n"
+        "    xorl %eax, %eax\n"
+        "    ret\n");
+
+int fault_probe_load(unsigned long long addr);
+int fault_probe_call(unsigned long long addr);
+
+int fault_probe_read(unsigned long long addr, FaultProbe *info)
 {
+    PROBE_CR2 = PROBE_ERR = 0;
+    int ok = fault_probe_load(addr);
+    if (info)
+    {
+        info->cr2 = PROBE_CR2;
+        info->error = PROBE_ERR;
+    }
+    return ok;
+}
+
+int fault_probe_exec(unsigned long long addr, FaultProbe *info)
+{
+    PROBE_CR2 = PROBE_ERR = 0;
+    int ok = fault_probe_call(addr);
+    if (info)
+    {
+        info->cr2 = PROBE_CR2;
+        info->error = PROBE_ERR;
+    }
+    return ok;
+}
+
+/* ---- non-maskable interrupts ---------------------------------------------------------------------------------- */
+static volatile unsigned NMI_COUNT;
+static volatile int NMI_OWN_STACK;
+
+unsigned fault_nmi_count(void) { return NMI_COUNT; }
+int fault_nmi_on_own_stack(void) { return NMI_OWN_STACK; }
+
+void fault_dispatch(FaultFrame *f)
+{
+    /* An expected page fault of a self test (see above): carry on after the probing instruction. */
+    if ((f->cs & 3) == 0 && f->vector == 14 && fault_probe_armed)
+    {
+        unsigned long long probe_cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(probe_cr2));
+        PROBE_CR2 = probe_cr2;
+        PROBE_ERR = f->error;
+        f->rip = fault_probe_rip;
+        f->rsp += fault_probe_rsp_add;
+        fault_probe_armed = 0;
+        return;
+    }
+
     /* An exception that ring 3 code caused is that process's problem, not the kernel's: the process is ended and the
      * system goes on. (Not for the vectors that mean the machine itself is in trouble: NMI, double fault, machine
      * check.) Anything that happens in ring 0 is a kernel bug and stops everything, below. */
@@ -208,6 +327,18 @@ __attribute__((noreturn)) void fault_dispatch(FaultFrame *f)
         unsigned long long fault_cr2;
         __asm__ volatile("mov %%cr2, %0" : "=r"(fault_cr2));
         process_fault(f, fault_cr2);
+    }
+
+    /* A non-maskable interrupt is not an error of the code it interrupted (it reports a hardware event, or is a watchdog
+     * or a debugger's poke): count it, say so the first few times, and return. It runs on its own stack (IST3). */
+    if (f->vector == 2)
+    {
+        NMI_COUNT++;
+        unsigned long long sp = (unsigned long long)f;
+        NMI_OWN_STACK = sp >= (unsigned long long)NMI_STACK && sp < (unsigned long long)(NMI_STACK + sizeof(NMI_STACK));
+        if (NMI_COUNT <= 3)
+            serial_puts("HARISOS: NMI\n");
+        return;
     }
 
     if (IN_FAULT) /* the report itself faulted (bad framebuffer?): stop, do not loop */

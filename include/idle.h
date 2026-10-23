@@ -19,5 +19,6 @@
 int idle_init(void);
 int idle_ready(void);
 void idle_wait(void);
+void idle_send_self_nmi(void); /* raise a non-maskable interrupt on this CPU (a self test of the NMI stack) */
 
 #endif

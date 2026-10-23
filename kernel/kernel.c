@@ -27,6 +27,7 @@
 #include "rtc.h"
 #include "serial.h"
 #include "process.h"
+#include "protect.h"
 #include "storage.h"
 #include "syscall.h"
 #include "task.h"
@@ -170,6 +171,14 @@ void kernel_main(const BootInfo *info)
     if (pmm_ok)
     {
         serial_init();
+
+        /* SMEP / SMAP before anything touches user memory (the address space test below does). */
+        protect_init();
+        serial_puts("HARISOS: protections: SMEP ");
+        serial_puts(protect_status() & PROTECT_SMEP ? "on" : "not available");
+        serial_puts(", SMAP ");
+        serial_puts(protect_status() & PROTECT_SMAP ? "on\n" : "not available\n");
+
         serial_puts("HARISOS: page tables: ");
         if (paging_ok)
         {
@@ -194,6 +203,22 @@ void kernel_main(const BootInfo *info)
         }
         else
             serial_puts("ok\n");
+
+        /* Do the protections work? Tries what must fault (reading / running a user page from the kernel) and sends an NMI
+         * to ourselves. Logged, not fatal. */
+        if (as_init == 0)
+        {
+            int pt = protect_selftest();
+            serial_puts("HARISOS: protection self test ");
+            if (pt == 0)
+                serial_puts("ok\n");
+            else
+            {
+                serial_puts("FAILED ");
+                serial_putd(pt);
+                serial_puts("\n");
+            }
+        }
 
         int gd = gdt_check(); /* the CPU accepts the ring 3 selectors and the TSS is loaded */
         serial_puts("HARISOS: GDT check ");

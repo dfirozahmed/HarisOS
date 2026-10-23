@@ -185,6 +185,7 @@ int idle_init(void)
         idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
     idt_set(VEC_TIMER, idle_isr_timer);
     IDT[8].ist = 1;  /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
+    IDT[2].ist = 3;  /* an NMI runs on IST3, never on the user's stack (the SYSCALL entry has a window where RSP is the user's) */
     IDT[14].ist = 2; /* so does #PF (IST2): a thread stack that overflowed into its guard page cannot take the frame */
     idt_set(VEC_SPURIOUS, idle_isr_spurious);
     idt_load();
@@ -214,6 +215,16 @@ int idle_init(void)
 
 int idle_ready(void) { return READY; }
 
+void idle_send_self_nmi(void)
+{
+    if (!READY)
+        return;
+    /* Interrupt command register: delivery mode NMI (100b at bit 8), level assert (bit 14), destination shorthand
+     * "self" (01b at bit 18). Writing the low half sends it. */
+    lapic_write(0x310, 0);
+    lapic_write(0x300, (1u << 18) | (1u << 14) | (4u << 8));
+}
+
 void idle_wait(void)
 {
     if (!READY)
@@ -230,5 +241,6 @@ void idle_wait(void)
 int idle_init(void) { return -1; }
 int idle_ready(void) { return 0; }
 void idle_wait(void) {}
+void idle_send_self_nmi(void) {}
 
 #endif

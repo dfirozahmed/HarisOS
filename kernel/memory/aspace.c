@@ -3,6 +3,7 @@
 #include "irq.h"
 #include "pmm.h"
 #include "preempt.h"
+#include "uaccess.h"
 
 #if defined(__x86_64__)
 
@@ -143,7 +144,9 @@ int aspace_selftest(void)
     static volatile u64 marker = 0xFEEDFACECAFEBEEFULL;
     u64 irq = irq_save();
     aspace_switch(as);
+    user_access_begin(); /* SMAP: reading a user page from ring 0 needs the window */
     u64 seen = *(volatile u64 *)va;
+    user_access_end();
     u64 mark = marker;
     aspace_switch(0);
     irq_restore(irq);
