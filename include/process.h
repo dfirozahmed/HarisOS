@@ -24,6 +24,12 @@
 /* The thread id (see task.h) or -1: bad image, no memory, no free thread slot. Nothing stays allocated on failure. */
 int process_start(const char *name, const void *image, unsigned long long size);
 
+/* The same for an ELF64 executable (elf.h): each PT_LOAD segment is mapped at its own address with its own permissions
+ * (read, write, execute, never write + execute), the entry point is the file's. `file` is only read, and may be freed
+ * as soon as this returns. Returns the thread id, or -1 with *err (if not NULL) = the ELF_ERR_* reason (a file that is
+ * not acceptable) or 0 (out of memory or thread slots). Nothing stays allocated on failure. */
+int process_start_elf(const char *name, const void *file, unsigned long long size, int *err);
+
 /* End the running process (called by SYS_EXIT, and by the kernel itself). Does not return. */
 __attribute__((noreturn)) void process_exit(int code);
 
@@ -37,6 +43,11 @@ typedef struct
 } ProcessStats;
 
 void process_stats(ProcessStats *out);
+
+/* Give the CPU to other threads until process thread `id` has ended and been cleaned up (its stack, pages and page
+ * tables freed). 0 = done, -1 = still running after a few hundred turns (a program that keeps running). For tests and for
+ * code that must wait for a program; a normal caller just lets the scheduler run. */
+int process_wait(int id);
 
 /* Boot self test: runs four small programs in ring 3 (a write + exit, a bad pointer, a bad memory access, and one that
  * spins until the timer interrupt has taken the CPU from it three times) and checks what the kernel did, and that

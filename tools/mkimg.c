@@ -1,7 +1,7 @@
 /*
  * mkimg - builds a bootable UEFI disk image (haris.img) with no external tools.
  *
- *   mkimg <out.img> <BOOTX64.EFI> <KERNEL.EFI>
+ *   mkimg <out.img> <BOOTX64.EFI> <KERNEL.EFI> [file ...]
  *
  * Layout (512-byte sectors, 64 MiB):
  *   LBA 0            protective MBR
@@ -9,7 +9,8 @@
  *   LBA 2048..       one EFI System Partition (FAT32)
  *   last 33 sectors  backup GPT
  *
- * FAT32 contents:  /EFI/BOOT/BOOTX64.EFI   /KERNEL.EFI
+ * FAT32 contents:  /EFI/BOOT/BOOTX64.EFI   /KERNEL.EFI   and every extra file in the root folder (user programs such as
+ *                  HELLO.ELF; the name is the file's own, upper case, at most 8 + 3 characters, at most 14 files)
  *
  * Write it to a USB stick (this ERASES the stick) with Rufus in "DD Image" mode,
  * balenaEtcher, or `dd`. The PC must boot in UEFI mode (Secure Boot off).
@@ -174,11 +175,35 @@ static void format_fat32(void)
     put32(fat_entry(1), FAT_EOC);
 }
 
+/* "dir/hello.elf" -> "HELLO   ELF": the 11 characters of a short FAT name (upper case, padded with spaces) */
+static void name83(const char *path, char out[11])
+{
+    const char *base = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    const char *dot = strrchr(base, '.');
+    size_t name_len = dot ? (size_t)(dot - base) : strlen(base);
+    const char *ext = dot ? dot + 1 : "";
+    if (name_len == 0 || name_len > 8 || strlen(ext) > 3)
+    {
+        fprintf(stderr, "mkimg: '%s' does not fit an 8.3 file name\n", base);
+        exit(1);
+    }
+    memset(out, ' ', 11);
+    for (size_t i = 0; i < name_len; i++)
+        out[i] = (char)((base[i] >= 'a' && base[i] <= 'z') ? base[i] - 32 : base[i]);
+    for (size_t i = 0; ext[i]; i++)
+        out[8 + i] = (char)((ext[i] >= 'a' && ext[i] <= 'z') ? ext[i] - 32 : ext[i]);
+}
+
+#define MAX_EXTRA 14 /* the root folder is one 512-byte cluster: 16 entries, two are used */
+
 int main(int argc, char **argv)
 {
-    if (argc != 4)
+    if (argc < 4 || argc - 4 > MAX_EXTRA)
     {
-        fprintf(stderr, "usage: mkimg <out.img> <BOOTX64.EFI> <KERNEL.EFI>\n");
+        fprintf(stderr, "usage: mkimg <out.img> <BOOTX64.EFI> <KERNEL.EFI> [file ... (at most %d)]\n", MAX_EXTRA);
         return 1;
     }
 
@@ -202,6 +227,15 @@ int main(int argc, char **argv)
     uint8_t *d = cluster_data(root);
     dir_entry(d, "EFI        ", 0x10, efi, 0);
     dir_entry(d + 32, "KERNEL  EFI", 0x20, c_kernel, kernel_size);
+    for (int i = 4; i < argc; i++) /* extra files: user programs */
+    {
+        uint32_t size;
+        uint8_t *data = read_file(argv[i], &size);
+        char n83[11];
+        name83(argv[i], n83);
+        dir_entry(d + 32 * (size_t)(i - 2), n83, 0x20, add_file(data, size), size);
+        free(data);
+    }
     d = cluster_data(efi);
     dir_entry(d, ".          ", 0x10, efi, 0);
     dir_entry(d + 32, "..         ", 0x10, 0, 0);

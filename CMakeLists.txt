@@ -71,7 +71,9 @@ set(KERNEL_SOURCES
     kernel/core/task_ctx.c          # kernel threads: the register-saving context switch
     kernel/core/heapmon.c           # background thread: checks the kernel heap once a second
     kernel/core/syscall.c           # system calls: SYSCALL entry, SYS_WRITE / SYS_EXIT / SYS_YIELD
-    kernel/core/process.c           # user processes: address space + thread, ring 3 entry, boot self test
+    kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
+    kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start
+    kernel/core/process.c          # user processes: address space + thread, ring 3 entry, boot self test
     kernel/core/user_demo.c         # ring 3 demo programs for the self test
     kernel/core/protect.c           # SMEP / SMAP, boot self test of the protections and the NMI stack
     kernel/core/gdt.c             # GDT: kernel + user segments, TSS (host-tested layout)
@@ -206,6 +208,74 @@ add_custom_command(
 )
 
 # ------------------------------------------------------------
+# User programs (ring 3): user/NAME.c becomes an ELF executable, stored on the boot disk as NAME.ELF.
+#
+# The toolchain on Windows (MSYS2 clang + lld) has no ELF linker, only PE ones, so the steps are:
+#   1. clang compiles user/NAME.c for the bare machine (freestanding, no C library, no SSE: the kernel does not save the
+#      SSE / x87 state of a process across switches yet)
+#   2. lld-link links it as a PE file at the start of the user address space, sections on 4 KiB boundaries, no relocations
+#   3. tools/mkelf.c repackages those sections as an ELF64 file, one PT_LOAD segment per section
+# On a machine with an ELF linker the kernel does not care how the file was made; this just works everywhere the
+# kernel itself can be built. To add a program: put user/NAME.c here and add NAME to USER_PROGRAMS.
+# ------------------------------------------------------------
+set(MKELF_EXE ${CMAKE_BINARY_DIR}/mkelf${CMAKE_HOST_EXECUTABLE_SUFFIX})
+add_custom_command(
+    OUTPUT  ${MKELF_EXE}
+    COMMAND ${CLANG_CC} -O2 -o ${MKELF_EXE} ${CMAKE_SOURCE_DIR}/tools/mkelf.c
+    DEPENDS ${CMAKE_SOURCE_DIR}/tools/mkelf.c
+    COMMENT "Building mkelf"
+    VERBATIM
+)
+
+set(USER_PROGRAMS hello)
+set(USER_CFLAGS
+    --target=x86_64-pc-win32-coff
+    -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone -mno-sse -mno-mmx
+    -O2 -Wall -Wextra -std=gnu11)
+set(USER_ELFS "")
+set(USER_ESP_FILES "")
+foreach(PROG ${USER_PROGRAMS})
+    string(TOUPPER ${PROG} PROG_UPPER)
+    set(PROG_OBJ ${CMAKE_BINARY_DIR}/user/${PROG}.obj)
+    set(PROG_PE  ${CMAKE_BINARY_DIR}/user/${PROG}.exe)
+    set(PROG_ELF ${CMAKE_BINARY_DIR}/user/${PROG}.elf)
+    set(PROG_ESP ${CMAKE_BINARY_DIR}/esp/${PROG_UPPER}.ELF)
+    add_custom_command(
+        OUTPUT  ${PROG_OBJ}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+        COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c
+        COMMENT "Compiling user/${PROG}.c"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${PROG_PE}
+        COMMAND ${LLD_LINK} -subsystem:native -entry:_start -nodefaultlib -base:0x400000000000 -fixed -dynamicbase:no
+                -driver -align:4096 -filealign:4096 -out:${PROG_PE} ${PROG_OBJ}
+        DEPENDS ${PROG_OBJ}
+        COMMENT "Linking ${PROG}.exe"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${PROG_ELF}
+        COMMAND ${MKELF_EXE} ${PROG_PE} ${PROG_ELF}
+        DEPENDS ${MKELF_EXE} ${PROG_PE}
+        COMMENT "Making ${PROG}.elf"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${PROG_ESP}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/esp
+        COMMAND ${CMAKE_COMMAND} -E copy ${PROG_ELF} ${PROG_ESP}
+        DEPENDS ${PROG_ELF}
+        COMMENT "Copying to esp/${PROG_UPPER}.ELF"
+        VERBATIM
+    )
+    list(APPEND USER_ELFS ${PROG_ELF})
+    list(APPEND USER_ESP_FILES ${PROG_ESP})
+endforeach()
+
+# ------------------------------------------------------------
 # Bootable disk image for a USB stick / virtual machine: build/haris.img
 # (GPT + FAT32 EFI System Partition). tools/mkimg.c is a small host program,
 # ------------------------------------------------------------
@@ -222,13 +292,13 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${HARIS_IMG}
-    COMMAND ${MKIMG_EXE} ${HARIS_IMG} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${CMAKE_BINARY_DIR}/KERNEL.EFI
-    DEPENDS ${MKIMG_EXE} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${KERNEL_BIN}
+    COMMAND ${MKIMG_EXE} ${HARIS_IMG} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${CMAKE_BINARY_DIR}/KERNEL.EFI ${USER_ELFS}
+    DEPENDS ${MKIMG_EXE} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${KERNEL_BIN} ${USER_ELFS}
     COMMENT "Creating haris.img"
     VERBATIM
 )
 
-add_custom_target(haris ALL DEPENDS ${ESP_LOADER} ${ESP_KERNEL} ${HARIS_IMG})
+add_custom_target(haris ALL DEPENDS ${ESP_LOADER} ${ESP_KERNEL} ${USER_ESP_FILES} ${HARIS_IMG})
 
 # ------------------------------------------------------------
 # Running needs UEFI firmware for the virtual machine (OVMF / edk2).

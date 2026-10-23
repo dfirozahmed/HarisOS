@@ -1,6 +1,7 @@
 /* HarisOS user processes: see include/process.h. */
 #include "process.h"
 #include "aspace.h"
+#include "elf.h"
 #include "heap.h"
 #include "idle.h"
 #include "pmm.h"
@@ -15,6 +16,20 @@ typedef unsigned long long u64;
 static ProcessStats STATS;
 
 void process_stats(ProcessStats *out) { *out = STATS; }
+
+int process_wait(int id)
+{
+    for (int i = 0; i < 400; i++)
+    {
+        TaskState s = task_state(id);
+        if (s == TASK_DEAD || s == TASK_UNUSED)
+            break;
+        task_yield(); /* it runs until it traps, is preempted by the timer, or ends */
+    }
+    task_yield(); /* frees the stack, the pages and the page tables of the finished thread */
+    task_yield();
+    return task_state(id) == TASK_UNUSED ? 0 : -1;
+}
 
 /* Leave ring 0 for ring 3 with IRETQ: it pops RIP, CS, RFLAGS, RSP, SS, so build that frame and go. RFLAGS = 0x202:
  * interrupts on (the timer must be able to take the CPU from a process that never gives it up), bit 1 is always set.
@@ -97,6 +112,35 @@ static int copy_in(AddressSpace *as, u64 va, const unsigned char *src, u64 n)
     return 0;
 }
 
+/* The last steps of every way to start a process: the stack (writable, not executable), the first thread data, the
+ * thread. On failure the address space is destroyed here, so the callers just return. Returns the thread id or -1. */
+static int launch(const char *name, AddressSpace *as, u64 entry)
+{
+    for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
+        if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
+        {
+            aspace_destroy(as);
+            return -1;
+        }
+    Start *st = kmalloc(sizeof(Start));
+    if (!st)
+    {
+        aspace_destroy(as);
+        return -1;
+    }
+    st->entry = entry;
+    st->user_rsp = PAGING_USER_END - 16; /* inside the top stack page; 16-aligned */
+    int id = task_create_user(name, user_thread_main, st, as);
+    if (id < 0)
+    {
+        kfree(st);
+        aspace_destroy(as);
+        return -1;
+    }
+    STATS.started++;
+    return id;
+}
+
 int process_start(const char *name, const void *image, u64 size)
 {
     if (!image || size == 0 || size > PROCESS_IMAGE_MAX)
@@ -105,34 +149,54 @@ int process_start(const char *name, const void *image, u64 size)
     if (!as)
         return -1;
 
-    /* Code and data of the image: executable, not writable. The stack: writable, not executable (W^X). */
+    /* Code and data of the image: executable, not writable (W^X). */
     u64 pages = (size + 4095) / 4096;
     for (u64 i = 0; i < pages; i++)
         if (aspace_map_new(as, PAGING_USER_BASE + i * 4096, ASPACE_EXEC) != 0)
-            goto fail;
-    for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
-        if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
-            goto fail;
+        {
+            aspace_destroy(as);
+            return -1;
+        }
     if (copy_in(as, PAGING_USER_BASE, (const unsigned char *)image, size) != 0)
-        goto fail;
-
-    Start *st = kmalloc(sizeof(Start));
-    if (!st)
-        goto fail;
-    st->entry = PAGING_USER_BASE;
-    st->user_rsp = PAGING_USER_END - 16; /* inside the top stack page; 16-aligned */
-    int id = task_create_user(name, user_thread_main, st, as);
-    if (id < 0)
     {
-        kfree(st);
-        goto fail;
+        aspace_destroy(as);
+        return -1;
     }
-    STATS.started++;
-    return id;
+    return launch(name, as, PAGING_USER_BASE);
+}
 
-fail:
-    aspace_destroy(as);
-    return -1;
+int process_start_elf(const char *name, const void *file, u64 size, int *err)
+{
+    ElfInfo info;
+    int e = elf_parse(file, size, &info); /* every field of the file is checked here, before anything is mapped */
+    if (err)
+        *err = e;
+    if (e != ELF_OK)
+        return -1;
+    AddressSpace *as = aspace_create();
+    if (!as)
+        return -1;
+
+    /* Each segment gets its own pages (elf_parse made sure no page is shared) with the permissions it asks for. A fresh
+     * page is zero, which is exactly what the bytes after filesz (.bss) must be; only the file's bytes are copied. */
+    for (int i = 0; i < info.nseg; i++)
+    {
+        const ElfSegment *s = &info.seg[i];
+        unsigned flags = ((s->flags & ELF_PF_W) ? ASPACE_WRITE : 0) | ((s->flags & ELF_PF_X) ? ASPACE_EXEC : 0);
+        u64 first = s->vaddr & ~4095ULL, last = (s->vaddr + s->memsz - 1) & ~4095ULL;
+        for (u64 va = first; va <= last; va += 4096)
+            if (aspace_map_new(as, va, flags) != 0)
+            {
+                aspace_destroy(as);
+                return -1;
+            }
+        if (copy_in(as, s->vaddr, (const unsigned char *)file + s->offset, s->filesz) != 0)
+        {
+            aspace_destroy(as);
+            return -1;
+        }
+    }
+    return launch(name, as, info.entry);
 }
 
 __attribute__((noreturn)) void process_exit(int code)
@@ -221,16 +285,7 @@ static int run(const char *name, const unsigned char *start, const unsigned char
     int id = process_start(name, start, (u64)(end - start));
     if (id < 0)
         return -1;
-    for (int i = 0; i < 200; i++)
-    {
-        TaskState s = task_state(id);
-        if (s == TASK_DEAD || s == TASK_UNUSED)
-            break;
-        task_yield(); /* it runs until it traps, is preempted by the timer, or ends */
-    }
-    task_yield(); /* frees the stack, the pages and the page tables of the finished thread */
-    task_yield();
-    return task_state(id) == TASK_UNUSED ? 0 : -2;
+    return process_wait(id) == 0 ? 0 : -2;
 }
 
 int process_selftest(void)

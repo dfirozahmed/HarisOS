@@ -6,6 +6,7 @@
 #include "desktop.h"
 #include "devmgr.h"
 #include "display.h"
+#include "exec.h"
 #include "exfat.h"
 #include "fbwc.h"
 #include "fault.h"
@@ -245,6 +246,23 @@ void kernel_main(const BootInfo *info)
          * a failure is logged, not fatal: nothing else depends on user mode yet. */
         syscall_init();
         int ps = (as_init == 0 && gd == 0) ? process_selftest() : 1;
+        if (ps == 0)
+        {
+            /* A program that is a real file: HELLO.ELF on one of the drives (if the boot disk has one; the volumes were
+             * mounted above). It is run, and damaged copies of it must be refused. Logged, not fatal. */
+            int ex = exec_selftest();
+            serial_puts("HARISOS: ELF program self test ");
+            if (ex == 1)
+                serial_puts("skipped (no HELLO.ELF on any drive)\n");
+            else if (ex == 0)
+                serial_puts("ok\n");
+            else
+            {
+                serial_puts("FAILED ");
+                serial_putd(ex);
+                serial_puts("\n");
+            }
+        }
         serial_puts("HARISOS: user mode self test ");
         if (ps == 1)
             serial_puts("skipped\n");
