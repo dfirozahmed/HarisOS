@@ -46,7 +46,14 @@ int main(void)
      * code, and SYSCALL's kernel code / data pair is base, base + 8 */
     CHECK((SEL_USER_CODE & ~7) - (SEL_USER_DATA & ~7) == 8);
     CHECK(SEL_KERNEL_DATA - SEL_KERNEL_CODE == 8);
-    CHECK((SEL_USER_DATA & ~7) == 0x10 + 8 && (SEL_USER_CODE & ~7) == 0x10 + 16); /* STAR[63:48] = 0x10 */
+    CHECK((SEL_USER_DATA & ~7) == 0x10 + 8 && (SEL_USER_CODE & ~7) == 0x10 + 16); /* STAR[63:48] = 0x10 + RPL 3 */
+
+    /* What SYSRET really loads: base + 8 and base + 16 as plain numbers. They must be exactly the user selectors WITH
+     * their RPL 3: a real CPU does not add the RPL, and an interrupt in ring 3 would push CS / SS with RPL 0, which IRETQ
+     * refuses with #GP (the bug that crashed a real machine; an emulator forces RPL 3 and did not show it). */
+    CHECK(SEL_SYSRET_BASE + 8 == SEL_USER_DATA && SEL_SYSRET_BASE + 16 == SEL_USER_CODE);
+    CHECK((SEL_SYSRET_BASE & 3) == 3);
+    CHECK((SEL_USER_DATA & 3) == (SEL_USER_CODE & 3)); /* IRETQ: the RPL of SS must equal the RPL (= CPL) of CS */
 
     /* the TSS descriptor is copied as it is, into two consecutive slots */
     CHECK(gdt[SEL_TSS / 8] == tss[0] && gdt[SEL_TSS / 8 + 1] == tss[1]);

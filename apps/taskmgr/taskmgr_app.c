@@ -212,7 +212,10 @@ static void draw_threads(UiRect body)
         UiRect r = ui_rect(list.x, list.y + row * ROW_H, list.w, ROW_H);
         row++;
         ui_text_in(ui_rect(r.x + 8, r.y, r.w - STATUS_W - PID_W - 16, r.h), name, UI_TEXT_BODY, UI_ALIGN_LEFT);
-        const char *label = st == TASK_RUNNING ? "Running" : (st == TASK_SLEEPING ? "Sleeping" : "Ready");
+        const char *label = st == TASK_RUNNING    ? "Running"
+                            : st == TASK_SLEEPING ? "Sleeping"
+                            : st == TASK_BLOCKED  ? "Waiting"
+                                                  : "Ready";
         ui_text_in_color(ui_rect(r.x + r.w - STATUS_W - PID_W - 8, r.y, STATUS_W, r.h), label, UI_TEXT_SMALL,
                          UI_ALIGN_LEFT, st == TASK_RUNNING ? t->success : t->text_dim);
         char id_s[8];

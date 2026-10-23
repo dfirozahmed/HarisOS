@@ -23,7 +23,14 @@
 #define EXEC_ERR_LOAD -5     /* the loader refused the file or ran out of memory (see *err) */
 
 int exec_find(const char *name);
-int exec_run(const char *name, int *err);
+int exec_run(const char *name, int *err); /* the program's output goes to the serial port, its input is empty */
+
+/* The same for a file that is already known (a double click in the File Explorer): VFS node `node`, shown as `name`.
+ * `console` is the handle of the console window it should write to and read from (console.h), or -1 for none. */
+int exec_run_node(int node, const char *name, int console, int *err);
+
+/* A sentence for a failed exec_run / exec_run_node: the code it returned and the *err it set. */
+const char *exec_error_text(int code, int err);
 
 /* Boot self test: runs HELLO.ELF from the boot drive if there is one, and checks that bad files are refused and nothing
  * leaks. 0 = fine, 1 = there is no HELLO.ELF on any drive (nothing to test), otherwise a negative number. */

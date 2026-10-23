@@ -70,7 +70,8 @@ set(KERNEL_SOURCES
     kernel/core/task.c             # kernel threads (cooperative): task table, round-robin scheduler, boot self test
     kernel/core/task_ctx.c          # kernel threads: the register-saving context switch
     kernel/core/heapmon.c           # background thread: checks the kernel heap once a second
-    kernel/core/syscall.c           # system calls: SYSCALL entry, SYS_WRITE / SYS_EXIT / SYS_YIELD
+    kernel/core/syscall.c           # system calls: SYSCALL entry, write / read / open / close / seek / exit / yield
+    kernel/core/console.c           # console: character grid, cursor and line editor for a program's window (host-tested)
     kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
     kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start
     kernel/core/process.c          # user processes: address space + thread, ring 3 entry, boot self test
@@ -154,7 +155,8 @@ set(KERNEL_SOURCES
     apps/devmgr/devmgr_app.c        # Device Manager app
     apps/display/display_app.c      # Display Settings app: brightness slider
     apps/taskmgr/taskmgr_app.c      # Task Manager app: processes and performance
-    apps/notepad/notepad_app.c)     # Notepad app: plain-text editor
+    apps/notepad/notepad_app.c      # Notepad app: plain-text editor
+    apps/console/console_app.c)     # Console window: where a program started from the File Explorer prints and reads
 
 file(GLOB HARIS_HEADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/include/*.h ${CMAKE_SOURCE_DIR}/apps/explorer/*.h)
 set(KERNEL_BIN ${CMAKE_BINARY_DIR}/KERNEL.EFI)
@@ -227,7 +229,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello)
+set(USER_PROGRAMS hello files echo)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone -mno-sse -mno-mmx
@@ -244,7 +246,7 @@ foreach(PROG ${USER_PROGRAMS})
         OUTPUT  ${PROG_OBJ}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
         COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
-        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/sys.h
         COMMENT "Compiling user/${PROG}.c"
         VERBATIM
     )

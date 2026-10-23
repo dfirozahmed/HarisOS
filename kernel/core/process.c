@@ -1,6 +1,7 @@
 /* HarisOS user processes: see include/process.h. */
 #include "process.h"
 #include "aspace.h"
+#include "console.h"
 #include "elf.h"
 #include "heap.h"
 #include "idle.h"
@@ -114,7 +115,9 @@ static int copy_in(AddressSpace *as, u64 va, const unsigned char *src, u64 n)
 
 /* The last steps of every way to start a process: the stack (writable, not executable), the first thread data, the
  * thread. On failure the address space is destroyed here, so the callers just return. Returns the thread id or -1. */
-static int launch(const char *name, AddressSpace *as, u64 entry)
+static void process_free(void *p) { kfree(p); }
+
+static int launch(const char *name, AddressSpace *as, u64 entry, int console)
 {
     for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
         if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
@@ -123,23 +126,36 @@ static int launch(const char *name, AddressSpace *as, u64 entry)
             return -1;
         }
     Start *st = kmalloc(sizeof(Start));
-    if (!st)
+    Process *p = kmalloc(sizeof(Process));
+    if (!st || !p)
     {
+        kfree(st);
+        kfree(p);
         aspace_destroy(as);
         return -1;
     }
     st->entry = entry;
     st->user_rsp = PAGING_USER_END - 16; /* inside the top stack page; 16-aligned */
-    int id = task_create_user(name, user_thread_main, st, as);
+    p->console = console;
+    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+    {
+        p->file[i].node = -1;
+        p->file[i].pos = 0;
+    }
+    /* the Process record belongs to the thread from here on: process_free is called when the thread is cleaned up */
+    int id = task_create_user(name, user_thread_main, st, as, p, process_free);
     if (id < 0)
     {
         kfree(st);
+        kfree(p);
         aspace_destroy(as);
         return -1;
     }
     STATS.started++;
     return id;
 }
+
+Process *process_current(void) { return (Process *)task_user_data(); }
 
 int process_start(const char *name, const void *image, u64 size)
 {
@@ -162,10 +178,10 @@ int process_start(const char *name, const void *image, u64 size)
         aspace_destroy(as);
         return -1;
     }
-    return launch(name, as, PAGING_USER_BASE);
+    return launch(name, as, PAGING_USER_BASE, -1);
 }
 
-int process_start_elf(const char *name, const void *file, u64 size, int *err)
+int process_start_elf(const char *name, const void *file, u64 size, int console, int *err)
 {
     ElfInfo info;
     int e = elf_parse(file, size, &info); /* every field of the file is checked here, before anything is mapped */
@@ -196,7 +212,7 @@ int process_start_elf(const char *name, const void *file, u64 size, int *err)
             return -1;
         }
     }
-    return launch(name, as, info.entry);
+    return launch(name, as, info.entry, console);
 }
 
 __attribute__((noreturn)) void process_exit(int code)
@@ -208,7 +224,17 @@ __attribute__((noreturn)) void process_exit(int code)
     serial_puts(" exited, code ");
     serial_putd(code);
     serial_puts("\n");
+    Process *p = process_current();
+    if (p)
+        console_finish(p->console, code); /* "[process exited, code N]" in its window (does nothing without one) */
     task_exit(); /* the scheduler frees the thread, its pages and its page tables */
+}
+
+static void hex64(char *out, u64 v) /* 16 hex digits and a NUL */
+{
+    for (int i = 0; i < 16; i++)
+        out[i] = "0123456789ABCDEF"[(v >> (60 - 4 * i)) & 15];
+    out[16] = 0;
 }
 
 __attribute__((noreturn)) void process_fault(const FaultFrame *f, u64 cr2)
@@ -220,6 +246,28 @@ __attribute__((noreturn)) void process_fault(const FaultFrame *f, u64 cr2)
     serial_puts(task_name(task_current()));
     serial_puts(" ended by a CPU exception in ring 3:\n");
     serial_puts(text);
+
+    Process *p = process_current();
+    if (p && console_valid(p->console)) /* tell the user in the program's window what happened, and where */
+    {
+        static char line[96];
+        const char *name = fault_name((unsigned)f->vector);
+        int n = 0;
+        static const char head[] = "\n[process crashed: ";
+        for (int i = 0; head[i]; i++)
+            line[n++] = head[i];
+        for (int i = 0; name[i] && n < 50; i++)
+            line[n++] = name[i];
+        static const char at[] = " at ";
+        for (int i = 0; at[i]; i++)
+            line[n++] = at[i];
+        hex64(line + n, f->rip);
+        n += 16;
+        line[n++] = ']';
+        line[n++] = '\n';
+        console_write(p->console, line, (unsigned)n);
+        console_finish(p->console, -1);
+    }
     task_exit();
 }
 
@@ -228,6 +276,7 @@ __attribute__((noreturn)) void process_fault(const FaultFrame *f, u64 cr2)
 extern const unsigned char user_hello_start[], user_hello_end[];
 extern const unsigned char user_badptr_start[], user_badptr_end[];
 extern const unsigned char user_fault_start[], user_fault_end[];
+extern const unsigned char user_segs_start[], user_segs_end[];
 extern const unsigned char user_spin_start[], user_spin_end[], user_spin_stop[], user_spin_deadline[];
 
 static u64 rdtsc(void)
@@ -311,6 +360,12 @@ int process_selftest(void)
         return -5;
     if (STATS.faulted != s0.faulted + 1)
         return -6;
+
+    /* the selectors ring 3 runs with after SYSRET: SS = 0x1B, CS = 0x23, both with RPL 3 (see syscall_init) */
+    if (run("SEGS", user_segs_start, user_segs_end) != 0)
+        return -15;
+    if (STATS.last_exit != (int)((0x1BU << 16) | 0x23U))
+        return -16;
 
     int sp = spin_test();
     if (sp != 0)

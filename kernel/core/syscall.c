@@ -1,15 +1,236 @@
 /* HarisOS system calls: see include/syscall.h. */
 #include "syscall.h"
 #include "aspace.h"
+#include "console.h"
+#include "exec.h"
 #include "gdt.h"
 #include "process.h"
 #include "serial.h"
 #include "task.h"
 #include "uaccess.h"
+#include "vfs.h"
 
-static unsigned long long COUNT;
+typedef unsigned long long ull;
 
-unsigned long long syscall_count(void) { return COUNT; }
+static ull COUNT;
+
+ull syscall_count(void) { return COUNT; }
+
+/* ---- moving bytes between ring 3 and the kernel ------------------------------------------------------------------
+ * Every pointer from ring 3 is checked with aspace_user_ok() before it is used (mapped, user accessible, writable if it
+ * is to be written) and only then touched, inside the SMAP window (uaccess.h) and in small pieces through a buffer on the
+ * kernel stack: code that talks to the console, the serial port or a drive never runs with the window open. Interrupts
+ * are off for the whole call, so the pages cannot be unmapped between the check and the copy, and the process's own
+ * address space is the one loaded, so its pointers can be used as they are. */
+#define CHUNK 512
+
+static void copy_from_user(char *dst, ull src, unsigned n)
+{
+    const volatile char *p = (const volatile char *)src; /* volatile: no memcpy in this build, and it must really read */
+    user_access_begin();
+    for (unsigned i = 0; i < n; i++)
+        dst[i] = p[i];
+    user_access_end();
+}
+
+static void copy_to_user(ull dst, const char *src, unsigned n)
+{
+    volatile char *p = (volatile char *)dst;
+    user_access_begin();
+    for (unsigned i = 0; i < n; i++)
+        p[i] = src[i];
+    user_access_end();
+}
+
+/* A NUL-terminated string from ring 3 into dst[cap]: its length, or -1 if it is not readable user memory or does not fit.
+ * The pages are checked one at a time as the string runs into them (its length is not known in advance). */
+static int copy_string_from_user(char *dst, int cap, ull src, const AddressSpace *as)
+{
+    for (int i = 0; i < cap; i++)
+    {
+        ull a = src + (ull)i;
+        if ((i == 0 || (a & 4095) == 0) && !aspace_user_ok(as, a, 1, 0))
+            return -1;
+        char c;
+        copy_from_user(&c, a, 1);
+        dst[i] = c;
+        if (c == 0)
+            return i;
+    }
+    return -1;
+}
+
+/* ---- the calls ----------------------------------------------------------------------------------------------------- */
+static long long sys_write(const SyscallFrame *f)
+{
+    ull fd = f->rdi, ptr = f->rsi, len = f->rdx;
+    if (fd != 1 && fd != 2) /* standard output and standard error: the console */
+        return -1;
+    if (len > SYS_WRITE_MAX)
+        return -1;
+    if (len == 0)
+        return 0;
+    const AddressSpace *as = task_address_space();
+    if (!as || !aspace_user_ok(as, ptr, len, 0))
+        return -1;
+    const Process *p = process_current();
+    char buf[CHUNK];
+    for (ull done = 0; done < len;)
+    {
+        unsigned n = (len - done) < CHUNK ? (unsigned)(len - done) : CHUNK;
+        copy_from_user(buf, ptr + done, n);
+        if (p && p->console >= 0)
+            console_write(p->console, buf, n); /* (a window that was closed takes nothing: the text is dropped) */
+        else
+            for (unsigned i = 0; i < n; i++) /* no window: the serial port, where a program started at boot talks */
+            {
+                if (buf[i] == '\n')
+                    serial_putc('\r');
+                serial_putc(buf[i]);
+            }
+        done += n;
+    }
+    return (long long)len;
+}
+
+static long long sys_read(const SyscallFrame *f)
+{
+    ull fd = f->rdi, ptr = f->rsi, len = f->rdx;
+    if (len == 0)
+        return 0;
+    if (len > SYS_READ_MAX)
+        len = SYS_READ_MAX; /* a read may return less than asked */
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p || !aspace_user_ok(as, ptr, len, 1))
+        return -1;
+    char buf[CHUNK];
+
+    if (fd == 0) /* standard input: a line typed in the console window */
+    {
+        if (p->console < 0)
+            return 0; /* no window: no input */
+        int want = len < CHUNK ? (int)len : CHUNK;
+        int got;
+        for (;;)
+        {
+            got = console_read(p->console, buf, want);
+            if (got >= 0)
+                break;
+            /* Nothing typed yet. The thread waits without being scheduled; Enter in the window wakes it. Interrupts
+             * are off, so the key cannot arrive between console_read and task_block and be missed. */
+            console_wait(p->console, task_current());
+            task_block();
+        }
+        if (got > 0)
+            copy_to_user(ptr, buf, (unsigned)got);
+        return got; /* 0 = the window is gone or the program is finished: end of input */
+    }
+
+    ull idx = fd - PROCESS_FD_FIRST;
+    if (fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
+        return -1;
+    const VfsNode *vn = vfs_node(p->file[idx].node);
+    if (!vn)
+        return -1; /* the file was deleted while open */
+    ull total = 0;
+    while (total < len)
+    {
+        if (p->file[idx].pos >= vn->size)
+            break; /* at or past the end: 0 bytes, whatever a drive's read would say about such an offset */
+        ull left = vn->size - p->file[idx].pos;
+        unsigned n = (len - total) < CHUNK ? (unsigned)(len - total) : CHUNK;
+        if (n > left)
+            n = (unsigned)left;
+        int got = vfs_read(p->file[idx].node, p->file[idx].pos, buf, n);
+        if (got < 0)
+            return total ? (long long)total : -1;
+        if (got == 0)
+            break; /* end of the file */
+        copy_to_user(ptr + total, buf, (unsigned)got);
+        p->file[idx].pos += (unsigned)got;
+        total += (ull)got;
+        if ((unsigned)got < n)
+            break;
+    }
+    return (long long)total;
+}
+
+/* Paths: a name without a slash ("HELLO.ELF") is looked up in the top folder of every drive, like exec does; a path that
+ * starts with '/' is a VFS path ("/RAM Disk/Documents/readme.txt"). Files are opened for reading only. */
+static long long sys_open(const SyscallFrame *f)
+{
+    ull ptr = f->rdi, flags = f->rsi;
+    if (flags != 0) /* O_RDONLY is all there is */
+        return -1;
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    if (!as || !p)
+        return -1;
+    char path[256];
+    if (copy_string_from_user(path, (int)sizeof(path), ptr, as) < 0)
+        return -1;
+    int node = path[0] == '/' ? vfs_lookup(path) : exec_find(path);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    if (!n || n->is_dir)
+        return -1;
+    for (int i = 0; i < PROCESS_MAX_FILES; i++)
+        if (p->file[i].node < 0)
+        {
+            p->file[i].node = node;
+            p->file[i].pos = 0;
+            return PROCESS_FD_FIRST + i;
+        }
+    return -1; /* too many open files */
+}
+
+static long long sys_close(const SyscallFrame *f)
+{
+    ull fd = f->rdi;
+    Process *p = process_current();
+    if (!p)
+        return -1;
+    if (fd < PROCESS_FD_FIRST) /* closing the console is allowed and does nothing */
+        return 0;
+    ull idx = fd - PROCESS_FD_FIRST;
+    if (idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
+        return -1;
+    p->file[idx].node = -1;
+    return 0;
+}
+
+/* whence: 0 = from the start, 1 = from the current position, 2 = from the end. Returns the new position. A position past
+ * the end is allowed (a read there returns 0); a negative one is not. */
+static long long sys_seek(const SyscallFrame *f)
+{
+    ull fd = f->rdi;
+    long long off = (long long)f->rsi;
+    ull whence = f->rdx;
+    Process *p = process_current();
+    ull idx = fd - PROCESS_FD_FIRST;
+    if (!p || fd < PROCESS_FD_FIRST || idx >= PROCESS_MAX_FILES || p->file[idx].node < 0)
+        return -1;
+    const VfsNode *n = vfs_node(p->file[idx].node);
+    if (!n)
+        return -1;
+    long long base;
+    if (whence == 0)
+        base = 0;
+    else if (whence == 1)
+        base = (long long)p->file[idx].pos;
+    else if (whence == 2)
+        base = (long long)n->size;
+    else
+        return -1;
+    /* off is any 64-bit number from ring 3: base is between 0 and 2^32, so only a huge positive offset can overflow */
+    if (off > 0 && off > 0x7FFFFFFFFFFFFFFFLL - base)
+        return -1;
+    long long pos = base + off;
+    if (pos < 0 || pos > 0xFFFFFFFFLL)
+        return -1;
+    p->file[idx].pos = (unsigned)pos;
+    return pos;
+}
 
 long long syscall_dispatch(SyscallFrame *f)
 {
@@ -17,38 +238,25 @@ long long syscall_dispatch(SyscallFrame *f)
     switch (f->rax)
     {
     case SYS_WRITE:
-    {
-        unsigned long long ptr = f->rdi, len = f->rsi;
-        if (len > SYS_WRITE_MAX)
-            return -1;
-        if (len == 0)
-            return 0;
-        /* The pointer comes from ring 3, so it is checked before it is used: every page of the buffer must be mapped,
-         * user accessible. (Interrupts are off for the whole call, so nothing can unmap it between check and use; and
-         * the process's own space is the one loaded, so the pointer can be used as it is.) */
-        const AddressSpace *as = task_address_space();
-        if (!as || !aspace_user_ok(as, ptr, len, 0))
-            return -1;
-        const volatile char *p = (const volatile char *)ptr;
-        user_access_begin(); /* SMAP: the kernel opens the window for exactly the loop that reads the user's buffer */
-        for (unsigned long long i = 0; i < len; i++)
-        {
-            if (p[i] == '\n')
-                serial_putc('\r');
-            serial_putc(p[i]);
-        }
-        user_access_end();
-        return (long long)len;
-    }
+        return sys_write(f);
     case SYS_EXIT:
         process_exit((int)f->rdi); /* does not return */
     case SYS_YIELD:
         task_yield();
         return 0;
+    case SYS_READ:
+        return sys_read(f);
+    case SYS_OPEN:
+        return sys_open(f);
+    case SYS_CLOSE:
+        return sys_close(f);
+    case SYS_SEEK:
+        return sys_seek(f);
     default:
         return -1;
     }
 }
+
 
 #if defined(__x86_64__) && !defined(HARIS_HOST)
 
@@ -137,8 +345,11 @@ static void wrmsr(unsigned msr, u64 v)
 void syscall_init(void)
 {
     /* SYSCALL loads CS from STAR[47:32] (SS = +8: our kernel code and data). SYSRET to 64-bit code loads SS from
-     * STAR[63:48] + 8 and CS from + 16: the base is the selector just below user data (segments.h). */
-    u64 star = ((u64)((SEL_USER_DATA & ~7u) - 8) << 48) | ((u64)SEL_KERNEL_CODE << 32);
+     * STAR[63:48] + 8 and CS from + 16, and it loads those numbers as they are: the real CPU does NOT turn the RPL
+     * bits into 3 by itself (an emulator may, which hid this once). User code would then run with CS = 0x20 / SS = 0x18,
+     * RPL 0, and the first interrupt would push those; IRETQ refuses a frame whose SS and CS have different RPL
+     * (#GP). So the base carries the RPL: 0x13, giving SS = 0x1B and CS = 0x23 (SEL_SYSRET_BASE in segments.h). */
+    u64 star = ((u64)SEL_SYSRET_BASE << 48) | ((u64)SEL_KERNEL_CODE << 32);
     wrmsr(MSR_STAR, star);
     wrmsr(MSR_LSTAR, (u64)syscall_entry);
     wrmsr(MSR_SFMASK, SYSCALL_FLAG_MASK);

@@ -36,12 +36,14 @@ int ex_kind_of(const VfsNode *n)
     for (int i = 0; AUDIO[i]; i++)
         if (ext_is(n->name, AUDIO[i]))
             return FK_AUDIO;
+    if (ext_is(n->name, "elf"))
+        return FK_PROGRAM;
     return ext_is(n->name, "efi") ? FK_EFI : FK_OTHER;
 }
 
 const char *ex_kind_name(int k)
 {
-    static const char *const NAMES[] = {"Folder", "Text file", "Source code", "Image", "Audio", "EFI program", "File", "Drive"};
+    static const char *const NAMES[] = {"Folder", "Text file", "Source code", "Image", "Audio", "EFI program", "Program", "File", "Drive"};
     return NAMES[k];
 }
 
@@ -59,6 +61,8 @@ UiRgb ex_kind_color(int k)
         return ui_rgb(170, 120, 240);
     case FK_EFI:
         return ui_rgb(250, 170, 60);
+    case FK_PROGRAM:
+        return ui_rgb(70, 210, 120);
     default:
         return ui_rgb(150, 160, 185);
     }

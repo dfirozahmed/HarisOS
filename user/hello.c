@@ -1,38 +1,22 @@
 /* HarisOS user program: the first one that is a real file. It is built as an ELF executable (see CMakeLists.txt),
- * stored on the boot disk as HELLO.ELF and started by the kernel's ELF loader (kernel/core/exec.c).
+ * stored on the boot disk as HELLO.ELF and started by the kernel's ELF loader (kernel/core/exec.c) - at boot as a self
+ * test, or by a double click on it in the File Explorer, when its text appears in a console window.
  *
- * There is no C library: the program talks to the kernel with the "syscall" instruction (include/syscall.h). It
- * exercises what a loader must get right: initialised data (.data), zero-filled data (.bss), read-only data (.rodata),
- * and a stack, and exits with 42 only if every one of them has the right content. */
+ * There is no C library: the program talks to the kernel with the "syscall" instruction (user/sys.h). It exercises what a
+ * loader must get right: initialised data (.data), zero-filled data (.bss), read-only data (.rodata), and a stack, and
+ * exits with 42 only if every one of them has the right content. */
+#include "sys.h"
 
 static const char MESSAGE[] = "hello from an ELF program\n";
 static const unsigned SQUARES[8] = {0, 1, 4, 9, 16, 25, 36, 49}; /* .rodata */
 static unsigned counter = 1000;                                   /* .data */
 static unsigned scratch[8192];                                    /* .bss: 32 KiB (8 pages) that must start as zero */
 
-/* long long, not long: the program is compiled for the same 64-bit Windows-style target as the kernel, where long is 32 bits */
-static long long syscall3(long long number, long long a, long long b, long long c)
-{
-    long long result;
-    __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
-    return result;
-}
-
-#define SYS_WRITE 1
-#define SYS_EXIT 2
-
-__attribute__((noreturn)) static void leave(int code)
-{
-    syscall3(SYS_EXIT, code, 0, 0);
-    for (;;)
-        ;
-}
-
 /* The kernel starts a program with a 16-byte aligned stack pointer; the C calling convention wants it to be 8 mod 16
  * at the first instruction of a function, as if a call had pushed a return address. */
 __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
 {
-    syscall3(SYS_WRITE, (long long)(unsigned long long)MESSAGE, sizeof(MESSAGE) - 1, 0);
+    sys_write(1, MESSAGE, sizeof(MESSAGE) - 1);
 
     int ok = 1;
     for (unsigned i = 0; i < sizeof(scratch) / sizeof(scratch[0]); i++)
@@ -56,5 +40,5 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
         if (local[i] != (char)i)
             ok = 0;
 
-    leave(ok ? 42 : 1);
+    sys_exit(ok ? 42 : 1);
 }

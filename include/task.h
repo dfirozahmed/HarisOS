@@ -40,6 +40,7 @@
 struct AddressSpace; /* aspace.h */
 
 typedef void (*TaskFn)(void *arg);
+typedef void (*TaskFreeFn)(void *data);
 
 typedef enum
 {
@@ -47,7 +48,8 @@ typedef enum
     TASK_READY,    /* could run, waits for its turn */
     TASK_RUNNING,  /* the one running now */
     TASK_SLEEPING, /* waits for wake_us */
-    TASK_DEAD      /* finished; its stack is freed by the next thread that runs */
+    TASK_DEAD,     /* finished; its stack is freed by the next thread that runs */
+    TASK_BLOCKED   /* waits for an event: not scheduled until task_wake() (appended last: other values keep their numbers) */
 } TaskState;
 
 int task_init(void);
@@ -57,8 +59,19 @@ int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags);
  * scheduler loads on every switch to it, and its kernel stack becomes the one the CPU uses when that code traps. It is
  * preemptible. The space is freed together with the thread (reap). The thread's function normally ends by entering ring
  * 3 (process.c); it never returns there. -1 if as is NULL or there is no slot or memory (as is then still the caller's). */
-int task_create_user(const char *name, TaskFn fn, void *arg, struct AddressSpace *as);
+int task_create_user(const char *name, TaskFn fn, void *arg, struct AddressSpace *as, void *data, TaskFreeFn free_data);
 struct AddressSpace *task_address_space(void); /* the running thread's user space, NULL for a kernel thread */
+/* `data` is the process's own record (process.h): task_user_data() gives it back to code running in that thread (the
+ * system calls), and free_data(data) is called when the thread has been cleaned up. NULL for kernel threads. */
+void *task_user_data(void);
+
+/* Wait for an event without being scheduled: task_block() marks the running thread BLOCKED and switches away; task_wake(id)
+ * (from anywhere: the main loop, another thread) makes it READY again. The caller checks its condition first and calls
+ * task_block() in a loop, because a wake-up can be spurious. Interrupts must stay off between the check and task_block()
+ * (system calls run that way), or the event could slip in between and the wake-up be lost. The main loop (thread 0) never
+ * blocks: task_block() there only yields. */
+void task_block(void);
+void task_wake(int id);
 struct AddressSpace *task_space_of(int id);    /* the user space of thread id; NULL for kernel threads and ended ones */
 void task_yield(void);
 

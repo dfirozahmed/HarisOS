@@ -28,7 +28,23 @@ int process_start(const char *name, const void *image, unsigned long long size);
  * (read, write, execute, never write + execute), the entry point is the file's. `file` is only read, and may be freed
  * as soon as this returns. Returns the thread id, or -1 with *err (if not NULL) = the ELF_ERR_* reason (a file that is
  * not acceptable) or 0 (out of memory or thread slots). Nothing stays allocated on failure. */
-int process_start_elf(const char *name, const void *file, unsigned long long size, int *err);
+int process_start_elf(const char *name, const void *file, unsigned long long size, int console, int *err);
+
+/* What the kernel keeps for a running process besides its address space (the thread's `data`, see task.h). The system
+ * calls reach it with process_current(). */
+#define PROCESS_MAX_FILES 5
+#define PROCESS_FD_FIRST 3 /* file descriptors 0, 1 and 2 are the console: input, output, errors */
+typedef struct Process
+{
+    int console; /* console.h handle of its window, -1 = none (output goes to the serial port, input is empty) */
+    struct
+    {
+        int node;     /* VFS node of an open file, -1 = this slot is free (file descriptor PROCESS_FD_FIRST + index) */
+        unsigned pos; /* the read position */
+    } file[PROCESS_MAX_FILES];
+} Process;
+
+Process *process_current(void); /* the running process, NULL in a kernel thread */
 
 /* End the running process (called by SYS_EXIT, and by the kernel itself). Does not return. */
 __attribute__((noreturn)) void process_exit(int code);

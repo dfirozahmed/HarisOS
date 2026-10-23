@@ -20,6 +20,8 @@ typedef struct
     unsigned char *stack;   /* start of the stack block (the guard page), NULL for task 0 (the firmware's stack) */
     int guarded;            /* the guard page really is unmapped (needs the page tables to be reachable) */
     AddressSpace *as;       /* the user address space of a process thread, NULL for kernel threads (kernel tables) */
+    void *data;             /* the process's own data (process.h), handed back by task_user_data() */
+    TaskFreeFn free_data;   /* called with data when the thread is cleaned up (may be NULL) */
     unsigned long long kstack_top; /* top of the stack above: where the CPU lands when ring 3 code traps (TSS rsp0) */
     TaskState state;
     unsigned flags;         /* TASK_PREEMPTIBLE */
@@ -77,6 +79,10 @@ static void reap(void)
                 aspace_destroy(t->as);
                 t->as = 0;
             }
+            if (t->data && t->free_data)
+                t->free_data(t->data);
+            t->data = 0;
+            t->free_data = 0;
             if (t->guarded)
                 paging_set_present((unsigned long long)t->stack, 1); /* the page goes back to the allocator: map it again */
             pmm_free_contiguous((unsigned long long)t->stack, STACK_BLOCK_PAGES);
@@ -160,6 +166,8 @@ int task_init(void)
         TASKS[i].stack = 0;
         TASKS[i].guarded = 0;
         TASKS[i].as = 0;
+        TASKS[i].data = 0;
+        TASKS[i].free_data = 0;
         TASKS[i].flags = 0;
     }
     ACTIVE_AS = 0;
@@ -177,26 +185,60 @@ int task_init(void)
     return 0;
 }
 
-static int create(const char *name, TaskFn fn, void *arg, unsigned flags, AddressSpace *as);
+static int create(const char *name, TaskFn fn, void *arg, unsigned flags, AddressSpace *as, void *data,
+                  TaskFreeFn free_data);
 
-int task_create(const char *name, TaskFn fn, void *arg) { return create(name, fn, arg, 0, 0); }
+int task_create(const char *name, TaskFn fn, void *arg) { return create(name, fn, arg, 0, 0, 0, 0); }
 
-int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags) { return create(name, fn, arg, flags, 0); }
+int task_create_flags(const char *name, TaskFn fn, void *arg, unsigned flags)
+{
+    return create(name, fn, arg, flags, 0, 0, 0);
+}
 
 /* A process thread must be preemptible: its ring 3 code never yields by itself. */
-int task_create_user(const char *name, TaskFn fn, void *arg, AddressSpace *as)
+int task_create_user(const char *name, TaskFn fn, void *arg, AddressSpace *as, void *data, TaskFreeFn free_data)
 {
-    return as ? create(name, fn, arg, TASK_PREEMPTIBLE, as) : -1;
+    return as ? create(name, fn, arg, TASK_PREEMPTIBLE, as, data, free_data) : -1;
 }
 
 AddressSpace *task_address_space(void) { return TASKS[CUR].as; }
+
+void *task_user_data(void) { return TASKS[CUR].data; }
+
+/* Blocking: a thread that waits for something (a key, a message) must not be READY, or the scheduler would keep running
+ * it just to look again. It marks itself BLOCKED and gives up the CPU; whoever produces the event calls task_wake().
+ * Interrupts are off from the check of the condition (the caller's) to here only if the caller keeps them off, as
+ * system calls do: nothing can wake the thread between its check and its block. */
+void task_block(void)
+{
+    if (CUR == 0) /* the main loop never blocks: it is what runs when everybody else does */
+    {
+        task_yield();
+        return;
+    }
+    unsigned long long irq = irq_save();
+    TASKS[CUR].state = TASK_BLOCKED;
+    schedule();
+    irq_restore(irq);
+}
+
+void task_wake(int id)
+{
+    if (id < 0 || id >= TASK_MAX)
+        return;
+    unsigned long long irq = irq_save();
+    if (TASKS[id].state == TASK_BLOCKED)
+        TASKS[id].state = TASK_READY;
+    irq_restore(irq);
+}
 
 AddressSpace *task_space_of(int id)
 {
     return id >= 0 && id < TASK_MAX && TASKS[id].state != TASK_UNUSED && TASKS[id].state != TASK_DEAD ? TASKS[id].as : 0;
 }
 
-static int create(const char *name, TaskFn fn, void *arg, unsigned flags, AddressSpace *as)
+static int create(const char *name, TaskFn fn, void *arg, unsigned flags, AddressSpace *as, void *data,
+                  TaskFreeFn free_data)
 {
     if (!fn)
         return -1;
@@ -240,6 +282,8 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     t->stack = stack;
     t->guarded = guarded;
     t->as = as; /* set before the state says READY: the scheduler never sees a process thread without its space */
+    t->data = data;
+    t->free_data = free_data;
     t->kstack_top = top;
     t->rsp = (unsigned long long)fr;
     t->fn = fn;

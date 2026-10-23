@@ -296,6 +296,26 @@ static void user_worker(void *arg)
     SEEN_IF = host_if;
 }
 
+static int FREED_DATA;
+static void *SEEN_DATA;
+static void free_data_fn(void *d) { FREED_DATA += *(int *)d; }
+static void data_worker(void *arg)
+{
+    (void)arg;
+    SEEN_DATA = task_user_data();
+}
+
+static int BLK_STAGE;
+static void block_worker(void *arg)
+{
+    (void)arg;
+    BLK_STAGE = 1;
+    task_block();
+    BLK_STAGE = 2;
+    task_block();
+    BLK_STAGE = 3;
+}
+
 static int SEEN_N, SEEN_BAD;
 static void user_pair_worker(void *arg)
 {
@@ -496,9 +516,9 @@ int main(void)
     CHECK(task_address_space() == 0);
     AS_SWITCHES = AS_DESTROYED = KSTACK_SETS = 0;
     LOADED = 0;
-    CHECK(task_create_user("USER", user_worker, 0, 0) == -1); /* no space: not a process thread */
+    CHECK(task_create_user("USER", user_worker, 0, 0, 0, 0) == -1); /* no space: not a process thread */
     CHECK(BLOCKS_OUT == 0);
-    int u = task_create_user("USER", user_worker, 0, &fake_as);
+    int u = task_create_user("USER", user_worker, 0, &fake_as, 0, 0);
     CHECK(u > 0);
     CHECK(task_state(u) == TASK_READY);
     CHECK(task_space_of(u) == &fake_as && task_space_of(0) == 0 && task_space_of(-1) == 0 && task_space_of(99) == 0);
@@ -513,6 +533,49 @@ int main(void)
     CHECK(task_space_of(u) == 0);
     CHECK(task_state(u) == TASK_UNUSED && BLOCKS_OUT == 0);
 
+    /* the process's own record: handed back to its thread, freed when the thread is cleaned up */
+    {
+        static int payload = 7;
+        FREED_DATA = 0;
+        SEEN_DATA = 0;
+        CHECK(task_user_data() == 0); /* the main thread has none */
+        CHECK(task_create_user("DATA", data_worker, 0, &fake_as, &payload, free_data_fn) > 0);
+        task_yield();
+        CHECK(SEEN_DATA == &payload); /* the thread saw its own record */
+        drain();
+        CHECK(FREED_DATA == 7); /* freed once the thread was cleaned up ... */
+        drain();
+        CHECK(FREED_DATA == 7);
+    }
+
+    /* blocking: a blocked thread is not scheduled until it is woken */
+    {
+        int b = task_create("BLOCK", block_worker, 0);
+        BLK_STAGE = 0;
+        task_yield();
+        CHECK(BLK_STAGE == 1 && task_state(b) == TASK_BLOCKED);
+        CHECK(task_count() == 2);        /* it is alive */
+        CHECK(!task_others_ready());     /* ... but not something the main loop should yield to */
+        task_yield();
+        task_yield();
+        CHECK(BLK_STAGE == 1 && task_state(b) == TASK_BLOCKED); /* nobody woke it: it stays where it is */
+        task_wake(b);
+        CHECK(task_state(b) == TASK_READY && task_others_ready());
+        task_wake(b); /* waking one that is not blocked changes nothing */
+        CHECK(task_state(b) == TASK_READY);
+        task_yield();
+        CHECK(BLK_STAGE == 2 && task_state(b) == TASK_BLOCKED); /* it blocked again */
+        task_wake(-1);
+        task_wake(TASK_MAX);
+        task_wake(15); /* an unused slot */
+        CHECK(task_state(b) == TASK_BLOCKED);
+        task_wake(b);
+        drain();
+        CHECK(BLK_STAGE == 3 && task_count() == 1);
+        task_block(); /* the main loop never blocks: this only yields */
+        CHECK(task_state(0) == TASK_RUNNING && task_current() == 0);
+    }
+
     /* kernel threads never change the address space or the trap stack */
     AS_SWITCHES = KSTACK_SETS = 0;
     ran = 0;
@@ -524,8 +587,8 @@ int main(void)
     static AddressSpace fake_as2;
     AS_SWITCHES = AS_DESTROYED = KSTACK_SETS = 0;
     SEEN_N = 0;
-    task_create_user("U1", user_pair_worker, &fake_as, &fake_as);
-    task_create_user("U2", user_pair_worker, &fake_as2, &fake_as2);
+    task_create_user("U1", user_pair_worker, &fake_as, &fake_as, 0, 0);
+    task_create_user("U2", user_pair_worker, &fake_as2, &fake_as2, 0, 0);
     drain();
     CHECK(SEEN_N == 4 && SEEN_BAD == 0); /* every time a thread ran, its own space was the loaded one */
     CHECK(AS_DESTROYED == 2 && LOADED == 0);

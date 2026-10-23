@@ -1,0 +1,130 @@
+/* Console window: where a program started from the File Explorer prints and reads.
+ *
+ * It is not an app in the start menu: console_window_open() is called when a program is launched (see
+ * include/console.h). The window only draws the character grid of a console (kernel/core/console.c) and passes typed
+ * keys to its line editor. Everything the program does goes through the grid: system calls write into it from the
+ * program's thread and mark it changed; this window notices on its next tick and redraws, so no window code ever runs
+ * inside a system call. Closing the window closes the console: the program's reads then return end of input, which
+ * ends well-behaved programs. */
+#include "console.h"
+#include "font.h"
+#include "gfx.h"
+#include "keyboard.h"
+#include "taskbar.h"
+#include "timer.h"
+#include "ui.h"
+#include "wm.h"
+
+#define PAD 10
+#define WIN_W 640
+#define WIN_H 380
+
+static int OPENED;             /* windows opened so far: each new one starts a bit lower and further right */
+static int LAST_BLINK[16]; /* by console slot (the low 4 bits of a handle) */
+
+static int handle_of(const Window *w) { return (int)(unsigned long long)w->user; }
+
+static void draw(Window *w, UiRect body)
+{
+    int con = handle_of(w);
+    gfx_fill_rect(body.x, body.y, body.w, body.h, ui_color(ui_rgb(18, 20, 28)));
+    UiRgb text_rgb = ui_rgb(220, 224, 232);
+    GfxColor text_color = ui_color(text_rgb);
+    const Font *f = &font_ui_14;
+    int line_h = font_line_height(f) + 2;
+    int rows = (body.h - 2 * PAD) / line_h;
+    if (rows < 1)
+        rows = 1;
+
+    /* The newest row is at the bottom: row `back` rows above the one with the cursor is drawn (rows - 1 - back) lines down. */
+    char text[CONSOLE_COLS + 1];
+    for (int i = 0; i < rows; i++)
+    {
+        int back = rows - 1 - i;
+        if (console_row(con, back, text))
+            gfx_text(f, body.x + PAD, body.y + PAD + i * line_h, text, text_color);
+    }
+
+    /* the cursor: a thin bar after the text of the bottom row, blinking, until the program has ended */
+    int col = console_cursor_col(con);
+    if (col >= 0 && ((timer_ms() / 500) & 1) == 0 && console_row(con, 0, text))
+    {
+        char upto[CONSOLE_COLS + 1];
+        int n = 0;
+        for (; n < col && text[n]; n++)
+            upto[n] = text[n];
+        for (; n < col; n++) /* the cursor can be past the last character (after spaces): they count too */
+            upto[n] = ' ';
+        upto[n] = 0;
+        int x = body.x + PAD + gfx_text_w(f, upto);
+        gfx_fill_rect(x + 1, body.y + PAD + (rows - 1) * line_h, 2, line_h - 2, text_color);
+    }
+}
+
+static void on_key(Window *w, const KeyEvent *k)
+{
+    if (!k->pressed)
+        return;
+    int ch = 0;
+    if (k->key == KEY_ENTER || k->ch == '\n')
+        ch = '\n';
+    else if (k->key == KEY_BACKSPACE)
+        ch = '\b';
+    else if (k->ch >= 32 && k->ch < 127)
+        ch = k->ch;
+    if (ch)
+        console_key(handle_of(w), ch); /* the window is redrawn after every key event */
+}
+
+static int on_tick(Window *w)
+{
+    int con = handle_of(w);
+    int changed = console_dirty(con); /* the program printed something */
+    int blink = (int)((timer_ms() / 500) & 1);
+    int *last = &LAST_BLINK[con & 15];
+    if (blink != *last)
+    {
+        *last = blink; /* the cursor turns on or off */
+        if (console_cursor_col(con) >= 0)
+            changed = 1;
+    }
+    return changed;
+}
+
+static void on_close(Window *w) { console_close(handle_of(w)); }
+
+int console_window_open(const char *title)
+{
+    int con = console_open(title);
+    if (con < 0)
+        return -1;
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int w = WIN_W < W - 20 ? WIN_W : W - 20, h = WIN_H < H - TASKBAR_HEIGHT - 20 ? WIN_H : H - TASKBAR_HEIGHT - 20;
+    int step = (OPENED++ % 5) * 28;
+    int x = (W - w) / 2 - 60 + step, y = (H - TASKBAR_HEIGHT - h) / 2 - 40 + step;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    char name[WM_TITLE_MAX];
+    const char *prefix = "Console - ";
+    int n = 0;
+    for (; prefix[n]; n++)
+        name[n] = prefix[n];
+    for (int i = 0; title[i] && n < WM_TITLE_MAX - 1; i++)
+        name[n++] = title[i];
+    name[n] = 0;
+
+    Window *win = wm_create(name, x, y, w, h, draw, (void *)(unsigned long long)con);
+    if (!win)
+    {
+        console_close(con);
+        return -1;
+    }
+    win->on_key = on_key;
+    win->on_tick = on_tick;
+    win->on_close = on_close;
+    win->icon = TASKBAR_ICON_TERMINAL;
+    LAST_BLINK[con & 15] = (int)((timer_ms() / 500) & 1);
+    return con;
+}

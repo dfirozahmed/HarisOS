@@ -1,5 +1,6 @@
 /* HarisOS exec: see include/exec.h. */
 #include "exec.h"
+#include "console.h"
 #include "elf.h"
 #include "heap.h"
 #include "pmm.h"
@@ -75,20 +76,17 @@ static unsigned char *read_whole(int node, unsigned *size_out, int *err)
     return buf;
 }
 
-int exec_run(const char *name, int *err)
+int exec_run_node(int node, const char *name, int console, int *err)
 {
     int e = 0;
     if (err)
         *err = 0;
-    int node = exec_find(name);
-    if (node < 0)
-        return EXEC_ERR_NOTFOUND;
     unsigned size = 0;
     unsigned char *buf = read_whole(node, &size, &e);
     if (!buf)
         return e;
     int elf_err = 0;
-    int id = process_start_elf(name, buf, size, &elf_err);
+    int id = process_start_elf(name, buf, size, console, &elf_err);
     kfree(buf); /* the process has its own copy of every segment */
     if (id < 0)
     {
@@ -97,6 +95,35 @@ int exec_run(const char *name, int *err)
         return EXEC_ERR_LOAD;
     }
     return id;
+}
+
+int exec_run(const char *name, int *err)
+{
+    if (err)
+        *err = 0;
+    int node = exec_find(name);
+    if (node < 0)
+        return EXEC_ERR_NOTFOUND;
+    return exec_run_node(node, name, -1, err);
+}
+
+const char *exec_error_text(int code, int err)
+{
+    switch (code)
+    {
+    case EXEC_ERR_NOTFOUND:
+        return "file not found";
+    case EXEC_ERR_SIZE:
+        return "the file is empty or too big";
+    case EXEC_ERR_MEMORY:
+        return "not enough memory to read the file";
+    case EXEC_ERR_READ:
+        return "the drive could not read the file";
+    case EXEC_ERR_LOAD:
+        return err ? elf_error_text(err) : "not enough memory to start the program";
+    default:
+        return "unknown error";
+    }
 }
 
 /* ---- boot self test ----------------------------------------------------------------------------------------- */
@@ -113,6 +140,108 @@ static void put64(unsigned char *p, u64 v)
 {
     for (int i = 0; i < 8; i++)
         p[i] = (unsigned char)(v >> (8 * i));
+}
+
+/* ---- the console, end to end ---------------------------------------------------------------------------------------
+ * ECHO.ELF reads lines from its console and prints them back. The test plays the user: it starts the program on a console
+ * (the same object a window shows, minus the window), waits until the program is blocked in SYS_READ, "types" a line, and
+ * looks at what ended up on the screen grid. Then a second run where the window is closed while the program waits. */
+static int row_has(int con, const char *needle)
+{
+    char row[CONSOLE_COLS + 1];
+    for (int back = 0; console_row(con, back, row); back++)
+    {
+        for (int i = 0; row[i]; i++)
+        {
+            int j = 0;
+            while (needle[j] && row[i + j] == needle[j])
+                j++;
+            if (!needle[j])
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static void type_line(int con, const char *s)
+{
+    for (; *s; s++)
+        console_key(con, *s);
+    console_key(con, '\n');
+}
+
+/* give the program the CPU until it is waiting for input (blocked), or has ended */
+static int wait_blocked(int id)
+{
+    for (int i = 0; i < 400; i++)
+    {
+        TaskState s = task_state(id);
+        if (s == TASK_BLOCKED)
+            return 1;
+        if (s == TASK_DEAD || s == TASK_UNUSED)
+            return 0;
+        task_yield();
+    }
+    return 0;
+}
+
+static int echo_test(int node)
+{
+    ProcessStats s0, s1;
+    process_stats(&s0);
+
+    int con = console_open("selftest");
+    if (con < 0)
+        return -20;
+    int err = 0;
+    int id = exec_run_node(node, "ECHO.ELF", con, &err);
+    if (id < 0)
+    {
+        console_close(con);
+        return -21;
+    }
+    if (!wait_blocked(id)) /* it prints its prompt, then waits in SYS_READ: blocked, not spinning */
+        return -22;
+    if (!row_has(con, "type a line") || !row_has(con, ">"))
+        return -23;
+
+    type_line(con, "hi"); /* Enter wakes the program: it prints the line back and waits again */
+    if (!wait_blocked(id))
+        return -24;
+    if (!row_has(con, "you said: hi (line 1, 2 characters)"))
+        return -25;
+
+    type_line(con, "quit");
+    if (process_wait(id) != 0)
+        return -26;
+    process_stats(&s1);
+    if (s1.exited != s0.exited + 1 || s1.last_exit != 2) /* it read two lines */
+        return -27;
+    if (!row_has(con, "bye") || !row_has(con, "[process exited, code 2]"))
+        return -28;
+    if (!console_finished(con))
+        return -29;
+    console_close(con);
+
+    /* the window is closed while the program waits for a line: it is woken, reads end of input, and finishes */
+    con = console_open("selftest 2");
+    if (con < 0)
+        return -30;
+    id = exec_run_node(node, "ECHO.ELF", con, &err);
+    if (id < 0)
+    {
+        console_close(con);
+        return -31;
+    }
+    if (!wait_blocked(id))
+        return -32;
+    console_close(con);
+    if (process_wait(id) != 0)
+        return -33;
+    process_stats(&s0);
+    if (s0.last_exit != 0 || s0.exited != s1.exited + 1)
+        return -34;
+    return 0;
 }
 
 int exec_selftest(void)
@@ -141,6 +270,27 @@ int exec_selftest(void)
     if (s1.exited != s0.exited + 1 || s1.last_exit != 42)
         return -3;
 
+    /* the file system calls: FILES.ELF opens, reads, seeks and closes files and checks that bad arguments are refused; it
+     * exits with 43 if all of its (many) checks held, else with the number of the first that did not */
+    id = exec_run("FILES.ELF", &err);
+    if (id < 0)
+        return -10;
+    if (process_wait(id) != 0)
+        return -11;
+    ProcessStats s2;
+    process_stats(&s2);
+    if (s2.exited != s1.exited + 1 || s2.last_exit != 43)
+        return -12 - (s2.last_exit > 0 && s2.last_exit < 43 ? s2.last_exit : 0); /* -13 ... -54: which check failed */
+
+    /* the console: input, output, blocking, waking, and what happens when the window goes (ECHO.ELF is optional) */
+    int echo_node = exec_find("ECHO.ELF");
+    if (echo_node >= 0)
+    {
+        int et = echo_test(echo_node);
+        if (et != 0)
+            return et;
+    }
+
     /* files the loader must refuse, made by damaging a copy of the real one */
     unsigned size = 0;
     int rerr = 0;
@@ -157,17 +307,17 @@ int exec_selftest(void)
         int e1 = 0, e2 = 0, e3 = 0;
 
         img[0] = 'X'; /* no longer an ELF file */
-        int a = process_start_elf("BAD1", img, size, &e1);
+        int a = process_start_elf("BAD1", img, size, -1, &e1);
         img[0] = 0x7F;
 
         for (int i = 0; i < 8; i++)
             saved[i] = img[phoff + 16 + i];
         put64(img + phoff + 16, 0x1000); /* the first segment would land in kernel memory */
-        int b = process_start_elf("BAD2", img, size, &e2);
+        int b = process_start_elf("BAD2", img, size, -1, &e2);
         for (int i = 0; i < 8; i++)
             img[phoff + 16 + i] = saved[i];
 
-        int c = process_start_elf("BAD3", img, size / 2, &e3); /* cut in half */
+        int c = process_start_elf("BAD3", img, size / 2, -1, &e3); /* cut in half */
 
         if (a != -1 || e1 != ELF_ERR_FORMAT)
             result = -6;

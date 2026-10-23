@@ -81,6 +81,7 @@ enum
     FK_IMAGE,
     FK_AUDIO,
     FK_EFI,
+    FK_PROGRAM, /* an ELF program (.elf): a double click runs it in a console window */
     FK_OTHER,
     FK_DRIVE /* a drive under This PC */
 };

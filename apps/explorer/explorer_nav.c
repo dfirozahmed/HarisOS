@@ -1,5 +1,7 @@
 /* File Explorer: current folder, history, sorting, window layout and selection. */
 #include "explorer.h"
+#include "console.h"
+#include "exec.h"
 
 void ex_update_nav_buttons(void)
 {
@@ -104,6 +106,35 @@ void ex_go_up(void)
             EX_SEL = i;
 }
 
+/* A program (an ELF file): open a console window for it and start it. The program's thread runs by itself from here;
+ * what it prints appears in the window, what the user types there is what it reads. Returns a message for the status
+ * bar if it could not be started, else NULL. */
+static const char *run_program(int node, const VfsNode *n)
+{
+    static char note[100];
+    int con = console_window_open(n->name);
+    if (con < 0)
+        return "Cannot run: no free console or window (close one first).";
+    int err = 0;
+    int id = exec_run_node(node, n->name, con, &err);
+    if (id >= 0)
+        return 0;
+
+    const char *why = exec_error_text(id, err);
+    const char *head = "Cannot run: ";
+    int len = 0;
+    for (; head[len]; len++)
+        note[len] = head[len];
+    for (int i = 0; why[i] && len < (int)sizeof(note) - 2; i++)
+        note[len++] = why[i];
+    note[len++] = '.';
+    note[len] = 0;
+    console_write(con, note, (unsigned)len); /* the window stays, so the reason is not lost */
+    console_write(con, "\n", 1);
+    console_finish(con, -1);
+    return note;
+}
+
 void ex_open_item(int row)
 {
     if (row < 0 || row >= EX_NITEMS)
@@ -120,6 +151,8 @@ void ex_open_item(int row)
         vfs_path(EX_ITEMS[row], path, (int)sizeof path);
         EX_NOTE = notepad_open_file(path); /* NULL: opened (or the question about unsaved text was asked) */
     }
+    else if (kind == FK_PROGRAM)
+        EX_NOTE = run_program(EX_ITEMS[row], n);
     else
         EX_NOTE = "No app can open this file yet.";
 }

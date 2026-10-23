@@ -7,10 +7,23 @@
  * comes back in rax. Everything except rax, rcx and r11 is preserved (rcx and r11 are used by the instruction itself to
  * save the return address and the flags); xmm0-xmm5 may be changed.
  *
- *   SYS_WRITE (1)  rdi = pointer, rsi = length (at most SYS_WRITE_MAX): send the bytes to the serial port.
- *                  Returns the length, or -1 if the buffer is not (all) readable user memory.
+ *   SYS_WRITE (1)  rdi = fd (1 or 2: the console), rsi = pointer, rdx = length (at most SYS_WRITE_MAX): print the bytes.
+ *                  In the program's console window; with no window, on the serial port. Returns the length, or -1 if
+ *                  the fd is not 1 or 2 or the buffer is not (all) readable user memory.
  *   SYS_EXIT  (2)  rdi = exit code: the process ends. Does not return.
  *   SYS_YIELD (3)  give the CPU to another thread. Returns 0.
+ *   SYS_READ  (4)  rdi = fd, rsi = pointer, rdx = length: read into the buffer. Returns the number of bytes (0 = end).
+ *                  fd 0 is the console: it waits for the user to type a line (and press Enter), then returns that line,
+ *                  newline included, at most one line per call; 0 when the window is closed or there is no window.
+ *                  A file descriptor from SYS_OPEN reads the file from its current position and moves it; a call may
+ *                  return fewer bytes than asked (at most SYS_READ_MAX at once). -1 for a bad fd or buffer.
+ *   SYS_OPEN  (5)  rdi = pointer to a NUL-terminated path, rsi = flags (0 = read only, the only kind). Returns a file
+ *                  descriptor (3 and up) or -1. A path without '/' is a file name looked up in the top folder of every
+ *                  drive ("HELLO.ELF"); a path starting with '/' is a VFS path ("/RAM Disk/Documents/readme.txt").
+ *                  At most PROCESS_MAX_FILES files are open at once.
+ *   SYS_CLOSE (6)  rdi = fd. Returns 0, or -1 if it is not open. (Closing 0, 1 or 2 does nothing.)
+ *   SYS_SEEK  (7)  rdi = fd, rsi = offset (signed), rdx = whence (0 = from the start, 1 = from the current position,
+ *                  2 = from the end of the file). Returns the new position, or -1 (bad fd, bad whence, negative result).
  *   anything else  returns -1.
  *
  * What the CPU does on SYSCALL: RIP goes to LSTAR, CS / SS are loaded from STAR (kernel code / data), the return address
@@ -28,8 +41,13 @@
 #define SYS_WRITE 1
 #define SYS_EXIT 2
 #define SYS_YIELD 3
+#define SYS_READ 4
+#define SYS_OPEN 5
+#define SYS_CLOSE 6
+#define SYS_SEEK 7
 
 #define SYS_WRITE_MAX 4096 /* one write call sends at most this many bytes */
+#define SYS_READ_MAX 65536 /* one read call returns at most this many bytes */
 
 /* What the entry code saves on the kernel stack, lowest address first (the push order in syscall.c). */
 typedef struct
