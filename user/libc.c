@@ -611,3 +611,30 @@ extern char sigentry[];
 
 int signal(int sig, sighandler_t handler) { return (int)sys_sigaction(sig, (void *)handler, handler ? (void *)sigentry : 0); }
 unsigned sigblock(unsigned mask) { return sys_sigmask(mask); }
+
+/* ---- big stack frames ------------------------------------------------------------------------------------------------------------ */
+/* The compiler calls __chkstk (rax = the size of the frame it is about to make) before a function whose frame is bigger than a page, so that
+ * the pages are touched one after the other, from the top. The kernel grows the stack by itself on a page fault, but only for an access not
+ * far below the stack pointer (process_stack_fault), so this walks the stack pointer down a page at a time, reads a byte at each step, and puts
+ * it back. A frame can be as big as the stack may grow (ELF_STACK_RESERVE, 8 MiB); beyond that the read faults and the program ends. Every
+ * register but rax, r10 and r11 is kept (r10 and r11 are saved here too, a Microsoft x64 caller does not expect them kept, but it is harmless). */
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl __chkstk\n"
+        "__chkstk:\n"
+        "    pushq %r10\n"
+        "    pushq %r11\n"
+        "    movq %rax, %r10\n"
+        "    movq %rsp, %r11\n"
+        "1:\n"
+        "    cmpq $4096, %r10\n"
+        "    jbe 2f\n"
+        "    subq $4096, %rsp\n"
+        "    testb %al, (%rsp)\n"
+        "    subq $4096, %r10\n"
+        "    jmp 1b\n"
+        "2:\n"
+        "    movq %r11, %rsp\n"
+        "    popq %r11\n"
+        "    popq %r10\n"
+        "    ret\n");

@@ -45,8 +45,8 @@ int process_start_elf(const char *name, const void *file, unsigned long long siz
  *             (and does not write the "[process exited]" line: the owner of the window does), and when it ends its
  *             exit code is kept for the parent's SYS_WAIT (process_reap) and the parent is woken.
  *   pid       out: the new process's number (1, 2, 3 ... never reused), set when the start succeeds. */
-#define PROCESS_ARGS_MAX 32
-#define PROCESS_ARGS_BYTES 2048
+#define PROCESS_ARGS_MAX 4096           /* the most arguments (strings) one program can be started with */
+#define PROCESS_ARGS_BYTES (256 * 1024) /* ... and the most bytes in them together: they are copied to the top of the new stack, which is made big enough */
 #define PROCESS_MAX_CHILDREN 1024 /* children one process can have outstanding: a sanity cap, the list grows as needed (the thread slots run out first) */
 
 /* An open file of a process. */
@@ -119,6 +119,8 @@ typedef struct
     int argc;
     const char *args;
     unsigned args_len;
+    int free_args; /* process_exec_elf only: 1 = `args` is a kernel heap block that process_exec_elf frees itself just before the point of no return
+                    * (after that nothing returns to the caller that could free it); on failure it is left alone */
     int parent;
     int cwd; /* working folder (a VFS node id, 0 = the root); a child normally gets its parent's */
     int pid;
@@ -168,6 +170,9 @@ typedef struct Process
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
      * rounded up). Lowering the break keeps the pages: they are given back when the process ends. */
     unsigned long long heap_base, heap_brk, heap_mapped, heap_limit;
+    /* The stack (user half, from PAGING_USER_END down) starts with PROCESS_STACK_PAGES pages (more if the arguments need them) and grows
+     * downwards by itself, a page fault at a time, down to ELF_STACK_RESERVE bytes below the top. stack_low = the lowest page mapped. */
+    unsigned long long stack_low;
     ProcessFile *file; /* file descriptor PROCESS_FD_FIRST + index: a heap block of file_cap entries, made with the process and grown when full */
     int file_cap;
     int stdio[3]; /* fd 0, 1, 2: -1 = the console, else the index in file[] that stands in for it (shell redirection) */
@@ -327,6 +332,14 @@ int process_ppid(void); /* the parent's pid, 0 if none */
 /* A write to a read-only page that ring 3 attempted (page fault, error code 7): if it is a copy-on-write page of a forked process it is
  * made private and writable. 1 = the faulting instruction can run again, anything else = a real fault. */
 int process_cow_fault(unsigned long long addr);
+
+/* The user stack grows on demand. process_stack_fault: a page fault of ring 3 code at `addr` (page not present) with the stack pointer `rsp`: if
+ * it is in the area the stack may grow into and not much further below rsp than a big stack frame, the pages down to it are mapped (zeroed)
+ * and 1 is returned - the instruction runs again. 0 = a real fault. process_stack_grow: the same without the rsp rule, for the kernel when it
+ * is about to use a user stack address (a system call at a stack pointer below the mapped part, a signal frame): 1 if `addr` is mapped
+ * afterwards (it was, or it was made), 0 if it is not in the stack area or there is no memory. */
+int process_stack_fault(unsigned long long addr, unsigned long long rsp);
+int process_stack_grow(unsigned long long addr);
 
 /* End the running process (called by SYS_EXIT, and by the kernel itself). Does not return. */
 __attribute__((noreturn)) void process_exit(int code);

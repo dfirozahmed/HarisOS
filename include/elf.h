@@ -28,7 +28,7 @@
 #define ELF_MAX_PAGES 8192          /* 32 MiB of pages (file + zero fill) per program */
 
 /* The stack lives at the top of the user part (process.h). A program may not reach into it. */
-#define ELF_STACK_RESERVE (1024ULL * 1024)
+#define ELF_STACK_RESERVE (8ULL * 1024 * 1024) /* the user stack can grow down to this much below the top of the user half (process.h) */
 
 #define ELF_PF_X 1u
 #define ELF_PF_W 2u

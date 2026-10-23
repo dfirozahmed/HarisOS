@@ -344,6 +344,10 @@ void fault_dispatch(FaultFrame *f)
          * runs again */
         if (f->vector == 14 && (f->error & 7) == 7 && process_cow_fault(fault_cr2) == 1)
             return;
+        /* a page that is not there, below the mapped part of the user stack (a push, a call, a new frame): the stack grows and the instruction
+         * runs again (error code: bit 0 clear = not present, bit 2 = from user mode) */
+        if (f->vector == 14 && (f->error & 5) == 4 && process_stack_fault(fault_cr2, f->rsp) == 1)
+            return;
         process_fault(f, fault_cr2);
     }
 

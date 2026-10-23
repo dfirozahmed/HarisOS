@@ -138,46 +138,61 @@ static int NEXT_PID = 1;
  *
  * The blob is checked here as well (exactly argc strings, all inside args_len): it is built by the kernel, but a mistake
  * must not become a write outside the stack. Returns 0, or -1 (nothing is written then). */
+/* How many pages the stack starts with: PROCESS_STACK_PAGES, or more when the arguments (the strings, the argv array, the alignment and the
+ * return slot, and a page of room for the program) do not fit. */
+static unsigned stack_pages_for(const ProcessSpawn *sp)
+{
+    unsigned long long need = (unsigned long long)sp->args_len + (unsigned long long)(sp->argc + 1) * 8 + 64;
+    unsigned pages = (unsigned)((need + 4095) / 4096) + 1;
+    return pages > PROCESS_STACK_PAGES ? pages : PROCESS_STACK_PAGES;
+}
+
 static int place_args(AddressSpace *as, const ProcessSpawn *sp, Start *st)
 {
     int argc = sp->argc;
     unsigned len = sp->args_len;
     if (argc < 0 || argc > PROCESS_ARGS_MAX || len > PROCESS_ARGS_BYTES || (argc > 0 && (!sp->args || len == 0)))
         return -1;
-    u64 argv_ptr[PROCESS_ARGS_MAX + 1];
+    u64 *argv_ptr = kmalloc((u64)(argc + 1) * 8); /* (the kernel stack is small: the array lives on the heap) */
+    if (!argv_ptr)
+        return -1;
     unsigned off = 0;
     u64 str_base = PAGING_USER_END - len;
     for (int i = 0; i < argc; i++)
     {
         if (off >= len)
-            return -1;
+            goto bad;
         argv_ptr[i] = str_base + off;
         while (off < len && sp->args[off])
             off++;
         if (off >= len)
-            return -1; /* a string without its NUL */
+            goto bad; /* a string without its NUL */
         off++;
     }
     if (off != len)
-        return -1; /* bytes left over */
+        goto bad; /* bytes left over */
     argv_ptr[argc] = 0;
     u64 array_bytes = (u64)(argc + 1) * 8;
     u64 array_base = (str_base - array_bytes) & ~15ULL;
     if (len && copy_in(as, str_base, (const unsigned char *)sp->args, len) != 0)
-        return -1;
+        goto bad;
     if (copy_in(as, array_base, (const unsigned char *)argv_ptr, array_bytes) != 0)
-        return -1;
+        goto bad;
+    kfree(argv_ptr);
     st->argc = (u64)argc;
     st->argv = array_base;
     st->user_rsp = array_base - 8;
     return 0;
+bad:
+    kfree(argv_ptr);
+    return -1;
 }
 
 /* The heap of a program whose last segment ends at heap_base. It may not run into the stack: it stops below the 1 MiB the stack
  * may grow into (ELF_STACK_RESERVE). */
 static void set_heap(Process *p, u64 heap_base)
 {
-    u64 stack_low = PAGING_USER_END - 1024ULL * 1024;
+    u64 stack_low = PAGING_USER_END - ELF_STACK_RESERVE;
     p->heap_base = p->heap_brk = p->heap_mapped = heap_base;
     p->heap_limit = heap_base + PROCESS_HEAP_MAX < stack_low ? heap_base + PROCESS_HEAP_MAX : stack_low;
     if (p->heap_limit < heap_base)
@@ -188,7 +203,8 @@ static void purge_exits(int owner); /* (the records of exit codes, further down)
 
 static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *sp, u64 heap_base)
 {
-    for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
+    unsigned stack_pages = stack_pages_for(sp);
+    for (unsigned i = 1; i <= stack_pages; i++)
         if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
         {
             aspace_destroy(as);
@@ -234,6 +250,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->child = 0; /* (the list of children is made by the first spawn or fork) */
     p->child_cap = 0;
     set_heap(p, heap_base);
+    p->stack_low = PAGING_USER_END - (u64)stack_pages * 4096;
     if (process_files_init(p) != 0)
     {
         kfree(st);
@@ -400,7 +417,8 @@ int process_exec_elf(const char *name, const void *file, u64 size, const Process
         aspace_destroy(as);
         return -1;
     }
-    for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
+    unsigned stack_pages = stack_pages_for(args);
+    for (unsigned i = 1; i <= stack_pages; i++)
         if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
         {
             aspace_destroy(as);
@@ -419,6 +437,8 @@ int process_exec_elf(const char *name, const void *file, u64 size, const Process
      * old program does, since nothing after this point returns to the caller that would free it. */
     if (free_file)
         kfree((void *)file);
+    if (args->free_args)
+        kfree((void *)args->args); /* the arguments are on the new stack now */
     process_release_shm(p); /* the old address space (and the mappings in it) goes away below */
     gui_release_owner(p->pid); /* its windows drew into those mappings */
     for (int i = 0; i < 32; i++) /* a new program has none of the old one's handlers (ignored signals stay ignored) */
@@ -426,6 +446,7 @@ int process_exec_elf(const char *name, const void *file, u64 size, const Process
     p->sig_entry = 0;
     p->sig_pending = p->sig_blocked = 0;
     set_heap(p, heap_base);
+    p->stack_low = PAGING_USER_END - (u64)stack_pages * 4096;
     task_exec_replace(as, name);
     process_enter_user(st.entry, st.user_rsp, st.argc, st.argv);
 }
@@ -520,6 +541,52 @@ int process_cow_fault(u64 addr)
 {
     AddressSpace *as = task_address_space();
     return as ? aspace_cow_fault(as, addr) : 0;
+}
+
+/* ---- the stack grows ---------------------------------------------------------------------------------------------------- */
+/* Map the stack down to the page of `addr` (which must be in the area the stack may grow into, below stack_low). The pages in between are
+ * mapped too, so the stack stays one piece. 1 = grew, 0 = nothing to do (already mapped, or not in the stack area), -1 = no memory (what
+ * was mapped stays, stack_low follows it). */
+static int grow_stack_to(Process *p, AddressSpace *as, u64 addr)
+{
+    u64 area_low = PAGING_USER_END - ELF_STACK_RESERVE;
+    if (addr < area_low || addr >= p->stack_low)
+        return 0;
+    u64 want = addr & ~4095ULL;
+    while (p->stack_low > want)
+    {
+        if (aspace_map_new(as, p->stack_low - 4096, ASPACE_WRITE) != 0)
+            return -1;
+        p->stack_low -= 4096;
+    }
+    return 1;
+}
+
+/* A push, a call or a store into a new stack frame lies at most this far below the stack pointer (a frame with big arrays is entered with
+ * one subtraction; probing it a page at a time is what a compiler does for frames bigger than this). */
+#define STACK_SLACK (64 * 1024)
+
+int process_stack_fault(u64 addr, u64 rsp)
+{
+    Process *p = process_current();
+    AddressSpace *as = task_address_space();
+    if (!p || !as || p->stack_low == 0 || addr + STACK_SLACK < rsp)
+        return 0;
+    return grow_stack_to(p, as, addr) == 1;
+}
+
+int process_stack_grow(u64 addr)
+{
+    Process *p = process_current();
+    AddressSpace *as = task_address_space();
+    if (!p || !as || p->stack_low == 0)
+        return 0;
+    u64 area_low = PAGING_USER_END - ELF_STACK_RESERVE;
+    if (addr < area_low || addr >= PAGING_USER_END)
+        return 0;
+    if (addr >= p->stack_low)
+        return 1;
+    return grow_stack_to(p, as, addr) >= 0;
 }
 
 int process_ppid(void)

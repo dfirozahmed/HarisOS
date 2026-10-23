@@ -185,6 +185,7 @@ int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
     SP_NODE = node;
     strcpy(SP_NAME, name);
     SP_ARGC = sp->argc;
+    CHECK(sp->free_args == 0); /* a spawn copies the arguments to the child's stack at once: the caller frees them */
     SP_LEN = sp->args_len;
     SP_CONSOLE = sp->console;
     SP_PARENT = sp->parent;
@@ -517,6 +518,7 @@ int exec_replace_node(int node, const char *name, ProcessSpawn *args, int *err)
     EXEC_NODE = node;
     strcpy(EXEC_NAME, name);
     EXEC_ARGC = args->argc;
+    CHECK(args->free_args == 1); /* the new program frees the arguments itself, just before it starts */
     EXEC_LEN = args->args_len;
     memcpy(EXEC_ARGS, args->args, args->args_len);
     return -5; /* the real one does not return when it works; this fake always "fails" */
@@ -524,6 +526,16 @@ int exec_replace_node(int node, const char *name, ProcessSpawn *args, int *err)
 
 static int PPID = 77;
 int process_ppid(void) { return PPID; }
+
+/* The stack grows on demand (process.c): every system call asks for the stack to be mapped down to the stack pointer first. */
+static unsigned long long STACK_GROW_LAST;
+static int STACK_GROWS;
+int process_stack_grow(unsigned long long addr)
+{
+    STACK_GROW_LAST = addr;
+    STACK_GROWS++;
+    return 1;
+}
 
 /* shared memory: the page allocator is real host memory, and the mapping calls only record what was asked */
 #include <stdlib.h>
@@ -1079,18 +1091,41 @@ int main(void)
         const char *none[] = {0};
         CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(none), 0) == 102);     /* an empty argv: argc 0 */
         CHECK(SP_ARGC == 0 && SP_LEN == 0);
+        static const char *over[PROCESS_ARGS_MAX + 2];
+        for (int i = 0; i <= PROCESS_ARGS_MAX; i++)
+            over[i] = "a";
+        over[PROCESS_ARGS_MAX + 1] = 0;
+        int calls = SPAWN_CALLS, heap0 = HEAP_BLOCKS;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(over), 0) == -1 && SPAWN_CALLS == calls); /* over PROCESS_ARGS_MAX */
+        static char hugearg[PROCESS_ARGS_BYTES + 8];
+        memset(hugearg, 'z', sizeof(hugearg) - 1);
+        const char *big[] = {hugearg, 0};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(big), 0) == -1 && SPAWN_CALLS == calls); /* over PROCESS_ARGS_BYTES */
+        CHECK(HEAP_BLOCKS == heap0);                                                      /* the half-built blob went back to the heap */
+        const char *four[] = {"a", "b", "c", "d", 0};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(four), 0) == 103 && PROC.child[3] == 103); /* the 4th slot */
+        CHECK(HEAP_BLOCKS == heap0);                                                      /* ... and so did the blob of a good call */
+
+        /* what used to be refused is fine now: 39 arguments, one of 2100 bytes (the old limits were 32 and 2048), up to the new limits */
         const char *many[40];
         for (int i = 0; i < 39; i++)
             many[i] = "a";
         many[39] = 0;
-        int calls = SPAWN_CALLS;
-        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(many), 0) == -1 && SPAWN_CALLS == calls); /* over PROCESS_ARGS_MAX */
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(many), 0) > 0 && SP_ARGC == 39 && SP_LEN == 78 && HEAP_BLOCKS == heap0);
         static char longarg[2100];
         memset(longarg, 'z', sizeof(longarg) - 1);
-        const char *big[] = {longarg, 0};
-        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(big), 0) == -1 && SPAWN_CALLS == calls); /* over PROCESS_ARGS_BYTES */
-        const char *four[] = {"a", "b", "c", "d", 0};
-        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(four), 0) == 103 && PROC.child[3] == 103); /* the 4th slot */
+        const char *longv[] = {longarg, 0};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(longv), 0) > 0 && SP_ARGC == 1 && SP_LEN == 2100 && HEAP_BLOCKS == heap0);
+        static char maxarg[PROCESS_ARGS_BYTES]; /* exactly the limit: PROCESS_ARGS_BYTES - 1 characters and the 0 */
+        memset(maxarg, 'y', sizeof(maxarg) - 1);
+        const char *maxv[] = {maxarg, 0};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(maxv), 0) > 0 && SP_ARGC == 1 && SP_LEN == PROCESS_ARGS_BYTES && HEAP_BLOCKS == heap0);
+        HEAP_FAIL = 1; /* no memory for the blob */
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), U(four), 0) == -1);
+        HEAP_FAIL = 0;
+        CHECK(HEAP_BLOCKS == heap0);
+        for (int i = 4; i < PROC.child_cap; i++) /* (those spawns took child slots; the checks below look at the first ones) */
+            PROC.child[i] = 0;
     }
     CHECK(call(SYS_SPAWN, U("NO-SUCH.ELF"), 0, 0) == -1);
     CHECK(call(SYS_SPAWN, U("/RAM Disk/DIR"), 0, 0) == -1);           /* a folder */
@@ -1654,11 +1689,19 @@ int main(void)
         CHECK(call(SYS_EXEC, U("hello.elf"), U(av), 0) == -1 && EXEC_CALLS == 2);
         CHECK(EXEC_ARGC == 3 && EXEC_LEN == 5 + 3 + 10 && memcmp(EXEC_ARGS, "prog\0-x\0two words\0", 18) == 0);
         CHECK(call(SYS_EXEC, U("NO-SUCH.ELF"), 0, 0) == -1 && call(SYS_EXEC, U("/RAM Disk/DIR"), 0, 0) == -1 && EXEC_CALLS == 2);
+        static const char *over[PROCESS_ARGS_MAX + 2];
+        for (int i = 0; i <= PROCESS_ARGS_MAX; i++)
+            over[i] = "a";
+        over[PROCESS_ARGS_MAX + 1] = 0;
+        int heap0 = HEAP_BLOCKS;
+        CHECK(call(SYS_EXEC, U("HELLO.ELF"), U(over), 0) == -1 && EXEC_CALLS == 2);      /* too many arguments */
         const char *many[40];
         for (int i = 0; i < 39; i++)
             many[i] = "a";
         many[39] = 0;
-        CHECK(call(SYS_EXEC, U("HELLO.ELF"), U(many), 0) == -1 && EXEC_CALLS == 2);      /* too many arguments */
+        CHECK(call(SYS_EXEC, U("HELLO.ELF"), U(many), 0) == -1 && EXEC_CALLS == 3 && EXEC_ARGC == 39); /* 39 is fine now (the fake "fails" to exec) ... */
+        CHECK(HEAP_BLOCKS == heap0);                                                     /* ... and the blob of a failed exec is freed by the call */
+        EXEC_CALLS = 2;
         USER_OK = 0;
         CHECK(call(SYS_EXEC, U("HELLO.ELF"), 0, 0) == -1 && EXEC_CALLS == 2);            /* bad pointer */
         USER_OK = 1;
@@ -1940,6 +1983,13 @@ int main(void)
         process_release_shm(&PROC);
         CHECK(gui_in_use() == 0 && shm_in_use() == 0 && PAGES_OUT == 0);
         PROC.pid = 0;
+    }
+
+    /* every system call first makes sure the stack is mapped down to the stack pointer (a big frame made by one subtraction) */
+    {
+        int grows = STACK_GROWS;
+        call(SYS_YIELD, 0, 0, 0);
+        CHECK(STACK_GROWS == grows + 1);
     }
 
     /* ================= message queues ================= */

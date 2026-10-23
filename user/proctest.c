@@ -37,15 +37,23 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(12, sys_spawn("ARGTEST.ELF", (const char *const *)0x1000) == -1);
     const char *badarg[] = {"x", (const char *)0x1000, 0};
     CHECK(13, sys_spawn("ARGTEST.ELF", badarg) == -1);
-    const char *many[40];
-    for (int i = 0; i < 39; i++)
+    static const char *many[4098]; /* PROCESS_ARGS_MAX is 4096: 4097 arguments are refused */
+    for (int i = 0; i < 4097; i++)
         many[i] = "a";
-    many[39] = 0;
-    CHECK(14, sys_spawn("ARGTEST.ELF", many) == -1); /* more than PROCESS_ARGS_MAX */
-    static char longarg[3000];
+    many[4097] = 0;
+    CHECK(14, sys_spawn("ARGTEST.ELF", many) == -1);
+    static char longarg[256 * 1024 + 8]; /* PROCESS_ARGS_BYTES is 256 KiB: a bit more is refused */
     memset(longarg, 'z', sizeof(longarg) - 1);
     const char *toolong[] = {longarg, 0};
-    CHECK(15, sys_spawn("ARGTEST.ELF", toolong) == -1); /* more than PROCESS_ARGS_BYTES */
+    CHECK(15, sys_spawn("ARGTEST.ELF", toolong) == -1);
+    /* ... but 39 arguments (the old limit was 32), and one of 3000 bytes (the old limit was 2048 for all), are started: ARGTEST runs and finds
+     * that they are not the ones it expects (exit 1) */
+    many[39] = 0;
+    long long big = sys_spawn("ARGTEST.ELF", many);
+    CHECK(16, big > 0 && sys_wait(big, &st) == big && st == 1);
+    longarg[3000] = 0;
+    big = sys_spawn("ARGTEST.ELF", toolong);
+    CHECK(16, big > 0 && sys_wait(big, &st) == big && st == 1);
     long long left = sys_spawn("HELLO.ELF", 0);
     CHECK(17, left > 0);
 

@@ -5,6 +5,7 @@
 #include "exec.h"
 #include "gdt.h"
 #include "gui.h"
+#include "heap.h"
 #include "mq.h"
 #include "pipe.h"
 #include "sem.h"
@@ -535,18 +536,50 @@ static long long sys_seek(const SyscallFrame *f)
     return pos;
 }
 
-/* The arguments of SYS_SPAWN / SYS_EXEC, copied into one blob "arg0\0arg1\0...": argv_ptr is a NULL-terminated array of string
- * pointers, or 0 = just the path as argv[0]. 0 and *len / *argc, or -1 (bad pointers, too many or too long). */
-static int collect_args(const AddressSpace *as, ull path_ptr, ull argv_ptr, char *blob, unsigned *len_out, int *argc_out)
+/* The arguments of SYS_SPAWN / SYS_EXEC, copied into one blob "arg0\0arg1\0..." in a kernel heap block that grows as the strings come
+ * (the kernel stack is too small for PROCESS_ARGS_BYTES). argv_ptr is a NULL-terminated array of string pointers, or 0 = just the path
+ * as argv[0]. 0 and *blob_out / *len_out / *argc_out, or -1 (bad pointers, too many or too long, no memory). *blob_out is set even when
+ * it fails (NULL or a block): the caller always kfrees it. */
+typedef struct
 {
-    unsigned len = 0;
-    int argc = 0;
+    char *p;
+    unsigned len, cap;
+} ArgBlob;
+
+/* Append the NUL-terminated string at user address `src` (the pages are checked one at a time as the string runs into them). 0, or -1. */
+static int blob_append_string(ArgBlob *b, const AddressSpace *as, ull src)
+{
+    for (ull i = 0;; i++)
+    {
+        ull a = src + i;
+        if ((i == 0 || (a & 4095) == 0) && !aspace_user_ok(as, a, 1, 0))
+            return -1;
+        if (b->len + 1 > PROCESS_ARGS_BYTES)
+            return -1; /* the arguments together do not fit */
+        if (b->len + 1 > b->cap)
+        {
+            unsigned cap = b->cap ? b->cap * 2 : 256;
+            char *n = krealloc(b->p, cap);
+            if (!n)
+                return -1;
+            b->p = n;
+            b->cap = cap;
+        }
+        char c;
+        copy_from_user(&c, a, 1);
+        b->p[b->len++] = c;
+        if (c == 0)
+            return 0;
+    }
+}
+
+static int collect_args(const AddressSpace *as, ull path_ptr, ull argv_ptr, char **blob_out, unsigned *len_out, int *argc_out)
+{
+    ArgBlob b = {0, 0, 0};
+    int argc = 0, ok = 1;
     if (argv_ptr == 0)
     {
-        int l = copy_string_from_user(blob, PROCESS_ARGS_BYTES, path_ptr, as);
-        if (l < 0)
-            return -1;
-        len = (unsigned)l + 1;
+        ok = blob_append_string(&b, as, path_ptr) == 0;
         argc = 1;
     }
     else
@@ -554,30 +587,38 @@ static int collect_args(const AddressSpace *as, ull path_ptr, ull argv_ptr, char
         for (;; argc++)
         {
             if (argc == PROCESS_ARGS_MAX)
-                return -1; /* no terminating NULL within the limit */
+            {
+                ok = 0; /* no terminating NULL within the limit */
+                break;
+            }
             ull slot_va = argv_ptr + (ull)argc * 8;
             ull str;
             if (slot_va < argv_ptr || !aspace_user_ok(as, slot_va, 8, 0))
-                return -1;
+            {
+                ok = 0;
+                break;
+            }
             copy_from_user((char *)&str, slot_va, 8);
             if (str == 0)
                 break;
-            int l = copy_string_from_user(blob + len, (int)(PROCESS_ARGS_BYTES - len), str, as);
-            if (l < 0)
-                return -1; /* unreadable, or the arguments together do not fit */
-            len += (unsigned)l + 1;
+            if (blob_append_string(&b, as, str) != 0)
+            {
+                ok = 0; /* unreadable, or the arguments together do not fit */
+                break;
+            }
         }
     }
-    *len_out = len;
+    *blob_out = b.p;
+    *len_out = b.len;
     *argc_out = argc;
-    return 0;
+    return ok ? 0 : -1;
 }
 
 /* SYS_SPAWN: path in rdi (as for SYS_OPEN), argv in rsi (a NULL-terminated array of string pointers, or 0 = just the path
  * as argv[0]). Starts the program as a child that shares this process's console. Returns the child's pid, or -1: no such
  * program, not a runnable file, bad pointers, too many or too long arguments, too many children not waited for yet, or no
  * memory / thread slot. Reading the program file happens inside this call. */
-static long long sys_spawn(const SyscallFrame *f)
+static long long spawn_with_blob(const SyscallFrame *f, char **blob_out)
 {
     ull path_ptr = f->rdi, argv_ptr = f->rsi, io_ptr = f->rdx;
     const AddressSpace *as = task_address_space();
@@ -595,10 +636,12 @@ static long long sys_spawn(const SyscallFrame *f)
     if (!n || n->is_dir)
         return -1;
 
-    char blob[PROCESS_ARGS_BYTES];
+    char *blob;
     unsigned len = 0;
     int argc = 0;
-    if (collect_args(as, path_ptr, argv_ptr, blob, &len, &argc) != 0)
+    int collected = collect_args(as, path_ptr, argv_ptr, &blob, &len, &argc);
+    *blob_out = blob; /* (the caller frees it, whatever happens below) */
+    if (collected != 0)
         return -1;
 
     /* fd 0, 1, 2 of the child: the files the caller named (its own open descriptors, copied), else what the caller itself has
@@ -640,6 +683,15 @@ static long long sys_spawn(const SyscallFrame *f)
         return -1;
     p->child[slot] = sp.pid;
     return sp.pid;
+}
+
+/* The child's stack has its own copy of the arguments by the time the call returns: the blob is not needed any more. */
+static long long sys_spawn(const SyscallFrame *f)
+{
+    char *blob = 0;
+    long long r = spawn_with_blob(f, &blob);
+    kfree(blob);
+    return r;
 }
 
 /* SYS_WAIT: pid in rdi (from SYS_SPAWN), a pointer for the exit code in rsi (or 0). Waits, without using the CPU, until
@@ -942,7 +994,7 @@ static long long sys_fork(const SyscallFrame *f)
 /* SYS_EXEC: rdi = path (as for SYS_SPAWN), rsi = argv. This process becomes that program: same pid, console, folder, open files
  * and redirections. Does not return when it works. -1 (and nothing changed): no such program, not an ELF file, bad pointers, no
  * memory. */
-static long long sys_exec(const SyscallFrame *f)
+static long long exec_with_blob(const SyscallFrame *f, char **blob_out)
 {
     ull path_ptr = f->rdi, argv_ptr = f->rsi;
     const AddressSpace *as = task_address_space();
@@ -956,15 +1008,25 @@ static long long sys_exec(const SyscallFrame *f)
     const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
     if (!n || n->is_dir)
         return -1;
-    char blob[PROCESS_ARGS_BYTES];
+    char *blob;
     unsigned len = 0;
     int argc = 0;
-    if (collect_args(as, path_ptr, argv_ptr, blob, &len, &argc) != 0)
+    int collected = collect_args(as, path_ptr, argv_ptr, &blob, &len, &argc);
+    *blob_out = blob; /* (freed by sys_exec if we come back) */
+    if (collected != 0)
         return -1;
-    ProcessSpawn sp = {.argc = argc, .args = blob, .args_len = len};
+    ProcessSpawn sp = {.argc = argc, .args = blob, .args_len = len, .free_args = 1}; /* a program that starts frees it itself, we never return then */
     int err = 0;
     exec_replace_node(node, n->name, &sp, &err); /* returns only if it failed */
     return -1;
+}
+
+static long long sys_exec(const SyscallFrame *f)
+{
+    char *blob = 0;
+    long long r = exec_with_blob(f, &blob); /* (it does not come back when the new program starts: the blob was freed on the way) */
+    kfree(blob);
+    return r;
 }
 
 /* SYS_GETPID: rdi = 0 for this process's pid, 1 for the parent's (0 if it has none or is gone). */
@@ -1713,6 +1775,9 @@ static long long dispatch_call(SyscallFrame *f)
  * SYS_SIGRETURN is the one that comes back from a handler: it is not interrupted by the next one at once (the timer tick will do it). */
 long long syscall_dispatch(SyscallFrame *f)
 {
+    /* The stack pointer may be below the mapped part of the stack (a big frame was made with one subtraction and nothing touched yet): map
+     * it down to there now, so that the pointers the call checks (a buffer in that frame) are valid. */
+    process_stack_grow(f->user_rsp);
     long long r = dispatch_call(f);
     if (f->rax != SYS_SIGRETURN && signal_deliverable(process_current()))
         r = signal_syscall_return(f, r);

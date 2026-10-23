@@ -46,6 +46,14 @@ static Process PROC;
 static Process *CURRENT = &PROC;
 Process *process_current(void) { return CURRENT; }
 
+/* The stack grows on demand; here it is just noted that the handler frame's address was offered to it. */
+static unsigned long long STACK_GROW_LAST;
+int process_stack_grow(unsigned long long addr)
+{
+    STACK_GROW_LAST = addr;
+    return 1;
+}
+
 static jmp_buf EXIT_JMP;
 static int EXIT_CODE;
 void process_exit(int code)

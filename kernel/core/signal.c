@@ -79,6 +79,7 @@ static u64 push_frame(Process *p, int sig, const UserRegs *r, const unsigned cha
     if (!as || !in_user_half(r->rsp) || r->rsp < PAGING_USER_BASE + RED_ZONE + sizeof(SigFrame) + 64)
         return 0;
     u64 frame = (r->rsp - RED_ZONE - sizeof(SigFrame)) & ~15ULL;
+    process_stack_grow(frame - 8); /* a handler may be started with the stack pointer below the mapped part */
     if (!in_user_half(frame - 8) || !aspace_user_ok(as, frame - 8, sizeof(SigFrame) + 8, 1))
         return 0;
     SigFrame sf;

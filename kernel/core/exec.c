@@ -679,6 +679,20 @@ int exec_selftest(void)
             return -776;
     }
 
+    /* the growing stack and arguments of any size: STKTEST.ELF (optional); exits with 55 */
+    if (exec_find("STKTEST.ELF") >= 0)
+    {
+        id = exec_run("STKTEST.ELF", &err);
+        if (id < 0)
+            return -780;
+        if (process_wait(id) != 0)
+            return -781;
+        ProcessStats s14;
+        process_stats(&s14);
+        if (s14.last_exit != 55)
+            return -782 - (s14.last_exit > 0 && s14.last_exit < 55 ? s14.last_exit : 0); /* -783 ... -836 */
+    }
+
     /* shared memory and message queues: IPCTEST.ELF with IPCCHILD.ELF (optional); exits with 51; nothing may be left behind */
     if (exec_find("IPCTEST.ELF") >= 0 && exec_find("IPCCHILD.ELF") >= 0)
     {
