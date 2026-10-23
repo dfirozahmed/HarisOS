@@ -20,7 +20,7 @@
 #define WIN_H 380
 
 static int OPENED;             /* windows opened so far: each new one starts a bit lower and further right */
-static int LAST_BLINK[16]; /* by console slot (the low 4 bits of a handle) */
+static int LAST_BLINK[CONSOLE_MAX]; /* by console slot (the low 8 bits of a handle) */
 
 static int handle_of(const Window *w) { return (int)(unsigned long long)w->user; }
 
@@ -87,7 +87,7 @@ static int on_tick(Window *w)
     int con = handle_of(w);
     int changed = console_dirty(con); /* the program printed something */
     int blink = (int)((timer_ms() / 500) & 1);
-    int *last = &LAST_BLINK[con & 15];
+    int *last = &LAST_BLINK[con & 255];
     if (blink != *last)
     {
         *last = blink; /* the cursor turns on or off */
@@ -131,6 +131,6 @@ int console_window_open(const char *title)
     win->on_tick = on_tick;
     win->on_close = on_close;
     win->icon = TASKBAR_ICON_TERMINAL;
-    LAST_BLINK[con & 15] = (int)((timer_ms() / 500) & 1);
+    LAST_BLINK[con & 255] = (int)((timer_ms() / 500) & 1);
     return con;
 }

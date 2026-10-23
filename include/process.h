@@ -47,7 +47,7 @@ int process_start_elf(const char *name, const void *file, unsigned long long siz
  *   pid       out: the new process's number (1, 2, 3 ... never reused), set when the start succeeds. */
 #define PROCESS_ARGS_MAX 32
 #define PROCESS_ARGS_BYTES 2048
-#define PROCESS_MAX_CHILDREN 8
+#define PROCESS_MAX_CHILDREN 1024 /* children one process can have outstanding: a sanity cap, the list grows as needed (the thread slots run out first) */
 
 /* An open file of a process. */
 #define PROCESS_MAX_FILES 1024 /* the most open files (and pipe ends, queues, ...) one process can have: a sanity cap, the list grows as needed */
@@ -162,7 +162,8 @@ typedef struct Process
     ProcessShm *shm;                  /* shared memory mapped here (SYS_SHM_MAP): a heap block of shm_cap entries (NULL when none), grown when full */
     int shm_cap;
     unsigned long long shm_next;      /* where the next mapping goes (0 = PROCESS_SHM_BASE) */
-    int child[PROCESS_MAX_CHILDREN];  /* pids of children not yet waited for, 0 = free slot */
+    int *child;                       /* pids of children not yet waited for, 0 = free slot: a heap block of child_cap entries (NULL when none), grown when full */
+    int child_cap;
     /* The heap (SYS_BRK): heap_base is page aligned, just above the program's last segment. heap_brk is the program's
      * break (heap_base ... heap_limit), heap_mapped the end of the pages really mapped (page aligned, >= heap_brk
      * rounded up). Lowering the break keeps the pages: they are given back when the process ends. */
@@ -253,6 +254,29 @@ static inline ProcessShm *process_shm_slot(Process *p)
     int first = p->shm_cap;
     p->shm_cap = cap;
     return &n[first];
+}
+
+/* A free entry of p->child for a new child (the list is doubled, 8, 16, ..., when all are in use). The index, or -1 at the limit or without
+ * memory. Entries are named by index: growing may move the list. */
+static inline int process_child_slot(Process *p)
+{
+    for (int i = 0; i < p->child_cap; i++)
+        if (p->child[i] == 0)
+            return i;
+    if (p->child_cap >= PROCESS_MAX_CHILDREN)
+        return -1;
+    int cap = p->child_cap ? p->child_cap * 2 : 8;
+    if (cap > PROCESS_MAX_CHILDREN)
+        cap = PROCESS_MAX_CHILDREN;
+    int *n = krealloc(p->child, (unsigned long long)cap * sizeof(int));
+    if (!n)
+        return -1;
+    int first = p->child_cap;
+    for (int i = first; i < cap; i++)
+        n[i] = 0;
+    p->child = n;
+    p->child_cap = cap;
+    return first;
 }
 
 /* Let go of the shared memory segments this process maps (their reference counts; the pages go away with its address space).

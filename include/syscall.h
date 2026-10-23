@@ -33,7 +33,7 @@
  *                  PROCESS_ARGS_MAX strings, PROCESS_ARGS_BYTES bytes together), or 0 for just the path as argv[0].
  *                  Starts the program as a child; it shares this process's console. The child begins at _start(argc,
  *                  argv) (rcx, rdx and rdi, rsi). Returns the child's pid (1, 2, ... never reused) or -1. At most
- *                  PROCESS_MAX_CHILDREN children can be outstanding (started and not yet waited for).
+ *                  PROCESS_MAX_CHILDREN (1024) children can be outstanding (started and not yet waited for).
  *   SYS_WAIT (10)  rdi = pid, rsi = pointer to an int for the exit code, or 0. Blocks until that child has ended, stores
  *                  its exit code (-1 = ended by a CPU exception) and returns the pid. A child is waited for once. -1 for
  *                  a pid that is not an outstanding child, or a bad pointer (the child stays waitable).

@@ -1,10 +1,40 @@
 /* Host test for pipes (kernel/core/pipe.c): the byte queue, end of input, broken pipes, wake-ups, slots. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "pipe.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
+
+/* the kernel heap: host memory, counted, with a switch that makes it fail */
+static int HEAP_BLOCKS, HEAP_FAIL;
+void *kmalloc(unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *p = calloc(1, size ? (size_t)size : 1);
+    if (p)
+        HEAP_BLOCKS++;
+    return p;
+}
+void kfree(void *p)
+{
+    if (p)
+    {
+        free(p);
+        HEAP_BLOCKS--;
+    }
+}
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_BLOCKS++;
+    return n;
+}
 
 static int WOKEN[64], WOKEN_N;
 void task_wake(int id) { if (WOKEN_N < 64) WOKEN[WOKEN_N++] = id; }

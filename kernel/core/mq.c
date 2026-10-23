@@ -1,10 +1,11 @@
 /* HarisOS message queues: see include/mq.h. */
 #include "mq.h"
+#include "heap.h"
 #include "task.h"
 
 typedef struct
 {
-    int used, linked, refs;
+    int linked, refs;
     char name[MQ_NAME_MAX];
     unsigned head, count; /* the queue is slot[head .. head + count) */
     unsigned len[MQ_DEPTH];
@@ -12,9 +13,14 @@ typedef struct
     unsigned rwait, wwait; /* bit i = thread i waits to receive / to send */
 } Queue;
 
-static Queue QUEUES[MQ_MAX];
+/* The table is a heap block of Q_CAP pointers, doubled when full (up to MQ_MAX); each queue is a heap block of its own, so a pointer to a
+ * queue stays good when the table moves. A queue is named by its index; a free index holds NULL and is reused. */
+static Queue **QUEUES;
+static int Q_CAP;
 
-int mq_valid(int q) { return q >= 0 && q < MQ_MAX && QUEUES[q].used; }
+static Queue *get(int q) { return q >= 0 && q < Q_CAP ? QUEUES[q] : 0; }
+
+int mq_valid(int q) { return get(q) != 0; }
 
 int mq_valid_name(const char *name)
 {
@@ -37,10 +43,34 @@ static int same(const char *a, const char *b)
 
 static int find(const char *name)
 {
-    for (int i = 0; i < MQ_MAX; i++)
-        if (QUEUES[i].used && QUEUES[i].linked && same(QUEUES[i].name, name))
+    for (int i = 0; i < Q_CAP; i++)
+        if (QUEUES[i] && QUEUES[i]->linked && same(QUEUES[i]->name, name))
             return i;
     return -1;
+}
+
+/* Double the table (at most MQ_MAX entries); the new entries are free. 0 = at the limit or out of memory. */
+static int grow_table(void)
+{
+    if (Q_CAP >= MQ_MAX)
+        return 0;
+    int cap = Q_CAP ? Q_CAP * 2 : 8;
+    if (cap > MQ_MAX)
+        cap = MQ_MAX;
+    Queue **t = krealloc(QUEUES, (unsigned long long)cap * sizeof(Queue *));
+    if (!t)
+        return 0;
+    for (int i = Q_CAP; i < cap; i++)
+        t[i] = 0;
+    QUEUES = t;
+    Q_CAP = cap;
+    return 1;
+}
+
+static void release(int q)
+{
+    kfree(QUEUES[q]);
+    QUEUES[q] = 0;
 }
 
 int mq_open(const char *name, unsigned flags)
@@ -52,12 +82,14 @@ int mq_open(const char *name, unsigned flags)
         return (flags & MQ_CREATE) && (flags & MQ_EXCL) ? -1 : q;
     if (!(flags & MQ_CREATE))
         return -1;
-    for (q = 0; q < MQ_MAX && QUEUES[q].used; q++)
+    for (q = 0; q < Q_CAP && QUEUES[q]; q++)
         ;
-    if (q == MQ_MAX)
+    if (q == Q_CAP && !grow_table())
         return -1;
-    Queue *s = &QUEUES[q];
-    s->used = s->linked = 1;
+    Queue *s = kmalloc(sizeof(Queue));
+    if (!s)
+        return -1;
+    s->linked = 1;
     s->refs = 0;
     s->head = s->count = 0;
     s->rwait = s->wwait = 0;
@@ -65,6 +97,7 @@ int mq_open(const char *name, unsigned flags)
     for (; name[n]; n++)
         s->name[n] = name[n];
     s->name[n] = 0;
+    QUEUES[q] = s;
     return q;
 }
 
@@ -79,18 +112,20 @@ static void wake_all(unsigned *mask)
 
 void mq_ref(int q)
 {
-    if (mq_valid(q))
-        QUEUES[q].refs++;
+    Queue *s = get(q);
+    if (s)
+        s->refs++;
 }
 
 void mq_unref(int q)
 {
-    if (!mq_valid(q))
+    Queue *s = get(q);
+    if (!s)
         return;
-    if (QUEUES[q].refs > 0)
-        QUEUES[q].refs--;
-    if (QUEUES[q].refs == 0 && !QUEUES[q].linked)
-        QUEUES[q].used = 0;
+    if (s->refs > 0)
+        s->refs--;
+    if (s->refs == 0 && !s->linked)
+        release(q);
 }
 
 int mq_unlink(const char *name)
@@ -98,17 +133,17 @@ int mq_unlink(const char *name)
     int q = find(name);
     if (q < 0)
         return -1;
-    QUEUES[q].linked = 0;
-    if (QUEUES[q].refs == 0)
-        QUEUES[q].used = 0;
+    QUEUES[q]->linked = 0;
+    if (QUEUES[q]->refs == 0)
+        release(q);
     return 0;
 }
 
 int mq_send(int q, const void *msg, unsigned len)
 {
-    if (!mq_valid(q) || len == 0 || len > MQ_MSG_MAX)
+    Queue *s = get(q);
+    if (!s || len == 0 || len > MQ_MSG_MAX)
         return -1;
-    Queue *s = &QUEUES[q];
     if (s->count == MQ_DEPTH)
         return MQ_WOULDBLOCK;
     unsigned slot = (s->head + s->count) % MQ_DEPTH;
@@ -123,9 +158,9 @@ int mq_send(int q, const void *msg, unsigned len)
 
 int mq_recv(int q, void *buf, unsigned cap)
 {
-    if (!mq_valid(q))
+    Queue *s = get(q);
+    if (!s)
         return -1;
-    Queue *s = &QUEUES[q];
     if (s->count == 0)
         return MQ_WOULDBLOCK;
     unsigned len = s->len[s->head];
@@ -142,18 +177,19 @@ int mq_recv(int q, void *buf, unsigned cap)
 
 void mq_wait(int q, int send_side, int task)
 {
-    if (!mq_valid(q) || task < 0 || task >= TASK_MAX)
+    Queue *s = get(q);
+    if (!s || task < 0 || task >= TASK_MAX)
         return;
     if (send_side)
-        QUEUES[q].wwait |= 1u << task;
+        s->wwait |= 1u << task;
     else
-        QUEUES[q].rwait |= 1u << task;
+        s->rwait |= 1u << task;
 }
 
 int mq_in_use(void)
 {
     int n = 0;
-    for (int i = 0; i < MQ_MAX; i++)
-        n += QUEUES[i].used ? 1 : 0;
+    for (int i = 0; i < Q_CAP; i++)
+        n += QUEUES[i] ? 1 : 0;
     return n;
 }

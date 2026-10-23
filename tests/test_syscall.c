@@ -687,7 +687,10 @@ static void reset(void)
     PROC.stdio[0] = PROC.stdio[1] = PROC.stdio[2] = -1;
     PROC.cwd = 0;
     PROC.parent = -1;
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+    kfree(PROC.child); /* a process that has spawned a few: the list of children has 8 free entries (a new one has none yet) */
+    PROC.child = kmalloc(8 * sizeof(int));
+    PROC.child_cap = 8;
+    for (int i = 0; i < 8; i++)
         PROC.child[i] = 0;
     kfree(PROC.file); /* a new process: the list of open files starts with PROCESS_FILES_FIRST free entries */
     PROC.file = 0;
@@ -1093,18 +1096,35 @@ int main(void)
     SPAWN_FAIL = 1;
     CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1 && PROC.child[4] == 0); /* the loader said no: no slot taken */
     SPAWN_FAIL = 0;
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
-        PROC.child[i] = 900 + i;
+    /* the list of children grows by doubling; at PROCESS_MAX_CHILDREN outstanding children nothing more is started */
     {
         int calls = SPAWN_CALLS;
+        for (int i = 0; i < 8; i++)
+            PROC.child[i] = 900 + i;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) > 0 && PROC.child_cap == 16 && PROC.child[0] == 900 && PROC.child[8] > 0); /* the 9th child */
+        kfree(PROC.child);
+        PROC.child = kmalloc(PROCESS_MAX_CHILDREN * sizeof(int));
+        PROC.child_cap = PROCESS_MAX_CHILDREN;
+        for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+            PROC.child[i] = 900 + i;
+        calls = SPAWN_CALLS;
         CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1 && SPAWN_CALLS == calls); /* all slots used: nothing is started */
+        kfree(PROC.child);
+        PROC.child = kmalloc(8 * sizeof(int));
+        PROC.child_cap = 8;
+        HEAP_FAIL = 1;
+        for (int i = 0; i < 8; i++)
+            PROC.child[i] = 900 + i;
+        calls = SPAWN_CALLS;
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1 && SPAWN_CALLS == calls && PROC.child_cap == 8); /* no memory for the list: refused */
+        HEAP_FAIL = 0;
     }
     CURRENT_PROC = 0;
     CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, 0) == -1 && call(SYS_WAIT, 100, 0, 0) == -1); /* kernel thread */
     CURRENT_PROC = &PROC;
 
     /* wait: the child ends while we sleep */
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+    for (int i = 0; i < PROC.child_cap; i++)
         PROC.child[i] = 0;
     PROC.child[2] = 200;
     PENDING_PID = 200;
@@ -2164,13 +2184,13 @@ int main(void)
         CHECK(usync_in_use() == 1); /* the condition variable's name is still linked */
         CHECK(call(SYS_SYNC_UNLINK, U("lk"), 1, 0) == 0 && usync_in_use() == 0);
 
-        /* the table is full after 16 objects */
+        /* the table is full after USYNC_MAX objects (it grew by doubling to get there) */
         long long fds[PROCESS_MAX_FILES];
         int n = 0;
-        char nm[4] = {'a', 0, 0, 0};
+        char nm[8];
         for (int i = 0; i < USYNC_MAX; i++)
         {
-            nm[0] = (char)('a' + i);
+            snprintf(nm, sizeof(nm), "u%d", i);
             long long fd = call(i & 1 ? SYS_COND_OPEN : SYS_MUTEX_OPEN, U(nm), SYS_CREATE, 0);
             CHECK(fd >= 3 || fd == -1);
             if (fd >= 3 && n < PROCESS_MAX_FILES)
@@ -2181,7 +2201,7 @@ int main(void)
         CHECK(usync_in_use() == USYNC_MAX && call(SYS_MUTEX_OPEN, U("zz"), SYS_CREATE, 0) == -1);
         for (int i = 0; i < USYNC_MAX; i++)
         {
-            nm[0] = (char)('a' + i);
+            snprintf(nm, sizeof(nm), "u%d", i);
             CHECK(call(SYS_SYNC_UNLINK, U(nm), i & 1, 0) == 0);
         }
         CHECK(usync_in_use() == 0);

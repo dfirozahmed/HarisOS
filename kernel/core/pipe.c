@@ -1,41 +1,66 @@
 /* HarisOS pipes: see include/pipe.h. */
 #include "pipe.h"
+#include "heap.h"
 #include "task.h"
 
 typedef struct
 {
-    int used;
     int readers, writers; /* holders of each end (several processes can hold one, after a spawn) */
     unsigned head, count; /* the queue is buf[head .. head + count), wrapping */
     unsigned rwait, wwait; /* bit i = thread i waits to read / to write */
     unsigned char buf[PIPE_SIZE];
 } Pipe;
 
-static Pipe PIPES[PIPE_MAX];
+/* The table is a heap block of PIPE_CAP pointers, doubled when full (up to PIPE_MAX); each pipe is a heap block of its own, so a pointer to a
+ * pipe stays good when the table moves. A pipe is named by its index; a free index holds NULL and is reused. */
+static Pipe **PIPES;
+static int PIPE_CAP;
 
-int pipe_valid(int p) { return p >= 0 && p < PIPE_MAX && PIPES[p].used; }
+static Pipe *get(int p) { return p >= 0 && p < PIPE_CAP ? PIPES[p] : 0; }
+
+int pipe_valid(int p) { return get(p) != 0; }
 
 int pipe_in_use(void)
 {
     int n = 0;
-    for (int i = 0; i < PIPE_MAX; i++)
-        n += PIPES[i].used ? 1 : 0;
+    for (int i = 0; i < PIPE_CAP; i++)
+        n += PIPES[i] ? 1 : 0;
     return n;
+}
+
+/* Double the table (at most PIPE_MAX entries); the new entries are free. 0 = at the limit or out of memory. */
+static int grow_table(void)
+{
+    if (PIPE_CAP >= PIPE_MAX)
+        return 0;
+    int cap = PIPE_CAP ? PIPE_CAP * 2 : 16;
+    if (cap > PIPE_MAX)
+        cap = PIPE_MAX;
+    Pipe **t = krealloc(PIPES, (unsigned long long)cap * sizeof(Pipe *));
+    if (!t)
+        return 0;
+    for (int i = PIPE_CAP; i < cap; i++)
+        t[i] = 0;
+    PIPES = t;
+    PIPE_CAP = cap;
+    return 1;
 }
 
 int pipe_new(void)
 {
-    for (int i = 0; i < PIPE_MAX; i++)
-        if (!PIPES[i].used)
-        {
-            Pipe *p = &PIPES[i];
-            p->used = 1;
-            p->readers = p->writers = 0;
-            p->head = p->count = 0;
-            p->rwait = p->wwait = 0;
-            return i;
-        }
-    return -1;
+    int i = 0;
+    while (i < PIPE_CAP && PIPES[i])
+        i++;
+    if (i == PIPE_CAP && !grow_table())
+        return -1;
+    Pipe *p = kmalloc(sizeof(Pipe));
+    if (!p)
+        return -1;
+    p->readers = p->writers = 0;
+    p->head = p->count = 0;
+    p->rwait = p->wwait = 0;
+    PIPES[i] = p;
+    return i;
 }
 
 static void wake_all(unsigned *mask)
@@ -49,19 +74,20 @@ static void wake_all(unsigned *mask)
 
 void pipe_ref(int p, int writer)
 {
-    if (!pipe_valid(p))
+    Pipe *q = get(p);
+    if (!q)
         return;
     if (writer)
-        PIPES[p].writers++;
+        q->writers++;
     else
-        PIPES[p].readers++;
+        q->readers++;
 }
 
 void pipe_unref(int p, int writer)
 {
-    if (!pipe_valid(p))
+    Pipe *q = get(p);
+    if (!q)
         return;
-    Pipe *q = &PIPES[p];
     if (writer && q->writers > 0)
         q->writers--;
     else if (!writer && q->readers > 0)
@@ -70,14 +96,17 @@ void pipe_unref(int p, int writer)
     wake_all(&q->rwait);
     wake_all(&q->wwait);
     if (q->readers == 0 && q->writers == 0)
-        q->used = 0;
+    {
+        PIPES[p] = 0;
+        kfree(q);
+    }
 }
 
 int pipe_read(int p, void *buf, unsigned len)
 {
-    if (!pipe_valid(p))
+    Pipe *q = get(p);
+    if (!q)
         return PIPE_BROKEN;
-    Pipe *q = &PIPES[p];
     if (q->count == 0)
         return q->writers > 0 ? PIPE_WOULDBLOCK : 0;
     unsigned n = len < q->count ? len : q->count;
@@ -93,9 +122,9 @@ int pipe_read(int p, void *buf, unsigned len)
 
 int pipe_write(int p, const void *buf, unsigned len)
 {
-    if (!pipe_valid(p))
+    Pipe *q = get(p);
+    if (!q)
         return PIPE_BROKEN;
-    Pipe *q = &PIPES[p];
     if (q->readers == 0)
         return PIPE_BROKEN;
     if (len == 0)
@@ -114,10 +143,11 @@ int pipe_write(int p, const void *buf, unsigned len)
 
 void pipe_wait(int p, int writer_side, int task)
 {
-    if (!pipe_valid(p) || task < 0 || task >= TASK_MAX)
+    Pipe *q = get(p);
+    if (!q || task < 0 || task >= TASK_MAX)
         return;
     if (writer_side)
-        PIPES[p].wwait |= 1u << task;
+        q->wwait |= 1u << task;
     else
-        PIPES[p].rwait |= 1u << task;
+        q->rwait |= 1u << task;
 }

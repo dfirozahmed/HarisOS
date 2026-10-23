@@ -20,7 +20,7 @@
 #ifndef HARIS_CONSOLE_H
 #define HARIS_CONSOLE_H
 
-#define CONSOLE_MAX 4
+#define CONSOLE_MAX 256 /* consoles that can exist at once (a handle holds the slot in 8 bits): the table is grown as needed up to this */
 #define CONSOLE_COLS 100
 #define CONSOLE_ROWS 200       /* rows kept, including the ones scrolled out of the window */
 #define CONSOLE_TITLE_MAX 32

@@ -581,13 +581,7 @@ static long long sys_spawn(const SyscallFrame *f)
     char path[256];
     if (copy_string_from_user(path, (int)sizeof(path), path_ptr, as) < 0)
         return -1;
-    int slot = -1;
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
-        if (p->child[i] == 0)
-        {
-            slot = i;
-            break;
-        }
+    int slot = process_child_slot(p); /* a free entry; the list grows when all are in use */
     if (slot < 0)
         return -1; /* wait for some of them first */
     int node = resolve_path(p, path, 1);
@@ -654,7 +648,7 @@ static long long sys_wait(const SyscallFrame *f)
     if (!as || !p || want == 0 || want > 0x7FFFFFFF)
         return -1;
     int slot = -1;
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
+    for (int i = 0; i < p->child_cap; i++)
         if (p->child[i] == (int)want)
             slot = i;
     if (slot < 0)
@@ -1435,7 +1429,7 @@ static long long sys_setprio(const SyscallFrame *f)
         return -1;
     int pid = f->rdi == 0 ? p->pid : (int)f->rdi;
     int allowed = pid == p->pid;
-    for (int i = 0; i < PROCESS_MAX_CHILDREN && !allowed; i++)
+    for (int i = 0; i < p->child_cap && !allowed; i++)
         allowed = p->child[i] == pid;
     if (!allowed)
         return -1;

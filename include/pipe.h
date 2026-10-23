@@ -19,7 +19,7 @@
 #ifndef HARIS_PIPE_H
 #define HARIS_PIPE_H
 
-#define PIPE_MAX 16
+#define PIPE_MAX 4096 /* pipes that can exist at once: the table is grown as needed up to this */
 #define PIPE_SIZE 4096
 
 #define PIPE_WOULDBLOCK -2

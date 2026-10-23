@@ -185,6 +185,8 @@ static void set_heap(Process *p, u64 heap_base)
         p->heap_limit = heap_base; /* the program sits that high: no heap */
 }
 
+static void purge_exits(int owner); /* (the records of exit codes, further down) */
+
 static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *sp, u64 heap_base)
 {
     for (int i = 1; i <= PROCESS_STACK_PAGES; i++)
@@ -230,8 +232,8 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->shm = 0; /* (the list of shared memory mappings is made by the first SYS_SHM_MAP) */
     p->shm_cap = 0;
     p->shm_next = 0;
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
-        p->child[i] = 0;
+    p->child = 0; /* (the list of children is made by the first spawn or fork) */
+    p->child_cap = 0;
     set_heap(p, heap_base);
     if (process_files_init(p) != 0)
     {
@@ -290,6 +292,11 @@ void process_release_files(Process *p)
     kfree(p->file); /* the list itself (NULL is fine) */
     p->file = 0;
     p->file_cap = 0;
+    purge_exits(p->pid); /* nobody can collect the exit codes of its children now */
+    kfree(p->child);
+
+    p->child = 0;
+    p->child_cap = 0;
     for (int k = 0; k < 3; k++)
         p->stdio[k] = -1;
 }
@@ -436,13 +443,7 @@ int process_fork(u64 user_rip, u64 user_rsp)
     AddressSpace *as = task_address_space();
     if (!p || !as)
         return -1;
-    int slot = -1;
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
-        if (p->child[i] == 0)
-        {
-            slot = i;
-            break;
-        }
+    int slot = process_child_slot(p);
     if (slot < 0)
         return -1;
     AddressSpace *cas = aspace_clone(as);
@@ -491,8 +492,8 @@ int process_fork(u64 user_rip, u64 user_rsp)
     cp->parent = task_current();
     cp->own_console = 0; /* the window belongs to whoever opened it */
     cp->sig_pending = 0; /* handlers and the mask are inherited, what is waiting for the parent is not */
-    for (int i = 0; i < PROCESS_MAX_CHILDREN; i++)
-        cp->child[i] = 0;
+    cp->child = 0; /* the clone has no children yet */
+    cp->child_cap = 0;
     st->entry = user_rip;
     st->user_rsp = user_rsp;
     st->argc = st->argv = 0;
@@ -529,22 +530,58 @@ int process_ppid(void)
     return pp ? pp->pid : 0;
 }
 
-/* The exit codes of children that their parent has not collected yet (a ring: the oldest record is overwritten). The pid
- * is never reused, so a stale record can never be mistaken for a newer process. Only children are recorded. */
-#define ZOMBIES 32
-static struct
+/* The exit codes of children that their parent has not collected yet. The pid is never reused, so a stale record can never be mistaken
+ * for a newer process. Only children are recorded. The records are a heap block that grows as needed (up to ZOMBIE_MAX; at the limit the
+ * oldest is overwritten, as the ring of 32 used to do for everybody); a record goes when its child is waited for, or when its parent ends
+ * (process_release_files): nobody can collect it then. A free entry has pid 0. */
+#define ZOMBIE_MAX 65536
+static struct Zombie
 {
     int pid, code;
-} ZOMBIE[ZOMBIES];
-static unsigned ZOMBIE_NEXT;
+    int owner; /* pid of the parent */
+} *ZOMBIE;
+static int Z_CAP, Z_USED, Z_NEXT; /* entries, entries that may be in use (the rest is free), where to overwrite at the limit */
+
+static void purge_exits(int owner)
+{
+    for (int i = 0; i < Z_USED; i++)
+        if (ZOMBIE[i].pid != 0 && ZOMBIE[i].owner == owner)
+            ZOMBIE[i].pid = 0;
+    while (Z_USED > 0 && ZOMBIE[Z_USED - 1].pid == 0)
+        Z_USED--;
+}
 
 static void record_exit(const Process *p, int code)
 {
     if (!p || p->parent < 0)
         return;
-    ZOMBIE[ZOMBIE_NEXT % ZOMBIES].pid = p->pid;
-    ZOMBIE[ZOMBIE_NEXT % ZOMBIES].code = code;
-    ZOMBIE_NEXT++;
+    const Process *pp = task_data_of(p->parent);
+    if (!pp) /* the parent is gone: nobody could collect the code, and nothing would ever purge the record */
+        return;
+    int slot = -1;
+    for (int i = 0; i < Z_USED && slot < 0; i++)
+        if (ZOMBIE[i].pid == 0)
+            slot = i;
+    if (slot < 0 && Z_USED == Z_CAP && Z_CAP < ZOMBIE_MAX)
+    {
+        int cap = Z_CAP ? Z_CAP * 2 : 32;
+        struct Zombie *n = krealloc(ZOMBIE, (u64)cap * sizeof(struct Zombie));
+        if (n)
+        {
+            ZOMBIE = n;
+            Z_CAP = cap;
+        }
+    }
+    if (slot < 0 && Z_USED < Z_CAP)
+        slot = Z_USED++;
+    if (slot < 0 && Z_USED > 0) /* no room and no memory: the oldest record goes */
+        slot = Z_NEXT++ % Z_USED;
+    if (slot >= 0)
+    {
+        ZOMBIE[slot].pid = p->pid;
+        ZOMBIE[slot].code = code;
+        ZOMBIE[slot].owner = pp->pid;
+    }
     task_wake(p->parent); /* if the parent has ended and the slot belongs to another thread, that is a harmless extra wake */
 }
 
@@ -552,12 +589,14 @@ int process_reap(int pid, int *code)
 {
     if (pid <= 0)
         return 0;
-    for (int i = 0; i < ZOMBIES; i++)
+    for (int i = 0; i < Z_USED; i++)
         if (ZOMBIE[i].pid == pid)
         {
             if (code)
                 *code = ZOMBIE[i].code;
             ZOMBIE[i].pid = 0;
+            while (Z_USED > 0 && ZOMBIE[Z_USED - 1].pid == 0)
+                Z_USED--;
             return 1;
         }
     return 0;

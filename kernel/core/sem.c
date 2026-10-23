@@ -1,18 +1,24 @@
 /* HarisOS semaphores: see include/sem.h. */
 #include "sem.h"
+#include "heap.h"
 #include "task.h"
 
 typedef struct
 {
-    int used, linked, refs;
+    int linked, refs;
     unsigned value;
     unsigned waiters; /* bit i = thread i sleeps in a wait */
     char name[SEM_NAME_MAX];
 } Semaphore;
 
-static Semaphore SEMS[SEM_MAX];
+/* The table is a heap block of SEM_CAP pointers, doubled when full (up to SEM_MAX); each semaphore is a heap block of its own, so a pointer
+ * to one stays good when the table moves. A semaphore is named by its index; a free index holds NULL and is reused. */
+static Semaphore **SEMS;
+static int SEM_CAP;
 
-int sem_valid(int s) { return s >= 0 && s < SEM_MAX && SEMS[s].used; }
+static Semaphore *get(int s) { return s >= 0 && s < SEM_CAP ? SEMS[s] : 0; }
+
+int sem_valid(int s) { return get(s) != 0; }
 
 int sem_valid_name(const char *name)
 {
@@ -35,10 +41,34 @@ static int same(const char *a, const char *b)
 
 static int find(const char *name)
 {
-    for (int i = 0; i < SEM_MAX; i++)
-        if (SEMS[i].used && SEMS[i].linked && same(SEMS[i].name, name))
+    for (int i = 0; i < SEM_CAP; i++)
+        if (SEMS[i] && SEMS[i]->linked && same(SEMS[i]->name, name))
             return i;
     return -1;
+}
+
+/* Double the table (at most SEM_MAX entries); the new entries are free. 0 = at the limit or out of memory. */
+static int grow_table(void)
+{
+    if (SEM_CAP >= SEM_MAX)
+        return 0;
+    int cap = SEM_CAP ? SEM_CAP * 2 : 16;
+    if (cap > SEM_MAX)
+        cap = SEM_MAX;
+    Semaphore **t = krealloc(SEMS, (unsigned long long)cap * sizeof(Semaphore *));
+    if (!t)
+        return 0;
+    for (int i = SEM_CAP; i < cap; i++)
+        t[i] = 0;
+    SEMS = t;
+    SEM_CAP = cap;
+    return 1;
+}
+
+static void release(int s)
+{
+    kfree(SEMS[s]);
+    SEMS[s] = 0;
 }
 
 int sem_open(const char *name, unsigned flags, unsigned initial)
@@ -50,12 +80,14 @@ int sem_open(const char *name, unsigned flags, unsigned initial)
         return (flags & SEM_CREATE) && (flags & SEM_EXCL) ? -1 : s;
     if (!(flags & SEM_CREATE) || initial > SEM_VALUE_MAX)
         return -1;
-    for (s = 0; s < SEM_MAX && SEMS[s].used; s++)
+    for (s = 0; s < SEM_CAP && SEMS[s]; s++)
         ;
-    if (s == SEM_MAX)
+    if (s == SEM_CAP && !grow_table())
         return -1;
-    Semaphore *m = &SEMS[s];
-    m->used = m->linked = 1;
+    Semaphore *m = kmalloc(sizeof(Semaphore));
+    if (!m)
+        return -1;
+    m->linked = 1;
     m->refs = 0;
     m->value = initial;
     m->waiters = 0;
@@ -63,23 +95,26 @@ int sem_open(const char *name, unsigned flags, unsigned initial)
     for (; name[n]; n++)
         m->name[n] = name[n];
     m->name[n] = 0;
+    SEMS[s] = m;
     return s;
 }
 
 void sem_ref(int s)
 {
-    if (sem_valid(s))
-        SEMS[s].refs++;
+    Semaphore *m = get(s);
+    if (m)
+        m->refs++;
 }
 
 void sem_unref(int s)
 {
-    if (!sem_valid(s))
+    Semaphore *m = get(s);
+    if (!m)
         return;
-    if (SEMS[s].refs > 0)
-        SEMS[s].refs--;
-    if (SEMS[s].refs == 0 && !SEMS[s].linked)
-        SEMS[s].used = 0;
+    if (m->refs > 0)
+        m->refs--;
+    if (m->refs == 0 && !m->linked)
+        release(s);
 }
 
 int sem_unlink(const char *name)
@@ -87,47 +122,54 @@ int sem_unlink(const char *name)
     int s = find(name);
     if (s < 0)
         return -1;
-    SEMS[s].linked = 0;
-    if (SEMS[s].refs == 0)
-        SEMS[s].used = 0;
+    SEMS[s]->linked = 0;
+    if (SEMS[s]->refs == 0)
+        release(s);
     return 0;
 }
 
 int sem_trywait(int s)
 {
-    if (!sem_valid(s))
+    Semaphore *m = get(s);
+    if (!m)
         return -1;
-    if (SEMS[s].value == 0)
+    if (m->value == 0)
         return SEM_WOULDBLOCK;
-    SEMS[s].value--;
+    m->value--;
     return 0;
 }
 
 int sem_post(int s)
 {
-    if (!sem_valid(s) || SEMS[s].value >= SEM_VALUE_MAX)
+    Semaphore *m = get(s);
+    if (!m || m->value >= SEM_VALUE_MAX)
         return -1;
-    SEMS[s].value++;
-    unsigned m = SEMS[s].waiters;
-    SEMS[s].waiters = 0;
+    m->value++;
+    unsigned w = m->waiters;
+    m->waiters = 0;
     for (int t = 0; t < TASK_MAX; t++)
-        if (m & (1u << t))
+        if (w & (1u << t))
             task_wake(t);
     return 0;
 }
 
 void sem_wait_for(int s, int task)
 {
-    if (sem_valid(s) && task >= 0 && task < TASK_MAX)
-        SEMS[s].waiters |= 1u << task;
+    Semaphore *m = get(s);
+    if (m && task >= 0 && task < TASK_MAX)
+        m->waiters |= 1u << task;
 }
 
-int sem_value(int s) { return sem_valid(s) ? (int)SEMS[s].value : -1; }
+int sem_value(int s)
+{
+    Semaphore *m = get(s);
+    return m ? (int)m->value : -1;
+}
 
 int sem_in_use(void)
 {
     int n = 0;
-    for (int i = 0; i < SEM_MAX; i++)
-        n += SEMS[i].used ? 1 : 0;
+    for (int i = 0; i < SEM_CAP; i++)
+        n += SEMS[i] ? 1 : 0;
     return n;
 }

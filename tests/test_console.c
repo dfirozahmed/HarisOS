@@ -1,10 +1,40 @@
 /* Host test for console.c: the character grid, the cursor, wrapping, scrolling, the line editor and handles. */
 #include "console.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
+
+/* the kernel heap: host memory, counted, with a switch that makes it fail */
+static int HEAP_BLOCKS, HEAP_FAIL;
+void *kmalloc(unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *p = calloc(1, size ? (size_t)size : 1);
+    if (p)
+        HEAP_BLOCKS++;
+    return p;
+}
+void kfree(void *p)
+{
+    if (p)
+    {
+        free(p);
+        HEAP_BLOCKS--;
+    }
+}
+void *krealloc(void *p, unsigned long long size)
+{
+    if (HEAP_FAIL)
+        return 0;
+    void *n = realloc(p, size ? (size_t)size : 1);
+    if (n && !p)
+        HEAP_BLOCKS++;
+    return n;
+}
 
 /* ---- the scheduler calls the console makes ---- */
 static int WOKEN[16], WOKEN_N;
@@ -173,7 +203,7 @@ int main(void)
     /* handles: a closed console is invalid, a reused slot gets a new handle, the old one stays invalid */
     int f = console_open("F");
     put(f, "old text\n");
-    int f_slot = f & 15;
+    int f_slot = f & 255;
     WOKEN_N = 0;
     console_wait(f, 9);
     console_close(f);
@@ -183,13 +213,13 @@ int main(void)
     CHECK(console_row(f, 0, r) == 0 && console_cursor_col(f) == -1);
     console_close(f); /* closing twice is harmless */
     int g = -1;
-    for (int tries = 0; tries < CONSOLE_MAX + 1 && (g < 0 || (g & 15) != f_slot); tries++)
+    for (int tries = 0; tries < CONSOLE_MAX + 1 && (g < 0 || (g & 255) != f_slot); tries++)
     {
         if (g >= 0)
             console_close(g);
         g = console_open("G");
     }
-    CHECK(g > 0 && (g & 15) == f_slot && g != f);            /* the slot came back with another generation */
+    CHECK(g > 0 && (g & 255) == f_slot && g != f);            /* the slot came back with another generation */
     CHECK(!console_valid(f) && console_valid(g));
     CHECK(row(g, 0, r) && r[0] == 0 && row(g, 1, r) == 0);   /* and it is empty: nothing of the old text */
     console_close(g);
@@ -226,6 +256,16 @@ int main(void)
     for (int i = 0; i <= CONSOLE_MAX; i++)
         console_close(h[i]);
     console_close(a);
+
+    /* the heap: every console went back (only the table of slots stays); no memory means no console, and nothing is left behind */
+    CHECK(HEAP_BLOCKS == 1);
+    HEAP_FAIL = 1;
+    CHECK(console_open("no memory") == -1 && HEAP_BLOCKS == 1);
+    HEAP_FAIL = 0;
+    int fresh = console_open("fresh");
+    CHECK(fresh >= 0 && HEAP_BLOCKS == 2);
+    console_close(fresh);
+    CHECK(HEAP_BLOCKS == 1);
 
     /* a long title is cut, not overrun */
     int t = console_open("0123456789012345678901234567890123456789");

@@ -14,7 +14,7 @@
 
 #include "mutex.h"
 
-#define USYNC_MAX 16
+#define USYNC_MAX 4096 /* objects that can exist at once: the table is grown as needed up to this */
 #define USYNC_NAME_MAX 32
 
 #define USYNC_MUTEX 0

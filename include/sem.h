@@ -15,7 +15,7 @@
 #ifndef HARIS_SEM_H
 #define HARIS_SEM_H
 
-#define SEM_MAX 16
+#define SEM_MAX 4096 /* semaphores that can exist at once: the table is grown as needed up to this */
 #define SEM_NAME_MAX 32
 #define SEM_VALUE_MAX 0x7FFFFFFF
 

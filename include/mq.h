@@ -14,7 +14,7 @@
 #ifndef HARIS_MQ_H
 #define HARIS_MQ_H
 
-#define MQ_MAX 8
+#define MQ_MAX 1024 /* queues that can exist at once: the table is grown as needed up to this */
 #define MQ_NAME_MAX 32
 #define MQ_MSG_MAX 256
 #define MQ_DEPTH 16

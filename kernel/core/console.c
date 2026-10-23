@@ -1,11 +1,10 @@
 /* HarisOS console: see include/console.h. A character grid, a cursor and a line editor. No window code. */
 #include "console.h"
+#include "heap.h"
 #include "task.h"
 
 typedef struct
 {
-    int used;
-    unsigned gen; /* part of the handle: changes every time the slot is closed */
     char title[CONSOLE_TITLE_MAX];
     int finished;
     int dirty;
@@ -16,28 +15,34 @@ typedef struct
     char queue[CONSOLE_INPUT_MAX]; /* finished lines, a ring */
     int q_head, q_count;
     int waiter; /* thread to wake, -1 = none */
+    char cell[CONSOLE_ROWS][CONSOLE_COLS]; /* the character grid */
 } Console;
 
-static Console C[CONSOLE_MAX];
-static char CELL[CONSOLE_MAX][CONSOLE_ROWS][CONSOLE_COLS];
+/* A console is a heap block of its own (about 21 KB), made by console_open and freed by console_close. The table of them is a heap block of
+ * T_CAP entries, doubled when full (up to CONSOLE_MAX). The generation of a slot stays in the table when its console is gone. */
+typedef struct
+{
+    Console *c; /* NULL = the slot is free */
+    unsigned gen; /* part of the handle: changes every time the slot is closed */
+} ConSlot;
+static ConSlot *T;
+static int T_CAP;
 
-/* The handle is gen * 16 + slot; generations start at 1, so a valid handle is never 0 and -1 is never valid. */
+/* The handle is gen * 256 + slot; generations start at 1, so a valid handle is never 0 and -1 is never valid. */
 static Console *get(int h)
 {
     if (h < 0)
         return 0;
-    unsigned slot = (unsigned)h & 15u, gen = (unsigned)h >> 4;
-    if (slot >= CONSOLE_MAX || !C[slot].used || C[slot].gen != gen)
+    unsigned slot = (unsigned)h & 255u, gen = (unsigned)h >> 8;
+    if (slot >= (unsigned)T_CAP || !T[slot].c || T[slot].gen != gen)
         return 0;
-    return &C[slot];
+    return T[slot].c;
 }
-
-static int slot_of(const Console *c) { return (int)(c - C); }
 
 /* Writes go through volatile: no C library here, and a plain fill loop could be turned into a call to memset. */
 static void clear_row(Console *c, unsigned row)
 {
-    volatile char *r = CELL[slot_of(c)][row % CONSOLE_ROWS];
+    volatile char *r = c->cell[row % CONSOLE_ROWS];
     for (int i = 0; i < CONSOLE_COLS; i++)
         r[i] = ' ';
 }
@@ -49,7 +54,7 @@ static void new_row(Console *c)
     clear_row(c, c->lines);
 }
 
-static char *cell(Console *c, int col) { return &CELL[slot_of(c)][c->lines % CONSOLE_ROWS][col]; }
+static char *cell(Console *c, int col) { return &c->cell[c->lines % CONSOLE_ROWS][col]; }
 
 static void put_char(Console *c, char ch)
 {
@@ -86,16 +91,39 @@ static void wake(Console *c)
     }
 }
 
+/* Double the table (at most CONSOLE_MAX); the new slots are free. 0 = at the limit or out of memory. */
+static int grow_table(void)
+{
+    if (T_CAP >= CONSOLE_MAX)
+        return 0;
+    int cap = T_CAP ? T_CAP * 2 : 8;
+    if (cap > CONSOLE_MAX)
+        cap = CONSOLE_MAX;
+    ConSlot *t = krealloc(T, (unsigned long long)cap * sizeof(ConSlot));
+    if (!t)
+        return 0;
+    for (int i = T_CAP; i < cap; i++)
+    {
+        t[i].c = 0;
+        t[i].gen = 1;
+    }
+    T = t;
+    T_CAP = cap;
+    return 1;
+}
+
 int console_open(const char *title)
 {
-    for (int i = 0; i < CONSOLE_MAX; i++)
+    int i = 0;
+    while (i < T_CAP && T[i].c)
+        i++;
+    if (i == T_CAP && !grow_table())
+        return -1;
+    Console *c = kmalloc(sizeof(Console));
+    if (!c)
+        return -1;
     {
-        Console *c = &C[i];
-        if (c->used)
-            continue;
-        if (c->gen == 0)
-            c->gen = 1;
-        c->used = 1;
+        T[i].c = c;
         c->finished = 0;
         c->dirty = 1;
         c->lines = 0;
@@ -108,9 +136,8 @@ int console_open(const char *title)
             c->title[n] = title[n];
         c->title[n] = 0;
         clear_row(c, 0);
-        return (int)(c->gen << 4) | i;
+        return (int)(T[i].gen << 8) | i;
     }
-    return -1;
 }
 
 void console_close(int h)
@@ -119,10 +146,12 @@ void console_close(int h)
     if (!c)
         return;
     wake(c); /* a reader that is blocked now finds the handle invalid and gets end of input */
-    c->used = 0;
-    c->gen++;
-    if (c->gen == 0 || c->gen > 0x7FFFFFF)
-        c->gen = 1;
+    ConSlot *s = &T[(unsigned)h & 255u];
+    s->c = 0;
+    kfree(c);
+    s->gen++;
+    if (s->gen == 0 || s->gen > 0x7FFFFF)
+        s->gen = 1;
 }
 
 int console_valid(int h) { return get(h) != 0; }
@@ -277,7 +306,7 @@ int console_row(int h, int back, char *out)
     unsigned available = c->lines + 1 < CONSOLE_ROWS ? c->lines + 1 : CONSOLE_ROWS;
     if ((unsigned)back >= available)
         return 0;
-    const char *row = CELL[slot_of(c)][(c->lines - (unsigned)back) % CONSOLE_ROWS];
+    const char *row = c->cell[(c->lines - (unsigned)back) % CONSOLE_ROWS];
     int n = CONSOLE_COLS;
     while (n > 0 && row[n - 1] == ' ')
         n--;
