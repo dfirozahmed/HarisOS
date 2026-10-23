@@ -2,6 +2,7 @@
 #include "task.h"
 #include "aspace.h"
 #include "idle.h"
+#include "fpu.h"
 #include "irq.h"
 #include "paging.h"
 #include "pmm.h"
@@ -29,6 +30,9 @@ typedef struct
     TaskFn fn;
     void *arg;
     char name[TASK_NAME_MAX];
+    /* The floating point / SSE registers of a process thread while it is not running (see fpu.h). Only process threads use
+     * it; kernel threads leave it alone. FXSAVE needs 16-byte alignment, which the attribute gives every Task. */
+    unsigned char fpu[FPU_STATE_SIZE] __attribute__((aligned(16)));
 } Task;
 
 /* Written at the lowest usable address, just above the guard page. The guard page catches a stack that grows into it
@@ -63,6 +67,29 @@ static void fill_zero(void *p, unsigned long long bytes)
     volatile unsigned char *b = (volatile unsigned char *)p; /* volatile: no call to memset in a freestanding build */
     for (unsigned long long i = 0; i < bytes; i++)
         b[i] = 0;
+}
+
+/* True while the x87 unit and MXCSR hold the registers of a process. Then a kernel thread that gets the CPU must first put
+ * them back to the normal values (the kernel's own SSE code expects the default rounding mode and masked exceptions). */
+static int FPU_HOLDS_PROCESS;
+
+/* The running thread `t` has just got the CPU: give it the floating point state it expects.
+ *   process thread  -> its own saved registers (or the clean state, for a new one): all of FXSAVE, i.e. x87, MXCSR, xmm.
+ *   kernel thread   -> if a process had the unit: reset the x87 unit and MXCSR, but NOT the xmm registers. A kernel thread
+ *                      that called schedule() expects xmm6-xmm15 back as it left them (callee-saved), and task_ctx_switch
+ *                      has just restored exactly that; a full restore of a default image would overwrite them. */
+static void fpu_enter(const Task *t)
+{
+    if (t->as)
+    {
+        fpu_restore(t->fpu);
+        FPU_HOLDS_PROCESS = 1;
+    }
+    else if (FPU_HOLDS_PROCESS)
+    {
+        fpu_reset_control();
+        FPU_HOLDS_PROCESS = 0;
+    }
 }
 
 /* Frees the stacks of finished threads. Only safe from another thread's stack, never from the dying one: the
@@ -139,18 +166,28 @@ static void schedule(void)
     if (TASKS[next].as)
         syscall_set_kernel_stack(TASKS[next].kstack_top);
 
+    /* Floating point state belongs to the process. The one that leaves saves it here, before the switch; the one that comes
+     * in loads it after the switch, in its own context (fpu_enter), not here: task_ctx_switch itself saves and restores
+     * xmm6-xmm15 of the thread that calls it, and loading the next thread's registers before that would make it store the
+     * wrong values for the one that leaves. (xmm0-xmm5 are not part of this: whoever interrupted the process, the timer
+     * interrupt or a system call, saved them in its own frame.) */
+    if (old->as)
+        fpu_save(old->fpu);
+
     TASKS[next].state = TASK_RUNNING;
     CUR = next;
     SWITCHES++;
     SLICE_LEFT = TASK_SLICE_TICKS; /* the thread that comes in gets a whole slice */
     task_ctx_switch(&old->rsp, TASKS[next].rsp);
-    reap(); /* we are on the stack of whichever thread was chosen to continue */
+    fpu_enter(&TASKS[CUR]); /* we are the thread that was chosen to continue: its floating point state now */
+    reap();
 }
 
 /* The first code of every new thread: task_ctx_switch "returns" here, with interrupts off (the switch ran inside
  * schedule()). */
 static void task_main(void)
 {
+    fpu_enter(&TASKS[CUR]); /* a new thread never returns from schedule(), so it takes its floating point state here */
     reap(); /* a thread that came here instead of returning from schedule() must free dead threads too */
     if (TASKS[CUR].flags & TASK_PREEMPTIBLE)
         irq_enable(); /* from here on the timer may take the CPU away */
@@ -171,6 +208,7 @@ int task_init(void)
         TASKS[i].flags = 0;
     }
     ACTIVE_AS = 0;
+    FPU_HOLDS_PROCESS = 0;
     SLICE_LEFT = TASK_SLICE_TICKS;
     preempt_count = 0;
     Task *t = &TASKS[0];
@@ -285,6 +323,8 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     t->data = data;
     t->free_data = free_data;
     t->kstack_top = top;
+    if (as)
+        fpu_default(t->fpu); /* a new process starts with clean floating point registers */
     t->rsp = (unsigned long long)fr;
     t->fn = fn;
     t->arg = arg;

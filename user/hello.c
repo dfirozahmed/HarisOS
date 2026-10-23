@@ -12,8 +12,8 @@ static const unsigned SQUARES[8] = {0, 1, 4, 9, 16, 25, 36, 49}; /* .rodata */
 static unsigned counter = 1000;                                   /* .data */
 static unsigned scratch[8192];                                    /* .bss: 32 KiB (8 pages) that must start as zero */
 
-/* The kernel starts a program with a 16-byte aligned stack pointer; the C calling convention wants it to be 8 mod 16
- * at the first instruction of a function, as if a call had pushed a return address. */
+/* The kernel starts a program with the stack pointer 8 mod 16, as if a call had pushed a return address, which is what
+ * the C calling convention expects at the first instruction of a function. (force_align_arg_pointer is a precaution.) */
 __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
 {
     sys_write(1, MESSAGE, sizeof(MESSAGE) - 1);

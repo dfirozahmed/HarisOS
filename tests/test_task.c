@@ -2,6 +2,7 @@
  * made by task_create(). The heap and the clock are replaced by host versions so the test can find leaks and move time. */
 #include "task.h"
 #include "aspace.h"
+#include "fpu.h"
 #include "irq.h"
 #include "syscall.h"
 #include "pmm.h"
@@ -48,6 +49,37 @@ void pmm_free_contiguous(unsigned long long phys, unsigned long long count)
     (void)count;
     BLOCKS_OUT--;
     ALIGNED_FREE((void *)phys);
+}
+
+/* Floating point state: what the scheduler asks of fpu.h, recorded as a string of S (save), R (restore), C (reset the
+ * x87 unit and MXCSR, leaving the xmm registers alone) and the buffer addresses used. Nothing real happens: the registers
+ * are not touched on the host. The order matters: a process that leaves is saved BEFORE the switch, the one that comes in is
+ * restored AFTER it, in its own context (see fpu_enter in task.c). */
+static char FPU_LOG[256];
+static int FPU_LOG_N, FPU_DEFAULT_CALLS, FPU_MISALIGNED;
+static const void *FPU_PTR[256];
+
+static void fpu_note(char op, const void *p)
+{
+    if (FPU_LOG_N < 255)
+    {
+        FPU_PTR[FPU_LOG_N] = p;
+        FPU_LOG[FPU_LOG_N++] = op;
+        FPU_LOG[FPU_LOG_N] = 0;
+    }
+    if (p && ((unsigned long long)p & 15))
+        FPU_MISALIGNED++; /* FXSAVE / FXRSTOR fault on a buffer that is not 16-byte aligned */
+}
+
+void fpu_init(void) {}
+void fpu_save(void *state) { fpu_note('S', state); }
+void fpu_restore(const void *state) { fpu_note('R', state); }
+void fpu_reset_control(void) { fpu_note('C', 0); }
+void fpu_default(void *state)
+{
+    FPU_DEFAULT_CALLS++;
+    if ((unsigned long long)state & 15)
+        FPU_MISALIGNED++;
 }
 
 /* Address spaces and the kernel stack of ring 3 traps: only recorded (nothing here runs in ring 3). */
@@ -316,6 +348,13 @@ static void block_worker(void *arg)
     BLK_STAGE = 3;
 }
 
+static void user_yield_worker(void *arg)
+{
+    (void)arg;
+    task_yield();
+    task_yield();
+}
+
 static int SEEN_N, SEEN_BAD;
 static void user_pair_worker(void *arg)
 {
@@ -512,6 +551,7 @@ int main(void)
     CHECK(preempt_count == 0 && host_if == 1);
 
     /* ---- process threads: their own address space ---- */
+    static AddressSpace fake_as2_for_fpu;
     static AddressSpace fake_as; /* only a pointer to compare: the scheduler hands it to aspace_switch, never reads it */
     CHECK(task_address_space() == 0);
     AS_SWITCHES = AS_DESTROYED = KSTACK_SETS = 0;
@@ -532,6 +572,61 @@ int main(void)
     CHECK(AS_DESTROYED == 1); /* freed with the thread */
     CHECK(task_space_of(u) == 0);
     CHECK(task_state(u) == TASK_UNUSED && BLOCKS_OUT == 0);
+
+    /* ---- floating point state: saved when a process leaves, loaded when one comes in, clean for kernel threads ---- */
+    {
+        FPU_LOG_N = 0;
+        FPU_LOG[0] = 0;
+        FPU_DEFAULT_CALLS = 0;
+        /* kernel threads switch among themselves without touching the floating point registers */
+        ran = 0;
+        task_create("K1", quick_worker, (void *)&ran);
+        task_create("K2", quick_worker, (void *)&ran);
+        drain();
+        CHECK(ran == 2 && FPU_LOG_N == 0 && FPU_DEFAULT_CALLS == 0);
+
+        /* a process thread gets a clean state when it is created, and only then */
+        int p = task_create_user("FP1", user_yield_worker, 0, &fake_as, 0, 0);
+        CHECK(p > 0 && FPU_DEFAULT_CALLS == 1);
+
+        /* main -> process: restore its registers.  process -> main (it yielded): save them, and give the kernel thread the
+         * clean state.  Three times (two yields and the exit): the same buffer every time, and always 16-byte aligned. */
+        task_yield();
+        drain();
+        CHECK(strcmp(FPU_LOG, "RSCRSCRSC") == 0);
+        for (int i = 0; i < FPU_LOG_N; i++)
+            if (FPU_LOG[i] != 'C')
+                CHECK(FPU_PTR[i] == FPU_PTR[0]);
+        CHECK(FPU_MISALIGNED == 0);
+        CHECK(FPU_DEFAULT_CALLS == 1);
+
+        /* two process threads alternate: nothing "clean" in between, since both own their registers; the clean state only
+         * comes when the CPU goes back to a kernel thread */
+        FPU_LOG_N = 0;
+        FPU_LOG[0] = 0;
+        task_create_user("FP2", user_yield_worker, 0, &fake_as, 0, 0);
+        task_create_user("FP3", user_yield_worker, 0, &fake_as2_for_fpu, 0, 0);
+        CHECK(FPU_DEFAULT_CALLS == 3); /* one per new process */
+        drain();
+        int saves = 0, restores = 0, defaults = 0;
+        for (int i = 0; i < FPU_LOG_N; i++)
+        {
+            saves += FPU_LOG[i] == 'S';
+            restores += FPU_LOG[i] == 'R';
+            defaults += FPU_LOG[i] == 'C';
+            /* a process that is left is saved first, a process that comes in is restored: never two saves in a row, and a
+             * save is always followed by the restore of the next process or the default for a kernel thread */
+            if (FPU_LOG[i] == 'S')
+                CHECK(i + 1 < FPU_LOG_N && (FPU_LOG[i + 1] == 'R' || FPU_LOG[i + 1] == 'C'));
+        }
+        CHECK(strchr(FPU_LOG, 'R') == FPU_LOG); /* it starts by restoring the first process */
+        /* main -> FP2, FP2 -> FP3, FP3 -> main, three rounds: each process-to-process switch is "save, restore" (no clean state
+         * in between), each return to the main thread is "save, clean default" */
+        CHECK(strcmp(FPU_LOG, "RSRSCRSRSCRSRSC") == 0);
+        CHECK(saves == restores && defaults == 3); /* every process that leaves is saved; each entry is a restore */
+        CHECK(strstr(FPU_LOG, "SC") != 0);
+        CHECK(FPU_MISALIGNED == 0); /* FXSAVE / FXRSTOR fault on a buffer that is not 16-byte aligned */
+    }
 
     /* the process's own record: handed back to its thread, freed when the thread is cleaned up */
     {

@@ -10,6 +10,7 @@
 #include "exfat.h"
 #include "fbwc.h"
 #include "fault.h"
+#include "fpu.h"
 #include "fat32.h"
 #include "gdt.h"
 #include "acpi.h"
@@ -175,6 +176,7 @@ void kernel_main(const BootInfo *info)
 
         /* SMEP / SMAP before anything touches user memory (the address space test below does). */
         protect_init();
+        fpu_init(); /* x87 / SSE usable, and a clean state to give every new process (see fpu.h) */
         serial_puts("HARISOS: protections: SMEP ");
         serial_puts(protect_status() & PROTECT_SMEP ? "on" : "not available");
         serial_puts(", SMAP ");

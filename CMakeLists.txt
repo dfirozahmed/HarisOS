@@ -78,6 +78,7 @@ set(KERNEL_SOURCES
     kernel/core/user_demo.c         # ring 3 demo programs for the self test
     kernel/core/protect.c           # SMEP / SMAP, boot self test of the protections and the NMI stack
     kernel/core/gdt.c             # GDT: kernel + user segments, TSS (host-tested layout)
+    kernel/core/fpu.c               # x87 / SSE state: per-process FXSAVE images, clean default state
     kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
@@ -213,8 +214,8 @@ add_custom_command(
 # User programs (ring 3): user/NAME.c becomes an ELF executable, stored on the boot disk as NAME.ELF.
 #
 # The toolchain on Windows (MSYS2 clang + lld) has no ELF linker, only PE ones, so the steps are:
-#   1. clang compiles user/NAME.c for the bare machine (freestanding, no C library, no SSE: the kernel does not save the
-#      SSE / x87 state of a process across switches yet)
+#   1. clang compiles user/NAME.c for the bare machine (freestanding, no C library; SSE and x87 are fine: the kernel keeps
+#      the floating point registers of every process apart, see include/fpu.h; AVX is not, it is switched off)
 #   2. lld-link links it as a PE file at the start of the user address space, sections on 4 KiB boundaries, no relocations
 #   3. tools/mkelf.c repackages those sections as an ELF64 file, one PT_LOAD segment per section
 # On a machine with an ELF linker the kernel does not care how the file was made; this just works everywhere the
@@ -229,10 +230,10 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo)
+set(USER_PROGRAMS hello files echo fpua fpub)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
-    -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone -mno-sse -mno-mmx
+    -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone
     -O2 -Wall -Wextra -std=gnu11)
 set(USER_ELFS "")
 set(USER_ESP_FILES "")
@@ -246,7 +247,7 @@ foreach(PROG ${USER_PROGRAMS})
         OUTPUT  ${PROG_OBJ}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
         COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
-        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/sys.h
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/fputest.h
         COMMENT "Compiling user/${PROG}.c"
         VERBATIM
     )

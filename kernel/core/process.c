@@ -18,6 +18,10 @@ static ProcessStats STATS;
 
 void process_stats(ProcessStats *out) { *out = STATS; }
 
+static int EXIT_CODE_OF[TASK_MAX]; /* by thread id */
+
+int process_exit_code(int id) { return id >= 0 && id < TASK_MAX ? EXIT_CODE_OF[id] : 0; }
+
 int process_wait(int id)
 {
     for (int i = 0; i < 400; i++)
@@ -135,7 +139,11 @@ static int launch(const char *name, AddressSpace *as, u64 entry, int console)
         return -1;
     }
     st->entry = entry;
-    st->user_rsp = PAGING_USER_END - 16; /* inside the top stack page; 16-aligned */
+    /* The stack pointer is 8 mod 16 at the first instruction, exactly as if the program had been called (a call pushes an
+     * 8-byte return address onto a 16-aligned stack). The C calling convention relies on it: a compiler that has to save
+     * xmm6-xmm15 in a function's prologue stores them with aligned moves relative to that assumption, and a stack that is
+     * 16-aligned instead faults on the first one. The slot at [rsp] is the "return address": zero, never used. */
+    st->user_rsp = PAGING_USER_END - 8;
     p->console = console;
     for (int i = 0; i < PROCESS_MAX_FILES; i++)
     {
@@ -219,6 +227,7 @@ __attribute__((noreturn)) void process_exit(int code)
 {
     STATS.exited++;
     STATS.last_exit = code;
+    EXIT_CODE_OF[task_current()] = code;
     serial_puts("HARISOS: process ");
     serial_puts(task_name(task_current()));
     serial_puts(" exited, code ");
@@ -240,6 +249,7 @@ static void hex64(char *out, u64 v) /* 16 hex digits and a NUL */
 __attribute__((noreturn)) void process_fault(const FaultFrame *f, u64 cr2)
 {
     STATS.faulted++;
+    EXIT_CODE_OF[task_current()] = -1;
     static char text[1024]; /* not on the stack: this runs on a small emergency stack for page faults */
     fault_format(text, sizeof(text), f, cr2);
     serial_puts("HARISOS: process ");

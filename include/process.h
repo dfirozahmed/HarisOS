@@ -60,6 +60,10 @@ typedef struct
 
 void process_stats(ProcessStats *out);
 
+/* How the process that ran as thread `id` ended: its exit code, or -1 if a CPU exception ended it. Valid after the thread has
+ * ended and until its slot is used by another thread (read it right after process_wait). 0 if it never ran / still runs. */
+int process_exit_code(int id);
+
 /* Give the CPU to other threads until process thread `id` has ended and been cleaned up (its stack, pages and page
  * tables freed). 0 = done, -1 = still running after a few hundred turns (a program that keeps running). For tests and for
  * code that must wait for a program; a normal caller just lets the scheduler run. */

@@ -5,7 +5,7 @@
  *
  * User code puts the call number in rax and up to three arguments in rdi, rsi, rdx, then executes "syscall". The result
  * comes back in rax. Everything except rax, rcx and r11 is preserved (rcx and r11 are used by the instruction itself to
- * save the return address and the flags); xmm0-xmm5 may be changed.
+ * save the return address and the flags). The floating point and SSE registers are the process's own and are kept.
  *
  *   SYS_WRITE (1)  rdi = fd (1 or 2: the console), rsi = pointer, rdx = length (at most SYS_WRITE_MAX): print the bytes.
  *                  In the program's console window; with no window, on the serial port. Returns the length, or -1 if

@@ -5,6 +5,7 @@
 #include "heap.h"
 #include "pmm.h"
 #include "process.h"
+#include "serial.h"
 #include "task.h"
 #include "vfs.h"
 
@@ -244,6 +245,37 @@ static int echo_test(int node)
     return 0;
 }
 
+/* ---- floating point state per process ----------------------------------------------------------------------------------
+ * FPUA.ELF and FPUB.ELF fill xmm0-15, the x87 stack, MXCSR and the x87 control word with values of their own (a different
+ * rounding mode each), spin, and check that nothing changed. They run at the same time, so the timer interrupt moves the CPU
+ * between them many times. Each exits with 44 if its registers were always its own. */
+static int fpu_test(void)
+{
+    unsigned long long switches0 = task_switches();
+    int err = 0;
+    int a = exec_run("FPUA.ELF", &err);
+    int b = exec_run("FPUB.ELF", &err);
+    if (a < 0 || b < 0)
+    {
+        if (a >= 0)
+            process_wait(a);
+        if (b >= 0)
+            process_wait(b);
+        return -40;
+    }
+    if (process_wait(a) != 0 || process_wait(b) != 0)
+        return -41;
+    int ca = process_exit_code(a), cb = process_exit_code(b);
+    if (ca != 44)
+        return -42 - (ca > 0 && ca < 10 ? ca : 0); /* -43 .. -46: which kind of register changed in A */
+    if (cb != 44)
+        return -47 - (cb > 0 && cb < 10 ? cb : 0); /* -48 .. -51 in B */
+    serial_puts("HARISOS: fpu test: ");
+    serial_putd((long long)(task_switches() - switches0));
+    serial_puts(" thread switches while the two programs ran\n");
+    return 0;
+}
+
 int exec_selftest(void)
 {
     int node = exec_find("HELLO.ELF");
@@ -281,6 +313,14 @@ int exec_selftest(void)
     process_stats(&s2);
     if (s2.exited != s1.exited + 1 || s2.last_exit != 43)
         return -12 - (s2.last_exit > 0 && s2.last_exit < 43 ? s2.last_exit : 0); /* -13 ... -54: which check failed */
+
+    /* floating point / SSE registers are kept apart per process (FPUA.ELF and FPUB.ELF are optional) */
+    if (exec_find("FPUA.ELF") >= 0 && exec_find("FPUB.ELF") >= 0)
+    {
+        int ft = fpu_test();
+        if (ft != 0)
+            return ft;
+    }
 
     /* the console: input, output, blocking, waking, and what happens when the window goes (ECHO.ELF is optional) */
     int echo_node = exec_find("ECHO.ELF");
