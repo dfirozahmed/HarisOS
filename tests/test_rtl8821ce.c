@@ -59,6 +59,7 @@ static int KNOB_LLT_STUCK;
 static int PH_BREAK_RF_READBACK; /* the RF window does not follow the SIPI writes */
 static unsigned PH_FLIP_RF_BITS; /* the chip itself changes these bits of RF register 0x18 and 0x51 */
 static int KNOB_H2C_STUCK; /* the firmware never takes a command from the mailbox */
+static unsigned LTEM[0x400]; /* the coexistence block's registers behind the indirect interface */
 static unsigned char EFUSE_RFE = 4, EFUSE_XTAL = 0x2A; /* what the board's efuse says at 0xCA and 0xB9 */
 
 static void build_efuse(const unsigned char mac[6])
@@ -236,6 +237,15 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
     }
     else if (size == 4 && off == 0x30 && !(value & BIT(31)) && !KNOB_EFUSE_STUCK)
         set32(0x30, (value & ~0xFFu) | EFUSE_MAP[(value >> 8) & 0x3FF] | BIT(31)); /* the byte at that address, and "done" */
+    else if (size == 4 && off == 0x1700)
+    {
+        unsigned c = (unsigned)reg32(0x1700), o = c & 0x3FF;
+        if ((c & 0xF0000000u) == 0xC0000000u)
+            LTEM[o] = reg32(0x1704);
+        else if ((c & 0xF0000000u) == 0x80000000u)
+            set32(0x1708, LTEM[o]);
+        REGS[0x1703] |= 0x20; /* ready again */
+    }
     else if (size == 4 && off == 0x1D0)
         REGS[0x1CC] |= 1; /* HMETFR: the box holds a command until the firmware has read it */
     else if (size == 4 && off == 0xC90 && !PH_BREAK_RF_READBACK)
@@ -349,6 +359,8 @@ static void chip(unsigned char filler, unsigned char cr, u16 mcufw)
     KNOB_NO_BCN_VALID = KNOB_DDMA_STUCK = KNOB_CHKSUM_BAD = KNOB_NO_BOOT = KNOB_EFUSE_STUCK = KNOB_LLT_STUCK = KNOB_H2C_STUCK = 0;
     static const unsigned char TEST_MAC[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
     build_efuse(TEST_MAC);
+    memset(LTEM, 0, sizeof LTEM);
+    REGS[0x1703] |= 0x20; /* the indirect interface of the coexistence block is ready */
 }
 
 /* the same, for a download test: nothing set that the real chip does not have (filler 0: DDMA idle, no stale flags) */
@@ -566,7 +578,7 @@ int main(void)
     CHECK(DL.off_after == 1);
     CHECK((DL.mcufw & 0xC078) == 0xC078);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(strstr(st, "fw 24.11, MAC 00:e0:4c:68:12:34, mac ok, phy ok, h2c ok, off") &&
+    CHECK(strstr(st, "fw 24.11, MAC 00:e0:4c:68:12:34, init ok, ch6 ok, off") &&
           strlen(st) < sizeof st);
     /* the order of the register sequence, by landmarks */
     static const Wr LANDMARKS[] = {
@@ -835,6 +847,7 @@ int main(void)
         EF.state = EF_OK;
         DL.state = DL_OK;
         DL.off_after = 1;
+        CHN.state = CH_NOT_TRIED;
         NIC_RTL8821CE.status(s4, sizeof s4);
         CHECK(strstr(s4, ", h2c no ack, off") && strlen(s4) < sizeof s4);
     }
@@ -846,6 +859,76 @@ int main(void)
     h2c_probe();
     CHECK(H2.state == H2_FAILED && strcmp(H2.why, "busy") == 0 && NLOG == 0); /* nothing is written into a busy box */
     KNOB_H2C_STUCK = 0;
+
+    /* ---- stage 4c-1: the antenna path and the channel against Linux's own functions (rtw_coex_set_ant_path for the Wi-Fi-only
+     * phase, rtw8821c_set_channel), run after the table load, with the same kind of register file behind them (including the
+     * indirect interface of the coexistence block). Event count and hash as for the tables. ---- */
+    static const struct
+    {
+        unsigned rfe, channel, swing2g;
+        long coex_events;
+        unsigned long long coex_hash;
+        long ch_events;
+        unsigned long long ch_hash;
+    } CH_LINUX[] = {
+        {4, 6, 0xFF, 19, 0x44792c9b1eb830c0ULL, 37, 0x8451c084ab98df15ULL},
+        {4, 1, 0xFF, 19, 0x44792c9b1eb830c0ULL, 37, 0x0e09fe3ab8371a7eULL},
+        {4, 14, 0xFF, 19, 0x44792c9b1eb830c0ULL, 37, 0xf7cb7fb48955e3f1ULL}, /* channel 14 has its own CCK filter */
+        {4, 36, 0xFF, 19, 0x44792c9b1eb830c0ULL, 30, 0x40fdb8d19ff2a1e9ULL}, /* 5 GHz: the WLA input */
+        {4, 149, 0xFF, 19, 0x44792c9b1eb830c0ULL, 30, 0xd5665caffaa4962bULL},
+        {0, 6, 0xFF, 19, 0x44792c9b1eb830c0ULL, 37, 0x85e3c5e0344f82adULL}, /* not a BTG board: the WLG input */
+        {2, 11, 0xFF, 19, 0x44792c9b1eb830c0ULL, 37, 0xb751c9f5e1c3d5c8ULL},
+        {6, 40, 0xFF, 13, 0x53efffcdf6038b21ULL, 30, 0xb01e580961fb5c5dULL}, /* no antenna switch on this board type */
+        {4, 6, 4, 19, 0x44792c9b1eb830c0ULL, 37, 0x51177f14eae9573eULL},     /* another bb swing setting from the efuse */
+    };
+    for (unsigned k = 0; k < sizeof CH_LINUX / sizeof CH_LINUX[0]; k++)
+    {
+        chip_for_download();
+        memset(REGS, 0, sizeof REGS);
+        memset(LTEM, 0, sizeof LTEM);
+        REGS[0x1703] |= 0x20; /* the indirect interface is ready */
+        EF.map_ok = 1;
+        EF.rfe = (unsigned char)CH_LINUX[k].rfe;
+        EF.pkg = 0;
+        EF.xtal = 0x2A;
+        EF.swing2g = (unsigned char)CH_LINUX[k].swing2g;
+        EF.swing5g = 0xFF;
+        phy_init(1);
+        CAP_N = 0;
+        CAP_H = 1469598103934665603ULL;
+        CAPTURE = 1;
+        coex_wifi_only(EF.rfe);
+        CAPTURE = 0;
+        if (CAP_N != CH_LINUX[k].coex_events || CAP_H != CH_LINUX[k].coex_hash)
+        {
+            printf("FAIL coex wifi-only rfe %u: %ld events hash %016llx, Linux %ld events hash %016llx\n", CH_LINUX[k].rfe, CAP_N, CAP_H,
+                   CH_LINUX[k].coex_events, CH_LINUX[k].coex_hash);
+            fails++;
+        }
+        CAP_N = 0;
+        CAP_H = 1469598103934665603ULL;
+        CAPTURE = 1;
+        set_channel_20(CH_LINUX[k].channel, PH.ch_param, EF.swing2g, EF.swing5g);
+        CAPTURE = 0;
+        if (CAP_N != CH_LINUX[k].ch_events || CAP_H != CH_LINUX[k].ch_hash)
+        {
+            printf("FAIL channel %u rfe %u swing %u: %ld events hash %016llx, Linux %ld events hash %016llx\n", CH_LINUX[k].channel,
+                   CH_LINUX[k].rfe, CH_LINUX[k].swing2g, CAP_N, CAP_H, CH_LINUX[k].ch_events, CH_LINUX[k].ch_hash);
+            fails++;
+        }
+    }
+    /* the full flow tunes channel 6 and checks it by reading RF register 0x18 back */
+    build_image(1);
+    chip_for_download();
+    file(IMG, IMG_SIZE, IMG_SIZE);
+    NIC_RTL8821CE.probe(&WIFI);
+    CHECK(CHN.state == CH_OK && CHN.channel == 6 && (CHN.rf18 & 0xFF) == 6);
+    CHECK(CX.ant_switch_exist && CX.wlg_at_btg && CX.polarity == 1 && CX.rfe_btg); /* rfe 4 */
+    {
+        char s5[96];
+        NIC_RTL8821CE.status(s5, sizeof s5);
+        CHECK(strstr(s5, ", init ok, ch6 ok, off") && strlen(s5) < sizeof s5);
+    }
 
     /* a firmware without extended memory: two parts only */
     build_image(0);
