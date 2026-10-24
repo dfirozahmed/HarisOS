@@ -235,7 +235,7 @@ void rtl8821ce_host_random(unsigned char *out, unsigned n)
 }
 
 /* ---- the pretend chip's receiver: frames the test queued are put into the receive ring, one per delay call, once the receiver is on ---- */
-typedef struct { unsigned char fc0; unsigned len; int c2h, crc_err; const unsigned char *data; } RxFrame;
+typedef struct { unsigned char fc0; unsigned len; int c2h, crc_err; const unsigned char *data; unsigned w0_or; } RxFrame;
 static RxFrame RXQ[128];
 static int RXQ_N, RXQ_NEXT;
 static void rx_deliver_one1(void);
@@ -243,12 +243,18 @@ static unsigned RX_HW; /* the chip's write index */
 static void rxq_add(unsigned char fc0, unsigned len, int c2h, int crc_err)
 {
     if (RXQ_N < 128)
-        RXQ[RXQ_N++] = (RxFrame){fc0, len, c2h, crc_err, 0};
+        RXQ[RXQ_N++] = (RxFrame){fc0, len, c2h, crc_err, 0, 0};
 }
 static void rxq_add_frame(const unsigned char *data, unsigned len)
 {
     if (RXQ_N < 128)
-        RXQ[RXQ_N++] = (RxFrame){data[0], len, 0, 0, data};
+        RXQ[RXQ_N++] = (RxFrame){data[0], len, 0, 0, data, 0};
+}
+/* a frame as the receive descriptor describes it after decryption: w0_or = the extra bits of descriptor word 0 */
+static void rxq_add_frame_w0(const unsigned char *data, unsigned len, unsigned w0_or)
+{
+    if (RXQ_N < 128)
+        RXQ[RXQ_N++] = (RxFrame){data[0], len, 0, 0, data, w0_or};
 }
 static int RX_BURST = 1; /* frames the chip delivers between two polls of the driver */
 static void rx_deliver_one(void)
@@ -265,7 +271,7 @@ static void rx_deliver_one1(void)
     unsigned char *buf = D.mem + Q_COUNT * PAGE + PAGE + RX_HW * RX_BUF_SLOT; /* the transmit rings, the receive ring, then the buffers */
     RxFrame *f = &RXQ[RXQ_NEXT++];
     memset(buf, 0, 24 + 32 + f->len);
-    unsigned w0 = f->len | (f->crc_err ? 1u << 14 : 0) | (4u << 16);
+    unsigned w0 = f->len | (f->crc_err ? 1u << 14 : 0) | (4u << 16) | f->w0_or;
     memcpy(buf, &w0, 4);
     unsigned w2 = f->c2h ? 1u << 28 : 0;
     memcpy(buf + 8, &w2, 4);
@@ -410,7 +416,21 @@ static void ap_handshake_rx(const unsigned char *fr, unsigned len)
         unsigned char mic[16];
         wpa_eapol_mic(AP_PTK, e, 99, mic);
         if (memcmp(mic, e + 81, 16) == 0)
+        {
             AP_GOT_MSG4++;
+            /* the port is open: the access point sends protected data frames (two the chip decrypts, one whose decryption fails) */
+            for (int k = 0; k < 3; k++)
+            {
+                unsigned char *r = HS_RESP[HS_RESP_N++ % 6];
+                memset(r, 0, 256);
+                r[0] = 0x08;
+                r[1] = 0x42; /* from the distribution system, protected */
+                memset(r + 4, 0xFF, 6);
+                memcpy(r + 10, AP_BSSID, 6);
+                memcpy(r + 16, AP_BSSID, 6);
+                rxq_add_frame_w0(r, 24 + 8 + 20 + 8 + 4, k < 2 ? (4u << 20) : (1u << 15));
+            }
+        }
     }
 }
 
@@ -1800,7 +1820,7 @@ int main(void)
             {RSN_PMF, 0, ", net pmf, off", 3, 0, 0, 0},
             {RSN_GTKIP, 0, ", net grp, off", 3, 0, 0, 0},
             /* the 4-way handshake: 3 probe requests, authentication, association, message 2, message 4, deauthentication */
-            {RSN_OK_, 0, ", net ch149, assoc ok, 4way ok, off", 8, 1, "secret-pass-phrase", 0},
+            {RSN_OK_, 0, ", net ch149, assoc ok, 4way ok, dec 2, icv 1, off", 8, 1, "secret-pass-phrase", 0},
             {RSN_OK_, 0, ", net ch149, assoc ok, 4way none, off", 7, 1, "another passphrase", 0}, /* the access point has another key: it never sends message 3 */
             {RSN_OK_, 0, ", net ch149, assoc ok, 4way mic, off", 7, 1, "secret-pass-phrase", 1},  /* message 3 with a damaged signature */
         };
@@ -1965,6 +1985,29 @@ int main(void)
         CHECK(EAPQ.pending && EAPQ.len == 99 && EAPQ.b[1] == 3);
         EAPQ.pending = 0;
         HS_LISTEN = 0;
+    }
+
+    /* ---- stage 6c-2: the security engine and the key table against Linux' own rtw_sec_enable_sec_engine and rtw_sec_write_cam (the register
+     * writes, in order: the same event hash as for the tables) ---- */
+    {
+        unsigned char pk[16], gk[16];
+        for (unsigned i = 0; i < 16; i++)
+        {
+            pk[i] = (unsigned char)(0xA0 + i);
+            gk[i] = (unsigned char)(0x40 + i);
+        }
+        static const unsigned char AP6[6] = {0x3c, 0x78, 0x95, 0x07, 0x75, 0x87}, BC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        chip_for_download();
+        memset(REGS, 0, sizeof REGS);
+        REGS[0x100] = 0xFF;
+        CAP_N = 0;
+        CAP_H = 1469598103934665603ULL;
+        CAPTURE = 1;
+        sec_enable();
+        cam_write(4, pk, 0, 0, AP6);
+        cam_write(1, gk, 1, 1, BC);
+        CAPTURE = 0;
+        CHECK(CAP_N == 34 && CAP_H == 0x65cd1cffa28d0113ULL);
     }
 
     /* a firmware without extended memory: two parts only */

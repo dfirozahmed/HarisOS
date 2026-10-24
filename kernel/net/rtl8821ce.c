@@ -1839,6 +1839,8 @@ static struct
     unsigned probe_resp;
     unsigned mgmt_other, ctrl, data;
     unsigned c2h;      /* messages from the firmware */
+    unsigned decrypted; /* protected data frames that the chip decrypted */
+    unsigned icv_err;   /* protected data frames whose decryption failed (wrong or missing key) */
     unsigned bad;      /* descriptors that did not make sense, or frames with a bad checksum */
 } RX;
 
@@ -1887,6 +1889,13 @@ static void rx_one(const volatile u8 *b)
     else
     {
         RX.data++;
+        if (f[1] & 0x40) /* the protected bit: the chip tried to decrypt (descriptor word 0: enc type bits 22..20, "software decrypt" bit 27, ICV error bit 15) */
+        {
+            if ((w0 >> 15) & 1)
+                RX.icv_err++;
+            else if (!((w0 >> 27) & 1) && ((w0 >> 20) & 7))
+                RX.decrypted++;
+        }
         if (type == 2)
             eapol_note(f, len - 4); /* (only kept while the handshake runs) */
     }
@@ -1899,7 +1908,7 @@ static void rx_restart(void)
     RX.rp = (rd32(R_RXBD_IDX_MPDUQ) >> 16) & 0xFFF;
     if (RX.rp >= RX_COUNT)
         RX.rp = 0;
-    RX.frames = RX.beacons = RX.probe_resp = RX.mgmt_other = RX.ctrl = RX.data = RX.c2h = RX.bad = 0;
+    RX.frames = RX.beacons = RX.probe_resp = RX.mgmt_other = RX.ctrl = RX.data = RX.c2h = RX.bad = RX.decrypted = RX.icv_err = 0;
 }
 
 static void rx_poll(void)
@@ -2983,6 +2992,57 @@ static void connect_try(void)
     }
 }
 
+/* ---- stage 6c-2: the keys in the chip ----
+ * With the keys from the handshake the chip can encrypt and decrypt the data frames itself (AES-CCMP). It keeps the keys in a table of 32
+ * entries, the "CAM": a key (16 bytes), the address it belongs to, its type, whether it is a group key, and the key id. An entry is written
+ * as eight 32-bit words, each through a command register (0x670) after the data register (0x674), exactly as Linux' rtw_sec_write_cam does.
+ * The first four entries are the group keys, found by their key id (the "default key search" mode Linux uses): the group key of the access
+ * point (key id 1 here) goes to entry 1. The pairwise key goes to the first free entry after them (4), found by the address of the access point.
+ * The security engine itself is switched on first (bit 9 of the command register, and the decrypt / default key bits of the config register). */
+#define R_SEC_CMD 0x0670
+#define R_SEC_WRITE 0x0674
+#define R_SEC_CONFIG 0x0680
+#define CAM_TYPE_AES 4
+#define CAM_PAIRWISE_ENTRY 4
+
+static void sec_enable(void)
+{
+    wr16(R_CR, (u16)(rd16(R_CR) | BIT(9))); /* RTW_SEC_ENGINE_EN */
+    /* decrypt on receive (BIT 3), encrypt on transmit (BIT 2), and the default key search for unicast and broadcast, both directions */
+    wr16(R_SEC_CONFIG, (u16)(rd16(R_SEC_CONFIG) | BIT(2) | BIT(3) | BIT(0) | BIT(1) | BIT(6) | BIT(7)));
+}
+
+/* rtw_sec_write_cam: entry `idx` = key (16 bytes) with key id `keyidx`, group or pairwise, for the address `addr` */
+static void cam_write(unsigned idx, const u8 *key, unsigned keyidx, int group, const u8 *addr)
+{
+    u32 base = idx << 3; /* eight words per entry */
+    for (int i = 7; i >= 0; i--)
+    {
+        u32 content;
+        switch (i)
+        {
+        case 0:
+            content = (keyidx & 3) | ((u32)CAM_TYPE_AES << 2) | ((u32)(group ? 1 : 0) << 6) | BIT(15) | (u32)addr[0] << 16 | (u32)addr[1] << 24;
+            break;
+        case 1:
+            content = (u32)addr[2] | (u32)addr[3] << 8 | (u32)addr[4] << 16 | (u32)addr[5] << 24;
+            break;
+        case 6:
+        case 7:
+            content = 0;
+            break;
+        default:
+        {
+            unsigned j = (unsigned)(i - 2) << 2;
+            content = (u32)key[j] | (u32)key[j + 1] << 8 | (u32)key[j + 2] << 16 | (u32)key[j + 3] << 24;
+            break;
+        }
+        }
+        wr32(R_SEC_WRITE, content);
+        wr32(R_SEC_CMD, BIT(16) | BIT(31) | (base + (u32)i)); /* write enable, poll */
+    }
+}
+
 /* ---- stage 6c-1: the WPA2 4-way handshake over the air ----
  * After the association the access point wants proof that we know the passphrase, without anybody sending the passphrase: it sends a random
  * number (message 1), we answer with ours and a signature that only someone with the same key could make (message 2), it checks, sends the
@@ -3115,14 +3175,19 @@ static struct
     unsigned rx_msgs; /* EAPOL packets taken */
     unsigned tx_msgs;
     u8 pmk[32];
+    int keys;         /* the keys are in the chip */
+    unsigned dec, icv; /* protected frames decrypted / failed in the second after the keys went in */
 } HS;
 static Wpa4 W4;
 #define HS_WAIT_MS 6000
+#define HS_DECRYPT_MS 1500
 
 static void handshake_run(void)
 {
     HS.state = 1;
     HS.result = 0;
+    HS.keys = 0;
+    HS.dec = HS.icv = 0;
     HS.rx_msgs = HS.tx_msgs = 0;
     EAPQ.pending = 0;
     EAPQ.dropped = 0;
@@ -3158,6 +3223,19 @@ static void handshake_run(void)
             break;
         }
         /* WPA4_IGNORED, a replayed counter, a short frame: wait for the next one */
+    }
+    if (HS.result == HS_OK)
+    {
+        /* message 4 is out: the keys go into the chip, and for a while we listen to see whether it can decrypt what the access point sends */
+        static const u8 BCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        sec_enable();
+        cam_write(CAM_PAIRWISE_ENTRY, W4.ptk + 32, 0, 0, CONN.bssid);
+        cam_write(W4.gtk_id, W4.gtk, W4.gtk_id, 1, BCAST);
+        HS.keys = 1;
+        RX.decrypted = RX.icv_err = 0;
+        listen_ms(HS_DECRYPT_MS);
+        HS.dec = RX.decrypted;
+        HS.icv = RX.icv_err;
     }
     HS_LISTEN = 0;
     for (unsigned i = 0; i < sizeof HS.pmk; i++) /* the master key is not kept around */
@@ -3378,7 +3456,10 @@ static void status_download(NicText *t)
             nic_puts(t, EF.why ? EF.why : "?");
         }
         if (MI.state == MI_OK && PH.state == PH_OK && H2.state == H2_OK) /* the three proven steps in one word: the line has to stay short */
-            nic_puts(t, ", init ok");
+        {
+            if (!CONN.state) /* (a connection that got as far as being tried says more than this) */
+                nic_puts(t, ", init ok");
+        }
         else
         {
         if (MI.state == MI_OK)
@@ -3479,7 +3560,19 @@ static void status_download(NicText *t)
                         {
                             nic_puts(t, ", 4way ");
                             if (HS.result == HS_OK)
+                            {
                                 nic_puts(t, "ok");
+                                if (HS.keys)
+                                {
+                                    nic_puts(t, ", dec ");
+                                    nic_putd(t, HS.dec < 99 ? HS.dec : 99);
+                                    if (HS.icv)
+                                    {
+                                        nic_puts(t, ", icv ");
+                                        nic_putd(t, HS.icv < 99 ? HS.icv : 99);
+                                    }
+                                }
+                            }
                             else if (HS.result == 0)
                                 nic_puts(t, "none");
                             else if (HS.result == WPA4_E_MIC)
