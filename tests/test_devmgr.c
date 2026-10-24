@@ -38,6 +38,17 @@ static unsigned int fake_gpu(unsigned bus, unsigned dev, unsigned fn, unsigned o
     return 0xFFFFFFFFu;
 }
 
+
+/* 00:19.0 Ethernet controller (class 02, subclass 00) and 00:1C.0 a wireless controller (class 02, subclass 80) */
+static unsigned int fake_net(unsigned bus, unsigned dev, unsigned fn, unsigned off)
+{
+    if (bus != 0 || fn != 0 || (dev != 0x19 && dev != 0x1C))
+        return 0xFFFFFFFFu;
+    if (off == 0x00) return dev == 0x19 ? 0x816810ECu : 0x24FD8086u;
+    if (off == 0x08) return dev == 0x19 ? 0x02000010u : 0x02800078u;
+    if (off == 0x0C) return 0;
+    return 0xFFFFFFFFu;
+}
 int main(void)
 {
     pci_scan_with(fake);
@@ -141,6 +152,41 @@ int main(void)
     devmgr_build(&gin);
     CHECK(!devmgr_get(0)->has_driver && devmgr_get(0)->note[0] == 0);
 
+
+    /* network cards: 00:19.0 Realtek Ethernet (class 02, subclass 00), 00:1C.0 an Intel wireless card (class 02, subclass 80) */
+    pci_scan_with(fake_net);
+    static DevmgrInputs nin;
+    CHECK(devmgr_build(&nin) == 2);
+    CHECK(devmgr_get(0)->category == DEV_CAT_NETWORK && devmgr_get(1)->category == DEV_CAT_NETWORK);
+    /* no driver found a card: the notes say what is supported */
+    CHECK(!devmgr_get(0)->has_driver && strcmp(devmgr_get(0)->note, "No driver (supported: Intel e1000, Realtek RTL8168)") == 0);
+    CHECK(!devmgr_get(1)->has_driver && strstr(devmgr_get(1)->note, "wireless") != NULL);
+    /* the driver started the Ethernet card: its line is the note, the wireless card is untouched */
+    nin.net_found = 1;
+    nin.net_working = 1;
+    nin.net_bus = 0;
+    nin.net_dev = 0x19;
+    nin.net_fn = 0;
+    strcpy(nin.net_status, "RTL8168g/8111g, 1000M full, rx 3 tx 2, 192.168.1.20 (DHCP)");
+    devmgr_build(&nin);
+    CHECK(devmgr_get(0)->has_driver && strcmp(devmgr_get(0)->note, nin.net_status) == 0);
+    CHECK(!devmgr_get(1)->has_driver && strstr(devmgr_get(1)->note, "wireless") != NULL);
+    /* the driver was meant for the card but it did not start: no driver, the reason is shown */
+    nin.net_working = 0;
+    strcpy(nin.net_status, "RTL8168 failed: reset did not finish");
+    devmgr_build(&nin);
+    CHECK(!devmgr_get(0)->has_driver && strcmp(devmgr_get(0)->note, "RTL8168 failed: reset did not finish") == 0);
+    /* another location is not matched */
+    nin.net_dev = 0x1C;
+    devmgr_build(&nin);
+    CHECK(strstr(devmgr_get(0)->note, "No driver (supported") != NULL);
+    /* a long status line is cut to the size of the note, still NUL terminated */
+    nin.net_dev = 0x19;
+    nin.net_working = 1;
+    memset(nin.net_status, 'x', sizeof nin.net_status - 1);
+    nin.net_status[sizeof nin.net_status - 1] = 0;
+    devmgr_build(&nin);
+    CHECK(strlen(devmgr_get(0)->note) == strlen(nin.net_status) && sizeof devmgr_get(0)->note >= sizeof nin.net_status);
     if (!fails) printf("devmgr tests passed\n");
     return fails ? 1 : 0;
 }

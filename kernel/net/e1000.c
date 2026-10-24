@@ -9,6 +9,7 @@
 #include "io.h"
 #include "ioapic.h"
 #include "net.h"
+#include "nic.h"
 #include "pci.h"
 #include "pmm.h"
 
@@ -229,23 +230,17 @@ static int bring_up(const PciDevice *pd)
     return 1;
 }
 
-int net_init(void)
+/* 82540EM (QEMU "e1000") and 82545EM. Others are not handled: QEMU's "e1000e" (82574L) differs, real laptops have I217/I219. */
+static int e1000_claims(const PciDevice *pd)
 {
-    for (int i = 0; i < pci_count(); i++)
-    {
-        const PciDevice *pd = pci_get(i);
-        /* 82540EM (QEMU "e1000"), 82545EM, 82574L (QEMU "e1000e" is different and is not handled) */
-        if (pd->vendor_id == 0x8086 && (pd->device_id == 0x100E || pd->device_id == 0x100F))
-            return bring_up(pd);
-    }
-    return 0;
+    return pd->vendor_id == 0x8086 && (pd->device_id == 0x100E || pd->device_id == 0x100F);
 }
 
-int net_present(void) { return NIC.ok; }
-const unsigned char *net_mac(void) { return NIC.mac; }
-int net_link_up(void) { return NIC.ok && (rd(R_STATUS) & STATUS_LU) != 0; }
 
-int net_send(const void *frame, unsigned len)
+static const unsigned char *e1000_mac(void) { return NIC.mac; }
+static int e1000_link_up(void) { return NIC.ok && (rd(R_STATUS) & STATUS_LU) != 0; }
+
+static int e1000_send(const void *frame, unsigned len)
 {
     if (!NIC.ok || !frame || len < 14 || len > NET_MAX_FRAME - 4)
         return -1;
@@ -265,7 +260,7 @@ int net_send(const void *frame, unsigned len)
     return 0;
 }
 
-int net_recv(void *buf, unsigned max)
+static int e1000_recv(void *buf, unsigned max)
 {
     if (!NIC.ok)
         return 0;
@@ -322,7 +317,7 @@ void net_irq_handler(void)
  * line (GSI 16 and up) send it to our vector, make the card raise a cause by itself (ICS), and see whether the handler runs.
  * Returns the GSI, or -1 (no I/O APIC / local APIC, or no line answers: polling goes on as before). Call it with the card
  * working, once; it briefly enables interrupts (idle_wait). */
-int net_irq_init(void)
+static int e1000_irq_init(void)
 {
     if (!NIC.ok || !idle_ready() || !ioapic_present())
         return -1;
@@ -357,12 +352,26 @@ int net_irq_init(void)
     return -1;
 }
 
-int net_irq_active(void) { return IRQ_ACTIVE; }
-unsigned net_irq_count(void) { return IRQ_COUNT; }
+static int e1000_irq_active(void) { return IRQ_ACTIVE; }
+static unsigned e1000_irq_count(void) { return IRQ_COUNT; }
 
-int net_irq_take(void)
+static int e1000_irq_take(void)
 {
     int f = IRQ_FLAG;
     IRQ_FLAG = 0;
     return f;
 }
+
+static void e1000_status(char *buf, unsigned cap)
+{
+    NicText t;
+    nic_text_init(&t, buf, cap);
+    nic_puts(&t, "Intel e1000, ");
+    nic_puts(&t, e1000_link_up() ? "link up" : "link down");
+    nic_puts(&t, e1000_irq_active() ? ", interrupts" : ", polled");
+}
+
+const NicDriver NIC_E1000 = {
+    "Intel e1000", e1000_claims, bring_up, e1000_mac, e1000_link_up, e1000_send, e1000_recv, e1000_status,
+    e1000_irq_init, e1000_irq_active, e1000_irq_take, e1000_irq_count,
+};

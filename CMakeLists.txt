@@ -98,7 +98,9 @@ set(KERNEL_SOURCES
     kernel/core/ioapic.c            # I/O APIC: device interrupt lines to processor interrupts (used by the network card)
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
-    kernel/net/e1000.c               # network: Intel e1000 NIC driver (polled), raw Ethernet frames
+    kernel/net/nic.c                 # network: picks the card driver, forwards net_send / net_recv ...
+    kernel/net/e1000.c               # network: Intel e1000 NIC driver (interrupt or polled), raw Ethernet frames
+    kernel/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
     kernel/net/sock.c                # network: socket table for the system calls (SYS_SOCKET ...)
     kernel/net/tcp.c                 # network: TCP client (connect / send / receive / close, retransmission)

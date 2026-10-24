@@ -52,6 +52,8 @@ static unsigned DNS_ID, DNS_SPORT;
 static int DNS_STATE; /* 0 = waiting, 1 = got an address in DNS_IP, -1 = the server says there is none */
 static unsigned char DNS_IP[4];
 
+static int IP_SOURCE; /* 0 = none yet, 1 = DHCP, 2 = the fixed fallback of the self test */
+int net_ip_source(void) { return IP_SOURCE; }
 const unsigned char *net_ip(void) { return OUR_IP; }
 const unsigned char *net_gateway(void) { return GATEWAY; }
 const unsigned char *net_dns(void) { return DNS; }
@@ -397,6 +399,7 @@ int net_dhcp(unsigned timeout_ms)
             for (int i = 0; i < ARP_CACHE_SIZE; i++)
                 CACHE[i].valid = 0; /* entries from an older network are wrong now */
             DHCP_WAIT = 0;
+            IP_SOURCE = 1;
             return 1;
         }
     }
@@ -444,7 +447,9 @@ int net_self_test(void)
         serial_puts("HARISOS: network: no supported adapter\n");
         return 0;
     }
-    serial_puts("HARISOS: network: e1000 mac ");
+    serial_puts("HARISOS: network: ");
+    serial_puts(net_driver_name());
+    serial_puts(" mac ");
     put_mac(net_mac());
     serial_puts(net_link_up() ? ", link up\n" : ", link down\n");
 
@@ -455,6 +460,7 @@ int net_self_test(void)
         /* no DHCP server: use the address QEMU's user network would have given */
         static const unsigned char ip[4] = {10, 0, 2, 15}, gw[4] = {10, 0, 2, 2}, dns[4] = {10, 0, 2, 3};
         copy(OUR_IP, ip, 4);
+        IP_SOURCE = 2;
         copy(GATEWAY, gw, 4);
         copy(DNS, dns, 4);
         serial_puts("HARISOS: network: dhcp failed, static ip ");

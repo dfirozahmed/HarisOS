@@ -21,7 +21,7 @@ typedef struct {
     char name[40];   /* e.g. "USB controller" */
     char detail[48]; /* e.g. "Intel 8086:1237 at 00:1F.2" */
     int has_driver;  /* 1 = HarisOS drives this device */
-    char note[64];   /* extra line for the details: why there is no driver, or a remark about the driver ("" = none) */
+    char note[96];   /* extra line for the details: why there is no driver, or a remark about the driver ("" = none) */
 } DevEntry;
 
 /* An I2C-HID device the firmware describes in ACPI (copied from i2c_hid_info()). */
@@ -78,6 +78,10 @@ typedef struct {
     DevmgrDisk disks[DEVMGR_MAX_DISKS];
     int display_count;
     DevmgrDisplay displays[DEVMGR_MAX_DISPLAYS];
+    int net_found;   /* a network card was found that a driver is meant for (net_adapter) */
+    int net_working; /* ... and it started */
+    unsigned char net_bus, net_dev, net_fn;
+    char net_status[96]; /* one line: chip, link, counters, or why it did not start */
 } DevmgrInputs;
 
 /* Rebuilds the list from pci_count()/pci_get() and the inputs. Returns the entry count. */

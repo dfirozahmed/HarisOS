@@ -160,6 +160,17 @@ int devmgr_build(const DevmgrInputs *in)
             ((d->subclass == 0x06 && d->prog_if == 0x01) || (d->subclass == 0x08 && d->prog_if == 0x02)))
             driver = 1;
         DevEntry *e = add(pci_category(d), pci_class_name(d->class_code, d->subclass), detail, driver);
+        if (e && in && d->class_code == 0x02) {
+            /* a network card: the driver says how it is doing; without one, the note says what is supported */
+            if (in->net_found && in->net_bus == d->bus && in->net_dev == d->dev && in->net_fn == d->fn) {
+                e->has_driver = in->net_working;
+                copy(e->note, sizeof e->note, in->net_status);
+            } else if (d->subclass == 0x00) {
+                copy(e->note, sizeof e->note, "No driver (supported: Intel e1000, Realtek RTL8168)");
+            } else {
+                copy(e->note, sizeof e->note, "No driver (wireless and other adapters are not supported)");
+            }
+        }
         if (e && in && d->class_code == 0x03) {
             const DevmgrDisplay *g = find_display(in, d);
             if (g)

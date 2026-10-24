@@ -5,6 +5,7 @@
 #include "display.h"
 #include "i2c_hid.h"
 #include "mouse.h"
+#include "net.h"
 #include "pci.h"
 #include "storage.h"
 #include "usb.h"
@@ -61,6 +62,13 @@ int devmgr_refresh(void)
         d->cur_h = a->cur_h;
         d->cur_bpp = a->cur_bpp;
         d->vram_mb = a->vram_bytes >> 20;
+    }
+    {
+        unsigned char loc[3] = {0, 0, 0};
+        in.net_found = net_adapter(loc, &in.net_working, in.net_status, sizeof in.net_status);
+        in.net_bus = loc[0];
+        in.net_dev = loc[1];
+        in.net_fn = loc[2];
     }
     in.i2c_count = 0;
     for (int i = 0; i < i2c_hid_count() && in.i2c_count < DEVMGR_MAX_I2C; i++)
