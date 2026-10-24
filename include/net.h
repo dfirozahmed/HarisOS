@@ -13,6 +13,11 @@
  *   net_poll();                       handles the frames that arrived: learns ARP answers, answers ARP and ping
  *                                     requests for us; returns how many it read. Call it while waiting.
  *   net_ping(ip, seq, timeout_ms);    echo request to ip (ARP first when needed); round trip in ms, or -1
+ *   net_irq_init();                   after net_init(): find the I/O APIC line of the card and let it interrupt on a received frame;
+ *                                     its number, or -1 (then everything stays polled). Optional: without it nothing changes.
+ *   net_irq_active();                 1 while interrupts are in use
+ *   net_irq_take();                   1 if the card has interrupted since the last call (frames may be waiting), and forget it
+ *   net_irq_count();                  how many receive interrupts there were (for diagnostics)
  *   net_self_test();                  boot check: three pings to the QEMU gateway; returns how many were answered */
 #ifndef HARIS_NET_H
 #define HARIS_NET_H
@@ -34,5 +39,9 @@ void net_set_yield(void (*fn)(void)); /* what net_yield() calls while a caller w
 int net_poll(void);
 int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms);
 int net_self_test(void);
+int net_irq_init(void);
+int net_irq_active(void);
+int net_irq_take(void);
+unsigned net_irq_count(void);
 
 #endif

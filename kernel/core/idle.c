@@ -9,6 +9,7 @@
 
 #define IDT_COUNT 256
 #define VEC_TIMER 0x40
+#define VEC_NET IDLE_VEC_NET
 #define VEC_SPURIOUS 0xFF
 
 #define MSR_APIC_BASE 0x1B
@@ -57,6 +58,7 @@ static int READY;
  * A CPU exception (vectors 0..31) is a bug: fault.c reports it and stops (see fault.h). */
 unsigned long long idle_lapic_eoi; /* address of the LAPIC EOI register, read by the handlers */
 void idle_isr_timer(void);
+void idle_isr_net(void);
 void idle_isr_other(void);
 void idle_isr_spurious(void);
 
@@ -86,6 +88,42 @@ __asm__(".text\n"
         "    call task_tick\n"
         "    leaq 128(%rsp), %rcx\n" /* the frame: r11 is the lowest word */
         "    call signal_irq\n" /* a signal handler that is due runs before the program goes on (usersig.h) */
+        "    movups 32(%rsp), %xmm0\n"
+        "    movups 48(%rsp), %xmm1\n"
+        "    movups 64(%rsp), %xmm2\n"
+        "    movups 80(%rsp), %xmm3\n"
+        "    movups 96(%rsp), %xmm4\n"
+        "    movups 112(%rsp), %xmm5\n"
+        "    addq $128, %rsp\n"
+        "    popq %r11\n"
+        "    popq %r10\n"
+        "    popq %r9\n"
+        "    popq %r8\n"
+        "    popq %rdx\n"
+        "    popq %rcx\n"
+        "    popq %rax\n"
+        "    iretq\n"
+        ".p2align 4\n"
+        ".globl idle_isr_net\n"
+        "idle_isr_net:\n" /* the network card: net_irq_handler() (e1000.c) clears the card's cause, then the EOI. Same frame as the timer. */
+        "    pushq %rax\n"
+        "    pushq %rcx\n"
+        "    pushq %rdx\n"
+        "    pushq %r8\n"
+        "    pushq %r9\n"
+        "    pushq %r10\n"
+        "    pushq %r11\n"
+        "    subq $128, %rsp\n"
+        "    movups %xmm0, 32(%rsp)\n"
+        "    movups %xmm1, 48(%rsp)\n"
+        "    movups %xmm2, 64(%rsp)\n"
+        "    movups %xmm3, 80(%rsp)\n"
+        "    movups %xmm4, 96(%rsp)\n"
+        "    movups %xmm5, 112(%rsp)\n"
+        "    cld\n"
+        "    call net_irq_handler\n"
+        "    movq idle_lapic_eoi(%rip), %rax\n" /* the line is level triggered: the EOI comes after the card let go of it */
+        "    movl $0, (%rax)\n"
         "    movups 32(%rsp), %xmm0\n"
         "    movups 48(%rsp), %xmm1\n"
         "    movups 64(%rsp), %xmm2\n"
@@ -147,7 +185,7 @@ static void idt_load(void)
     __asm__ volatile("lidt %0" : : "m"(p));
 }
 
-/* Legacy interrupt sources stay quiet: every device is polled, none may interrupt us. */
+/* Legacy interrupt sources stay quiet: every device is polled, none may interrupt us (ioapic_init unmasks a line later when a driver asks). */
 static void silence_legacy_irqs(void)
 {
     io_out8(0x21, 0xFF); /* 8259 PICs: mask all lines */
@@ -186,6 +224,7 @@ int idle_init(void)
     for (int i = 0; i < IDT_COUNT; i++)
         idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
     idt_set(VEC_TIMER, idle_isr_timer);
+    idt_set(VEC_NET, idle_isr_net); /* quiet until a driver routes an I/O APIC line to it (ioapic.h) */
     IDT[8].ist = 1;  /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
     IDT[2].ist = 3;  /* an NMI runs on IST3, never on the user's stack (the SYSCALL entry has a window where RSP is the user's) */
     IDT[14].ist = 2; /* so does #PF (IST2): a thread stack that overflowed into its guard page cannot take the frame */
@@ -217,6 +256,8 @@ int idle_init(void)
 
 int idle_ready(void) { return READY; }
 
+unsigned idle_lapic_id(void) { return READY ? lapic_read(0x20) >> 24 : 0; }
+
 void idle_send_self_nmi(void)
 {
     if (!READY)
@@ -242,6 +283,7 @@ void idle_wait(void)
 
 int idle_init(void) { return -1; }
 int idle_ready(void) { return 0; }
+unsigned idle_lapic_id(void) { return 0; }
 void idle_wait(void) {}
 void idle_send_self_nmi(void) {}
 

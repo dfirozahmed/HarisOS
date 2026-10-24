@@ -18,6 +18,12 @@ void acpi_init(unsigned long long rsdp);
 #define ACPI_MAX_CPUS 256
 int acpi_cpu_count(void);
 unsigned acpi_cpu_apic_id(int i);
+/* I/O APICs (MADT type 1): the chips that turn device interrupt lines into interrupts of a processor (see ioapic.h). Each serves
+ * a run of "global system interrupt" numbers starting at its GSI base. 0 when there is no MADT. */
+#define ACPI_MAX_IOAPICS 8
+int acpi_ioapic_count(void);
+unsigned acpi_ioapic_addr(int i);     /* MMIO address of I/O APIC i, 0 if there is none */
+unsigned acpi_ioapic_gsi_base(int i);
 int acpi_aml_count(void);
 const unsigned char *acpi_aml(int i, unsigned *len);
 

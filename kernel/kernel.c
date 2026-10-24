@@ -20,6 +20,7 @@
 #include "heap.h"
 #include "heapmon.h"
 #include "idle.h"
+#include "ioapic.h"
 #include "keyboard.h"
 #include "mouse.h"
 #include "net.h"
@@ -169,6 +170,7 @@ void kernel_main(const BootInfo *info)
 
     timer_init(); /* needed for double-click */
     idle_init();  /* 1 ms LAPIC tick so the loop can sleep (hlt) when idle; see idle.h */
+    ioapic_init(); /* the I/O APICs, every line masked until a driver asks for one (the network card does, below) */
 
     /* Kernel threads: this loop becomes task 0. The boot self test switches between test threads and checks that the
      * timer interrupt can take the CPU from one that never yields. A broken context switch or interrupt handler would
@@ -237,6 +239,20 @@ void kernel_main(const BootInfo *info)
         serial_puts("\n");
         task_init();
         net_set_yield(task_yield); /* from now on a thread that waits for the network lets the others run (net.h) */
+        if (net_present())
+        {
+            /* receive interrupts for the card, if its I/O APIC line can be found (the self test above proved the polled path) */
+            int gsi = net_irq_init();
+            serial_puts("HARISOS: network: ");
+            if (gsi < 0)
+                serial_puts("no receive interrupt, polling\n");
+            else
+            {
+                serial_puts("receive interrupt on I/O APIC line ");
+                serial_putd(gsi);
+                serial_puts("\n");
+            }
+        }
         int st = task_selftest();
         int sp = st == 0 ? task_selftest_preempt() : 0;
         serial_puts("HARISOS: thread self test ");
@@ -341,6 +357,8 @@ void kernel_main(const BootInfo *info)
     enum { WHEEL_FRAME_US = 16000 };
     int wheel_pending = 0, wheel_x = 0, wheel_y = 0;
     unsigned long long wheel_last = 0;
+    enum { NET_POLL_US = 10000 };
+    unsigned long long net_last_poll = 0;
 
     for (;;)
     {
@@ -382,8 +400,15 @@ void kernel_main(const BootInfo *info)
             blk_seen = blk_generation();
             worked = 1;
         }
-        if (net_present() && net_poll() > 0) /* the network keeps running while nobody waits for it: ACKs, retransmit timers, ping */
-            worked = 1;                      /* frames arrived: look again at once, more may be behind them */
+        /* The network keeps running while nobody waits for it: ACKs, retransmit timers, ping. With a receive interrupt the card says when
+         * frames wait, so the loop looks only then (and wakes at once from hlt); without one it looks every pass. A look every
+         * NET_POLL_US is made either way: TCP timers need it, and a missed interrupt then costs a few milliseconds, not a frame. */
+        if (net_present() && (!net_irq_active() || net_irq_take() || pass_start - net_last_poll >= NET_POLL_US))
+        {
+            net_last_poll = pass_start;
+            if (net_poll() > 0)
+                worked = 1; /* frames arrived: look again at once, more may be behind them */
+        }
         if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
             worked = 1;
         int others = task_others_ready();

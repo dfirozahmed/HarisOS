@@ -37,6 +37,7 @@ try {
         @('Display adapter tests', 'tests/run_display_tests.sh'),
         @('Network protocol tests', 'tests/run_netproto_tests.sh'),
         @('Memory function tests', 'tests/run_mem_tests.sh'),
+        @('I/O APIC tests', 'tests/run_ioapic_tests.sh'),
         @('TCP tests', 'tests/run_tcp_tests.sh'),
         @('CPU load tests', 'tests/run_cpuload_tests.sh'),
         @('CPU information tests', 'tests/run_cpuinfo_tests.sh'),

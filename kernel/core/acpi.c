@@ -9,6 +9,8 @@ static const unsigned char *TAB[MAX_AML];
 static unsigned LEN[MAX_AML];
 static int NTAB;
 static unsigned CPU_APIC[ACPI_MAX_CPUS];
+static unsigned IOAPIC_ADDR[ACPI_MAX_IOAPICS], IOAPIC_GSI[ACPI_MAX_IOAPICS];
+static int NIOAPIC;
 static int NCPU;
 
 static unsigned rd32(const unsigned char *p)
@@ -57,7 +59,8 @@ static void add(unsigned long long addr)
 }
 
 /* MADT: after the 44-byte header come entries (type, length, ...). Type 0 = local APIC (8 bytes: APIC id at 3,
- * flags at 4), type 9 = x2APIC (16 bytes: APIC id at 4, flags at 8). Flags bit 0 = the processor is enabled. */
+ * flags at 4), type 9 = x2APIC (16 bytes: APIC id at 4, flags at 8). Flags bit 0 = the processor is enabled.
+ * Type 1 = I/O APIC (12 bytes: id at 2, MMIO address at 4, the first interrupt number it serves ("GSI base") at 8). */
 static void read_madt(const unsigned char *t, unsigned n)
 {
     for (unsigned off = 44; off + 2 <= n;)
@@ -72,6 +75,12 @@ static void read_madt(const unsigned char *t, unsigned n)
             else if (type == 9 && len >= 16 && (rd32(t + off + 8) & 1))
                 CPU_APIC[NCPU++] = rd32(t + off + 4);
         }
+        if (type == 1 && len >= 12 && NIOAPIC < ACPI_MAX_IOAPICS)
+        {
+            IOAPIC_ADDR[NIOAPIC] = rd32(t + off + 4);
+            IOAPIC_GSI[NIOAPIC] = rd32(t + off + 8);
+            NIOAPIC++;
+        }
         off += len;
     }
 }
@@ -80,6 +89,7 @@ void acpi_init(unsigned long long rsdp)
 {
     NTAB = 0;
     NCPU = 0;
+    NIOAPIC = 0;
     if (!rsdp)
         return;
     const unsigned char *r = (const unsigned char *)rsdp;
@@ -135,3 +145,7 @@ const unsigned char *acpi_aml(int i, unsigned *len)
     *len = LEN[i];
     return TAB[i];
 }
+
+int acpi_ioapic_count(void) { return NIOAPIC; }
+unsigned acpi_ioapic_addr(int i) { return (i >= 0 && i < NIOAPIC) ? IOAPIC_ADDR[i] : 0; }
+unsigned acpi_ioapic_gsi_base(int i) { return (i >= 0 && i < NIOAPIC) ? IOAPIC_GSI[i] : 0; }

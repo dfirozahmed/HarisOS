@@ -88,7 +88,7 @@ static void fix_sum(unsigned char *t, unsigned len, unsigned at)
 
 static void test_madt(void)
 {
-    static unsigned char madt[44 + 8 * 3 + 16 + 8], xsdt[36 + 8], rsdp[36];
+    static unsigned char madt[44 + 8 * 3 + 16 + 8 + 12 * 2], xsdt[36 + 8], rsdp[36];
     memset(madt, 0, sizeof madt); memset(xsdt, 0, sizeof xsdt); memset(rsdp, 0, sizeof rsdp);
     memcpy(madt, "APIC", 4);
     put32(madt + 4, sizeof madt);
@@ -98,6 +98,8 @@ static void test_madt(void)
     e[0] = 0; e[1] = 8; e[2] = 2; e[3] = 4; put32(e + 4, 0); e += 8;   /* APIC id 4, disabled: not counted */
     e[0] = 9; e[1] = 16; put32(e + 4, 0x100); put32(e + 8, 1); e += 16; /* x2APIC id 0x100, enabled */
     e[0] = 4; e[1] = 8; e += 8;                                         /* NMI entry: skipped by its length */
+    e[0] = 1; e[1] = 12; e[2] = 1; put32(e + 4, 0xFEC00000u); put32(e + 8, 0); e += 12;  /* I/O APIC 1: GSI 0.. */
+    e[0] = 1; e[1] = 12; e[2] = 2; put32(e + 4, 0xFEC01000u); put32(e + 8, 24); e += 12; /* I/O APIC 2: GSI 24.. */
     fix_sum(madt, sizeof madt, 9);
 
     memcpy(xsdt, "XSDT", 4);
@@ -118,10 +120,14 @@ static void test_madt(void)
     CHECK(acpi_cpu_count() == 3);
     CHECK(acpi_cpu_apic_id(0) == 0 && acpi_cpu_apic_id(1) == 2 && acpi_cpu_apic_id(2) == 0x100);
     CHECK(acpi_cpu_apic_id(3) == 0 && acpi_cpu_apic_id(-1) == 0);
+    CHECK(acpi_ioapic_count() == 2 && acpi_ioapic_addr(0) == 0xFEC00000u && acpi_ioapic_gsi_base(0) == 0);
+    CHECK(acpi_ioapic_addr(1) == 0xFEC01000u && acpi_ioapic_gsi_base(1) == 24);
+    CHECK(acpi_ioapic_addr(2) == 0 && acpi_ioapic_addr(-1) == 0 && acpi_ioapic_gsi_base(2) == 0);
 
     madt[10] ^= 0xFF; /* a broken checksum: the table is ignored */
     acpi_init((unsigned long long)(size_t)rsdp);
     CHECK(acpi_cpu_count() == 0);
+    CHECK(acpi_ioapic_count() == 0);
 }
 
 int main(void)

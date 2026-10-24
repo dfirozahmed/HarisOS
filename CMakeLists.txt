@@ -95,6 +95,7 @@ set(KERNEL_SOURCES
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
     kernel/core/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
+    kernel/core/ioapic.c            # I/O APIC: device interrupt lines to processor interrupts (used by the network card)
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/e1000.c               # network: Intel e1000 NIC driver (polled), raw Ethernet frames

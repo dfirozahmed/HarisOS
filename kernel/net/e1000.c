@@ -5,7 +5,9 @@
  * buffer at the head (RDH) and sets the DD ("descriptor done") bit; we hand the descriptor back by moving the
  * tail (RDT) forward. For sending, we fill the descriptor at the tail (TDT), advance the tail, and the card
  * sets DD when the frame has left. Both rings are physically contiguous because the card uses physical addresses. */
+#include "idle.h"
 #include "io.h"
+#include "ioapic.h"
 #include "net.h"
 #include "pci.h"
 #include "pmm.h"
@@ -18,7 +20,9 @@ typedef unsigned long long u64;
 #define R_CTRL 0x0000
 #define R_STATUS 0x0008
 #define R_EERD 0x0014
+#define R_ICS 0x00C8 /* interrupt cause set: software can raise a cause (a test of the wiring) */
 #define R_ICR 0x00C0
+#define R_IMS 0x00D0 /* interrupt mask set: which causes may interrupt */
 #define R_IMC 0x00D8
 #define R_RCTL 0x0100
 #define R_TCTL 0x0400
@@ -40,6 +44,9 @@ typedef unsigned long long u64;
 #define CTRL_SLU (1u << 6)  /* set link up */
 #define CTRL_RST (1u << 26)
 #define STATUS_LU (1u << 1) /* link is up */
+#define INT_RXDMT0 (1u << 4) /* interrupt causes: the receive ring is running empty, */
+#define INT_RXO (1u << 6)    /* ... a frame was lost because it was full, */
+#define INT_RXT0 (1u << 7)   /* ... a frame arrived */
 #define RCTL_EN (1u << 1)
 #define RCTL_BAM (1u << 15)    /* accept broadcast */
 #define RCTL_SECRC (1u << 26)  /* the card strips the CRC */
@@ -278,4 +285,84 @@ int net_recv(void *buf, unsigned max)
     wr(R_RDT, NIC.rx_next);
     NIC.rx_next = (NIC.rx_next + 1) % RX_COUNT;
     return got;
+}
+
+/* ---- interrupts ---------------------------------------------------------------------------------------------------------------
+ * The card can interrupt when a frame has arrived. The handler does as little as possible: it reads ICR (which also clears the
+ * causes and lets go of the wire) and leaves a note; net_poll() later reads the frames. A lost or missing interrupt therefore
+ * costs only time, never data: the ring keeps the frames, and net_poll() is still called every few milliseconds. */
+#define IRQ_CAUSES (INT_RXT0 | INT_RXO | INT_RXDMT0)
+#define IRQ_SPURIOUS_MAX 1000 /* interrupts without a cause of ours before the line is given up (something else holds it) */
+
+static volatile unsigned IRQ_COUNT, IRQ_SPURIOUS;
+static volatile int IRQ_FLAG;   /* a frame may be waiting */
+static volatile int IRQ_ACTIVE; /* interrupts are in use */
+static unsigned IRQ_GSI;
+
+/* Called by the interrupt entry code in idle.c (interrupts off, on whatever stack the CPU switched to). */
+void net_irq_handler(void)
+{
+    if (!NIC.regs)
+        return;
+    unsigned icr = rd(R_ICR); /* reading clears it */
+    if (icr & IRQ_CAUSES)
+    {
+        IRQ_COUNT++;
+        IRQ_FLAG = 1;
+    }
+    else if (++IRQ_SPURIOUS >= IRQ_SPURIOUS_MAX) /* the wire is held by another device that nobody serves: stop listening, poll again */
+    {
+        wr(R_IMC, 0xFFFFFFFFu);
+        ioapic_mask(IRQ_GSI);
+        IRQ_ACTIVE = 0;
+    }
+}
+
+/* Which I/O APIC line is the card's wire? Nothing here reads the ACPI routing tables, so find out by asking: for each PCI-style
+ * line (GSI 16 and up) send it to our vector, make the card raise a cause by itself (ICS), and see whether the handler runs.
+ * Returns the GSI, or -1 (no I/O APIC / local APIC, or no line answers: polling goes on as before). Call it with the card
+ * working, once; it briefly enables interrupts (idle_wait). */
+int net_irq_init(void)
+{
+    if (!NIC.ok || !idle_ready() || !ioapic_present())
+        return -1;
+    unsigned apic = idle_lapic_id();
+    unsigned lines = ioapic_gsi_count();
+    for (unsigned gsi = 16; gsi < lines; gsi++)
+    {
+        IRQ_GSI = gsi;
+        IRQ_SPURIOUS = 0;
+        if (ioapic_route(gsi, IDLE_VEC_NET, apic) != 0)
+            continue;
+        unsigned before = IRQ_COUNT;
+        IRQ_ACTIVE = 1;
+        wr(R_IMS, IRQ_CAUSES);
+        wr(R_ICS, INT_RXT0); /* "a frame arrived", though none did */
+        for (int i = 0; i < 3 && IRQ_COUNT == before; i++)
+            idle_wait(); /* sti; hlt: returns at the latest at the next 1 ms timer tick */
+        wr(R_IMC, 0xFFFFFFFFu);
+        (void)rd(R_ICR);
+        ioapic_mask(gsi);
+        IRQ_ACTIVE = 0;
+        if (IRQ_COUNT != before)
+        {
+            IRQ_SPURIOUS = 0;
+            IRQ_FLAG = 1; /* (a frame may have come while we looked) */
+            ioapic_route(gsi, IDLE_VEC_NET, apic);
+            IRQ_ACTIVE = 1;
+            wr(R_IMS, IRQ_CAUSES);
+            return (int)gsi;
+        }
+    }
+    return -1;
+}
+
+int net_irq_active(void) { return IRQ_ACTIVE; }
+unsigned net_irq_count(void) { return IRQ_COUNT; }
+
+int net_irq_take(void)
+{
+    int f = IRQ_FLAG;
+    IRQ_FLAG = 0;
+    return f;
 }

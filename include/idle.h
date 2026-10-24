@@ -6,7 +6,8 @@
  *
  * Why: without it the main loop spins at 100% of a host core even when nothing happens.
  * The CPU wakes on every 1 ms LAPIC timer tick, the loop polls the devices once more and
- * sleeps again, so mouse / USB / I2C drivers stay polled and need no interrupt of their own.
+ * sleeps again, so mouse / USB / I2C drivers stay polled and need no interrupt of their own. The network card is the one
+ * exception: its receive interrupt (vector IDLE_VEC_NET, routed by ioapic.h) also ends the sleep, see e1000.c.
  *
  * The tick also calls task_tick() (task.h), which is how a preemptible kernel thread loses the CPU.
  *
@@ -18,6 +19,8 @@
 
 int idle_init(void);
 int idle_ready(void);
+unsigned idle_lapic_id(void); /* the id of this processor's local APIC: where an I/O APIC line is sent */
+#define IDLE_VEC_NET 0x41 /* the interrupt vector of the network card (e1000.c); 0x40 is the timer */
 void idle_wait(void);
 void idle_send_self_nmi(void); /* raise a non-maskable interrupt on this CPU (a self test of the NMI stack) */
 
