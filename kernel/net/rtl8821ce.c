@@ -1336,6 +1336,58 @@ static void phy_init(unsigned cut)
  * written, even on a healthy card: 26 of about 90 registers on the real one. Only if more than half differ is the write path suspect. */
 static int phy_rf_suspect(void) { return PH.rf_diff * 2 > PH.rf_regs; }
 
+/* ---- stage 4b-3: the first firmware command (H2C through the mailbox registers) ----
+ * A short command goes to the firmware through one of four mailboxes: two 32-bit registers each (HMEBOX0_EX = bytes 4..7, HMEBOX0 =
+ * bytes 0..3, written last). The chip sets the box's bit in HMETFR when the low word is written and the firmware clears it when it has
+ * read the command: that is the proof that the firmware runs and listens. The command used is "tell the Bluetooth coexistence code not
+ * to ignore WLAN actions, off" (H2C 0x63), the default state: it changes nothing and the firmware answers it with no packet (the
+ * receive DMA is still off). The same sequence as rtw_fw_send_h2c_command(). */
+#define R_HMETFR 0x01CC
+#define R_HMEBOX0 0x01D0
+#define R_HMEBOX0_EX 0x01F0
+#define H2C_CMD_IGNORE_WLAN_ACTION 0x63
+
+enum { H2_NOT_TRIED, H2_OK, H2_FAILED };
+static struct
+{
+    int state;
+    const char *why;
+} H2;
+
+static int h2c_box_free(void)
+{
+    for (int i = 0; i < 30; i++) /* 3 ms in steps of 100 us, like Linux */
+    {
+        if (!(rd8(R_HMETFR) & BIT(0)))
+            return 1;
+        udelay(100);
+    }
+    return 0;
+}
+
+static void h2c_probe(void)
+{
+    H2.state = H2_FAILED;
+    H2.why = 0;
+    if (!h2c_box_free())
+    {
+        H2.why = "busy";
+        return;
+    }
+    wr32(R_HMEBOX0_EX, 0);
+    wr32(R_HMEBOX0, H2C_CMD_IGNORE_WLAN_ACTION); /* bit 8 = enable = 0 */
+    for (int i = 0; i < 200; i++) /* up to 20 ms for the firmware to take it */
+    {
+        if (!(rd8(R_HMETFR) & BIT(0)))
+        {
+            H2.state = H2_OK;
+            return;
+        }
+        udelay(100);
+    }
+    H2.why = "no ack";
+}
+
 static int rtl8821ce_claims(const PciDevice *pd)
 {
     return pd->vendor_id == 0x10EC && (pd->device_id == 0xB821 || pd->device_id == 0xC821);
@@ -1392,6 +1444,8 @@ static int rtl8821ce_probe(const PciDevice *pd)
     MI.why = 0;
     PH.state = PH_NOT_TRIED;
     PH.why = 0;
+    H2.state = H2_NOT_TRIED;
+    H2.why = 0;
     EF.why = 0;
     DL.why = 0;
     DL.part = 0;
@@ -1440,6 +1494,8 @@ static int rtl8821ce_probe(const PciDevice *pd)
                 mac_init();       /* stage 4b-1: queues and MAC timing; the receive DMA is switched off again at the end */
                 if (MI.state == MI_OK)
                     phy_init((W.cfg1 >> 12) & 0xF); /* stage 4b-2: the baseband / AGC / RF tables */
+                if (MI.state == MI_OK)
+                    h2c_probe(); /* stage 4b-3: does the firmware read a command? */
             }
             else
             {
@@ -1504,7 +1560,6 @@ static void status_download(NicText *t)
         nic_putd(t, FW.version);
         nic_putc(t, '.');
         nic_putd(t, FW.subversion);
-        nic_puts(t, " ready");
         if (EF.state == EF_OK)
         {
             nic_puts(t, ", MAC ");
@@ -1536,6 +1591,13 @@ static void status_download(NicText *t)
         {
             nic_puts(t, ", no phy: ");
             nic_puts(t, PH.why ? PH.why : "?");
+        }
+        if (H2.state == H2_OK)
+            nic_puts(t, ", h2c ok");
+        else if (H2.state == H2_FAILED)
+        {
+            nic_puts(t, ", h2c ");
+            nic_puts(t, H2.why ? H2.why : "?");
         }
         nic_puts(t, DL.off_after > 0 ? ", off" : DL.off_after < 0 ? ", power-off FAILED" : "");
     }

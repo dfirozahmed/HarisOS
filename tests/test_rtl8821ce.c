@@ -58,6 +58,7 @@ static int KNOB_EFUSE_STUCK;
 static int KNOB_LLT_STUCK;
 static int PH_BREAK_RF_READBACK; /* the RF window does not follow the SIPI writes */
 static unsigned PH_FLIP_RF_BITS; /* the chip itself changes these bits of RF register 0x18 and 0x51 */
+static int KNOB_H2C_STUCK; /* the firmware never takes a command from the mailbox */
 static unsigned char EFUSE_RFE = 4, EFUSE_XTAL = 0x2A; /* what the board's efuse says at 0xCA and 0xB9 */
 
 static void build_efuse(const unsigned char mac[6])
@@ -235,6 +236,8 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
     }
     else if (size == 4 && off == 0x30 && !(value & BIT(31)) && !KNOB_EFUSE_STUCK)
         set32(0x30, (value & ~0xFFu) | EFUSE_MAP[(value >> 8) & 0x3FF] | BIT(31)); /* the byte at that address, and "done" */
+    else if (size == 4 && off == 0x1D0)
+        REGS[0x1CC] |= 1; /* HMETFR: the box holds a command until the firmware has read it */
     else if (size == 4 && off == 0xC90 && !PH_BREAK_RF_READBACK)
         set32(0x2800 + ((value >> 20) & 0xFF) * 4, (value & 0xFFFFF) ^ (((value >> 20) & 0xFF) == 0x18 || ((value >> 20) & 0xFF) == 0x51 ? PH_FLIP_RF_BITS : 0)); /* the RF register answers in its direct-read window */
     else if (size == 1 && off == 0x208 && (value & 1) && !KNOB_LLT_STUCK)
@@ -254,6 +257,8 @@ void rtl8821ce_host_udelay(unsigned us)
     if (CAPTURE)
         cap_ev(2, us, 0, 0);
     UDELAYS++;
+    if (!KNOB_H2C_STUCK)
+        REGS[0x1CC] &= (unsigned char)~1; /* the firmware takes the command */
     if (!CHIP_COMPLETES)
         return;
     if (REGS[5] & 2)
@@ -341,7 +346,7 @@ static void chip(unsigned char filler, unsigned char cr, u16 mcufw)
     BCN_PAGE = 0xFFFF;
     memset(CHIPMEM, 0, sizeof CHIPMEM);
     memset(TXFIFO, 0, sizeof TXFIFO);
-    KNOB_NO_BCN_VALID = KNOB_DDMA_STUCK = KNOB_CHKSUM_BAD = KNOB_NO_BOOT = KNOB_EFUSE_STUCK = KNOB_LLT_STUCK = 0;
+    KNOB_NO_BCN_VALID = KNOB_DDMA_STUCK = KNOB_CHKSUM_BAD = KNOB_NO_BOOT = KNOB_EFUSE_STUCK = KNOB_LLT_STUCK = KNOB_H2C_STUCK = 0;
     static const unsigned char TEST_MAC[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
     build_efuse(TEST_MAC);
 }
@@ -561,7 +566,7 @@ int main(void)
     CHECK(DL.off_after == 1);
     CHECK((DL.mcufw & 0xC078) == 0xC078);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(strstr(st, "fw 24.11 ready, MAC 00:e0:4c:68:12:34, mac ok, phy ok, off") &&
+    CHECK(strstr(st, "fw 24.11, MAC 00:e0:4c:68:12:34, mac ok, phy ok, h2c ok, off") &&
           strlen(st) < sizeof st);
     /* the order of the register sequence, by landmarks */
     static const Wr LANDMARKS[] = {
@@ -805,6 +810,42 @@ int main(void)
         CHECK(strstr(s2, ", phy rf") && strchr(s2, ':') && strstr(s2, ", off") && strlen(s2) < sizeof s2);
         CHECK(PH.diff_addr[0] == 0x00); /* RF register 0 is the first one written, and the first that failed to read back here */
     }
+
+    /* ---- stage 4b-3: the mailbox command. Sequence as in rtw_fw_send_h2c_command: wait for the box to be free, high word first,
+     * then the low word with the command id; then the firmware must clear the box bit. ---- */
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    NLOG = 0;
+    h2c_probe();
+    CHECK(H2.state == H2_OK && H2.why == 0);
+    CHECK(NLOG == 2 && LOG[0].off == 0x1F0 && LOG[0].size == 4 && LOG[0].value == 0 && LOG[1].off == 0x1D0 && LOG[1].size == 4 &&
+          LOG[1].value == 0x63);
+    CHECK((REGS[0x1CC] & 1) == 0);
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    KNOB_H2C_STUCK = 1; /* the firmware does not answer */
+    NLOG = 0;
+    h2c_probe();
+    CHECK(H2.state == H2_FAILED && strcmp(H2.why, "no ack") == 0 && NLOG == 2);
+    {
+        char s4[96];
+        PH.state = PH_OK;
+        PH.rf_diff = 0;
+        MI.state = MI_OK;
+        EF.state = EF_OK;
+        DL.state = DL_OK;
+        DL.off_after = 1;
+        NIC_RTL8821CE.status(s4, sizeof s4);
+        CHECK(strstr(s4, ", h2c no ack, off") && strlen(s4) < sizeof s4);
+    }
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    REGS[0x1CC] = 1; /* the box is still occupied by an earlier command */
+    KNOB_H2C_STUCK = 1;
+    NLOG = 0;
+    h2c_probe();
+    CHECK(H2.state == H2_FAILED && strcmp(H2.why, "busy") == 0 && NLOG == 0); /* nothing is written into a busy box */
+    KNOB_H2C_STUCK = 0;
 
     /* a firmware without extended memory: two parts only */
     build_image(0);
