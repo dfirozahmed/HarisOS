@@ -1813,6 +1813,238 @@ static void channel_probe(unsigned channel)
     CHN.state = (CHN.rf18 & RF18_CHANNEL_MASK) == channel && (CHN.rf18 & RF18_BW_MASK) == RF18_BW_20M ? CH_OK : CH_FAILED;
 }
 
+/* ---- stage 4c-2: receive ----
+ * The chip writes every frame it receives into the next buffer of the receive ring (the 32 descriptors set up in dma_setup(), each
+ * pointing at its own 12 KiB buffer) and moves its write index, which the host can read at 0x3B4 (bits 27..16). The host reads the
+ * frames from the buffers and gives the index it has reached back (bits 15..0), so that the chip may reuse the buffers behind it.
+ * Each buffer holds a 24 byte receive descriptor, then 32 bytes of PHY status (signal strength etc., the "driver info" of
+ * rtw_drv_info_cfg), then the 802.11 frame including its 4 byte FCS. Descriptor word 0: bits 13..0 frame length, 19..16 driver info
+ * size in units of 8 bytes, 25..24 extra shift; word 2 bit 28 marks a message from the firmware (C2H) instead of a received frame.
+ * What this stage does: switch the receiver on with Linux' default filter and count what arrives for a while, without answering
+ * anything. The receive filter accepts beacons of every network (the "associated BSSID" check is off), so on a busy channel the beacons
+ * of all access points around are received. */
+#define R_RXBD_IDX_MPDUQ 0x03B4
+#define RCR_RX_DEFAULT 0xF410400Eu /* hal->rcr: APP_FCS | APP_MIC | APP_ICV | PKTCTL_DLEN | HTC_LOC_CTRL | APP_PHYSTS | AB | AM | APM, + VHT_DACK */
+#define RX_DESC_SIZE 24
+
+enum { RXS_NOT_TRIED, RXS_OK };
+static struct
+{
+    int state;
+    unsigned rp;       /* the next buffer the host reads */
+    unsigned frames;   /* frames received (not counting messages from the firmware) */
+    unsigned beacons;
+    unsigned probe_resp;
+    unsigned mgmt_other, ctrl, data;
+    unsigned c2h;      /* messages from the firmware */
+    unsigned bad;      /* descriptors that did not make sense, or frames with a bad checksum */
+} RX;
+
+static u32 vle32(const volatile u8 *p) { return (u32)p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24; }
+
+static u32 rx_buf_dma(unsigned i) { return D.dma + (u32)(D.mem + Q_COUNT * PAGE + PAGE - D.mem) + i * RX_BUF_SLOT; }
+
+static void scan_note(const volatile u8 *f, unsigned len);
+
+/* one received buffer: classify it. `b` is the buffer, as the chip filled it. */
+static void rx_one(const volatile u8 *b)
+{
+    u32 w0 = vle32(b), w2 = vle32(b + 8);
+    unsigned len = w0 & 0x3FFF, drv = ((w0 >> 16) & 0xF) * 8, shift = (w0 >> 24) & 3;
+    int crc_err = (w0 >> 14) & 1;
+    if (w2 & BIT(28)) /* C2H */
+    {
+        RX.c2h++;
+        return;
+    }
+    if (len <= 4 || drv > 32 || RX_DESC_SIZE + drv + shift + len > RX_BUF_SIZE || crc_err)
+    {
+        RX.bad++;
+        return;
+    }
+    const volatile u8 *f = b + RX_DESC_SIZE + drv + shift;
+    unsigned fc0 = f[0], type = (fc0 >> 2) & 3, subtype = fc0 >> 4;
+    RX.frames++;
+    if (type == 0)
+    {
+        if (subtype == 8)
+            RX.beacons++;
+        else if (subtype == 5)
+            RX.probe_resp++;
+        else
+            RX.mgmt_other++;
+        if (subtype == 8 || subtype == 5)
+            scan_note(f, len - 4); /* the frame without its FCS */
+    }
+    else if (type == 1)
+        RX.ctrl++;
+    else
+        RX.data++;
+}
+
+/* take every buffer the chip has finished, re-arm it, tell the chip how far we are */
+static void rx_poll(void)
+{
+    unsigned hw = (rd32(R_RXBD_IDX_MPDUQ) >> 16) & 0xFFF;
+    if (hw >= RX_COUNT)
+        return; /* nonsense from the register: do nothing */
+    unsigned n = hw >= RX.rp ? hw - RX.rp : RX_COUNT - (RX.rp - hw);
+    if (!n)
+        return;
+    u8 *ring = D.mem + Q_COUNT * PAGE;
+    u8 *bufs = ring + PAGE;
+    while (n--)
+    {
+        rx_one(bufs + RX.rp * RX_BUF_SLOT);
+        u8 *bd = ring + RX.rp * 8; /* give the buffer back: size, packet size 0, address */
+        put16(bd, RX_BUF_SIZE);
+        put16(bd + 2, 0);
+        put32(bd + 4, rx_buf_dma(RX.rp));
+        if (++RX.rp >= RX_COUNT)
+            RX.rp = 0;
+    }
+    wr16(R_RXBD_IDX_MPDUQ, (u16)RX.rp);
+}
+
+/* ---- stage 4c-3: scan ----
+ * Passive scan: tune to each channel in turn, listen a little longer than a beacon interval (access points send a beacon about every
+ * 102 ms) and note every network heard. A beacon (or a probe response) is a management frame: 24 byte header (the sender's BSSID is the
+ * third address), 12 bytes of fixed fields (timestamp, beacon interval, capability bits), then a list of information elements,
+ * each tag (1 byte), length (1 byte), data. Element 0 is the network name (SSID), 3 the channel the access point is on (2.4 GHz),
+ * 61 (HT operation) holds it for 5 GHz, 48 is the WPA2 (RSN) security description, a vendor element with 00:50:F2 type 1 is WPA. */
+#define SCAN_DWELL_MS 300
+#define SCAN_AP_MAX 32
+
+typedef struct
+{
+    u8 bssid[6];
+    char ssid[33];
+    u8 channel;  /* the channel the access point says it is on, else the one we heard it on */
+    u8 sec;      /* 0 open, 1 WEP (privacy bit only), 2 WPA, 3 WPA2 */
+    u8 heard_on; /* the channel the scan was tuned to */
+    unsigned beacons;
+} ScanAp;
+
+static const u8 SCAN_CHANNELS[] = {1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161};
+#define SCAN_NCH ((unsigned)sizeof SCAN_CHANNELS)
+static struct
+{
+    int state;
+    ScanAp ap[SCAN_AP_MAX];
+    unsigned n;
+    unsigned per_channel[SCAN_NCH]; /* frames heard on each channel */
+    unsigned channels_ok;           /* channels that could be tuned */
+    unsigned cur_channel;           /* where the receiver listens now */
+    unsigned dropped;               /* networks that did not fit the table */
+} SC;
+
+
+/* one management frame (without its FCS): remember the network it belongs to */
+static void scan_note(const volatile u8 *f, unsigned len)
+{
+    if (len < 36 + 2)
+        return;
+    unsigned fc0 = f[0];
+    if ((fc0 & 0xFC) != 0x80 && (fc0 & 0xFC) != 0x50) /* beacon or probe response */
+        return;
+    u8 bssid[6];
+    for (int i = 0; i < 6; i++)
+        bssid[i] = f[16 + i];
+    unsigned cap = (unsigned)f[34] | (unsigned)f[35] << 8;
+    char ssid[33];
+    unsigned ssid_len = 0;
+    int have_ssid = 0, named = 0;
+    unsigned chan = 0, sec = (cap & 0x10) ? 1 : 0;
+    for (unsigned p = 36; p + 2 <= len;)
+    {
+        unsigned tag = f[p], tl = f[p + 1];
+        if (p + 2 + tl > len)
+            break; /* an element that runs past the frame: stop reading */
+        const volatile u8 *d = f + p + 2;
+        if (tag == 0 && !have_ssid && tl <= 32)
+        {
+            for (unsigned i = 0; i < tl; i++)
+            {
+                unsigned c = d[i];
+                ssid[i] = c >= 32 && c < 127 ? (char)c : '?';
+                if (c)
+                    named = 1;
+            }
+            ssid_len = named ? tl : 0; /* a hidden network sends an empty name or only zeros */
+
+            have_ssid = 1;
+        }
+        else if (tag == 3 && tl >= 1)
+            chan = d[0];
+        else if (tag == 61 && tl >= 1 && !chan)
+            chan = d[0];
+        else if (tag == 48)
+            sec = 3;
+        else if (tag == 221 && tl >= 4 && d[0] == 0x00 && d[1] == 0x50 && d[2] == 0xF2 && d[3] == 1 && sec < 2)
+            sec = 2;
+        p += 2 + tl;
+    }
+    if (!have_ssid)
+        return;
+    ssid[ssid_len] = 0;
+    for (unsigned i = 0; i < SC.n; i++)
+    {
+        ScanAp *a = &SC.ap[i];
+        int same = 1;
+        for (int k = 0; k < 6; k++)
+            if (a->bssid[k] != bssid[k])
+                same = 0;
+        if (same)
+        {
+            a->beacons++;
+            return;
+        }
+    }
+    if (SC.n >= SCAN_AP_MAX)
+    {
+        SC.dropped++;
+        return;
+    }
+    ScanAp *a = &SC.ap[SC.n++];
+    for (int k = 0; k < 6; k++)
+        a->bssid[k] = bssid[k];
+    for (unsigned i = 0; i <= ssid_len; i++)
+        a->ssid[i] = ssid[i];
+    a->channel = (u8)(chan ? chan : SC.cur_channel);
+    a->sec = (u8)sec;
+    a->heard_on = (u8)SC.cur_channel;
+    a->beacons = 1;
+}
+
+/* the whole scan: for each channel, switch, listen, collect. The receiver stays on all the time. */
+static void scan_run(void)
+{
+    SC.n = SC.dropped = SC.channels_ok = 0;
+    for (unsigned i = 0; i < SCAN_NCH; i++)
+        SC.per_channel[i] = 0;
+    SC.state = 1;
+    RX.rp = RX.frames = RX.beacons = RX.probe_resp = RX.mgmt_other = RX.ctrl = RX.data = RX.c2h = RX.bad = 0;
+    wr32(R_RCR, RCR_RX_DEFAULT);
+    wr8(R_CR, MAC_TRX_ENABLE);
+    for (unsigned i = 0; i < SCAN_NCH; i++)
+    {
+        SC.cur_channel = SCAN_CHANNELS[i];
+        set_channel_20(SC.cur_channel, PH.ch_param, EF.swing2g, EF.swing5g);
+        if ((rf_read(0x18) & RF18_CHANNEL_MASK) != SC.cur_channel) /* the synthesizer did not take the channel */
+            continue;
+        SC.channels_ok++;
+        unsigned before = RX.frames;
+        for (unsigned ms = 0; ms < SCAN_DWELL_MS; ms++)
+        {
+            udelay(1000);
+            rx_poll();
+        }
+        SC.per_channel[i] = RX.frames - before;
+    }
+    wr8(R_CR, 0);
+    RX.state = RXS_OK;
+}
+
 static int rtl8821ce_claims(const PciDevice *pd)
 {
     return pd->vendor_id == 0x10EC && (pd->device_id == 0xB821 || pd->device_id == 0xC821);
@@ -1872,6 +2104,9 @@ static int rtl8821ce_probe(const PciDevice *pd)
     H2.state = H2_NOT_TRIED;
     H2.why = 0;
     CHN.state = CH_NOT_TRIED;
+    RX.state = RXS_NOT_TRIED;
+    SC.state = 0;
+    SC.n = 0;
     EF.why = 0;
     DL.why = 0;
     DL.part = 0;
@@ -1924,6 +2159,8 @@ static int rtl8821ce_probe(const PciDevice *pd)
                     h2c_probe(); /* stage 4b-3: does the firmware read a command? */
                 if (PH.state == PH_OK && !phy_rf_suspect() && H2.state == H2_OK)
                     channel_probe(6); /* stage 4c-1: antenna to Wi-Fi, channel 6 */
+                if (CHN.state == CH_OK)
+                    scan_run(); /* stage 4c-2/3: listen on every channel, note the networks */
             }
             else
             {
@@ -1984,10 +2221,14 @@ static void status_download(NicText *t)
             nic_puts(t, DL.off_after > 0 ? ", off" : ", power-off FAILED");
             return;
         }
-        nic_puts(t, ", fw ");
-        nic_putd(t, FW.version);
-        nic_putc(t, '.');
-        nic_putd(t, FW.subversion);
+        int all_ok = MI.state == MI_OK && PH.state == PH_OK && H2.state == H2_OK && SC.state; /* then the line has room for the scan result instead of the firmware version */
+        if (!all_ok)
+        {
+            nic_puts(t, ", fw ");
+            nic_putd(t, FW.version);
+            nic_putc(t, '.');
+            nic_putd(t, FW.subversion);
+        }
         if (EF.state == EF_OK)
         {
             nic_puts(t, ", MAC ");
@@ -2032,7 +2273,24 @@ static void status_download(NicText *t)
             nic_puts(t, H2.why ? H2.why : "?");
         }
         }
-        if (CHN.state == CH_OK)
+        if (SC.state)
+        {
+            unsigned f2 = 0, f5 = 0;
+            for (unsigned i = 0; i < SCAN_NCH; i++)
+                if (SCAN_CHANNELS[i] <= 14)
+                    f2 += SC.per_channel[i];
+                else
+                    f5 += SC.per_channel[i];
+            nic_puts(t, ", ");
+            nic_putd(t, SC.n);
+            nic_puts(t, "ap 2G");
+            nic_putd(t, f2);
+            nic_puts(t, " 5G");
+            nic_putd(t, f5);
+            nic_puts(t, " b");
+            nic_putd(t, RX.beacons);
+        }
+        else if (CHN.state == CH_OK)
         {
             nic_puts(t, ", ch");
             nic_putd(t, CHN.channel);

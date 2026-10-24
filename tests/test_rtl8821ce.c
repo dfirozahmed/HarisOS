@@ -218,6 +218,49 @@ static void cap_ev(unsigned t, unsigned a, unsigned b, unsigned c)
     CAP_N++;
 }
 
+/* ---- the pretend chip's receiver: frames the test queued are put into the receive ring, one per delay call, once the receiver is on ---- */
+typedef struct { unsigned char fc0; unsigned len; int c2h, crc_err; const unsigned char *data; } RxFrame;
+static RxFrame RXQ[128];
+static int RXQ_N, RXQ_NEXT;
+static void rx_deliver_one1(void);
+static unsigned RX_HW; /* the chip's write index */
+static void rxq_add(unsigned char fc0, unsigned len, int c2h, int crc_err)
+{
+    if (RXQ_N < 128)
+        RXQ[RXQ_N++] = (RxFrame){fc0, len, c2h, crc_err, 0};
+}
+static void rxq_add_frame(const unsigned char *data, unsigned len)
+{
+    if (RXQ_N < 128)
+        RXQ[RXQ_N++] = (RxFrame){data[0], len, 0, 0, data};
+}
+static int RX_BURST = 1; /* frames the chip delivers between two polls of the driver */
+static void rx_deliver_one(void)
+{
+    for (int k = 0; k < RX_BURST; k++)
+        rx_deliver_one1();
+}
+static void rx_deliver_one1(void)
+{
+    if (RXQ_NEXT >= RXQ_N || !D.ready || !(REGS[0x100] & 8))
+        return;
+    if ((RX_HW + 1) % 32 == (unsigned)((REGS[0x3B4] | REGS[0x3B5] << 8) & 0xFFF)) /* the ring is full: the chip waits for the host */
+        return;
+    unsigned char *buf = D.mem + Q_COUNT * PAGE + PAGE + RX_HW * RX_BUF_SLOT; /* the transmit rings, the receive ring, then the buffers */
+    RxFrame *f = &RXQ[RXQ_NEXT++];
+    memset(buf, 0, 24 + 32 + f->len);
+    unsigned w0 = f->len | (f->crc_err ? 1u << 14 : 0) | (4u << 16);
+    memcpy(buf, &w0, 4);
+    unsigned w2 = f->c2h ? 1u << 28 : 0;
+    memcpy(buf + 8, &w2, 4);
+    buf[24 + 32] = f->fc0;
+    if (f->data)
+        memcpy(buf + 24 + 32, f->data, f->len);
+    RX_HW = (RX_HW + 1) % 32;
+    REGS[0x3B6] = (unsigned char)(RX_HW & 0xFF); /* bits 27..16 of 0x3B4 */
+    REGS[0x3B7] = (unsigned char)((RX_HW >> 8) & 0x0F);
+}
+
 void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
 {
     if (CAPTURE)
@@ -267,6 +310,7 @@ void rtl8821ce_host_udelay(unsigned us)
     if (CAPTURE)
         cap_ev(2, us, 0, 0);
     UDELAYS++;
+    rx_deliver_one();
     if (!KNOB_H2C_STUCK)
         REGS[0x1CC] &= (unsigned char)~1; /* the firmware takes the command */
     if (!CHIP_COMPLETES)
@@ -578,7 +622,7 @@ int main(void)
     CHECK(DL.off_after == 1);
     CHECK((DL.mcufw & 0xC078) == 0xC078);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(strstr(st, "fw 24.11, MAC 00:e0:4c:68:12:34, init ok, ch6 ok, off") &&
+    CHECK(strstr(st, "cut B, MAC 00:e0:4c:68:12:34, init ok, 0ap 2G0 5G0 b0, off") &&
           strlen(st) < sizeof st);
     /* the order of the register sequence, by landmarks */
     static const Wr LANDMARKS[] = {
@@ -848,6 +892,8 @@ int main(void)
         DL.state = DL_OK;
         DL.off_after = 1;
         CHN.state = CH_NOT_TRIED;
+        RX.state = RXS_NOT_TRIED;
+        SC.state = 0;
         NIC_RTL8821CE.status(s4, sizeof s4);
         CHECK(strstr(s4, ", h2c no ack, off") && strlen(s4) < sizeof s4);
     }
@@ -927,7 +973,140 @@ int main(void)
     {
         char s5[96];
         NIC_RTL8821CE.status(s5, sizeof s5);
-        CHECK(strstr(s5, ", init ok, ch6 ok, off") && strlen(s5) < sizeof s5);
+        CHECK(strstr(s5, ", init ok, 0ap 2G0 5G0 b0, off") && strlen(s5) < sizeof s5);
+    }
+
+    /* ---- stage 4c-2: receive. The pretend chip delivers the frames the test queued; the driver must classify them, hand the
+     * buffers back and report how far it has read. ---- */
+    build_image(1);
+    chip_for_download();
+    file(IMG, IMG_SIZE, IMG_SIZE);
+    RXQ_N = RXQ_NEXT = 0;
+    RX_HW = 0;
+    rxq_add(0x80, 80, 0, 0);  /* beacon */
+    rxq_add(0x80, 90, 0, 0);
+    rxq_add(0x50, 100, 0, 0); /* probe response */
+    rxq_add(0x80, 70, 0, 0);
+    rxq_add(0x08, 120, 0, 0); /* data */
+    rxq_add(0xD4, 14, 0, 0);  /* acknowledgement */
+    rxq_add(0x40, 60, 0, 0);  /* probe request: some other management frame */
+    rxq_add(0x00, 40, 1, 0);  /* a message from the firmware */
+    rxq_add(0x80, 80, 0, 1);  /* checksum error */
+    NLOG = 0;
+    NIC_RTL8821CE.probe(&WIFI);
+    CHECK(RX.state == RXS_OK && RX.frames == 7 && RX.beacons == 3 && RX.probe_resp == 1 && RX.data == 1 && RX.ctrl == 1 && RX.mgmt_other == 1);
+    CHECK(RX.c2h == 1 && RX.bad == 1 && RX.rp == 9);
+    {
+        /* RCR as Linux' default filter, and the receiver is off again at the end, before the power-off */
+        int rcr_seen = 0, cr_on = 0, cr_off_after = 0;
+        for (int i = 0; i < NLOG; i++)
+        {
+            if (LOG[i].off == 0x608 && LOG[i].size == 4 && LOG[i].value == 0xF410400Eu)
+                rcr_seen = 1;
+            if (LOG[i].off == 0x100 && LOG[i].size == 1 && LOG[i].value == 0xFF)
+                cr_on = 1;
+            if (cr_on && LOG[i].off == 0x100 && LOG[i].size == 1 && LOG[i].value == 0)
+                cr_off_after = 1;
+        }
+        CHECK(rcr_seen && cr_on && cr_off_after);
+    }
+    {
+        char s6[96];
+        NIC_RTL8821CE.status(s6, sizeof s6);
+        CHECK(strstr(s6, ", init ok, 1ap 2G7 5G0 b3, off") && strlen(s6) < sizeof s6);
+    }
+    /* more frames than the ring has buffers: it must wrap around and nothing is lost */
+    build_image(1);
+    chip_for_download();
+    file(IMG, IMG_SIZE, IMG_SIZE);
+    RXQ_N = RXQ_NEXT = 0;
+    RX_HW = 0;
+    RX_BURST = 5; /* five frames arrive between two looks of the driver, so the index wraps around the ring in the middle of a batch */
+    for (int i = 0; i < 100; i++)
+        rxq_add(i % 2 ? 0x80 : 0x08, 60 + i, 0, 0);
+    NIC_RTL8821CE.probe(&WIFI);
+    CHECK(RX.frames == 100 && RX.beacons == 50 && RX.data == 50 && RX.bad == 0 && RX.rp == 100 % 32);
+    RX_BURST = 1;
+    /* nonsense in the index register is ignored */
+    RX.rp = 0;
+    RX.frames = 0;
+    memset(REGS, 0, sizeof REGS);
+    REGS[0x3B6] = 0xFF;
+    REGS[0x3B7] = 0x0F; /* index 4095, beyond the 32 buffers */
+    rx_poll();
+    CHECK(RX.frames == 0 && RX.rp == 0);
+    RXQ_N = RXQ_NEXT = 0;
+
+    /* ---- stage 4c-3: scan. Beacons built byte by byte, as an access point sends them. ---- */
+    {
+        static unsigned char FR[10][256];
+        unsigned FL[10];
+        int nf = 0;
+        /* header, fixed fields, then SSID, rates, (DS channel | HT operation), optional security elements, FCS */
+#define MKBEACON(fc0v, bssid_last, cap, ssid_s, ssid_n, ds_chan, ht_chan, rsn, wpa)                          \
+    do                                                                                                       \
+    {                                                                                                        \
+        unsigned char *f = FR[nf];                                                                           \
+        memset(f, 0, 256);                                                                                   \
+        f[0] = (fc0v);                                                                                       \
+        memset(f + 4, 0xFF, 6);                                                                              \
+        f[10] = 2; f[15] = (bssid_last);                                                                     \
+        f[16] = 2; f[21] = (bssid_last);                                                                     \
+        f[32] = 0x64;                                                                                        \
+        f[34] = (cap) & 0xFF; f[35] = (cap) >> 8;                                                            \
+        unsigned p = 36;                                                                                     \
+        f[p++] = 0; f[p++] = (ssid_n); memcpy(f + p, (ssid_s), (ssid_n)); p += (ssid_n);                     \
+        f[p++] = 1; f[p++] = 2; f[p++] = 0x82; f[p++] = 0x84;                                                \
+        if (ds_chan) { f[p++] = 3; f[p++] = 1; f[p++] = (ds_chan); }                                         \
+        if (ht_chan) { f[p++] = 61; f[p++] = 2; f[p++] = (ht_chan); f[p++] = 0; }                            \
+        if (rsn) { f[p++] = 48; f[p++] = 2; f[p++] = 1; f[p++] = 0; }                                        \
+        if (wpa) { f[p++] = 221; f[p++] = 4; f[p++] = 0x00; f[p++] = 0x50; f[p++] = 0xF2; f[p++] = 1; }      \
+        p += 4; /* FCS */                                                                                    \
+        FL[nf] = p;                                                                                          \
+        nf++;                                                                                                \
+    } while (0)
+        MKBEACON(0x80, 1, 0x1431, "HomeNet", 7, 6, 0, 1, 0);       /* WPA2, channel 6 */
+        MKBEACON(0x80, 2, 0x0421, "Cafe", 4, 11, 0, 0, 0);         /* open */
+        MKBEACON(0x80, 3, 0x0411, "OldWep", 6, 1, 0, 0, 0);        /* privacy bit, no RSN: WEP */
+        MKBEACON(0x80, 4, 0x1431, "WpaNet", 6, 6, 0, 0, 1);        /* WPA */
+        MKBEACON(0x80, 5, 0x0421, "", 0, 6, 0, 0, 0);              /* hidden: empty name */
+        MKBEACON(0x80, 6, 0x0421, "\0\0\0\0\0\0\0\0", 8, 6, 0, 0, 0); /* hidden: zeros */
+        MKBEACON(0x80, 7, 0x1431, "Fast5", 5, 0, 36, 1, 0);        /* 5 GHz: no DS element, HT operation says 36 */
+        MKBEACON(0x50, 8, 0x0421, "Resp", 4, 11, 0, 0, 0);         /* probe response */
+        MKBEACON(0x80, 1, 0x1431, "HomeNet", 7, 6, 0, 1, 0);       /* HomeNet again */
+        MKBEACON(0x80, 1, 0x1431, "HomeNet", 7, 6, 0, 1, 0);
+#undef MKBEACON
+        build_image(1);
+        chip_for_download();
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        RXQ_N = RXQ_NEXT = 0;
+        RX_HW = 0;
+        for (int i = 0; i < nf; i++)
+            rxq_add_frame(FR[i], FL[i]);
+        NIC_RTL8821CE.probe(&WIFI);
+        CHECK(SC.state == 1 && SC.channels_ok == SCAN_NCH && SC.n == 8 && SC.dropped == 0);
+        CHECK(strcmp(SC.ap[0].ssid, "HomeNet") == 0 && SC.ap[0].sec == 3 && SC.ap[0].channel == 6 && SC.ap[0].beacons == 3);
+        CHECK(SC.ap[0].bssid[0] == 2 && SC.ap[0].bssid[5] == 1);
+        CHECK(strcmp(SC.ap[1].ssid, "Cafe") == 0 && SC.ap[1].sec == 0 && SC.ap[1].channel == 11);
+        CHECK(strcmp(SC.ap[2].ssid, "OldWep") == 0 && SC.ap[2].sec == 1);
+        CHECK(strcmp(SC.ap[3].ssid, "WpaNet") == 0 && SC.ap[3].sec == 2);
+        CHECK(SC.ap[4].ssid[0] == 0 && SC.ap[5].ssid[0] == 0); /* hidden networks have no name */
+        CHECK(strcmp(SC.ap[6].ssid, "Fast5") == 0 && SC.ap[6].channel == 36 && SC.ap[6].sec == 3);
+        CHECK(strcmp(SC.ap[7].ssid, "Resp") == 0);
+        CHECK(RX.frames == 10 && RX.beacons == 9 && RX.probe_resp == 1);
+        CHECK(SC.per_channel[0] == 10); /* everything arrived while the receiver listened on the first channel */
+        char s7[96];
+        NIC_RTL8821CE.status(s7, sizeof s7);
+        CHECK(strstr(s7, ", init ok, 8ap 2G10 5G0 b9, off") && strlen(s7) < sizeof s7);
+        /* a frame whose element runs past its end, and one that is too short: nothing is read beyond the frame */
+        SC.n = 0;
+        static unsigned char SHORT[40] = {0x80};
+        scan_note(SHORT, 20);
+        CHECK(SC.n == 0);
+        scan_note(FR[0], 41); /* cut in the middle of the SSID element: it runs past the end of the frame */
+        CHECK(SC.n == 0);
+        scan_note(FR[0], FL[0] - 4);
+        CHECK(SC.n == 1 && strcmp(SC.ap[0].ssid, "HomeNet") == 0);
     }
 
     /* a firmware without extended memory: two parts only */
