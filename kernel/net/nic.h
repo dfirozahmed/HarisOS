@@ -26,6 +26,7 @@ typedef struct
 
 extern const NicDriver NIC_E1000;
 extern const NicDriver NIC_RTL8168;
+extern const NicDriver NIC_RTL8821CE; /* Wi-Fi: identification only for now, probe always fails (rtl8821ce.c) */
 
 /* Tiny text builder for status lines (no libc here): appends to buf[cap], always NUL-terminated. */
 typedef struct

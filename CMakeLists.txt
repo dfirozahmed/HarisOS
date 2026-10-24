@@ -100,6 +100,7 @@ set(KERNEL_SOURCES
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/nic.c                 # network: picks the card driver, forwards net_send / net_recv ...
     kernel/net/e1000.c               # network: Intel e1000 NIC driver (interrupt or polled), raw Ethernet frames
+    kernel/net/rtl8821ce.c           # network: Realtek RTL8821CE Wi-Fi, identification only (stage 1; not a working adapter)
     kernel/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
     kernel/net/sock.c                # network: socket table for the system calls (SYS_SOCKET ...)
@@ -325,10 +326,19 @@ add_custom_command(
     VERBATIM
 )
 
+# Optional extra files for the boot disk that do not belong in the repository. firmware/RTW8821C.BIN is the firmware of the Realtek
+# RTL8821CE Wi-Fi card (linux-firmware rtw88/rtw8821c_fw.bin, Realtek's licence: you fetch it yourself, see kernel/net/rtl8821ce.c).
+# The driver looks for a file of that name in the top folder of any drive. The folder is ignored by git.
+set(HARIS_EXTRA_FILES "")
+if(EXISTS ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)
+    list(APPEND HARIS_EXTRA_FILES ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)
+    message(STATUS "Wi-Fi firmware found: firmware/RTW8821C.BIN goes onto haris.img")
+endif()
+
 add_custom_command(
     OUTPUT  ${HARIS_IMG}
-    COMMAND ${MKIMG_EXE} ${HARIS_IMG} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${CMAKE_BINARY_DIR}/KERNEL.EFI ${USER_ELFS}
-    DEPENDS ${MKIMG_EXE} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${KERNEL_BIN} ${USER_ELFS}
+    COMMAND ${MKIMG_EXE} ${HARIS_IMG} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${CMAKE_BINARY_DIR}/KERNEL.EFI ${USER_ELFS} ${HARIS_EXTRA_FILES}
+    DEPENDS ${MKIMG_EXE} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${KERNEL_BIN} ${USER_ELFS} ${HARIS_EXTRA_FILES}
     COMMENT "Creating haris.img"
     VERBATIM
 )
