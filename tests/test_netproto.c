@@ -214,6 +214,46 @@ int main(void)
     CHECK(!ip_parse("256.1.1.1", pip) && !ip_parse("1.2.3", pip) && !ip_parse("1.2.3.4.5", pip));
     CHECK(!ip_parse("1.2.3.", pip) && !ip_parse("a.b.c.d", pip) && !ip_parse("", pip) && !ip_parse("1.2.3.4 ", pip));
     CHECK(!ip_parse("1..2.3", pip) && !ip_parse("example.com", pip) && !ip_parse("0001.2.3.4", pip));
+
+    /* TCP segment: SYN with MSS option, then a data segment; checksum with pseudo header; corruption caught */
+    TcpSeg ts;
+    n = tcp_build(f, MAC_A, MAC_B, IP_A, IP_B, 50000, 80, 0xFFFFFFF0u, 0, TCP_SYN, 8192, 1460, 11, NULL, 0);
+    CHECK(n == ETH_HDR_LEN + IP_HDR_LEN + 24);
+    CHECK(net_checksum(f + ETH_HDR_LEN, IP_HDR_LEN) == 0);
+    CHECK(tcp_parse(f, n, &ts) && ts.src_port == 50000 && ts.dst_port == 80 && ts.seq == 0xFFFFFFF0u && ts.ack == 0);
+    CHECK(ts.flags == TCP_SYN && ts.window == 8192 && ts.mss == 1460 && ts.payload_len == 0);
+    n = tcp_build(f, MAC_B, MAC_A, IP_B, IP_A, 80, 50000, 1000, 0xFFFFFFF1u, TCP_ACK | TCP_PSH, 65535, 0, 12, blob, 5);
+    CHECK(n == ETH_HDR_LEN + IP_HDR_LEN + 20 + 5);
+    CHECK(tcp_parse(f, n, &ts) && ts.flags == (TCP_ACK | TCP_PSH) && ts.ack == 0xFFFFFFF1u && ts.mss == 0);
+    CHECK(ts.payload_len == 5 && memcmp(ts.payload, blob, 5) == 0 && ts.window == 65535);
+    CHECK(memcmp(ts.src_ip, IP_B, 4) == 0 && memcmp(ts.dst_mac, MAC_A, 6) == 0);
+    memcpy(bad, f, n);
+    bad[n - 1] ^= 1;
+    CHECK(!tcp_parse(bad, n, &ts)); /* payload bit flipped */
+    memcpy(bad, f, n);
+    bad[ETH_HDR_LEN + IP_HDR_LEN + 5] ^= 1; /* sequence number bit flipped */
+    CHECK(!tcp_parse(bad, n, &ts));
+    CHECK(!tcp_parse(f, n - 1, &ts));
+    CHECK(tcp_build(f, MAC_B, MAC_A, IP_B, IP_A, 80, 50000, 1, 1, TCP_ACK, 1, 0, 1, blob, TCP_MAX_PAYLOAD + 1) == 0);
+    /* a window over 65535 is clamped (no window scaling) */
+    n = tcp_build(f, MAC_B, MAC_A, IP_B, IP_A, 80, 1, 1, 1, TCP_ACK, 100000, 0, 1, NULL, 0);
+    CHECK(tcp_parse(f, n, &ts) && ts.window == 65535);
+    /* an option whose length runs past the header is rejected even with a correct checksum */
+    n = tcp_build(f, MAC_A, MAC_B, IP_A, IP_B, 1, 2, 1, 0, TCP_SYN, 100, 1460, 1, NULL, 0);
+    {
+        unsigned char *t = f + ETH_HDR_LEN + IP_HDR_LEN;
+        unsigned char tmp[12 + 24];
+        t[21] = 9;
+        t[16] = t[17] = 0;
+        memcpy(tmp, IP_A, 4);
+        memcpy(tmp + 4, IP_B, 4);
+        tmp[8] = 0; tmp[9] = 6; tmp[10] = 0; tmp[11] = 24; /* pseudo header: zero, protocol 6, TCP length 24 */
+        memcpy(tmp + 12, t, 24);
+        unsigned short s = net_checksum(tmp, sizeof tmp);
+        t[16] = (unsigned char)(s >> 8);
+        t[17] = (unsigned char)s;
+        CHECK(!tcp_parse(f, n, &ts));
+    }
     if (fails == 0)
         printf("netproto tests passed\n");
     return fails ? 1 : 0;

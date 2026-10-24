@@ -11,8 +11,10 @@
  * net_self_test() call it while they wait. QEMU's user-mode network (-nic user) gives the guest 10.0.2.15,
  * and the gateway 10.0.2.2 answers ARP and ping. */
 #include "net.h"
+#include "net_internal.h"
 #include "netproto.h"
 #include "serial.h"
+#include "tcp.h"
 #include "timer.h"
 
 #define ARP_CACHE_SIZE 8
@@ -175,14 +177,18 @@ int net_poll(void)
         ArpPacket a;
         IcmpEcho e;
         UdpPacket u;
+        TcpSeg t;
         if (arp_parse(r, (unsigned)n, &a))
             handle_arp(&a);
         else if (icmp_echo_parse(r, (unsigned)n, &e))
             handle_echo(&e);
         else if (udp_parse(r, (unsigned)n, &u))
             handle_udp(&u);
+        else if (tcp_parse(r, (unsigned)n, &t) && same(t.dst_ip, OUR_IP, 4))
+            tcp_input(&t);
         handled++;
     }
+    tcp_tick(); /* retransmission timers run whenever somebody waits for the network */
     return handled;
 }
 
@@ -372,6 +378,39 @@ int net_dhcp(unsigned timeout_ms)
     return 0;
 }
 
+/* TCP check: ask a web server for its front page and report the status line and how many bytes came back. */
+static void http_test(const unsigned char *ip)
+{
+    static const char req[] = "GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    int s = tcp_connect(ip, 80, 3000);
+    if (s < 0)
+    {
+        serial_puts("HARISOS: network: tcp connect failed\n");
+        return;
+    }
+    if (tcp_send(s, req, sizeof req - 1, 3000) < 0)
+    {
+        serial_puts("HARISOS: network: tcp send failed\n");
+        tcp_close(s);
+        return;
+    }
+    unsigned char buf[512];
+    unsigned total = 0;
+    int n;
+    serial_puts("HARISOS: network: http ");
+    while ((n = tcp_recv(s, buf, sizeof buf, 3000)) > 0)
+    {
+        if (total == 0) /* the status line, e.g. "HTTP/1.0 200 OK" */
+            for (int i = 0; i < n && i < 60 && buf[i] != '\r' && buf[i] != '\n'; i++)
+                serial_putc((char)buf[i]);
+        total += (unsigned)n;
+    }
+    serial_puts(", ");
+    serial_putd(total);
+    serial_puts(n == 0 ? " bytes, closed by the server\n" : " bytes, then an error or timeout\n");
+    tcp_close(s);
+}
+
 int net_self_test(void)
 {
     if (!net_present())
@@ -429,6 +468,7 @@ int net_self_test(void)
     {
         put_ip(addr);
         serial_puts("\n");
+        http_test(addr);
     }
     else
         serial_puts("not resolved (no internet, or no DNS server)\n");
@@ -442,3 +482,11 @@ int net_self_test(void)
     }
     return ok;
 }
+
+/* for tcp.c (see net_internal.h) */
+int net_arp_mac(const unsigned char ip[4], unsigned char mac[6], unsigned timeout_ms)
+{
+    return resolve(ip, mac, timeout_ms);
+}
+
+unsigned net_next_ip_id(void) { return IP_ID++; }

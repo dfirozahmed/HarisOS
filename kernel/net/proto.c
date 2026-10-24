@@ -470,3 +470,119 @@ int ip_parse(const char *s, unsigned char ip[4])
     }
     return *s == 0;
 }
+
+/* ---- TCP ---- */
+
+static unsigned short tcp_checksum(const unsigned char sip[4], const unsigned char dip[4], const unsigned char *tcp,
+                                   unsigned tcp_len)
+{
+    unsigned long sum = sum_add(0, sip, 4);
+    sum = sum_add(sum, dip, 4);
+    sum += IP_PROTO_TCP;
+    sum += tcp_len;
+    return sum_finish(sum_add(sum, tcp, tcp_len));
+}
+
+unsigned tcp_build(unsigned char *f, const unsigned char smac[6], const unsigned char dmac[6],
+                   const unsigned char sip[4], const unsigned char dip[4], unsigned sport, unsigned dport,
+                   unsigned seq, unsigned ack, unsigned flags, unsigned window, unsigned mss, unsigned ip_id,
+                   const unsigned char *payload, unsigned plen)
+{
+    if (plen > TCP_MAX_PAYLOAD)
+        return 0;
+    unsigned hlen = TCP_HDR_LEN + (mss ? 4 : 0);
+    unsigned tcp_len = hlen + plen;
+    unsigned ip_len = IP_HDR_LEN + tcp_len;
+
+    copy(f, dmac, 6);
+    copy(f + 6, smac, 6);
+    put16(f + 12, ETH_TYPE_IPV4);
+
+    unsigned char *ip = f + ETH_HDR_LEN;
+    ip[0] = 0x45;
+    ip[1] = 0;
+    put16(ip + 2, ip_len);
+    put16(ip + 4, ip_id);
+    put16(ip + 6, 0x4000); /* do not fragment: TCP does its own sizing */
+    ip[8] = 64;
+    ip[9] = IP_PROTO_TCP;
+    put16(ip + 10, 0);
+    copy(ip + 12, sip, 4);
+    copy(ip + 16, dip, 4);
+    put16(ip + 10, net_checksum(ip, IP_HDR_LEN));
+
+    unsigned char *t = ip + IP_HDR_LEN;
+    put16(t, sport);
+    put16(t + 2, dport);
+    put16(t + 4, seq >> 16);
+    put16(t + 6, seq & 0xFFFF);
+    put16(t + 8, ack >> 16);
+    put16(t + 10, ack & 0xFFFF);
+    t[12] = (unsigned char)((hlen / 4) << 4); /* header length in dwords */
+    t[13] = (unsigned char)flags;
+    put16(t + 14, window > 0xFFFF ? 0xFFFF : window); /* no window scaling: 16 bits is all there is */
+    put16(t + 16, 0);                                 /* checksum, filled in below */
+    put16(t + 18, 0);                                 /* urgent pointer, unused */
+    if (mss)
+    {
+        t[20] = 2; /* option kind 2: maximum segment size */
+        t[21] = 4;
+        put16(t + 22, mss);
+    }
+    for (unsigned i = 0; i < plen; i++)
+        t[hlen + i] = payload[i];
+    put16(t + 16, tcp_checksum(sip, dip, t, tcp_len));
+    return ETH_HDR_LEN + ip_len;
+}
+
+int tcp_parse(const unsigned char *f, unsigned len, TcpSeg *out)
+{
+    if (len < ETH_HDR_LEN + IP_HDR_LEN + TCP_HDR_LEN || get16(f + 12) != ETH_TYPE_IPV4)
+        return 0;
+    const unsigned char *ip = f + ETH_HDR_LEN;
+    if ((ip[0] >> 4) != 4)
+        return 0;
+    unsigned ihl = (unsigned)(ip[0] & 15) * 4;
+    unsigned ip_len = get16(ip + 2);
+    if (ihl < IP_HDR_LEN || ip_len < ihl + TCP_HDR_LEN || ETH_HDR_LEN + ip_len > len)
+        return 0;
+    if (ip[9] != IP_PROTO_TCP || (get16(ip + 6) & 0x3FFF) || net_checksum(ip, ihl) != 0)
+        return 0; /* 0x4000 (do not fragment) is fine; more-fragments or an offset is not */
+    const unsigned char *t = ip + ihl;
+    unsigned tcp_len = ip_len - ihl;
+    unsigned hlen = (unsigned)(t[12] >> 4) * 4;
+    if (hlen < TCP_HDR_LEN || hlen > tcp_len || tcp_checksum(ip + 12, ip + 16, t, tcp_len) != 0)
+        return 0;
+
+    out->mss = 0;
+    for (unsigned i = TCP_HDR_LEN; i < hlen;) /* options: kind, [length, data] */
+    {
+        unsigned kind = t[i];
+        if (kind == 0) /* end of options */
+            break;
+        if (kind == 1) /* no-op padding */
+        {
+            i++;
+            continue;
+        }
+        if (i + 1 >= hlen || t[i + 1] < 2 || i + t[i + 1] > hlen)
+            return 0; /* an option that does not fit */
+        if (kind == 2 && t[i + 1] == 4)
+            out->mss = get16(t + i + 2);
+        i += t[i + 1];
+    }
+
+    out->src_port = get16(t);
+    out->dst_port = get16(t + 2);
+    out->seq = (unsigned)get16(t + 4) << 16 | get16(t + 6);
+    out->ack = (unsigned)get16(t + 8) << 16 | get16(t + 10);
+    out->flags = t[13] & 0x3F;
+    out->window = get16(t + 14);
+    copy(out->dst_mac, f, 6);
+    copy(out->src_mac, f + 6, 6);
+    copy(out->src_ip, ip + 12, 4);
+    copy(out->dst_ip, ip + 16, 4);
+    out->payload = t + hlen;
+    out->payload_len = tcp_len - hlen;
+    return 1;
+}

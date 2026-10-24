@@ -131,4 +131,36 @@ int dns_parse_a(const unsigned char *msg, unsigned len, unsigned id, unsigned ch
 
 /* "10.0.2.15" -> 4 bytes. 1 on success; 0 for anything else (a name, a value over 255, a missing part). */
 int ip_parse(const char *s, unsigned char ip[4]);
+
+/* TCP (RFC 9293): a reliable byte stream. This is only the segment format; the connection logic is in tcp.c. */
+#define IP_PROTO_TCP 6
+#define TCP_HDR_LEN 20
+#define TCP_MAX_PAYLOAD 1460 /* the MSS we advertise: 1500 byte Ethernet payload - 20 IP - 20 TCP */
+#define TCP_FIN 0x01
+#define TCP_SYN 0x02
+#define TCP_RST 0x04
+#define TCP_PSH 0x08
+#define TCP_ACK 0x10
+
+typedef struct
+{
+    unsigned src_port, dst_port;
+    unsigned seq, ack; /* 32-bit sequence numbers wrap around: compare them with (int)(a - b) */
+    unsigned flags;    /* TCP_FIN | TCP_SYN | ... */
+    unsigned window;   /* how many more bytes the sender of this segment can take */
+    unsigned mss;      /* the MSS option of a SYN, 0 if the segment has none */
+    unsigned char src_mac[6], dst_mac[6];
+    unsigned char src_ip[4], dst_ip[4];
+    const unsigned char *payload; /* points into the parsed frame */
+    unsigned payload_len;
+} TcpSeg;
+
+/* Writes an Ethernet + IPv4 + TCP frame with correct checksums. `mss` != 0 adds the MSS option (for a SYN). Returns the
+ * frame length, or 0 if the payload is over TCP_MAX_PAYLOAD. */
+unsigned tcp_build(unsigned char *frame, const unsigned char src_mac[6], const unsigned char dst_mac[6],
+                   const unsigned char src_ip[4], const unsigned char dst_ip[4], unsigned src_port,
+                   unsigned dst_port, unsigned seq, unsigned ack, unsigned flags, unsigned window, unsigned mss,
+                   unsigned ip_id, const unsigned char *payload, unsigned payload_len);
+/* 1 and fills *out for a well-formed, unfragmented IPv4 TCP segment whose IP and TCP checksums are right. */
+int tcp_parse(const unsigned char *frame, unsigned len, TcpSeg *out);
 #endif

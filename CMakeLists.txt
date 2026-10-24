@@ -99,6 +99,7 @@ set(KERNEL_SOURCES
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/e1000.c               # network: Intel e1000 NIC driver (polled), raw Ethernet frames
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
+    kernel/net/tcp.c                 # network: TCP client (connect / send / receive / close, retransmission)
     kernel/net/net.c                 # network: ARP cache, answering ARP / ping, ping, boot self test
     kernel/storage/blk.c             # block devices: sector I/O and the write lock
     kernel/storage/part.c            # partition tables (GPT, MBR)
