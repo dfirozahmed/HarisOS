@@ -44,6 +44,12 @@ static unsigned DHCP_XID;
 static int DHCP_HAVE;
 static DhcpMsg DHCP_RX;
 
+/* the DNS answer net_resolve() is waiting for */
+static int DNS_WAIT;
+static unsigned DNS_ID, DNS_SPORT;
+static int DNS_STATE; /* 0 = waiting, 1 = got an address in DNS_IP, -1 = the server says there is none */
+static unsigned char DNS_IP[4];
+
 const unsigned char *net_ip(void) { return OUR_IP; }
 const unsigned char *net_gateway(void) { return GATEWAY; }
 const unsigned char *net_dns(void) { return DNS; }
@@ -144,6 +150,18 @@ static void handle_udp(const UdpPacket *u)
         if (dhcp_parse(u->payload, u->payload_len, &DHCP_RX) && DHCP_RX.xid == DHCP_XID)
             DHCP_HAVE = 1;
     }
+    /* a DNS answer: from our DNS server's port 53 to the port we asked from, addressed to us. Anyone else could
+     * guess an id, but not easily our source port and server address too. */
+    else if (DNS_WAIT && DNS_STATE == 0 && u->src_port == DNS_PORT && u->dst_port == DNS_SPORT &&
+             same(u->src_ip, DNS, 4) && same(u->dst_ip, OUR_IP, 4))
+    {
+        unsigned char ip[4];
+        int r = dns_parse_a(u->payload, u->payload_len, DNS_ID, ip);
+        if (r == 1)
+            copy(DNS_IP, ip, 4);
+        if (r != 0)
+            DNS_STATE = r;
+    }
 }
 
 int net_poll(void)
@@ -229,6 +247,57 @@ int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms)
     }
     PING_WAIT = 0;
     return rtt;
+}
+
+/* Sends a UDP datagram to `ip` (ARP first when the next hop's MAC is unknown). 0 on success. */
+static int udp_send(const unsigned char *ip, unsigned sport, unsigned dport, const unsigned char *data, unsigned len,
+                    unsigned arp_timeout_ms)
+{
+    unsigned char mac[6];
+    unsigned char f[ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + DNS_MAX_QUERY];
+    if (len > DNS_MAX_QUERY || !resolve(ip, mac, arp_timeout_ms))
+        return -1;
+    unsigned n = udp_build(f, net_mac(), mac, OUR_IP, ip, sport, dport, IP_ID++, data, len);
+    return n ? net_send(f, n) : -1;
+}
+
+/* DNS in two messages: we ask the server "what is the A record of example.com?" in a UDP datagram from a port we pick,
+ * and it answers from port 53 to that port with the address (a recursive server like QEMU's 10.0.2.3 asks the
+ * internet for us). Names written as dotted numbers are taken as they are. Returns 1 and the address, else 0. */
+int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms)
+{
+    if (ip_parse(name, ip))
+        return 1;
+    if (!net_present() || (DNS[0] | DNS[1] | DNS[2] | DNS[3]) == 0)
+        return 0;
+    unsigned char q[DNS_MAX_QUERY];
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        /* a new id and source port per try: an old, late answer then no longer matches */
+        unsigned r = (unsigned)timer_us() ^ ((unsigned)attempt * 0x9E37u);
+        DNS_ID = r & 0xFFFF;
+        DNS_SPORT = 49152 + (r >> 8) % 16000;
+        unsigned n = dns_build_query(q, DNS_ID, name);
+        if (!n)
+            return 0;
+        DNS_STATE = 0;
+        DNS_WAIT = 1;
+        if (udp_send(DNS, DNS_SPORT, DNS_PORT, q, n, timeout_ms) == 0)
+        {
+            unsigned long long end = timer_ms() + timeout_ms;
+            while (timer_ms() < end && DNS_STATE == 0)
+                net_poll();
+        }
+        DNS_WAIT = 0;
+        if (DNS_STATE == 1)
+        {
+            copy(ip, DNS_IP, 4);
+            return 1;
+        }
+        if (DNS_STATE == -1) /* a definite "no": asking again would get the same answer */
+            return 0;
+    }
+    return 0;
 }
 
 /* Sends one DHCP client message: from 0.0.0.0 to 255.255.255.255, Ethernet broadcast, port 68 to port 67. */
@@ -351,6 +420,19 @@ int net_self_test(void)
             ok++;
         }
     }
+    /* DNS: a dotted number must come back unchanged, a name needs the internet (the result is only reported) */
+    unsigned char addr[4];
+    if (net_resolve("10.1.2.3", addr, 100) && addr[3] == 3)
+        serial_puts("HARISOS: network: dns literal ok\n");
+    serial_puts("HARISOS: network: dns example.com ");
+    if (net_resolve("example.com", addr, 1500))
+    {
+        put_ip(addr);
+        serial_puts("\n");
+    }
+    else
+        serial_puts("not resolved (no internet, or no DNS server)\n");
+
     const ArpEntry *g = cache_find(GATEWAY);
     if (g)
     {

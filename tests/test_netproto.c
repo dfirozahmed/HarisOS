@@ -143,6 +143,77 @@ int main(void)
     bad_opt[236] = 0; /* no magic cookie */
     CHECK(!dhcp_parse(bad_opt, sizeof bad_opt, &m));
     CHECK(!dhcp_parse(o, 100, &m));
+
+    /* DNS query layout: header, 7 'example' 3 'com' 0, type A, class IN */
+    unsigned char q[DNS_MAX_QUERY];
+    unsigned ql = dns_build_query(q, 0xBEEF, "example.com");
+    CHECK(ql == 12 + 1 + 7 + 1 + 3 + 1 + 4);
+    CHECK(q[0] == 0xBE && q[1] == 0xEF && q[2] == 0x01 && q[3] == 0x00 && q[5] == 1 && q[7] == 0);
+    CHECK(q[12] == 7 && memcmp(q + 13, "example", 7) == 0 && q[20] == 3 && memcmp(q + 21, "com", 3) == 0 && q[24] == 0);
+    CHECK(q[25] == 0 && q[26] == 1 && q[27] == 0 && q[28] == 1);
+    CHECK(dns_build_query(q, 1, "example.com.") == ql); /* trailing dot is the same name */
+    CHECK(dns_build_query(q, 1, "localhost") == 12 + 1 + 9 + 1 + 4); /* a single label works */
+    CHECK(dns_build_query(q, 1, "") == 0 && dns_build_query(q, 1, ".") == 0);
+    CHECK(dns_build_query(q, 1, "a..b") == 0 && dns_build_query(q, 1, ".a.b") == 0);
+    CHECK(dns_build_query(q, 1, "bad name.com") == 0 && dns_build_query(q, 1, "a/b.com") == 0);
+    char big[300];
+    memset(big, 'a', 64); big[64] = 0;
+    CHECK(dns_build_query(q, 1, big) == 0); /* label of 64 */
+    memset(big, 'a', 63); big[63] = 0;
+    CHECK(dns_build_query(q, 1, big) == 12 + 1 + 63 + 1 + 4);
+    /* whole name: 4 labels of 63 = 4*64+1 = 257 encoded bytes -> too long; 3 labels of 63 + a short one fits */
+    char longname[300];
+    int ln = 0;
+    for (int k = 0; k < 4; k++)
+    {
+        for (int i = 0; i < 63; i++)
+            longname[ln++] = 'a';
+        longname[ln++] = '.';
+    }
+    longname[ln - 1] = 0;
+    CHECK(dns_build_query(q, 1, longname) == 0);
+    longname[63 * 3 + 3] = 0; /* three labels: 3*64+1 = 193 encoded bytes */
+    CHECK(dns_build_query(q, 1, longname) == 12 + 193 + 4);
+
+    /* DNS answers: build one by hand (query copy + CNAME + A with a compression pointer) */
+    unsigned char r[512];
+    unsigned rl = dns_build_query(r, 0x1234, "www.example.com");
+    r[2] = 0x81; r[3] = 0x80; /* response, recursion desired + available, RCODE 0 */
+    r[7] = 2;                 /* two answers */
+    const unsigned char cname[] = {0xC0, 12, 0, 5, 0, 1, 0, 0, 0, 60, 0, 2, 0xC0, 12}; /* CNAME -> pointer */
+    const unsigned char arec[] = {0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 93, 184, 216, 34};
+    memcpy(r + rl, cname, sizeof cname);
+    memcpy(r + rl + sizeof cname, arec, sizeof arec);
+    unsigned rn = rl + sizeof cname + sizeof arec;
+    unsigned char got[4];
+    CHECK(dns_parse_a(r, rn, 0x1234, got) == 1 && got[0] == 93 && got[1] == 184 && got[2] == 216 && got[3] == 34);
+    CHECK(dns_parse_a(r, rn, 0x1235, got) == 0);     /* another query's id */
+    CHECK(dns_parse_a(r, rn - 1, 0x1234, got) == 0); /* cut inside the last record */
+    CHECK(dns_parse_a(r, 11, 0x1234, got) == 0);
+    unsigned char t[512];
+    memcpy(t, r, rn);
+    t[2] = 0x01; /* QR bit clear: that is a query, not an answer */
+    CHECK(dns_parse_a(t, rn, 0x1234, got) == 0);
+    memcpy(t, r, rn);
+    t[3] = 0x83; /* RCODE 3: name does not exist */
+    CHECK(dns_parse_a(t, rn, 0x1234, got) == -1);
+    memcpy(t, r, rn);
+    t[7] = 1; /* only the CNAME is counted: no address */
+    CHECK(dns_parse_a(t, rn, 0x1234, got) == -1);
+    memcpy(t, r, rn);
+    t[rl + 11] = 0xFF; /* CNAME data length far beyond the message */
+    CHECK(dns_parse_a(t, rn, 0x1234, got) == 0);
+    memcpy(t, r, rn);
+    t[12] = 0x80; /* a reserved label type in the question */
+    CHECK(dns_parse_a(t, rn, 0x1234, got) == 0);
+
+    /* IPv4 text */
+    unsigned char pip[4];
+    CHECK(ip_parse("10.0.2.15", pip) && pip[0] == 10 && pip[1] == 0 && pip[2] == 2 && pip[3] == 15);
+    CHECK(ip_parse("255.255.255.255", pip) && pip[3] == 255);
+    CHECK(!ip_parse("256.1.1.1", pip) && !ip_parse("1.2.3", pip) && !ip_parse("1.2.3.4.5", pip));
+    CHECK(!ip_parse("1.2.3.", pip) && !ip_parse("a.b.c.d", pip) && !ip_parse("", pip) && !ip_parse("1.2.3.4 ", pip));
+    CHECK(!ip_parse("1..2.3", pip) && !ip_parse("example.com", pip) && !ip_parse("0001.2.3.4", pip));
     if (fails == 0)
         printf("netproto tests passed\n");
     return fails ? 1 : 0;

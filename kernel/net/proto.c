@@ -342,3 +342,131 @@ int dhcp_parse(const unsigned char *d, unsigned len, DhcpMsg *out)
         return 0;
     return 1;
 }
+
+/* ---- DNS ---- */
+
+unsigned dns_build_query(unsigned char *o, unsigned id, const char *name)
+{
+    put16(o, id);
+    put16(o + 2, 0x0100); /* standard query, recursion desired */
+    put16(o + 4, 1);      /* one question */
+    put16(o + 6, 0);
+    put16(o + 8, 0);
+    put16(o + 10, 0);
+
+    if (*name == 0)
+        return 0;
+    unsigned pos = 12;
+    const char *p = name;
+    while (*p)
+    {
+        unsigned n = 0; /* length of this label */
+        while (p[n] && p[n] != '.')
+        {
+            char c = p[n];
+            int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+            if (!ok)
+                return 0;
+            n++;
+        }
+        if (n == 0 || n > 63 || pos - 12 + n + 1 + 1 > 255) /* empty label, too long label, name over 255 encoded bytes */
+            return 0;
+        o[pos++] = (unsigned char)n; /* a label is its length, then its characters */
+        for (unsigned i = 0; i < n; i++)
+            o[pos++] = (unsigned char)p[i];
+        p += n;
+        if (*p == '.')
+        {
+            p++;
+            if (*p == 0) /* one trailing dot ("example.com.") is the same name */
+                break;
+        }
+    }
+    o[pos++] = 0;           /* the root label ends the name */
+    put16(o + pos, 1);      /* type A */
+    put16(o + pos + 2, 1);  /* class IN */
+    return pos + 4;
+}
+
+/* Skips a name at *pos: labels, or a compression pointer (2 bytes, end of name). 1 if it stayed inside the message. */
+static int dns_skip_name(const unsigned char *m, unsigned len, unsigned *pos)
+{
+    unsigned i = *pos;
+    for (;;)
+    {
+        if (i >= len)
+            return 0;
+        unsigned c = m[i];
+        if (c == 0)
+        {
+            *pos = i + 1;
+            return 1;
+        }
+        if ((c & 0xC0) == 0xC0)
+        {
+            if (i + 2 > len)
+                return 0;
+            *pos = i + 2;
+            return 1;
+        }
+        if (c & 0xC0) /* 0x40 / 0x80 label types are not defined */
+            return 0;
+        i += c + 1;
+    }
+}
+
+int dns_parse_a(const unsigned char *m, unsigned len, unsigned id, unsigned char ip[4])
+{
+    if (len < 12 || get16(m) != id)
+        return 0;
+    unsigned flags = get16(m + 2);
+    if (!(flags & 0x8000) || ((flags >> 11) & 15) != 0) /* must be a response to a standard query */
+        return 0;
+    unsigned qd = get16(m + 4), an = get16(m + 6), pos = 12;
+    if (qd != 1)
+        return 0;
+    if ((flags & 15) != 0) /* RCODE: 3 = name does not exist, 2 = server failure ... */
+        return -1;
+    for (unsigned i = 0; i < qd; i++)
+    {
+        if (!dns_skip_name(m, len, &pos) || pos + 4 > len)
+            return 0;
+        pos += 4;
+    }
+    for (unsigned i = 0; i < an; i++)
+    {
+        if (!dns_skip_name(m, len, &pos) || pos + 10 > len)
+            return 0;
+        unsigned type = get16(m + pos), cls = get16(m + pos + 2), rdlen = get16(m + pos + 8);
+        pos += 10;
+        if (rdlen > len - pos)
+            return 0;
+        if (type == 1 && cls == 1 && rdlen == 4)
+        {
+            copy(ip, m + pos, 4);
+            return 1;
+        }
+        pos += rdlen; /* CNAME and others: the A record of the target usually follows in the same answer */
+    }
+    return -1;
+}
+
+int ip_parse(const char *s, unsigned char ip[4])
+{
+    for (int part = 0; part < 4; part++)
+    {
+        unsigned v = 0, digits = 0;
+        while (*s >= '0' && *s <= '9')
+        {
+            v = v * 10 + (unsigned)(*s++ - '0');
+            if (++digits > 3 || v > 255)
+                return 0;
+        }
+        if (digits == 0)
+            return 0;
+        ip[part] = (unsigned char)v;
+        if (part < 3 && *s++ != '.')
+            return 0;
+    }
+    return *s == 0;
+}

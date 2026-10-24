@@ -7,7 +7,9 @@
  *   net_recv(buf, max);               length of the next received frame (without CRC), or 0 if none waits
  *   net_ip(); net_gateway(); net_dns();  our IPv4 address and the servers; 0.0.0.0 until net_dhcp() or the self
  *                                     test's fallback sets them
- *   net_dhcp(timeout_ms);             asks a DHCP server for an address (3 tries, timeout per answer); 1 on success
+ *   net_resolve(name, ip, timeout_ms);  name -> IPv4 through the DNS server (2 tries, timeout per try); a dotted
+ *                                     number is returned as it is; 1 and ip[4] on success
+ *   net_dhcp(timeout_ms);            asks a DHCP server for an address (3 tries, timeout per answer); 1 on success
  *   net_poll();                       handles the frames that arrived: learns ARP answers, answers ARP and ping
  *                                     requests for us; returns how many it read. Call it while waiting.
  *   net_ping(ip, seq, timeout_ms);    echo request to ip (ARP first when needed); round trip in ms, or -1
@@ -27,6 +29,7 @@ const unsigned char *net_ip(void);
 const unsigned char *net_gateway(void);
 const unsigned char *net_dns(void);
 int net_dhcp(unsigned timeout_ms);
+int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms);
 int net_poll(void);
 int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms);
 int net_self_test(void);

@@ -114,4 +114,21 @@ unsigned dhcp_build(unsigned char *out, unsigned type, const unsigned char mac[6
  * run past the end make it fail. *out is overwritten even on failure. */
 int dhcp_parse(const unsigned char *data, unsigned len, DhcpMsg *out);
 
+
+/* DNS (RFC 1035): ask a server for the IPv4 address (A record) of a name, over UDP port 53. */
+#define DNS_PORT 53
+#define DNS_MAX_QUERY 272 /* 12 header + up to 255 name bytes + 4 (type, class) */
+
+/* Writes a standard recursive query for the A record of `name` ("example.com", a trailing dot is fine). Returns the
+ * length, or 0 if the name is not valid: empty, a label empty or over 63 bytes, whole name over 253 characters, or a
+ * character other than letters, digits, '-' and '_'. */
+unsigned dns_build_query(unsigned char *out, unsigned id, const char *name);
+/* Reads a reply to the query with this id. Gives 1 and the first A record in ip[4]; 0 when the message is not a usable
+ * reply to this query (wrong id, not a response, truncated or malformed) so the caller keeps waiting; -1 when the server
+ * answered but there is no address (name does not exist, server failure, no A record). Compressed names are skipped, never
+ * followed, so a hostile reply cannot loop us. */
+int dns_parse_a(const unsigned char *msg, unsigned len, unsigned id, unsigned char ip[4]);
+
+/* "10.0.2.15" -> 4 bytes. 1 on success; 0 for anything else (a name, a value over 255, a missing part). */
+int ip_parse(const char *s, unsigned char ip[4]);
 #endif
