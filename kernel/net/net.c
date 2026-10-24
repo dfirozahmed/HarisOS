@@ -23,9 +23,10 @@ typedef struct
     int valid;
 } ArpEntry;
 
-static const unsigned char OUR_IP[4] = {10, 0, 2, 15};
-static const unsigned char NETMASK[4] = {255, 255, 255, 0};
-static const unsigned char GATEWAY[4] = {10, 0, 2, 2};
+static unsigned char OUR_IP[4]; /* 0.0.0.0 until DHCP (or the fallback) sets it */
+static unsigned char NETMASK[4] = {255, 255, 255, 0};
+static unsigned char GATEWAY[4];
+static unsigned char DNS[4];
 static const unsigned char BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 static ArpEntry CACHE[ARP_CACHE_SIZE];
@@ -37,7 +38,15 @@ static int PING_WAIT;
 static unsigned PING_ID, PING_SEQ;
 static int PING_GOT;
 
+/* the DHCP answer net_dhcp() is waiting for: parsed in place, only when its transaction id is ours */
+static int DHCP_WAIT;
+static unsigned DHCP_XID;
+static int DHCP_HAVE;
+static DhcpMsg DHCP_RX;
+
 const unsigned char *net_ip(void) { return OUR_IP; }
+const unsigned char *net_gateway(void) { return GATEWAY; }
+const unsigned char *net_dns(void) { return DNS; }
 
 static int same(const unsigned char *a, const unsigned char *b, int n)
 {
@@ -127,6 +136,16 @@ static void handle_echo(const IcmpEcho *e)
         PING_GOT = 1;
 }
 
+static void handle_udp(const UdpPacket *u)
+{
+    /* DHCP answers come from port 67 to port 68, before we own an address, so the destination ip is not checked */
+    if (DHCP_WAIT && !DHCP_HAVE && u->src_port == DHCP_SERVER_PORT && u->dst_port == DHCP_CLIENT_PORT)
+    {
+        if (dhcp_parse(u->payload, u->payload_len, &DHCP_RX) && DHCP_RX.xid == DHCP_XID)
+            DHCP_HAVE = 1;
+    }
+}
+
 int net_poll(void)
 {
     unsigned char r[NET_MAX_FRAME];
@@ -137,10 +156,13 @@ int net_poll(void)
     {
         ArpPacket a;
         IcmpEcho e;
+        UdpPacket u;
         if (arp_parse(r, (unsigned)n, &a))
             handle_arp(&a);
         else if (icmp_echo_parse(r, (unsigned)n, &e))
             handle_echo(&e);
+        else if (udp_parse(r, (unsigned)n, &u))
+            handle_udp(&u);
         handled++;
     }
     return handled;
@@ -209,6 +231,78 @@ int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms)
     return rtt;
 }
 
+/* Sends one DHCP client message: from 0.0.0.0 to 255.255.255.255, Ethernet broadcast, port 68 to port 67. */
+static int dhcp_send(unsigned type, const unsigned char *requested_ip, const unsigned char *server_id)
+{
+    static const unsigned char any[4] = {0, 0, 0, 0}, all[4] = {255, 255, 255, 255};
+    unsigned char payload[DHCP_MIN_LEN];
+    unsigned char f[ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN + DHCP_MIN_LEN];
+    unsigned pn = dhcp_build(payload, type, net_mac(), DHCP_XID, requested_ip, server_id);
+    unsigned n = udp_build(f, net_mac(), BROADCAST_MAC, any, all, DHCP_CLIENT_PORT, DHCP_SERVER_PORT, IP_ID++, payload, pn);
+    return n ? net_send(f, n) : -1;
+}
+
+/* Waits for a DHCP message of type `want` (or a NAK); 1 when it arrived, 0 on timeout. */
+static int dhcp_wait(unsigned want, unsigned timeout_ms)
+{
+    unsigned long long end = timer_ms() + timeout_ms;
+    while (timer_ms() < end)
+    {
+        net_poll();
+        if (DHCP_HAVE)
+        {
+            if (DHCP_RX.type == want || DHCP_RX.type == DHCP_NAK)
+                return 1;
+            DHCP_HAVE = 0; /* some other message with our id (a second offer, say): keep waiting */
+        }
+    }
+    return 0;
+}
+
+/* DHCP in four messages: we broadcast DISCOVER ("any server there?"), a server answers OFFER ("you could have
+ * 10.0.2.15"), we broadcast REQUEST ("I take 10.0.2.15 from server X") and the server confirms with ACK, which also
+ * carries the subnet mask, the router (gateway), the DNS server and the lease time. */
+int net_dhcp(unsigned timeout_ms)
+{
+    if (!net_present())
+        return 0;
+    for (int attempt = 0; attempt < 3; attempt++)
+    {
+        /* a fresh transaction id each try, so a late answer to an older try is ignored */
+        DHCP_XID = (unsigned)timer_us() ^ ((unsigned)net_mac()[5] << 8 | net_mac()[4]) ^ (unsigned)attempt;
+        DHCP_HAVE = 0;
+        DHCP_WAIT = 1;
+
+        int got = dhcp_send(DHCP_DISCOVER, 0, 0) == 0 && dhcp_wait(DHCP_OFFER, timeout_ms) && DHCP_RX.type == DHCP_OFFER &&
+                  DHCP_RX.has_server;
+        if (got)
+        {
+            unsigned char offered[4], server[4];
+            copy(offered, DHCP_RX.yiaddr, 4);
+            copy(server, DHCP_RX.server_id, 4);
+            DHCP_HAVE = 0;
+            got = dhcp_send(DHCP_REQUEST, offered, server) == 0 && dhcp_wait(DHCP_ACK, timeout_ms) &&
+                  DHCP_RX.type == DHCP_ACK;
+        }
+        if (got)
+        {
+            copy(OUR_IP, DHCP_RX.yiaddr, 4);
+            if (DHCP_RX.has_mask)
+                copy(NETMASK, DHCP_RX.mask, 4);
+            if (DHCP_RX.has_router)
+                copy(GATEWAY, DHCP_RX.router, 4);
+            if (DHCP_RX.has_dns)
+                copy(DNS, DHCP_RX.dns, 4);
+            for (int i = 0; i < ARP_CACHE_SIZE; i++)
+                CACHE[i].valid = 0; /* entries from an older network are wrong now */
+            DHCP_WAIT = 0;
+            return 1;
+        }
+    }
+    DHCP_WAIT = 0;
+    return 0;
+}
+
 int net_self_test(void)
 {
     if (!net_present())
@@ -218,8 +312,26 @@ int net_self_test(void)
     }
     serial_puts("HARISOS: network: e1000 mac ");
     put_mac(net_mac());
-    serial_puts(net_link_up() ? ", link up, ip " : ", link down, ip ");
+    serial_puts(net_link_up() ? ", link up\n" : ", link down\n");
+
+    if (net_dhcp(2000))
+        serial_puts("HARISOS: network: dhcp ok, ip ");
+    else
+    {
+        /* no DHCP server: use the address QEMU's user network would have given */
+        static const unsigned char ip[4] = {10, 0, 2, 15}, gw[4] = {10, 0, 2, 2}, dns[4] = {10, 0, 2, 3};
+        copy(OUR_IP, ip, 4);
+        copy(GATEWAY, gw, 4);
+        copy(DNS, dns, 4);
+        serial_puts("HARISOS: network: dhcp failed, static ip ");
+    }
     put_ip(OUR_IP);
+    serial_puts(", gateway ");
+    put_ip(GATEWAY);
+    serial_puts(", dns ");
+    put_ip(DNS);
+    serial_puts(", mask ");
+    put_ip(NETMASK);
     serial_puts("\n");
 
     /* the first ARP answer can take a second in QEMU (its TCG main loop is slow to deliver), so wait generously */

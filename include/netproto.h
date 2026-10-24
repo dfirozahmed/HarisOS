@@ -59,4 +59,59 @@ unsigned icmp_echo_build(unsigned char *frame, const unsigned char src_mac[6], c
  * ICMP checksums are right. Everything else gives 0. */
 int icmp_echo_parse(const unsigned char *frame, unsigned len, IcmpEcho *out);
 
+
+#define IP_PROTO_UDP 17
+#define UDP_HDR_LEN 8
+#define UDP_MAX_PAYLOAD 1400
+
+typedef struct
+{
+    unsigned src_port, dst_port;
+    unsigned char src_mac[6], dst_mac[6];
+    unsigned char src_ip[4], dst_ip[4];
+    const unsigned char *payload; /* points into the parsed frame */
+    unsigned payload_len;
+} UdpPacket;
+
+/* Writes an Ethernet + IPv4 + UDP frame; the UDP checksum covers the pseudo header (addresses + protocol + length)
+ * as RFC 768 asks. Returns the frame length, or 0 if the payload is longer than UDP_MAX_PAYLOAD. */
+unsigned udp_build(unsigned char *frame, const unsigned char src_mac[6], const unsigned char dst_mac[6],
+                   const unsigned char src_ip[4], const unsigned char dst_ip[4], unsigned src_port,
+                   unsigned dst_port, unsigned ip_id, const unsigned char *payload, unsigned payload_len);
+/* 1 and fills *out for a well-formed, unfragmented IPv4 UDP datagram with right IP checksum and (when the sender
+ * used one) right UDP checksum. A UDP checksum field of 0 means "none" and is accepted. */
+int udp_parse(const unsigned char *frame, unsigned len, UdpPacket *out);
+
+/* DHCP (RFC 2131): how a host without an address asks for one. Ports: client 68, server 67. */
+#define DHCP_CLIENT_PORT 68
+#define DHCP_SERVER_PORT 67
+#define DHCP_DISCOVER 1
+#define DHCP_OFFER 2
+#define DHCP_REQUEST 3
+#define DHCP_ACK 5
+#define DHCP_NAK 6
+#define DHCP_MIN_LEN 300 /* old servers drop shorter messages (BOOTP minimum) */
+
+typedef struct
+{
+    unsigned type; /* DHCP_OFFER, DHCP_ACK, ... (option 53) */
+    unsigned xid;
+    unsigned char yiaddr[4];    /* the address offered / granted to us */
+    unsigned char server_id[4]; /* option 54 */
+    unsigned char mask[4];      /* option 1 */
+    unsigned char router[4];    /* option 3, the first one */
+    unsigned char dns[4];       /* option 6, the first one */
+    unsigned lease_s;     /* option 51 */
+    int has_server, has_mask, has_router, has_dns;
+} DhcpMsg;
+
+/* Writes a DHCP client message (DISCOVER or REQUEST) into `out` (room for DHCP_MIN_LEN bytes). Broadcast flag set, so
+ * the server may answer before we own an address. `requested_ip` / `server_id` are added when not NULL (REQUEST).
+ * Returns the length (DHCP_MIN_LEN). */
+unsigned dhcp_build(unsigned char *out, unsigned type, const unsigned char mac[6], unsigned xid,
+                    const unsigned char *requested_ip, const unsigned char *server_id);
+/* 1 and fills *out if `data` is a well-formed BOOTREPLY with the DHCP magic cookie and a message type; options that
+ * run past the end make it fail. *out is overwritten even on failure. */
+int dhcp_parse(const unsigned char *data, unsigned len, DhcpMsg *out);
+
 #endif

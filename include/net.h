@@ -5,7 +5,9 @@
  *   net_mac();                        its 6-byte MAC address
  *   net_send(frame, len);             send a whole Ethernet frame (without the CRC); 0 on success
  *   net_recv(buf, max);               length of the next received frame (without CRC), or 0 if none waits
- *   net_ip();                         our IPv4 address (fixed 10.0.2.15 for now, the QEMU user network; DHCP later)
+ *   net_ip(); net_gateway(); net_dns();  our IPv4 address and the servers; 0.0.0.0 until net_dhcp() or the self
+ *                                     test's fallback sets them
+ *   net_dhcp(timeout_ms);             asks a DHCP server for an address (3 tries, timeout per answer); 1 on success
  *   net_poll();                       handles the frames that arrived: learns ARP answers, answers ARP and ping
  *                                     requests for us; returns how many it read. Call it while waiting.
  *   net_ping(ip, seq, timeout_ms);    echo request to ip (ARP first when needed); round trip in ms, or -1
@@ -22,6 +24,9 @@ int net_link_up(void);
 int net_send(const void *frame, unsigned len);
 int net_recv(void *buf, unsigned max);
 const unsigned char *net_ip(void);
+const unsigned char *net_gateway(void);
+const unsigned char *net_dns(void);
+int net_dhcp(unsigned timeout_ms);
 int net_poll(void);
 int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms);
 int net_self_test(void);

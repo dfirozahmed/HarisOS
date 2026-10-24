@@ -136,3 +136,209 @@ int icmp_echo_parse(const unsigned char *f, unsigned len, IcmpEcho *out)
     out->payload_len = icmp_len - ICMP_HDR_LEN;
     return 1;
 }
+
+/* ---- UDP ---- */
+
+/* Adds `len` bytes as 16-bit words to a running ones' complement sum (an odd last byte is padded with zero). */
+static unsigned long sum_add(unsigned long sum, const unsigned char *p, unsigned len)
+{
+    for (; len >= 2; len -= 2, p += 2)
+        sum += get16(p);
+    if (len)
+        sum += (unsigned long)p[0] << 8;
+    return sum;
+}
+
+static unsigned short sum_finish(unsigned long sum)
+{
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return (unsigned short)~sum;
+}
+
+/* UDP checksum: the sum over the pseudo header (source ip, destination ip, zero, protocol, UDP length) and the UDP
+ * header + data. With the checksum field in place, a correct datagram sums to 0. */
+static unsigned short udp_checksum(const unsigned char sip[4], const unsigned char dip[4], const unsigned char *udp,
+                                   unsigned udp_len)
+{
+    unsigned long sum = sum_add(0, sip, 4);
+    sum = sum_add(sum, dip, 4);
+    sum += IP_PROTO_UDP;
+    sum += udp_len;
+    return sum_finish(sum_add(sum, udp, udp_len));
+}
+
+unsigned udp_build(unsigned char *f, const unsigned char smac[6], const unsigned char dmac[6],
+                   const unsigned char sip[4], const unsigned char dip[4], unsigned sport, unsigned dport,
+                   unsigned ip_id, const unsigned char *payload, unsigned plen)
+{
+    if (plen > UDP_MAX_PAYLOAD)
+        return 0;
+    unsigned udp_len = UDP_HDR_LEN + plen;
+    unsigned ip_len = IP_HDR_LEN + udp_len;
+
+    copy(f, dmac, 6);
+    copy(f + 6, smac, 6);
+    put16(f + 12, ETH_TYPE_IPV4);
+
+    unsigned char *ip = f + ETH_HDR_LEN;
+    ip[0] = 0x45;
+    ip[1] = 0;
+    put16(ip + 2, ip_len);
+    put16(ip + 4, ip_id);
+    put16(ip + 6, 0);
+    ip[8] = 64;
+    ip[9] = IP_PROTO_UDP;
+    put16(ip + 10, 0);
+    copy(ip + 12, sip, 4);
+    copy(ip + 16, dip, 4);
+    put16(ip + 10, net_checksum(ip, IP_HDR_LEN));
+
+    unsigned char *u = ip + IP_HDR_LEN;
+    put16(u, sport);
+    put16(u + 2, dport);
+    put16(u + 4, udp_len);
+    put16(u + 6, 0);
+    for (unsigned i = 0; i < plen; i++)
+        u[UDP_HDR_LEN + i] = payload[i];
+    unsigned short c = udp_checksum(sip, dip, u, udp_len);
+    put16(u + 6, c ? c : 0xFFFF); /* a computed 0 is sent as all ones, because 0 means "no checksum" */
+    return ETH_HDR_LEN + ip_len;
+}
+
+int udp_parse(const unsigned char *f, unsigned len, UdpPacket *out)
+{
+    if (len < ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN || get16(f + 12) != ETH_TYPE_IPV4)
+        return 0;
+    const unsigned char *ip = f + ETH_HDR_LEN;
+    if ((ip[0] >> 4) != 4)
+        return 0;
+    unsigned ihl = (unsigned)(ip[0] & 15) * 4;
+    unsigned ip_len = get16(ip + 2);
+    if (ihl < IP_HDR_LEN || ip_len < ihl + UDP_HDR_LEN || ETH_HDR_LEN + ip_len > len)
+        return 0;
+    if (ip[9] != IP_PROTO_UDP || (get16(ip + 6) & 0x3FFF) || net_checksum(ip, ihl) != 0)
+        return 0;
+    const unsigned char *u = ip + ihl;
+    unsigned udp_len = get16(u + 4);
+    if (udp_len < UDP_HDR_LEN || udp_len > ip_len - ihl)
+        return 0;
+    if (get16(u + 6) != 0 && udp_checksum(ip + 12, ip + 16, u, udp_len) != 0)
+        return 0;
+    out->src_port = get16(u);
+    out->dst_port = get16(u + 2);
+    copy(out->dst_mac, f, 6);
+    copy(out->src_mac, f + 6, 6);
+    copy(out->src_ip, ip + 12, 4);
+    copy(out->dst_ip, ip + 16, 4);
+    out->payload = u + UDP_HDR_LEN;
+    out->payload_len = udp_len - UDP_HDR_LEN;
+    return 1;
+}
+
+/* ---- DHCP ---- */
+
+/* BOOTP layout: op htype hlen hops | xid | secs flags | ciaddr yiaddr siaddr giaddr | chaddr[16] | sname[64] |
+ * file[128] | magic cookie 63 82 53 63 | options (code, length, data ... 255). */
+#define BOOTP_YIADDR 16
+#define BOOTP_CHADDR 28
+#define BOOTP_COOKIE 236
+#define BOOTP_OPTIONS 240
+
+unsigned dhcp_build(unsigned char *o, unsigned type, const unsigned char mac[6], unsigned xid,
+                    const unsigned char *requested_ip, const unsigned char *server_id)
+{
+    for (unsigned i = 0; i < DHCP_MIN_LEN; i++)
+        o[i] = 0;
+    o[0] = 1; /* BOOTREQUEST */
+    o[1] = 1; /* Ethernet */
+    o[2] = 6;
+    o[4] = (unsigned char)(xid >> 24);
+    o[5] = (unsigned char)(xid >> 16);
+    o[6] = (unsigned char)(xid >> 8);
+    o[7] = (unsigned char)xid;
+    put16(o + 10, 0x8000); /* flags: please answer by broadcast */
+    copy(o + BOOTP_CHADDR, mac, 6);
+    o[BOOTP_COOKIE] = 0x63;
+    o[BOOTP_COOKIE + 1] = 0x82;
+    o[BOOTP_COOKIE + 2] = 0x53;
+    o[BOOTP_COOKIE + 3] = 0x63;
+
+    unsigned char *p = o + BOOTP_OPTIONS;
+    *p++ = 53; *p++ = 1; *p++ = (unsigned char)type;
+    if (requested_ip)
+    {
+        *p++ = 50; *p++ = 4;
+        copy(p, requested_ip, 4);
+        p += 4;
+    }
+    if (server_id)
+    {
+        *p++ = 54; *p++ = 4;
+        copy(p, server_id, 4);
+        p += 4;
+    }
+    *p++ = 55; *p++ = 4;       /* parameter request list: what we want to know */
+    *p++ = 1; *p++ = 3; *p++ = 6; *p++ = 51; /* subnet mask, router, DNS server, lease time */
+    *p++ = 255;                /* end; the rest of the message is already zero padding */
+    return DHCP_MIN_LEN;
+}
+
+int dhcp_parse(const unsigned char *d, unsigned len, DhcpMsg *out)
+{
+    if (len < BOOTP_OPTIONS || d[0] != 2 || d[1] != 1 || d[2] != 6) /* BOOTREPLY over Ethernet */
+        return 0;
+    if (d[BOOTP_COOKIE] != 0x63 || d[BOOTP_COOKIE + 1] != 0x82 || d[BOOTP_COOKIE + 2] != 0x53 ||
+        d[BOOTP_COOKIE + 3] != 0x63)
+        return 0;
+    DhcpMsg *m = out; /* filled in place: a struct copy could become a memcpy call, and the kernel has none */
+    volatile unsigned char *z = (volatile unsigned char *)m; /* no memset in the kernel */
+    for (unsigned i = 0; i < sizeof *m; i++)
+        z[i] = 0;
+    m->xid = (unsigned)d[4] << 24 | (unsigned)d[5] << 16 | (unsigned)d[6] << 8 | d[7];
+    copy(m->yiaddr, d + BOOTP_YIADDR, 4);
+
+    unsigned i = BOOTP_OPTIONS;
+    while (i < len)
+    {
+        unsigned code = d[i++];
+        if (code == 255)
+            break;
+        if (code == 0) /* padding */
+            continue;
+        if (i >= len)
+            return 0;
+        unsigned n = d[i++];
+        if (n > len - i) /* the option runs past the end */
+            return 0;
+        const unsigned char *v = d + i;
+        if (code == 53 && n == 1)
+            m->type = v[0];
+        else if (code == 54 && n == 4)
+        {
+            copy(m->server_id, v, 4);
+            m->has_server = 1;
+        }
+        else if (code == 1 && n == 4)
+        {
+            copy(m->mask, v, 4);
+            m->has_mask = 1;
+        }
+        else if (code == 3 && n >= 4)
+        {
+            copy(m->router, v, 4);
+            m->has_router = 1;
+        }
+        else if (code == 6 && n >= 4)
+        {
+            copy(m->dns, v, 4);
+            m->has_dns = 1;
+        }
+        else if (code == 51 && n == 4)
+            m->lease_s = (unsigned)v[0] << 24 | (unsigned)v[1] << 16 | (unsigned)v[2] << 8 | v[3];
+        i += n;
+    }
+    if (m->type == 0)
+        return 0;
+    return 1;
+}
