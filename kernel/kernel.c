@@ -382,6 +382,8 @@ void kernel_main(const BootInfo *info)
             blk_seen = blk_generation();
             worked = 1;
         }
+        if (net_present() && net_poll() > 0) /* the network keeps running while nobody waits for it: ACKs, retransmit timers, ping */
+            worked = 1;                      /* frames arrived: look again at once, more may be behind them */
         if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
             worked = 1;
         int others = task_others_ready();

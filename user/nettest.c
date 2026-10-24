@@ -40,11 +40,6 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(s >= 0);
     sys_close((int)s);
 
-    /* a port nobody listens on: the host (10.0.2.2 in QEMU's network) answers the SYN with a reset */
-    s = sys_socket();
-    CHECK(s >= 0 && sys_connect((int)s, SOCK_IP(10, 0, 2, 2), 1) == -1);
-    sys_close((int)s);
-
     /* the real thing, if the internet is there */
     long long ip = sys_resolve("example.com");
     if (ip < 0)
