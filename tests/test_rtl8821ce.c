@@ -13,7 +13,7 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
-static _Alignas(4096) unsigned char REGS[0x2000];
+static _Alignas(4096) unsigned char REGS[0x4000];
 static unsigned char SNAP[sizeof REGS];
 static u32 CFG_CMD;
 static int BAR_KIND; /* 0 = 64 bit memory BAR at REGS, 1 = I/O BAR, 2 = empty */
@@ -55,6 +55,10 @@ static unsigned char *dma2host(u32 dma)
 /* ---- the efuse the pretend chip holds (physical map, 512 bytes) ---- */
 static unsigned char EFUSE_MAP[512];
 static int KNOB_EFUSE_STUCK;
+static int KNOB_LLT_STUCK;
+static int PH_BREAK_RF_READBACK; /* the RF window does not follow the SIPI writes */
+static unsigned PH_FLIP_RF_BITS; /* the chip itself changes these bits of RF register 0x18 and 0x51 */
+static unsigned char EFUSE_RFE = 4, EFUSE_XTAL = 0x2A; /* what the board's efuse says at 0xCA and 0xB9 */
 
 static void build_efuse(const unsigned char mac[6])
 {
@@ -68,6 +72,13 @@ static void build_efuse(const unsigned char mac[6])
     EFUSE_MAP[i++] = ((26 >> 3) << 4) | 0x8;
     for (int k = 0; k < 6; k++)
         EFUSE_MAP[i++] = mac[k];
+    /* block 23 (0xB8): word 0 = channel plan, crystal calibration (0xB9); block 25 (0xC8): word 1 = rf antenna option, rfe_option (0xCA is the byte after) */
+    EFUSE_MAP[i++] = ((23 & 7) << 5) | 0x0F;
+    EFUSE_MAP[i++] = ((23 >> 3) << 4) | 0xE;
+    EFUSE_MAP[i++] = 0x00; EFUSE_MAP[i++] = EFUSE_XTAL;
+    EFUSE_MAP[i++] = ((25 & 7) << 5) | 0x0F;
+    EFUSE_MAP[i++] = ((25 >> 3) << 4) | 0xD;
+    EFUSE_MAP[i++] = EFUSE_RFE; EFUSE_MAP[i++] = 0x00;
 }
 /* ---- the pretend chip's insides ---- */
 static unsigned char TXFIFO[16384];
@@ -190,8 +201,25 @@ static void maybe_boot(void)
     }
 }
 
+/* ---- capture of every chip access (writes and delays) as a hash, to compare with Linux's own table interpreter ---- */
+static int CAPTURE;
+static long CAP_N;
+static unsigned long long CAP_H;
+static void cap_ev(unsigned t, unsigned a, unsigned b, unsigned c)
+{
+    unsigned w[4] = {t, a, b, c};
+    for (int i = 0; i < 16; i++)
+    {
+        CAP_H ^= ((unsigned char *)w)[i];
+        CAP_H *= 1099511628211ULL;
+    }
+    CAP_N++;
+}
+
 void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
 {
+    if (CAPTURE)
+        cap_ev(1, off, size, value);
     if (NLOG < 4096)
         LOG[NLOG++] = (Wr){off, size, value};
     if (size == 2 && off == 0x204)
@@ -207,6 +235,10 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
     }
     else if (size == 4 && off == 0x30 && !(value & BIT(31)) && !KNOB_EFUSE_STUCK)
         set32(0x30, (value & ~0xFFu) | EFUSE_MAP[(value >> 8) & 0x3FF] | BIT(31)); /* the byte at that address, and "done" */
+    else if (size == 4 && off == 0xC90 && !PH_BREAK_RF_READBACK)
+        set32(0x2800 + ((value >> 20) & 0xFF) * 4, (value & 0xFFFFF) ^ (((value >> 20) & 0xFF) == 0x18 || ((value >> 20) & 0xFF) == 0x51 ? PH_FLIP_RF_BITS : 0)); /* the RF register answers in its direct-read window */
+    else if (size == 1 && off == 0x208 && (value & 1) && !KNOB_LLT_STUCK)
+        REGS[0x208] &= (unsigned char)~1; /* BIT_AUTO_INIT_LLT_V1: the chip has linked its pages and clears the bit */
     else if (size == 4 && off == 0x1208 && (value & BIT(31)))
         run_ddma(value);
     else if (size == 1 && (off == 0x03 || off == 0x1D))
@@ -219,6 +251,8 @@ static unsigned UDELAYS;
 void rtl8821ce_host_udelay(unsigned us)
 {
     (void)us;
+    if (CAPTURE)
+        cap_ev(2, us, 0, 0);
     UDELAYS++;
     if (!CHIP_COMPLETES)
         return;
@@ -307,7 +341,7 @@ static void chip(unsigned char filler, unsigned char cr, u16 mcufw)
     BCN_PAGE = 0xFFFF;
     memset(CHIPMEM, 0, sizeof CHIPMEM);
     memset(TXFIFO, 0, sizeof TXFIFO);
-    KNOB_NO_BCN_VALID = KNOB_DDMA_STUCK = KNOB_CHKSUM_BAD = KNOB_NO_BOOT = KNOB_EFUSE_STUCK = 0;
+    KNOB_NO_BCN_VALID = KNOB_DDMA_STUCK = KNOB_CHKSUM_BAD = KNOB_NO_BOOT = KNOB_EFUSE_STUCK = KNOB_LLT_STUCK = 0;
     static const unsigned char TEST_MAC[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
     build_efuse(TEST_MAC);
 }
@@ -527,7 +561,7 @@ int main(void)
     CHECK(DL.off_after == 1);
     CHECK((DL.mcufw & 0xC078) == 0xC078);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(strstr(st, "fw 24.11 ready (80=c078)") && strstr(st, ", MAC 00:e0:4c:68:12:34") && strstr(st, ", off again") &&
+    CHECK(strstr(st, "fw 24.11 ready, MAC 00:e0:4c:68:12:34, mac ok, phy ok, off") &&
           strlen(st) < sizeof st);
     /* the order of the register sequence, by landmarks */
     static const Wr LANDMARKS[] = {
@@ -625,7 +659,7 @@ int main(void)
     KNOB_EFUSE_STUCK = 1;
     NIC_RTL8821CE.probe(&WIFI);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(DL.state == DL_OK && EF.state == EF_FAILED && strstr(st, ", efuse: read timeout") && strstr(st, ", off again") && strlen(st) < sizeof st);
+    CHECK(DL.state == DL_OK && EF.state == EF_FAILED && strstr(st, ", efuse: read timeout") && strstr(st, ", off") && strlen(st) < sizeof st);
     {
         static const unsigned char MCAST[6] = {0x01, 0xE0, 0x4C, 0x68, 0x12, 0x34};
         static const unsigned char ZERO[6] = {0, 0, 0, 0, 0, 0};
@@ -640,6 +674,136 @@ int main(void)
         file(IMG, IMG_SIZE, IMG_SIZE);
         NIC_RTL8821CE.probe(&WIFI);
         CHECK(EF.state == EF_FAILED && strcmp(EF.why, "no valid MAC") == 0);
+    }
+
+    /* ---- stage 4b-1: rtw_mac_init against Linux's own code. The writes below were produced by running Linux' rtw_init_trx_cfg,
+     * rtw8821c_mac_init and rtw_drv_info_cfg (rtw88 sources) with a plain register file behind them (reads return what was written; BIT_AUTO_INIT_LLT_V1 clears itself); mine must write the same, in the
+     * same order. (The harness is not part of the repo.) ---- */
+    static const Wr MAC_INIT_LINUX[] = {
+    {0x10C, 2, 0xC5A0U}, {0x100, 1, 0x0U}, {0x100, 1, 0xFFU}, {0x1330, 4, 0x80000000U},
+    {0x230, 2, 0x10U}, {0x234, 2, 0x10U}, {0x238, 2, 0x10U}, {0x23C, 2, 0xEU},
+    {0x240, 2, 0x18DU}, {0x22C, 4, 0x80000000U}, {0x204, 2, 0x1CCU}, {0x422, 1, 0x10U},
+    {0x424, 2, 0x1CCU}, {0x206, 2, 0x1CCU}, {0x456, 2, 0x1CCU}, {0x11C, 4, 0x3EFFU},
+    {0x208, 1, 0x1U}, {0x103, 1, 0x0U}, {0x244, 4, 0xFA00U}, {0x24C, 4, 0xFA00U},
+    {0x248, 4, 0xFE00U}, {0x254, 1, 0x1U}, {0x254, 1, 0x5U}, {0x20D, 1, 0x80U},
+    {0x455, 1, 0x70U}, {0x45E, 1, 0x4U}, {0x4E5, 1, 0xE4U}, {0x4E6, 1, 0x9U},
+    {0x4C8, 4, 0x202008FFU}, {0x4CE, 2, 0x801U}, {0x1448, 1, 0x6U}, {0x144A, 1, 0x6U},
+    {0x144C, 1, 0x6U}, {0x144E, 1, 0x6U}, {0x480, 1, 0x20U}, {0x5B4, 1, 0x0U},
+    {0x522, 2, 0x0U}, {0x51B, 1, 0x9U}, {0x512, 1, 0x19U}, {0x514, 4, 0x10100E0AU},
+    {0x502, 2, 0x186U}, {0x506, 2, 0x3BCU}, {0x544, 4, 0x1B0005U}, {0x55E, 2, 0x3030U},
+    {0x550, 1, 0x8U}, {0x540, 4, 0x6404U}, {0x558, 1, 0x4U}, {0x559, 1, 0x2U},
+    {0x521, 1, 0x0U}, {0x6A0, 2, 0xFFFFU}, {0x6A2, 2, 0xFFFU}, {0x6A4, 2, 0xFFFFU},
+    {0x608, 4, 0xE400220EU}, {0x60C, 1, 0x18U}, {0x606, 1, 0x30U}, {0x605, 1, 0x30U},
+    {0x639, 1, 0x40U}, {0x66C, 1, 0x2U}, {0x718, 1, 0x40U}, {0x7D8, 4, 0xB0810041U},
+    {0x7D4, 1, 0x98U}, {0x60F, 1, 0x4U}, {0x115, 1, 0xFU}, {0x608, 4, 0xF400220EU},
+    {0x7D4, 4, 0x98U},    };
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    NLOG = 0;
+    MI.state = MI_NOT_TRIED;
+    mac_init();
+    CHECK(MI.state == MI_OK && MI.why == 0);
+    CHECK(NLOG == (int)(sizeof MAC_INIT_LINUX / sizeof MAC_INIT_LINUX[0]) + 1); /* Linux's list, plus our final "receive DMA off" */
+    CHECK(LOG[NLOG - 1].off == 0x100 && LOG[NLOG - 1].size == 1 && LOG[NLOG - 1].value == 0);
+    NLOG--;
+    check_log(MAC_INIT_LINUX, (int)(sizeof MAC_INIT_LINUX / sizeof MAC_INIT_LINUX[0]), "mac init vs Linux");
+
+    /* the auto-LLT never finishes: the init stops there, and says so */
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    KNOB_LLT_STUCK = 1;
+    MI.state = MI_NOT_TRIED;
+    mac_init();
+    CHECK(MI.state == MI_FAILED && strcmp(MI.why, "llt") == 0);
+    CHECK(count_writes(0x608, 4) == 0);                                         /* never got as far as the receive filter */
+    KNOB_LLT_STUCK = 0;
+
+    /* a command ring that does not start empty */
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    set32(0x10D4, 0x100); /* the write pointer is ahead of the read pointer */
+    MI.state = MI_NOT_TRIED;
+    mac_init();
+    CHECK(MI.state == MI_FAILED && strcmp(MI.why, "h2c") == 0);
+
+    /* ---- stage 4b-2: the baseband / AGC / RF tables against Linux's own interpreter. The expected event counts and hashes (every
+     * register write and every delay, in order) come from running Linux' rtw_phy_load_tables / rtw_parse_tbl_phy_cond / rtw_phy_cfg_*
+     * / rtw_phy_write_rf_reg_sipi and the first half of rtw8821c_phy_set_param on the real rtw8821c_table.c, cut B, PCIe, package 0,
+     * with a plain register file behind them. (The harness is not part of the repo.) ---- */
+    static const struct { unsigned rfe, xtal, pkg; long events; unsigned long long hash; } PHY_LINUX[] = {
+        {4, 0x2A, 0, 4076, 0xa448cd59c4217c59ULL}, /* rfe 2 and 4 load the extra BTG AGC table, too */
+        {2, 0x7F, 0, 4076, 0x7bff35ce73685275ULL}, /* 0x7F & 0x3F = 0x3F reaches the crystal registers */
+        {0, 0x2A, 0, 3948, 0x1573d11c9c443c9cULL},
+        {6, 0x2A, 0, 3948, 0x1573d11c9c443c9cULL},
+        {0, 0x15, 0, 3948, 0x0376394a56f3effcULL},
+        {4, 0x2A, 1, 4076, 0x0827f572d5a8e151ULL}, /* package type 1 (efuse 0xCA bit 5) selects other blocks of the tables */
+    };
+    for (unsigned k = 0; k < sizeof PHY_LINUX / sizeof PHY_LINUX[0]; k++)
+    {
+        chip_for_download();
+        memset(REGS, 0, sizeof REGS);
+        EF.map_ok = 1;
+        EF.rfe = (unsigned char)PHY_LINUX[k].rfe;
+        EF.pkg = (unsigned char)PHY_LINUX[k].pkg;
+        EF.xtal = (unsigned char)PHY_LINUX[k].xtal;
+        CAP_N = 0;
+        CAP_H = 1469598103934665603ULL;
+        CAPTURE = 1;
+        phy_init(1); /* chip cut B */
+        CAPTURE = 0;
+        if (CAP_N != PHY_LINUX[k].events || CAP_H != PHY_LINUX[k].hash)
+        {
+            printf("FAIL phy tables rfe %u xtal 0x%X: %ld events hash %016llx, Linux %ld events hash %016llx\n", PHY_LINUX[k].rfe, PHY_LINUX[k].xtal,
+                   CAP_N, CAP_H, PHY_LINUX[k].events, PHY_LINUX[k].hash);
+            fails++;
+        }
+        CHECK(PH.state == PH_OK && PH.rf_diff == 0 && PH.rf_written > 100);
+    }
+    /* what cannot be done: no efuse map, or a board type that Linux has no tables for */
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    EF.map_ok = 0;
+    NLOG = 0;
+    phy_init(1);
+    CHECK(PH.state == PH_SKIPPED && strcmp(PH.why, "efuse") == 0 && NLOG == 0);
+    EF.map_ok = 1;
+    EF.rfe = 5;
+    phy_init(1);
+    CHECK(PH.state == PH_SKIPPED && strcmp(PH.why, "rfe") == 0 && NLOG == 0);
+    /* a few RF registers whose bits the chip changes itself: counted, but the stage is fine */
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    EF.map_ok = 1;
+    EF.rfe = 0;
+    EF.xtal = 0x2A;
+    PH_FLIP_RF_BITS = 0x3000;
+    phy_init(1);
+    PH_FLIP_RF_BITS = 0;
+    CHECK(PH.state == PH_OK && PH.rf_diff == 2 && PH.diff_addr[0] == 0x18 && PH.diff_xor[0] == 0x3000 && !phy_rf_suspect());
+    {
+        char s3[96];
+        DL.state = DL_OK;
+        DL.off_after = 1;
+        NIC_RTL8821CE.status(s3, sizeof s3);
+        CHECK(strstr(s3, ", phy ok") && !strstr(s3, "phy rf") && strlen(s3) < sizeof s3);
+    }
+    /* an RF register that does not hold what was written is counted */
+    chip_for_download();
+    memset(REGS, 0, sizeof REGS);
+    EF.map_ok = 1;
+    EF.rfe = 0;
+    EF.xtal = 0x2A;
+    PH_BREAK_RF_READBACK = 1;
+    phy_init(1);
+    PH_BREAK_RF_READBACK = 0;
+    CHECK(PH.state == PH_OK && PH.rf_diff > 0 && phy_rf_suspect());
+    {
+        char s2[96];
+        DL.state = DL_OK;
+        DL.off_after = 1;
+        NIC_RTL8821CE.status(s2, sizeof s2);
+        CHECK(strstr(s2, ", phy rf") && strchr(s2, ':') && strstr(s2, ", off") && strlen(s2) < sizeof s2);
+        CHECK(PH.diff_addr[0] == 0x00); /* RF register 0 is the first one written, and the first that failed to read back here */
     }
 
     /* a firmware without extended memory: two parts only */

@@ -15,7 +15,10 @@
  * coexistence register that Linux saves around the download is left alone; the receive ring is small (the download receives nothing).
  *
  * The road ahead, in the order it can be built and tested on the real card:
- *   4. keep the firmware running; firmware commands (H2C) and events (C2H), then the MAC / baseband / RF tables of rtw8821c.c;
+ *   4a  read the board data (MAC address, board type, crystal setting) from the efuse. Seen to work on a real card.
+ *   4b-1 rtw_mac_init (queues, MAC timing, receive filter). Seen to work on a real card.
+ *   4b-2 the baseband, AGC and RF tables (include/rtl8821ce_phytab.h), then power off again.
+ *   4b-3 firmware commands (H2C) and events (C2H); 4c receive and scan;
  *   5. 802.11 itself: scan (probe requests, beacons), authenticate, associate, data frames in and out;
  *   6. WPA2-PSK: PBKDF2-HMAC-SHA1 for the key, the 4-way handshake, AES-CCMP for every frame.
  *
@@ -27,6 +30,7 @@
 #include "nic.h"
 #include "pci.h"
 #include "pmm.h"
+#include "rtl8821ce_phytab.h"
 #include "vfs.h"
 
 #ifndef RTL8821CE_POWER_ON
@@ -539,6 +543,8 @@ static struct
     int state;
     const char *why;
     unsigned char mac[6];
+    int map_ok;                 /* the logical map was decoded: the three values below are real */
+    unsigned char rfe, pkg, xtal; /* rfe_option (0xCA, low 5 bits), package type (0xCA bit 5), crystal calibration (0xB9) */
 } EF;
 
 /* rtw_dump_logical_efuse_map. 0 = ok, -1 = the blocks do not fit (corrupt map). `log` must be filled with 0xFF by the caller. */
@@ -615,6 +621,7 @@ static int valid_mac(const u8 *m)
 static void efuse_read_mac(void)
 {
     u8 phy[EFUSE_PHYSICAL], log[EFUSE_LOGICAL];
+    EF.map_ok = 0;
     EF.state = EF_FAILED;
     EF.why = 0;
     if (efuse_physical(phy))
@@ -630,6 +637,10 @@ static void efuse_read_mac(void)
         EF.why = "corrupt map";
         return;
     }
+    EF.map_ok = 1;
+    EF.rfe = log[0xCA] & 0x1F;
+    EF.pkg = (log[0xCA] >> 5) & 1;
+    EF.xtal = log[0xB9];
     for (int i = 0; i < 6; i++)
         EF.mac[i] = log[EFUSE_MAC_AT + i];
     if (!valid_mac(EF.mac))
@@ -860,6 +871,471 @@ static int fw_download(void)
     return 0;
 }
 
+/* ---- stage 4b-1: rtw_mac_init, the MAC's queues and protocol timing (Linux rtw_mac.c + rtw8821c_mac_init) ----
+ * What it does, in short: the chip's 64 KiB TX packet memory is cut into 128-byte pages; the top pages are reserved for the firmware's own
+ * use (H2C queue, ...), the rest is shared by the transmit queues. The firmware commands (H2C) get a ring inside the reserved pages. Then
+ * the timing constants of the 802.11 MAC (slot, SIFS, TXOP limits) and the receive filter are set. No radio is configured here. */
+#define R_TX_HANG_CTRL 0x045E
+#define R_AMPDU_MAX_TIME_V1 0x0455
+#define R_PRECNT_CTRL 0x04E5
+#define R_PROT_MODE_CTRL 0x04C8
+#define R_BAR_MODE_CTRL 0x04CC
+#define R_FAST_EDCA_VOVI 0x1448
+#define R_FAST_EDCA_BEBK 0x144C
+#define R_INIRTS_RATE_SEL 0x0480
+#define R_TIMER0_SRC_SEL 0x05B4
+#define R_TXPAUSE 0x0522
+#define R_SLOT 0x051B
+#define R_PIFS 0x0512
+#define R_SIFS 0x0514
+#define R_EDCA_VO_PARAM 0x0500
+#define R_EDCA_VI_PARAM 0x0504
+#define R_RD_NAV_NXT 0x0544
+#define R_RXTSF_OFFSET_CCK 0x055E
+#define R_TBTT_PROHIBIT 0x0540
+#define R_DRVERLYINT 0x0558
+#define R_BCNDMATIM 0x0559
+#define R_TX_PTCL_CTRL 0x0520
+#define R_RXFLTMAP0 0x06A0
+#define R_RXFLTMAP1 0x06A2
+#define R_RXFLTMAP2 0x06A4
+#define R_RCR 0x0608
+#define R_RX_PKT_LIMIT 0x060C
+#define R_RX_DRVINFO_SZ 0x060F
+#define R_TCR 0x0604
+#define R_ACKTO_CCK 0x0639
+#define R_WMAC_TRXPTCL_CTL_H 0x066C
+#define R_SND_PTCL_CTRL 0x0718
+#define R_WMAC_OPTION_FUNCTION 0x07D0
+#define R_TRXFF_BNDY 0x0114
+#define R_RXFF_BNDY 0x011C
+#define R_AUTO_LLT_V1 0x0208
+#define R_BCNQ_BDNY_V1 0x0424
+#define R_BCNQ1_BDNY_V1 0x0456
+#define R_H2C_HEAD 0x0244
+#define R_H2C_TAIL 0x0248
+#define R_H2C_READ_ADDR 0x024C
+#define R_H2C_INFO 0x0254
+#define R_H2C_PKT_READADDR 0x10D0
+#define R_H2C_PKT_WRITEADDR 0x10D4
+#define R_TXDMA_OFFSET_CHK 0x020C
+#define MAC_TRX_ENABLE 0xFF /* TX/RX DMA, protocol, scheduler, MAC TX and RX: bits 0..7 of the command register */
+
+/* the geometry of this chip (rtw8821c_hw_spec, page_table_8821c[1], rqpn_table_8821c[1]) */
+#define TX_PAGE_SIZE_SHIFT 7
+#define TXFF_PAGES (65536 >> TX_PAGE_SIZE_SHIFT)
+#define RSVD_PAGES (8 + 24 + 8 + 8 + 0 + 4 + 0)         /* driver, H2C extra info, H2C static info, H2C queue, CPU instructions, FW TX buffer, CSI */
+#define RSVD_BOUNDARY (TXFF_PAGES - RSVD_PAGES)         /* the first reserved page: 460 */
+#define H2CQ_PAGE (TXFF_PAGES - 0 - 4 - 0 - 8)          /* below the CSI (0), FW TX buffer (4) and CPU instructions (0) */
+#define H2CQ_SIZE (8 << TX_PAGE_SIZE_SHIFT)
+#define RXFF_SIZE 16384
+#define C2H_PKT_BUF 256
+#define PAGES_HQ 16
+#define PAGES_LQ 16
+#define PAGES_NQ 16
+#define PAGES_EXQ 14
+#define PAGES_GAPQ 1
+#define PAGES_PUBQ (RSVD_BOUNDARY - PAGES_HQ - PAGES_LQ - PAGES_NQ - PAGES_EXQ - PAGES_GAPQ)
+/* queue -> DMA priority queue (0 extra, 1 low, 2 normal, 3 high), the PCIe row */
+#define DMA_VO 2
+#define DMA_VI 2
+#define DMA_BE 1
+#define DMA_BK 1
+#define DMA_MG 0
+#define DMA_HI 3
+#define TXDMA_PQ_MAP ((DMA_HI << 14) | (DMA_MG << 12) | (DMA_BK << 10) | (DMA_BE << 8) | (DMA_VI << 6) | (DMA_VO << 4))
+
+/* the protocol constants of rtw8821c.h */
+#define WLAN_SLOT_TIME 0x09
+#define WLAN_PIFS_TIME 0x19
+#define WLAN_SIFS_CCK_CONT_TX 0xA
+#define WLAN_SIFS_OFDM_CONT_TX 0xE
+#define WLAN_SIFS_CCK_TRX 0x10
+#define WLAN_SIFS_OFDM_TRX 0x10
+#define WLAN_VO_TXOP_LIMIT 0x186
+#define WLAN_VI_TXOP_LIMIT 0x3BC
+#define WLAN_RDG_NAV 0x05
+#define WLAN_TXOP_NAV 0x1B
+#define WLAN_CCK_RX_TSF 0x30
+#define WLAN_OFDM_RX_TSF 0x30
+#define WLAN_TBTT_PROHIBIT 0x04
+#define WLAN_TBTT_HOLD_TIME 0x064
+#define WLAN_DRV_EARLY_INT 0x04
+#define WLAN_BCN_DMA_TIME 0x02
+#define WLAN_RX_FILTER0 0xFFFF
+#define WLAN_RX_FILTER1 0x0FFF
+#define WLAN_RX_FILTER2 0xFFFF
+#define WLAN_RCR_CFG 0xE400220E
+#define WLAN_RXPKT_MAX_SZ 12288
+#define WLAN_RXPKT_MAX_SZ_512 (WLAN_RXPKT_MAX_SZ >> 9)
+#define WLAN_AMPDU_MAX_TIME 0x70
+#define WLAN_RTS_LEN_TH 0xFF
+#define WLAN_RTS_TX_TIME_TH 0x08
+#define WLAN_MAX_AGG_PKT_LIMIT 0x20
+#define WLAN_RTS_MAX_AGG_PKT_LIMIT 0x20
+#define FAST_EDCA_TH 0x06 /* VO, VI, BE and BK all use 6 */
+#define WLAN_BAR_RETRY_LIMIT 0x01
+#define WLAN_RA_TRY_RATE_AGG_LIMIT 0x08
+#define WLAN_TX_FUNC_CFG1 0x30
+#define WLAN_TX_FUNC_CFG2 0x30
+#define WLAN_MAC_OPT_NORM_FUNC1 0x98
+#define WLAN_MAC_OPT_FUNC2 0xb0810041
+#define WLAN_PRE_TXCNT_TIME_TH 0x1E4
+#define WLAN_SIFS_CFG (WLAN_SIFS_CCK_CONT_TX | (WLAN_SIFS_OFDM_CONT_TX << 8) | (WLAN_SIFS_CCK_TRX << 16) | (WLAN_SIFS_OFDM_TRX << 24))
+#define WLAN_TBTT_TIME (WLAN_TBTT_PROHIBIT | (WLAN_TBTT_HOLD_TIME << 8))
+#define WLAN_NAV_CFG (WLAN_RDG_NAV | (WLAN_TXOP_NAV << 16))
+#define WLAN_RX_TSF_CFG (WLAN_CCK_RX_TSF | (WLAN_OFDM_RX_TSF) << 8)
+
+enum { MI_NOT_TRIED, MI_OK, MI_FAILED };
+static struct
+{
+    int state;
+    const char *why;
+    u8 cr; /* the command register once the init is through */
+} MI;
+
+static void or32(u32 off, u32 bits) { wr32(off, rd32(off) | bits); }
+static void andn32(u32 off, u32 bits) { wr32(off, rd32(off) & ~bits); }
+
+/* rtw_init_trx_cfg: txdma_queue_mapping + priority_queue_cfg + init_h2c. 0 = ok, else the reason. */
+static const char *init_trx_cfg(void)
+{
+    /* txdma_queue_mapping: which transmit queue feeds which priority queue; then the DMA engines and the MAC switch on */
+    wr16(R_TXDMA_PQ_MAP, TXDMA_PQ_MAP);
+    wr8(R_CR, 0);
+    wr8(R_CR, MAC_TRX_ENABLE);
+    wr32(R_H2CQ_CSR, BIT(31)); /* BIT_H2CQ_FULL, the CPU is the 3081 kind */
+
+    /* priority_queue_cfg: how many pages each queue owns, where the reserved ones begin, and the chip builds its page chain itself */
+    wr16(R_FIFOPAGE_INFO_1, PAGES_HQ);
+    wr16(R_FIFOPAGE_INFO_1 + 4, PAGES_LQ);
+    wr16(R_FIFOPAGE_INFO_1 + 8, PAGES_NQ);
+    wr16(R_FIFOPAGE_INFO_1 + 12, PAGES_EXQ);
+    wr16(R_FIFOPAGE_INFO_1 + 16, PAGES_PUBQ);
+    or32(R_RQPN_CTRL_2, BIT(31)); /* BIT_LD_RQPN: load the numbers */
+    wr16(R_FIFOPAGE_CTRL_2, RSVD_BOUNDARY);
+    set8(R_FWHW_TXQ_CTRL + 2, (u8)(BIT(20) >> 16)); /* BIT_EN_WR_FREE_TAIL */
+    wr16(R_BCNQ_BDNY_V1, RSVD_BOUNDARY);
+    wr16(R_FIFOPAGE_CTRL_2 + 2, RSVD_BOUNDARY);
+    wr16(R_BCNQ1_BDNY_V1, RSVD_BOUNDARY);
+    wr32(R_RXFF_BNDY, RXFF_SIZE - C2H_PKT_BUF - 1);
+    set8(R_AUTO_LLT_V1, BIT(0)); /* BIT_AUTO_INIT_LLT_V1: the chip links its pages, then clears the bit */
+    if (!ready32(R_AUTO_LLT_V1, BIT(0), 0, 1000))
+        return "llt";
+    wr8(R_CR + 3, 0);
+
+    /* init_h2c: the ring of firmware commands lives in the reserved pages */
+    u32 head = H2CQ_PAGE << TX_PAGE_SIZE_SHIFT;
+    wr32(R_H2C_HEAD, (rd32(R_H2C_HEAD) & 0xFFFC0000u) | head);
+    wr32(R_H2C_READ_ADDR, (rd32(R_H2C_READ_ADDR) & 0xFFFC0000u) | head);
+    wr32(R_H2C_TAIL, (rd32(R_H2C_TAIL) & 0xFFFC0000u) | (head + H2CQ_SIZE));
+    wr8(R_H2C_INFO, (u8)((rd8(R_H2C_INFO) & 0xFC) | 0x01));
+    wr8(R_H2C_INFO, (u8)((rd8(R_H2C_INFO) & 0xFB) | 0x04));
+    wr8(R_TXDMA_OFFSET_CHK + 1, (u8)((rd8(R_TXDMA_OFFSET_CHK + 1) & 0x7F) | 0x80));
+    u32 wp = rd32(R_H2C_PKT_WRITEADDR) & 0x3FFFF, rp = rd32(R_H2C_PKT_READADDR) & 0x3FFFF;
+    u32 free_bytes = wp >= rp ? H2CQ_SIZE - (wp - rp) : rp - wp;
+    if (free_bytes != H2CQ_SIZE) /* the ring must start empty */
+        return "h2c";
+    return 0;
+}
+
+/* rtw8821c_mac_init: protocol parameters, EDCA timing, beacon timing and the receive filter */
+static void init_wmac(void)
+{
+    wr8(R_AMPDU_MAX_TIME_V1, WLAN_AMPDU_MAX_TIME);
+    set8(R_TX_HANG_CTRL, BIT(2)); /* BIT_EN_EOF_V1 */
+    u16 pre_txcnt = WLAN_PRE_TXCNT_TIME_TH | BIT(11); /* BIT_EN_PRECNT */
+    wr8(R_PRECNT_CTRL, (u8)(pre_txcnt & 0xFF));
+    wr8(R_PRECNT_CTRL + 1, (u8)(pre_txcnt >> 8));
+    wr32(R_PROT_MODE_CTRL, WLAN_RTS_LEN_TH | (WLAN_RTS_TX_TIME_TH << 8) | (WLAN_MAX_AGG_PKT_LIMIT << 16) | (WLAN_RTS_MAX_AGG_PKT_LIMIT << 24));
+    wr16(R_BAR_MODE_CTRL + 2, WLAN_BAR_RETRY_LIMIT | WLAN_RA_TRY_RATE_AGG_LIMIT << 8);
+    wr8(R_FAST_EDCA_VOVI, FAST_EDCA_TH);
+    wr8(R_FAST_EDCA_VOVI + 2, FAST_EDCA_TH);
+    wr8(R_FAST_EDCA_BEBK, FAST_EDCA_TH);
+    wr8(R_FAST_EDCA_BEBK + 2, FAST_EDCA_TH);
+    set8(R_INIRTS_RATE_SEL, BIT(5));
+
+    clr8(R_TIMER0_SRC_SEL, BIT(4) | BIT(5) | BIT(6)); /* BIT_TSFT_SEL_TIMER0 */
+    wr16(R_TXPAUSE, 0);
+    wr8(R_SLOT, WLAN_SLOT_TIME);
+    wr8(R_PIFS, WLAN_PIFS_TIME);
+    wr32(R_SIFS, WLAN_SIFS_CFG);
+    wr16(R_EDCA_VO_PARAM + 2, WLAN_VO_TXOP_LIMIT);
+    wr16(R_EDCA_VI_PARAM + 2, WLAN_VI_TXOP_LIMIT);
+    wr32(R_RD_NAV_NXT, WLAN_NAV_CFG);
+    wr16(R_RXTSF_OFFSET_CCK, WLAN_RX_TSF_CFG);
+
+    set8(R_BCN_CTRL, BIT(3)); /* BIT_EN_BCN_FUNCTION: the TSF timer runs */
+    wr32(R_TBTT_PROHIBIT, WLAN_TBTT_TIME);
+    wr8(R_DRVERLYINT, WLAN_DRV_EARLY_INT);
+    wr8(R_BCNDMATIM, WLAN_BCN_DMA_TIME);
+    clr8(R_TX_PTCL_CTRL + 1, (u8)(BIT(12) >> 8)); /* BIT_SIFS_BK_EN */
+
+    wr16(R_RXFLTMAP0, WLAN_RX_FILTER0);
+    wr16(R_RXFLTMAP1, WLAN_RX_FILTER1);
+    wr16(R_RXFLTMAP2, WLAN_RX_FILTER2);
+    wr32(R_RCR, WLAN_RCR_CFG);
+    wr8(R_RX_PKT_LIMIT, WLAN_RXPKT_MAX_SZ_512);
+    wr8(R_TCR + 2, WLAN_TX_FUNC_CFG2);
+    wr8(R_TCR + 1, WLAN_TX_FUNC_CFG1);
+    wr8(R_ACKTO_CCK, 0x40);
+    set8(R_WMAC_TRXPTCL_CTL_H, BIT(1));
+    set8(R_SND_PTCL_CTRL, BIT(6)); /* BIT_DIS_CHK_VHTSIGB_CRC */
+    wr32(R_WMAC_OPTION_FUNCTION + 8, WLAN_MAC_OPT_FUNC2);
+    wr8(R_WMAC_OPTION_FUNCTION + 4, WLAN_MAC_OPT_NORM_FUNC1);
+}
+
+/* rtw_drv_info_cfg: every received frame carries a 4 * 8 byte PHY status in front of it */
+static void init_drv_info(void)
+{
+    wr8(R_RX_DRVINFO_SZ, 4);
+    wr8(R_TRXFF_BNDY + 1, (u8)((rd8(R_TRXFF_BNDY + 1) & 0xF0) | 0xF)); /* "for the rxdesc len = 0 issue" */
+    or32(R_RCR, BIT(28));                                              /* BIT_APP_PHYSTS */
+    andn32(R_WMAC_OPTION_FUNCTION + 4, BIT(8) | BIT(9));
+}
+
+static void mac_init(void)
+{
+    MI.state = MI_FAILED;
+    MI.why = init_trx_cfg();
+    if (MI.why)
+        return;
+    init_wmac();
+    init_drv_info();
+    MI.cr = rd8(R_CR);
+    MI.state = MI_OK;
+    /* The receive DMA has no ring yet (stage 4c), so it must not stay on until the chip is powered off. */
+    wr8(R_CR, 0);
+}
+
+/* ---- stage 4b-2: the baseband, AGC and RF tables (the table part of rtw8821c_phy_set_param) ----
+ * The radio is configured by long lists of register writes that Realtek ships as tables (include/rtl8821ce_phytab.h, copied from
+ * Linux). A list holds several variants of the same setting for different chip cuts / board types, written as "if (conditions) ...
+ * else ... endif" blocks inside the list; only the variant of THIS chip (cut, package, interface, RFE type from the efuse) is written.
+ * The RF registers are not memory mapped: they are written through the "SIPI" serial interface (one 32-bit word: register number in
+ * bits 27..20, data in bits 19..0 at 0xC90 for path A) and can be read back directly from a window at 0x2800 + 4 * number.
+ * Not done here (software state or later stages): rtw_phy_init, the power-tracking and beamforming set-up, calibration (IQK / LCK). */
+
+#define R_RXPSEL 0x0808
+#define R_AFE_XTAL_CTRL 0x0024
+#define R_AFE_PLL_CTRL 0x0028
+#define R_CCK0_FAREPORT 0x0A2C
+#define R_RF_SIPI_A 0x0C90
+#define R_RF_BASE_A 0x2800
+#define RFREG_MASK 0xFFFFF
+
+enum { TAB_MAC, TAB_AGC, TAB_BB, TAB_RF };
+enum { PH_NOT_TRIED, PH_OK, PH_SKIPPED };
+static struct
+{
+    int state;
+    const char *why;
+    unsigned cond;      /* what this chip is, in the layout of a table's condition word */
+    unsigned rf_diff;   /* RF registers that read back differently from what was written last */
+    unsigned rf_written;
+    unsigned rf_regs;   /* distinct RF registers written */
+    unsigned char diff_addr[40]; /* the first RF registers that did not read back ... */
+    unsigned diff_xor[40];       /* ... and which bits of them differ */
+    unsigned char rf_seen[256];
+    unsigned rf_last[256];
+} PH;
+
+static void delay_us(unsigned us) { udelay(us); }
+
+/* the cut, package, interface and RFE type that the "if" blocks of the tables ask about (rtw_phy_setup_phy_cond) */
+static unsigned phy_cond_word(unsigned cut, unsigned pkg, unsigned rfe)
+{
+    return (rfe & 0xFF) | (1u << 8) /* INTF_PCIE */ | ((pkg ? pkg : 15) << 12) | (4u << 16) /* plat */ | ((cut ? cut : 15) << 24);
+}
+
+/* check_positive: a zero field in the table's condition means "any" */
+static int phy_cond_matches(unsigned c)
+{
+    unsigned d = PH.cond;
+    if (((c >> 24) & 0xF) && ((c >> 24) & 0xF) != ((d >> 24) & 0xF))
+        return 0;
+    if (((c >> 12) & 0xF) && ((c >> 12) & 0xF) != ((d >> 12) & 0xF))
+        return 0;
+    if (((c >> 8) & 0xF) && ((c >> 8) & 0xF) != ((d >> 8) & 0xF))
+        return 0;
+    return (c & 0xFF) == (d & 0xFF);
+}
+
+static void phy_rf_write(unsigned addr, unsigned data)
+{
+    addr &= 0xFF;
+    wr32(R_RF_SIPI_A, ((addr << 20) | (data & RFREG_MASK)) & 0x0FFFFFFF);
+    delay_us(13);
+    PH.rf_seen[addr] = 1;
+    PH.rf_last[addr] = data & RFREG_MASK;
+    PH.rf_written++;
+}
+
+static void phy_cfg(int kind, unsigned addr, unsigned data)
+{
+    switch (kind)
+    {
+    case TAB_MAC:
+        wr8(addr, (u8)data);
+        break;
+    case TAB_AGC:
+        wr32(addr, data);
+        break;
+    case TAB_BB:
+        if (addr == 0xFE)
+            delay_us(50000);
+        else if (addr == 0xFD)
+            delay_us(5000);
+        else if (addr == 0xFC)
+            delay_us(1000);
+        else if (addr == 0xFB)
+            delay_us(50);
+        else if (addr == 0xFA)
+            delay_us(5);
+        else if (addr == 0xF9)
+            delay_us(1);
+        else
+            wr32(addr, data);
+        break;
+    default: /* TAB_RF, path A */
+        if (addr == 0xFFE)
+            delay_us(50000);
+        else if (addr == 0xFE)
+            delay_us(100);
+        else
+        {
+            phy_rf_write(addr, data);
+            delay_us(1);
+        }
+        break;
+    }
+}
+
+/* rtw_parse_tbl_phy_cond: bit 31 of the first word = "this is a condition" (branch in bits 29..28: 0 if, 1 elif, 2 else, 3 endif);
+ * bit 30 = "the conditions are complete, decide now"; anything else is a register write while the current block is selected. */
+static void phy_table_run(int kind, const unsigned *t, unsigned words)
+{
+    unsigned pos_cond = 0;
+    int matched = 1, skipped = 0;
+    for (unsigned i = 0; i + 1 < words; i += 2)
+    {
+        unsigned w = t[i];
+        if (w & BIT(31))
+        {
+            unsigned branch = (w >> 28) & 3;
+            if (branch == 3)
+            {
+                matched = 1;
+                skipped = 0;
+            }
+            else if (branch == 2)
+                matched = skipped ? 0 : 1;
+            else
+                pos_cond = w;
+        }
+        else if (w & BIT(30))
+        {
+            if (!skipped)
+            {
+                if (phy_cond_matches(pos_cond))
+                {
+                    matched = 1;
+                    skipped = 1;
+                }
+                else
+                {
+                    matched = 0;
+                    skipped = 0;
+                }
+            }
+            else
+                matched = 0;
+        }
+        else if (matched)
+            phy_cfg(kind, w, t[i + 1]);
+    }
+}
+
+#define TAB_WORDS(t) ((unsigned)(sizeof(t) / sizeof((t)[0])))
+
+static void mask32(u32 off, u32 mask, u32 value)
+{
+    unsigned shift = 0;
+    while (!((mask >> shift) & 1))
+        shift++;
+    wr32(off, (rd32(off) & ~mask) | ((value << shift) & mask));
+}
+
+static void phy_init(unsigned cut)
+{
+    PH.state = PH_SKIPPED;
+    PH.why = 0;
+    PH.rf_diff = PH.rf_written = 0;
+    PH.rf_regs = 0;
+    for (int i = 0; i < 256; i++)
+        PH.rf_seen[i] = 0;
+    if (!EF.map_ok)
+    {
+        PH.why = "efuse";
+        return;
+    }
+    if (EF.rfe != 0 && EF.rfe != 2 && EF.rfe != 4 && EF.rfe != 6) /* the only board types rtw8821c_rfe_defs has: Linux refuses the others */
+    {
+        PH.why = "rfe";
+        return;
+    }
+    PH.cond = phy_cond_word(cut, EF.pkg, EF.rfe);
+
+    /* power on the baseband and RF domains, then pulse the baseband reset */
+    u8 val = rd8(R_SYS_FUNC_EN);
+    val |= BIT(6); /* BIT_FEN_PCIEA */
+    wr8(R_SYS_FUNC_EN, val);
+    val |= BIT(0) | BIT(1); /* BIT_FEN_BB_RSTB | BIT_FEN_BB_GLB_RST */
+    wr8(R_SYS_FUNC_EN, val);
+    val &= (u8) ~(BIT(0) | BIT(1));
+    wr8(R_SYS_FUNC_EN, val);
+    val |= BIT(0) | BIT(1);
+    wr8(R_SYS_FUNC_EN, val);
+    wr8(R_RF_CTRL, BIT(0) | BIT(1) | BIT(2)); /* BIT_RF_EN | BIT_RF_RSTB | BIT_RF_SDM_RSTB */
+    delay_us(10);
+    wr8(R_WLRF1 + 3, BIT(0) | BIT(1) | BIT(2));
+    delay_us(10);
+
+    andn32(R_RXPSEL, BIT(28) | BIT(29)); /* BIT_RX_PSEL_RST: held while the tables are written */
+
+    phy_table_run(TAB_MAC, rtl8821ce_tab_mac, TAB_WORDS(rtl8821ce_tab_mac));
+    phy_table_run(TAB_BB, rtl8821ce_tab_bb, TAB_WORDS(rtl8821ce_tab_bb));
+    phy_table_run(TAB_AGC, rtl8821ce_tab_agc, TAB_WORDS(rtl8821ce_tab_agc));
+    if (EF.rfe == 2 || EF.rfe == 4) /* rtw8821c_rfe_defs: these board types carry an extra AGC table (the BTG antenna switch) */
+        phy_table_run(TAB_AGC, rtl8821ce_tab_agc_btg2, TAB_WORDS(rtl8821ce_tab_agc_btg2));
+    phy_table_run(TAB_RF, rtl8821ce_tab_rf_a, TAB_WORDS(rtl8821ce_tab_rf_a));
+
+    unsigned xtal = EF.xtal & 0x3F;
+    mask32(R_AFE_XTAL_CTRL, 0x7E000000, xtal);
+    mask32(R_AFE_PLL_CTRL, 0x7E, xtal);
+    mask32(R_CCK0_FAREPORT, BIT(18) | BIT(22), 0);
+    or32(R_RXPSEL, BIT(28) | BIT(29));
+
+    /* the RF registers answer at 0x2800 + 4 * number: do they hold what was last written? */
+    for (int a = 0; a < 256; a++)
+        if (PH.rf_seen[a] && (rd32(R_RF_BASE_A + ((unsigned)a << 2)) & RFREG_MASK) != PH.rf_last[a])
+        {
+            if (PH.rf_diff < sizeof PH.diff_addr)
+            {
+                PH.diff_addr[PH.rf_diff] = (unsigned char)a;
+                PH.diff_xor[PH.rf_diff] = (rd32(R_RF_BASE_A + ((unsigned)a << 2)) & RFREG_MASK) ^ PH.rf_last[a];
+            }
+            PH.rf_diff++;
+        }
+    for (int a = 0; a < 256; a++)
+        PH.rf_regs += PH.rf_seen[a];
+    PH.state = PH_OK;
+}
+
+/* Some RF bits are driven by the chip itself (mode, channel and bandwidth, bias settings) and read back differently from what was
+ * written, even on a healthy card: 26 of about 90 registers on the real one. Only if more than half differ is the write path suspect. */
+static int phy_rf_suspect(void) { return PH.rf_diff * 2 > PH.rf_regs; }
+
 static int rtl8821ce_claims(const PciDevice *pd)
 {
     return pd->vendor_id == 0x10EC && (pd->device_id == 0xB821 || pd->device_id == 0xC821);
@@ -912,6 +1388,10 @@ static int rtl8821ce_probe(const PciDevice *pd)
     int dma_ok = 0;
     DL.state = DL_NOT_TRIED;
     EF.state = EF_NOT_TRIED;
+    MI.state = MI_NOT_TRIED;
+    MI.why = 0;
+    PH.state = PH_NOT_TRIED;
+    PH.why = 0;
     EF.why = 0;
     DL.why = 0;
     DL.part = 0;
@@ -957,6 +1437,9 @@ static int rtl8821ce_probe(const PciDevice *pd)
                 DL.state = DL_OK;
                 DL.mcufw = rd16(R_MCUFW_CTRL);
                 efuse_read_mac(); /* the chip is powered on and the firmware runs: read the board's data while we can */
+                mac_init();       /* stage 4b-1: queues and MAC timing; the receive DMA is switched off again at the end */
+                if (MI.state == MI_OK)
+                    phy_init((W.cfg1 >> 12) & 0xF); /* stage 4b-2: the baseband / AGC / RF tables */
             }
             else
             {
@@ -1003,13 +1486,25 @@ static void status_download(NicText *t)
     static const char *const PART[] = {"dmem", "imem", "emem"};
     if (DL.state == DL_OK)
     {
+        if (PH.state == PH_OK && phy_rf_suspect())
+        {
+            /* the RF read-back differs: the line has room for the register numbers instead of the usual details */
+            nic_puts(t, ", phy rf");
+            nic_putd(t, PH.rf_diff);
+            nic_putc(t, ':');
+            for (unsigned i = 0; i < PH.rf_diff && i < 7; i++) /* register number, then the differing bits */
+            {
+                nic_puth(t, PH.diff_addr[i], 2);
+                nic_puth(t, PH.diff_xor[i], 5);
+            }
+            nic_puts(t, DL.off_after > 0 ? ", off" : ", power-off FAILED");
+            return;
+        }
         nic_puts(t, ", fw ");
         nic_putd(t, FW.version);
         nic_putc(t, '.');
         nic_putd(t, FW.subversion);
-        nic_puts(t, " ready (80=");
-        nic_puth(t, DL.mcufw, 4);
-        nic_putc(t, ')');
+        nic_puts(t, " ready");
         if (EF.state == EF_OK)
         {
             nic_puts(t, ", MAC ");
@@ -1025,7 +1520,24 @@ static void status_download(NicText *t)
             nic_puts(t, ", efuse: ");
             nic_puts(t, EF.why ? EF.why : "?");
         }
-        nic_puts(t, DL.off_after > 0 ? ", off again" : DL.off_after < 0 ? ", power-off FAILED" : "");
+        if (MI.state == MI_OK)
+            nic_puts(t, ", mac ok");
+        else if (MI.state == MI_FAILED)
+        {
+            nic_puts(t, ", mac FAILED: ");
+            nic_puts(t, MI.why ? MI.why : "?");
+        }
+        if (PH.state == PH_OK)
+        {
+            nic_puts(t, ", phy ");
+            nic_puts(t, "ok");
+        }
+        else if (PH.state == PH_SKIPPED)
+        {
+            nic_puts(t, ", no phy: ");
+            nic_puts(t, PH.why ? PH.why : "?");
+        }
+        nic_puts(t, DL.off_after > 0 ? ", off" : DL.off_after < 0 ? ", power-off FAILED" : "");
     }
     else if (DL.state == DL_FAILED)
     {
