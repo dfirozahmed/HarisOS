@@ -99,6 +99,7 @@ set(KERNEL_SOURCES
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/e1000.c               # network: Intel e1000 NIC driver (polled), raw Ethernet frames
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
+    kernel/net/sock.c                # network: socket table for the system calls (SYS_SOCKET ...)
     kernel/net/tcp.c                 # network: TCP client (connect / send / receive / close, retransmission)
     kernel/net/net.c                 # network: ARP cache, answering ARP / ping, ping, boot self test
     kernel/storage/blk.c             # block devices: sector I/O and the write lock
@@ -248,7 +249,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest)
+set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

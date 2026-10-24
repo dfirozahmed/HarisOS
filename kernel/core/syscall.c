@@ -237,10 +237,51 @@ static long long pipe_write_user(Process *p, ull idx, ull ptr, ull len)
     return (long long)total;
 }
 
+/* ---- sockets ---------------------------------------------------------------------------------------------------------------- */
+/* A socket descriptor (SYS_SOCKET): SYS_READ receives, SYS_WRITE sends (sock.h). Receiving sleeps in the same way as a pipe read: ask,
+ * and when nothing has arrived give the CPU to the other threads and ask again, so that a signal can end the wait. The kernel stack is
+ * small (32 KiB), so data moves in pieces of SOCK_CHUNK bytes. */
+#define SOCK_CHUNK 1024
+
+static long long sock_read_user(Process *p, ull idx, ull ptr, ull len)
+{
+    int s = pfile_sock(&p->file[idx]);
+    unsigned char buf[SOCK_CHUNK];
+    unsigned cap = len < SOCK_CHUNK ? (unsigned)len : SOCK_CHUNK;
+    int got;
+    while ((got = sock_recv(s, buf, cap)) == SOCK_WOULDBLOCK)
+    {
+        task_yield();
+        if (sig_interrupted(p))
+            return -1;
+    }
+    if (got > 0)
+        copy_to_user(ptr, (const char *)buf, (unsigned)got);
+    return got < 0 ? -1 : got; /* 0 = the server closed its side: end of input */
+}
+
+static long long sock_write_user(Process *p, ull idx, ull ptr, ull len)
+{
+    int s = pfile_sock(&p->file[idx]);
+    unsigned char buf[SOCK_CHUNK];
+    ull total = 0;
+    while (total < len)
+    {
+        unsigned n = (len - total) < SOCK_CHUNK ? (unsigned)(len - total) : SOCK_CHUNK;
+        copy_from_user((char *)buf, ptr + total, n);
+        if (sock_send(s, buf, n) < 0) /* what went before stays sent: report it */
+            return total ? (long long)total : -1;
+        total += n;
+    }
+    return (long long)total;
+}
+
 static long long file_read(Process *p, ull idx, ull ptr, ull len)
 {
     if (pfile_is_sem(&p->file[idx]) || pfile_is_usync(&p->file[idx]))
         return -1; /* a semaphore, mutex or condition variable holds no bytes */
+    if (pfile_is_sock(&p->file[idx]))
+        return sock_read_user(p, idx, ptr, len);
     if (pfile_is_mq(&p->file[idx]))
         return mq_read_user(p, idx, ptr, len);
     if (pfile_is_pipe(&p->file[idx]))
@@ -280,6 +321,8 @@ static long long file_write(Process *p, ull idx, ull ptr, ull len)
 {
     if (pfile_is_sem(&p->file[idx]) || pfile_is_usync(&p->file[idx]))
         return -1;
+    if (pfile_is_sock(&p->file[idx]))
+        return sock_write_user(p, idx, ptr, len);
     if (pfile_is_mq(&p->file[idx]))
         return mq_write_user(p, idx, ptr, len);
     if (pfile_is_pipe(&p->file[idx]))
@@ -1234,6 +1277,63 @@ static long long sys_mq_unlink(const SyscallFrame *f)
     return mq_unlink(name);
 }
 
+/* ---- sockets: the calls ------------------------------------------------------------------------------------------------------ */
+/* SYS_SOCKET: rdi = type (SYS_SOCK_STREAM). A descriptor for a new, unconnected TCP socket, or -1 (other type, no network adapter, no free
+ * socket or descriptor). SYS_READ / SYS_WRITE / SYS_CLOSE work on it; fork copies the descriptor (both processes then share the connection). */
+static long long sys_socket(const SyscallFrame *f)
+{
+    Process *p = process_current();
+    if (!p || f->rdi != SYS_SOCK_STREAM)
+        return -1;
+    int slot = process_file_slot(p); /* a free entry; the list grows when all are in use */
+    if (slot < 0)
+        return -1;
+    int s = sock_create();
+    if (s < 0)
+        return -1;
+    p->file[slot].node = PROCESS_SOCK_NODE + s;
+    p->file[slot].pos = 0;
+    p->file[slot].flags = 0;
+    sock_ref(s);
+    return PROCESS_FD_FIRST + slot;
+}
+
+/* The socket behind descriptor fd, or -1 if it is not one. */
+static int sock_of(Process *p, ull fd)
+{
+    ull idx = fd - PROCESS_FD_FIRST;
+    if (!p || fd < PROCESS_FD_FIRST || idx >= (ull)p->file_cap || p->file[idx].node < 0 || !pfile_is_sock(&p->file[idx]))
+        return -1;
+    return pfile_sock(&p->file[idx]);
+}
+
+/* SYS_CONNECT: rdi = socket descriptor, rsi = the server's address as one number (a << 24 | b << 16 | c << 8 | d for a.b.c.d), rdx = port
+ * 1 .. 65535. Waits for the TCP handshake (about 5 seconds at most). 0, or -1 (not a socket, already connected, nobody answers, refused). */
+static long long sys_connect(const SyscallFrame *f)
+{
+    int s = sock_of(process_current(), f->rdi);
+    if (s < 0 || f->rsi > 0xFFFFFFFFULL || f->rdx == 0 || f->rdx > 65535)
+        return -1;
+    unsigned char ip[4] = {(unsigned char)(f->rsi >> 24), (unsigned char)(f->rsi >> 16), (unsigned char)(f->rsi >> 8), (unsigned char)f->rsi};
+    return sock_connect(s, ip, (unsigned)f->rdx);
+}
+
+/* SYS_RESOLVE: rdi = a host name ("example.com") or a dotted number. The address in the form SYS_CONNECT takes, or -1 (no such name, no DNS
+ * server, no network). Waits up to a few seconds. */
+static long long sys_resolve(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current())
+        return -1;
+    char name[256];
+    if (copy_string_from_user(name, (int)sizeof(name), f->rdi, as) <= 0)
+        return -1;
+    unsigned char ip[4];
+    if (!sock_resolve(name, ip))
+        return -1;
+    return (long long)((ull)ip[0] << 24 | (ull)ip[1] << 16 | (ull)ip[2] << 8 | ip[3]);
+}
+
 /* ---- semaphores -------------------------------------------------------------------------------------------------------------- */
 /* SYS_SEM_OPEN: rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL), rdx = the starting count for one that is made (0 .. 2^31-1).
  * A descriptor for the semaphore, or -1. SYS_CLOSE lets go; fork copies the descriptor. */
@@ -1760,6 +1860,12 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_gui_event(f);
     case SYS_GUI_CTL:
         return sys_gui_ctl(f);
+    case SYS_SOCKET:
+        return sys_socket(f);
+    case SYS_CONNECT:
+        return sys_connect(f);
+    case SYS_RESOLVE:
+        return sys_resolve(f);
     case SYS_SIGACTION:
         return sys_sigaction(f);
     case SYS_SIGRETURN:

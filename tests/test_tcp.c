@@ -31,6 +31,7 @@ int net_arp_mac(const unsigned char ip[4], unsigned char mac[6], unsigned timeou
     return 1;
 }
 unsigned net_next_ip_id(void) { static unsigned id; return id++; }
+void net_yield(void) {}
 
 typedef struct { unsigned char d[1600]; unsigned n; } Frame;
 static Frame Q[1024];

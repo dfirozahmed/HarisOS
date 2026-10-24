@@ -330,7 +330,10 @@ int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
 
     unsigned long long end = timer_ms() + timeout_ms;
     while (s->state == ST_SYN_SENT && timer_ms() < end)
+    {
         net_poll();
+        net_yield();
+    }
     if (s->state != ST_ESTABLISHED)
     {
         s->used = 0;
@@ -344,7 +347,10 @@ int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
 static int wait_acked(Sock *s, unsigned long long end)
 {
     while (s->rtx && s->state != ST_CLOSED && timer_ms() < end)
+    {
         net_poll();
+        net_yield();
+    }
     return !s->rtx && !s->err;
 }
 
@@ -367,6 +373,7 @@ int tcp_send(int h, const void *data, unsigned len, unsigned timeout_ms)
             if (timer_ms() >= end)
                 return -1;
             net_poll();
+            net_yield();
             continue;
         }
         unsigned chunk = len - done;
@@ -409,6 +416,7 @@ int tcp_recv(int h, void *buf, unsigned max, unsigned timeout_ms)
         if (timer_ms() >= end)
             return -2;
         net_poll();
+        net_yield();
     }
 }
 
@@ -425,7 +433,10 @@ void tcp_close(int h)
         emit(s, TCP_FIN | TCP_ACK, 0, 0);
     }
     while (s->state != ST_CLOSED && timer_ms() < end)
+    {
         net_poll();
+        net_yield();
+    }
     if (s->state != ST_CLOSED && s->state != ST_SYN_SENT)
         send_raw(s, s->snd_nxt, TCP_RST | TCP_ACK, 0, 0); /* we give up waiting: tell the peer the connection is gone */
     s->used = 0;

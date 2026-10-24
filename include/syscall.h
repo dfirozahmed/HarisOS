@@ -138,6 +138,17 @@
  *   SYS_GUI_CTL (53) rdi = handle, rsi = 0: destroy the window (the program should also SYS_SHM_UNMAP its picture), or rsi = 1: the window's
  *                  title is the string at rdx. 0, or -1. A process that ends loses its windows. The window's close button does not
  *                  close it: it sends GUI_EV_CLOSE (and closes it at once if the program ignored the previous one).
+ *   SYS_SOCKET (54) rdi = type (SYS_SOCK_STREAM = TCP, the only one): a descriptor for a new socket, or -1 (no network adapter, no free socket
+ *                  (SOCK_MAX = 4 in all), no free descriptor). It is not connected yet. SYS_WRITE sends on it (all of it, in pieces; fewer
+ *                  bytes, or -1, if the connection broke part way), SYS_READ receives (sleeps until something arrives; 0 = the server closed its
+ *                  side and everything was read, -1 = reset or broken connection, or a signal handler ran) and SYS_CLOSE closes the connection and
+ *                  frees the socket once no holder is left (fork copies the descriptor: both processes then share the connection). It cannot
+ *                  be seeked, redirected or given to SYS_SPAWN. Only connections we open (no bind / listen / accept yet).
+ *   SYS_CONNECT (55) rdi = socket descriptor, rsi = the server's IPv4 address as one number (a << 24 | b << 16 | c << 8 | d for a.b.c.d),
+ *                  rdx = port 1 .. 65535. Waits for the TCP handshake (ARP, SYN, up to about 5 seconds, retrying). 0, or -1 (not a socket,
+ *                  already connected, no answer, refused). Other threads keep running while it waits.
+ *   SYS_RESOLVE (56) rdi = pointer to a NUL-terminated host name ("example.com") or dotted number ("10.0.2.2"): its IPv4 address in the form
+ *                  SYS_CONNECT takes (0 .. 2^32-1), or -1 (no such name, no DNS server, no network, name too long or not valid).
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
@@ -218,6 +229,12 @@
 #define SYS_GUI_PRESENT 51
 #define SYS_GUI_EVENT 52
 #define SYS_GUI_CTL 53
+#define SYS_SOCKET 54
+#define SYS_CONNECT 55
+#define SYS_RESOLVE 56
+
+/* SYS_SOCKET types */
+#define SYS_SOCK_STREAM 1 /* TCP */
 
 /* SYS_GUI_CTL commands */
 #define SYS_GUI_DESTROY 0

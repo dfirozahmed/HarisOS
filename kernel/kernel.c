@@ -236,6 +236,7 @@ void kernel_main(const BootInfo *info)
             serial_putd(gd);
         serial_puts("\n");
         task_init();
+        net_set_yield(task_yield); /* from now on a thread that waits for the network lets the others run (net.h) */
         int st = task_selftest();
         int sp = st == 0 ? task_selftest_preempt() : 0;
         serial_puts("HARISOS: thread self test ");
@@ -270,6 +271,25 @@ void kernel_main(const BootInfo *info)
                 serial_puts("FAILED ");
                 serial_putd(ex);
                 serial_puts("\n");
+            }
+        }
+        if (ps == 0 && net_present() && exec_find("NETTEST.ELF") >= 0)
+        {
+            /* the socket system calls from ring 3 (its own lines go to the serial port); logged, not fatal */
+            int err = 0;
+            int id = exec_run("nettest.elf", &err);
+            ProcessStats ns;
+            serial_puts("HARISOS: socket self test ");
+            /* process_wait gives a program 400 turns, enough for the others; this one waits for the network, so keep asking */
+            int waited = -1;
+            for (unsigned long long end = timer_ms() + 15000; id >= 0 && waited != 0 && timer_ms() < end;)
+                waited = process_wait(id);
+            if (id < 0 || waited != 0)
+                serial_puts("could not run or did not finish in 15 s\n");
+            else
+            {
+                process_stats(&ns);
+                serial_puts(ns.last_exit == 0 ? "ok\n" : "FAILED\n");
             }
         }
         serial_puts("HARISOS: user mode self test ");

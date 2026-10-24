@@ -60,6 +60,10 @@
 #define SYS_GUI_PRESENT 51
 #define SYS_GUI_EVENT 52
 #define SYS_GUI_CTL 53
+#define SYS_SOCKET 54
+#define SYS_CONNECT 55
+#define SYS_RESOLVE 56
+#define SYS_SOCK_STREAM 1
 #define SYS_GUI_DESTROY 0
 #define SYS_GUI_SET_TITLE 1
 
@@ -167,6 +171,32 @@ static inline long long sys_cond_unlink(const char *name) { return syscall3(SYS_
  * returns the old one, or -1. sys_getprio only reads it. */
 static inline long long sys_setprio(int pid, int prio) { return syscall3(SYS_SETPRIO, pid, prio, 0); }
 static inline long long sys_getprio(int pid) { return syscall3(SYS_SETPRIO, pid, -1, 0); }
+/* ---- sockets (TCP client; SYS_SOCKET ... in include/syscall.h) ---- */
+/* an IPv4 address as the one number sys_connect takes: SOCK_IP(10, 0, 2, 2) */
+#define SOCK_IP(a, b, c, d) ((unsigned)(a) << 24 | (unsigned)(b) << 16 | (unsigned)(c) << 8 | (unsigned)(d))
+/* a new TCP socket: a descriptor, or -1. Then sys_connect, sys_send / sys_recv (or sys_write / sys_read), sys_close. */
+static inline long long sys_socket(void) { return syscall3(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0); }
+/* connect to ip (see SOCK_IP) and port: 0, or -1 */
+static inline long long sys_connect(int fd, unsigned ip, unsigned port) { return syscall3(SYS_CONNECT, fd, (long long)ip, port); }
+/* host name or dotted number -> the address in the form sys_connect takes (0 .. 2^32-1), or -1 */
+static inline long long sys_resolve(const char *name) { return syscall3(SYS_RESOLVE, (long long)(usize)name, 0, 0); }
+/* send all len bytes: len, or -1 if the connection broke (then some of it may have gone). One system call takes at most 4096 bytes. */
+static inline long long sys_send(int fd, const void *buf, usize len)
+{
+    const char *p = (const char *)buf;
+    usize done = 0;
+    while (done < len)
+    {
+        usize n = len - done < 4096 ? len - done : 4096;
+        long long r = sys_write(fd, p + done, n);
+        if (r <= 0)
+            return -1;
+        done += (usize)r;
+    }
+    return (long long)len;
+}
+/* receive up to len bytes: how many (>0), 0 = the server closed and everything was read, -1 = error. Waits for the first byte. */
+static inline long long sys_recv(int fd, void *buf, usize len) { return sys_read(fd, buf, len); }
 /* ---- GUI windows (gui.h, SYS_GUI_* in include/syscall.h) ---- */
 #define GUI_EV_KEY 1        /* key, ch, pressed, mods (KEY_* values of keyboard.h: KEY_ESC is 256) */
 #define GUI_EV_MOUSE_MOVE 2 /* x, y, buttons (bit 0 = left, bit 1 = right) */

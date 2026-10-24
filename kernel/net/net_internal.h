@@ -9,6 +9,9 @@
 int net_arp_mac(const unsigned char ip[4], unsigned char mac[6], unsigned timeout_ms);
 /* IPv4 identification for the next packet we send. */
 unsigned net_next_ip_id(void);
+/* Called in every loop that waits for the network, so other threads can run meanwhile (a no-op until the kernel
+ * registers task_yield with net_set_yield). */
+void net_yield(void);
 
 /* tcp.c: a TCP segment addressed to us arrived / time passed (retransmit timers). Both are called from net_poll(). */
 void tcp_input(const TcpSeg *seg);

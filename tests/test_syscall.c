@@ -70,7 +70,13 @@ static jmp_buf EXIT_JMP;
 
 Process *process_current(void) { return CURRENT_PROC; }
 int task_current(void) { return 7; }
-void task_yield(void) { YIELDS++; }
+static void (*YIELD_ACTION)(void); /* what happens "elsewhere" while the caller yields (a signal arrives) */
+void task_yield(void)
+{
+    YIELDS++;
+    if (YIELD_ACTION)
+        YIELD_ACTION();
+}
 static int WOKEN_TASKS[16], WOKEN_TASKS_N;
 void task_wake(int id) { if (WOKEN_TASKS_N < 16) WOKEN_TASKS[WOKEN_TASKS_N++] = id; } /* (pipes wake waiters) */
 /* mutex.c: every thread sleeps (so a wake-up is worth sending) except DEAD_TASK, which has ended; interrupts are a flag it can look at */
@@ -662,6 +668,93 @@ int vfs_volume_of(int id)
     return -1;
 }
 
+/* ---- sockets: a fake of sock.c (the real one is tested with tcp.c in test_tcp.c) ---- */
+#include "sock.h"
+static int FS_NET, FS_USED[SOCK_MAX], FS_REFS[SOCK_MAX], FS_CONN[SOCK_MAX];
+static unsigned char FS_IP[4];
+static unsigned FS_PORT;
+static unsigned char FS_SENT[8192];
+static int FS_SENT_N, FS_SEND_CALLS, FS_MAX_PIECE, FS_SEND_FAIL_AFTER;
+static const char *FS_IN;
+static int FS_IN_POS, FS_WOULDBLOCKS, FS_ERR;
+static void fake_sock_reset(void)
+{
+    FS_NET = 1;
+    for (int i = 0; i < SOCK_MAX; i++)
+        FS_USED[i] = FS_REFS[i] = FS_CONN[i] = 0;
+    FS_PORT = 0;
+    FS_SENT_N = FS_SEND_CALLS = FS_MAX_PIECE = FS_SEND_FAIL_AFTER = 0;
+    FS_IN = "";
+    FS_IN_POS = FS_WOULDBLOCKS = FS_ERR = 0;
+}
+int sock_create(void)
+{
+    if (!FS_NET)
+        return -1;
+    for (int i = 0; i < SOCK_MAX; i++)
+        if (!FS_USED[i])
+        {
+            FS_USED[i] = 1;
+            FS_REFS[i] = 0;
+            return i;
+        }
+    return -1;
+}
+void sock_ref(int id) { if (id >= 0 && id < SOCK_MAX && FS_USED[id]) FS_REFS[id]++; }
+void sock_unref(int id)
+{
+    if (id >= 0 && id < SOCK_MAX && FS_USED[id] && --FS_REFS[id] <= 0)
+        FS_USED[id] = FS_CONN[id] = 0;
+}
+int sock_connect(int id, const unsigned char ip[4], unsigned port)
+{
+    if (id < 0 || id >= SOCK_MAX || !FS_USED[id] || FS_CONN[id] || port == 0 || port > 65535)
+        return -1;
+    memcpy(FS_IP, ip, 4);
+    FS_PORT = port;
+    FS_CONN[id] = 1;
+    return 0;
+}
+int sock_send(int id, const void *data, unsigned len)
+{
+    if (id < 0 || id >= SOCK_MAX || !FS_CONN[id])
+        return -1;
+    if (FS_SEND_FAIL_AFTER && FS_SEND_CALLS >= FS_SEND_FAIL_AFTER)
+        return -1;
+    FS_SEND_CALLS++;
+    if ((int)len > FS_MAX_PIECE)
+        FS_MAX_PIECE = (int)len;
+    if (FS_SENT_N + (int)len <= (int)sizeof FS_SENT)
+        memcpy(FS_SENT + FS_SENT_N, data, len);
+    FS_SENT_N += (int)len;
+    return (int)len;
+}
+int sock_recv(int id, void *buf, unsigned max)
+{
+    if (id < 0 || id >= SOCK_MAX || !FS_CONN[id] || FS_ERR)
+        return -1;
+    if (FS_WOULDBLOCKS > 0)
+    {
+        FS_WOULDBLOCKS--;
+        return SOCK_WOULDBLOCK;
+    }
+    int left = (int)strlen(FS_IN) - FS_IN_POS;
+    int n = left < (int)max ? left : (int)max;
+    memcpy(buf, FS_IN + FS_IN_POS, (size_t)n);
+    FS_IN_POS += n;
+    return n; /* 0 once everything is read: the server closed */
+}
+int sock_resolve(const char *name, unsigned char ip[4])
+{
+    if (strcmp(name, "example.com") == 0)
+    {
+        unsigned char a[4] = {93, 184, 216, 34};
+        memcpy(ip, a, 4);
+        return 1;
+    }
+    return 0;
+}
+
 /* ---- helpers ---- */
 static long long call(ull num, ull a, ull b, ull c)
 {
@@ -715,6 +808,8 @@ static void reset(void)
     CHECK(process_files_init(&PROC) == 0);
     READ_CALLS = 0;
     host_uaccess = 0;
+    YIELD_ACTION = 0;
+    fake_sock_reset();
 }
 
 /* what "the other process" does while the caller sleeps in task_block (see BLOCK_ACTION) */
@@ -742,6 +837,7 @@ static int GUI_TEST_HANDLE;
 static void gui_poster(void) { GuiEvent e = {GUI_EV_WHEEL, 3, 0, 0, 0, 0, 0, 0}; gui_post(GUI_TEST_HANDLE, &e); BLOCK_ACTION = 0; }
 static void gui_destroyer(void) { gui_destroy(GUI_TEST_HANDLE); BLOCK_ACTION = 0; }
 static void raise_int(void) { PROC.sig_pending |= 1u << SIGINT; BLOCK_ACTION = 0; }
+static void raise_int_yield(void) { PROC.sig_pending |= 1u << SIGINT; YIELD_ACTION = 0; }
 static void raise_then_feed(void)
 {
     PROC.sig_pending |= 1u << SIGINT;
@@ -2079,6 +2175,109 @@ int main(void)
         CURRENT_PROC = 0;
         CHECK(call(SYS_MQ_OPEN, U("k"), SYS_CREATE, 0) == -1 && call(SYS_MQ_UNLINK, U("k"), 0, 0) == -1);
         CURRENT_PROC = &PROC;
+    }
+
+    /* ================= sockets ================= */
+    reset();
+    {
+        char rb[64];
+        long long s = call(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0);
+        CHECK(s == 3 && PROC.file[0].node == PROCESS_SOCK_NODE + 0 && FS_REFS[0] == 1);
+        CHECK(pfile_is_sock(&PROC.file[0]) && pfile_is_object(&PROC.file[0]) && !pfile_is_usync(&PROC.file[0]) &&
+              !pfile_is_cond(&PROC.file[0]));
+
+        /* not connected yet: nothing goes in or out */
+        CHECK(call(SYS_WRITE, (ull)s, U("x"), 1) == -1 && call(SYS_READ, (ull)s, U(rb), sizeof rb) == -1);
+
+        /* connect: the address is one number a<<24|b<<16|c<<8|d, the port 1 .. 65535 */
+        CHECK(call(SYS_CONNECT, (ull)s, 0, 0) == -1);                                   /* port 0 */
+        CHECK(call(SYS_CONNECT, (ull)s, 0x5DB8D822ULL, 65536) == -1);                   /* port too big */
+        CHECK(call(SYS_CONNECT, (ull)s, 0x100000000ULL, 80) == -1);                     /* more than 32 bits */
+        CHECK(call(SYS_CONNECT, 1, 0x5DB8D822ULL, 80) == -1);                           /* the console is no socket */
+        CHECK(call(SYS_CONNECT, 99, 0x5DB8D822ULL, 80) == -1);                          /* not open */
+        CHECK(call(SYS_CONNECT, (ull)s, 0x5DB8D822ULL, 80) == 0);
+        CHECK(FS_IP[0] == 93 && FS_IP[1] == 184 && FS_IP[2] == 216 && FS_IP[3] == 34 && FS_PORT == 80);
+        CHECK(call(SYS_CONNECT, (ull)s, 0x5DB8D822ULL, 80) == -1);                      /* already connected */
+
+        /* send: SYS_WRITE, in pieces of at most 1024 bytes through a kernel buffer; the limit of one write call applies */
+        static char big[SYS_WRITE_MAX + 1];
+        for (unsigned i = 0; i < sizeof big; i++)
+            big[i] = (char)(i * 13);
+        CHECK(call(SYS_WRITE, (ull)s, U("GET /"), 5) == 5 && FS_SENT_N == 5 && memcmp(FS_SENT, "GET /", 5) == 0);
+        CHECK(call(SYS_WRITE, (ull)s, U(big), 3000) == 3000 && FS_SENT_N == 3005 && FS_MAX_PIECE <= 1024);
+        CHECK(memcmp(FS_SENT + 5, big, 3000) == 0);
+        CHECK(call(SYS_WRITE, (ull)s, U(big), sizeof big) == -1);                       /* more than SYS_WRITE_MAX */
+        USER_OK = 0;
+        CHECK(call(SYS_WRITE, (ull)s, U(big), 10) == -1);                               /* a bad pointer */
+        USER_OK = 1;
+        FS_SEND_FAIL_AFTER = FS_SEND_CALLS + 2; /* the connection breaks after two pieces of 1024 */
+        CHECK(call(SYS_WRITE, (ull)s, U(big), 3000) == 2048);                           /* what went before is reported */
+        FS_SEND_FAIL_AFTER = FS_SEND_CALLS;
+        CHECK(call(SYS_WRITE, (ull)s, U(big), 10) == -1);                               /* nothing went: -1 */
+        FS_SEND_FAIL_AFTER = 0;
+
+        /* receive: SYS_READ returns what is there, sleeps (yields) while there is nothing, 0 once the server closed */
+        FS_IN = "HTTP/1.0 200 OK";
+        CHECK(call(SYS_READ, (ull)s, U(rb), 4) == 4 && memcmp(rb, "HTTP", 4) == 0);
+        YIELDS = 0;
+        FS_WOULDBLOCKS = 3;
+        CHECK(call(SYS_READ, (ull)s, U(rb), sizeof rb) == 11 && memcmp(rb, "/1.0 200 OK", 11) == 0 && YIELDS == 3);
+        CHECK(call(SYS_READ, (ull)s, U(rb), sizeof rb) == 0 && call(SYS_READ, (ull)s, U(rb), sizeof rb) == 0); /* closed */
+        USER_OK = 0;
+        CHECK(call(SYS_READ, (ull)s, U(rb), 4) == -1);                                  /* bad buffer */
+        USER_OK = 1;
+        FS_ERR = 1;
+        CHECK(call(SYS_READ, (ull)s, U(rb), 4) == -1);                                  /* reset by the peer */
+        FS_ERR = 0;
+
+        /* a signal with a handler ends the wait */
+        FS_WOULDBLOCKS = 1000000;
+        YIELD_ACTION = raise_int_yield;
+        CHECK(call(SYS_READ, (ull)s, U(rb), 4) == -1 && YIELDS >= 1);
+        PROC.sig_pending = 0;
+        FS_WOULDBLOCKS = 0;
+
+        /* what a socket cannot do */
+        CHECK(call(SYS_SEEK, (ull)s, 0, 0) == -1);
+        CHECK(call(SYS_DUP2, (ull)s, 1, 0) == -1);
+        int io3[3] = {-1, (int)s, -1};
+        CHECK(call(SYS_SPAWN, U("HELLO.ELF"), 0, U(io3)) == -1);
+        CHECK(call(SYS_SEM_POST, (ull)s, 0, 0) == -1 && call(SYS_MUTEX_LOCK, (ull)s, 0, 0) == -1);
+
+        /* a copy of the descriptor (fork, spawn) is one more holder: the connection lives until the last one closes */
+        pfile_ref(&PROC.file[0]); /* what fork does to a copy of the slot */
+        CHECK(FS_REFS[0] == 2);
+        CHECK(call(SYS_CLOSE, (ull)s, 0, 0) == 0 && FS_USED[0] && FS_REFS[0] == 1);
+        sock_unref(0); /* the other holder closes */
+        CHECK(!FS_USED[0]);
+
+        /* the table: SOCK_MAX sockets, then none; the descriptors are given back by closing */
+        long long fds[SOCK_MAX + 1];
+        int n = 0;
+        while (n < SOCK_MAX + 1 && (fds[n] = call(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0)) >= 3)
+            n++;
+        CHECK(n == SOCK_MAX && fds[n] == -1);
+        for (int i = 0; i < n; i++)
+            CHECK(call(SYS_CLOSE, (ull)fds[i], 0, 0) == 0);
+        CHECK((s = call(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0)) >= 3);
+        CHECK(call(SYS_CLOSE, (ull)s, 0, 0) == 0);
+
+        /* refused */
+        CHECK(call(SYS_SOCKET, 2, 0, 0) == -1 && call(SYS_SOCKET, 0, 0, 0) == -1);      /* only SYS_SOCK_STREAM */
+        FS_NET = 0;
+        CHECK(call(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0) == -1);                           /* no network adapter */
+        FS_NET = 1;
+
+        /* names: SYS_RESOLVE gives the address in the form SYS_CONNECT takes */
+        CHECK(call(SYS_RESOLVE, U("example.com"), 0, 0) == 0x5DB8D822LL);
+        CHECK(call(SYS_RESOLVE, U("nowhere.example"), 0, 0) == -1);
+        CHECK(call(SYS_RESOLVE, U(""), 0, 0) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_RESOLVE, U("example.com"), 0, 0) == -1);                         /* bad pointer */
+        USER_OK = 1;
+        static char longname[400];
+        memset(longname, 'a', sizeof longname - 1);
+        CHECK(call(SYS_RESOLVE, U(longname), 0, 0) == -1);                              /* does not fit the 256 byte buffer */
     }
 
     /* ================= semaphores ================= */

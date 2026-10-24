@@ -30,6 +30,7 @@ const unsigned char *net_gateway(void);
 const unsigned char *net_dns(void);
 int net_dhcp(unsigned timeout_ms);
 int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms);
+void net_set_yield(void (*fn)(void)); /* what net_yield() calls while a caller waits for the network; the kernel passes task_yield */
 int net_poll(void);
 int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms);
 int net_self_test(void);

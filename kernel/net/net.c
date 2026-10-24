@@ -217,7 +217,10 @@ static int resolve(const unsigned char *ip, unsigned char *mac, unsigned timeout
             return 0;
         unsigned long long end = timer_ms() + timeout_ms;
         while (timer_ms() < end && !cache_find(hop))
+        {
             net_poll();
+            net_yield();
+        }
     }
     return 0;
 }
@@ -244,7 +247,10 @@ int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms)
     {
         unsigned long long end = timer_ms() + timeout_ms;
         while (timer_ms() < end && !PING_GOT)
+        {
             net_poll();
+            net_yield();
+        }
         if (PING_GOT)
         {
             unsigned long long us = timer_us() - start;
@@ -270,7 +276,7 @@ static int udp_send(const unsigned char *ip, unsigned sport, unsigned dport, con
 /* DNS in two messages: we ask the server "what is the A record of example.com?" in a UDP datagram from a port we pick,
  * and it answers from port 53 to that port with the address (a recursive server like QEMU's 10.0.2.3 asks the
  * internet for us). Names written as dotted numbers are taken as they are. Returns 1 and the address, else 0. */
-int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms)
+static int resolve_name(const char *name, unsigned char ip[4], unsigned timeout_ms)
 {
     if (ip_parse(name, ip))
         return 1;
@@ -292,7 +298,10 @@ int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms)
         {
             unsigned long long end = timer_ms() + timeout_ms;
             while (timer_ms() < end && DNS_STATE == 0)
+            {
                 net_poll();
+                net_yield();
+            }
         }
         DNS_WAIT = 0;
         if (DNS_STATE == 1)
@@ -304,6 +313,22 @@ int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms)
             return 0;
     }
     return 0;
+}
+
+/* One DNS question at a time: the answer state above is shared, so a second process asking while the first waits
+ * (they run while the first yields) must wait its turn. */
+static int DNS_BUSY;
+
+int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms)
+{
+    if (ip_parse(name, ip)) /* no lock needed for a dotted number */
+        return 1;
+    while (DNS_BUSY)
+        net_yield();
+    DNS_BUSY = 1;
+    int r = resolve_name(name, ip, timeout_ms);
+    DNS_BUSY = 0;
+    return r;
 }
 
 /* Sends one DHCP client message: from 0.0.0.0 to 255.255.255.255, Ethernet broadcast, port 68 to port 67. */
@@ -324,6 +349,7 @@ static int dhcp_wait(unsigned want, unsigned timeout_ms)
     while (timer_ms() < end)
     {
         net_poll();
+        net_yield();
         if (DHCP_HAVE)
         {
             if (DHCP_RX.type == want || DHCP_RX.type == DHCP_NAK)
@@ -490,3 +516,11 @@ int net_arp_mac(const unsigned char ip[4], unsigned char mac[6], unsigned timeou
 }
 
 unsigned net_next_ip_id(void) { return IP_ID++; }
+
+static void (*YIELD_FN)(void);
+void net_set_yield(void (*fn)(void)) { YIELD_FN = fn; }
+void net_yield(void)
+{
+    if (YIELD_FN)
+        YIELD_FN();
+}
