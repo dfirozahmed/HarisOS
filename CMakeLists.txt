@@ -335,6 +335,13 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)
     message(STATUS "Wi-Fi firmware found: firmware/RTW8821C.BIN goes onto haris.img")
 endif()
 
+# pconfig/WIFI.CFG (git ignores the folder): the name and passphrase of the Wi-Fi network to join, two lines "ssid=NAME" and "psk=PASSPHRASE".
+# It goes into the top folder of the boot disk; the driver reads it at start-up and never prints the passphrase.
+if(EXISTS ${CMAKE_SOURCE_DIR}/pconfig/WIFI.CFG)
+    list(APPEND HARIS_EXTRA_FILES ${CMAKE_SOURCE_DIR}/pconfig/WIFI.CFG)
+    message(STATUS "Wi-Fi settings found: pconfig/WIFI.CFG goes onto haris.img")
+endif()
+
 add_custom_command(
     OUTPUT  ${HARIS_IMG}
     COMMAND ${MKIMG_EXE} ${HARIS_IMG} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${CMAKE_BINARY_DIR}/KERNEL.EFI ${USER_ELFS} ${HARIS_EXTRA_FILES}

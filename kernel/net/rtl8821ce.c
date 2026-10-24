@@ -546,6 +546,7 @@ static struct
     int map_ok;                 /* the logical map was decoded: the three values below are real */
     unsigned char rfe, pkg, xtal; /* rfe_option (0xCA, low 5 bits), package type (0xCA bit 5), crystal calibration (0xB9) */
     unsigned char swing2g, swing5g; /* tx_bb_swing_setting_2g / _5g (0xC6, 0xC7) */
+    unsigned char txpwr[42];        /* the power calibration of RF path A (logical map 0x10 .. 0x39) */
 } EF;
 
 /* rtw_dump_logical_efuse_map. 0 = ok, -1 = the blocks do not fit (corrupt map). `log` must be filled with 0xFF by the caller. */
@@ -644,6 +645,8 @@ static void efuse_read_mac(void)
     EF.xtal = log[0xB9];
     EF.swing2g = log[0xC6];
     EF.swing5g = log[0xC7];
+    for (int i = 0; i < 42; i++)
+        EF.txpwr[i] = log[0x10 + i];
     for (int i = 0; i < 6; i++)
         EF.mac[i] = log[EFUSE_MAC_AT + i];
     if (!valid_mac(EF.mac))
@@ -1107,8 +1110,6 @@ static void mac_init(void)
     init_drv_info();
     MI.cr = rd8(R_CR);
     MI.state = MI_OK;
-    /* The receive DMA has no ring yet (stage 4c), so it must not stay on until the chip is powered off. */
-    wr8(R_CR, 0);
 }
 
 /* ---- stage 4b-2: the baseband, AGC and RF tables (the table part of rtw8821c_phy_set_param) ----
@@ -1845,6 +1846,7 @@ static u32 vle32(const volatile u8 *p) { return (u32)p[0] | (u32)p[1] << 8 | (u3
 static u32 rx_buf_dma(unsigned i) { return D.dma + (u32)(D.mem + Q_COUNT * PAGE + PAGE - D.mem) + i * RX_BUF_SLOT; }
 
 static void scan_note(const volatile u8 *f, unsigned len);
+static void conn_note(const volatile u8 *f, unsigned len);
 
 /* one received buffer: classify it. `b` is the buffer, as the chip filled it. */
 static void rx_one(const volatile u8 *b)
@@ -1873,6 +1875,8 @@ static void rx_one(const volatile u8 *b)
             RX.probe_resp++;
         else
             RX.mgmt_other++;
+        if (subtype == 11 || subtype == 1 || subtype == 12 || subtype == 10) /* authentication, association response, deauthentication, disassociation */
+            conn_note(f, len - 4);
         if (subtype == 8 || subtype == 5)
             scan_note(f, len - 4); /* the frame without its FCS */
     }
@@ -1883,6 +1887,15 @@ static void rx_one(const volatile u8 *b)
 }
 
 /* take every buffer the chip has finished, re-arm it, tell the chip how far we are */
+/* start counting afresh: the buffers the chip fills next are the ones after the last it filled (an earlier listening left its index where it was) */
+static void rx_restart(void)
+{
+    RX.rp = (rd32(R_RXBD_IDX_MPDUQ) >> 16) & 0xFFF;
+    if (RX.rp >= RX_COUNT)
+        RX.rp = 0;
+    RX.frames = RX.beacons = RX.probe_resp = RX.mgmt_other = RX.ctrl = RX.data = RX.c2h = RX.bad = 0;
+}
+
 static void rx_poll(void)
 {
     unsigned hw = (rd32(R_RXBD_IDX_MPDUQ) >> 16) & 0xFFF;
@@ -1922,6 +1935,9 @@ typedef struct
     u8 channel;  /* the channel the access point says it is on, else the one we heard it on */
     u8 sec;      /* 0 open, 1 WEP (privacy bit only), 2 WPA, 3 WPA2 */
     u8 heard_on; /* the channel the scan was tuned to */
+    u16 cap;     /* the capability bits of its beacon */
+    u8 rsn_len;  /* the RSN element (WPA2 security description) without its tag and length; 0 = none or too long to keep */
+    u8 rsn[40];
     unsigned beacons;
 } ScanAp;
 
@@ -1936,6 +1952,7 @@ static struct
     unsigned channels_ok;           /* channels that could be tuned */
     unsigned cur_channel;           /* where the receiver listens now */
     unsigned dropped;               /* networks that did not fit the table */
+    unsigned beacons;               /* beacons heard during the whole scan */
 } SC;
 
 
@@ -1955,6 +1972,8 @@ static void scan_note(const volatile u8 *f, unsigned len)
     unsigned ssid_len = 0;
     int have_ssid = 0, named = 0;
     unsigned chan = 0, sec = (cap & 0x10) ? 1 : 0;
+    u8 rsn[40];
+    unsigned rsn_len = 0;
     for (unsigned p = 36; p + 2 <= len;)
     {
         unsigned tag = f[p], tl = f[p + 1];
@@ -1979,7 +1998,12 @@ static void scan_note(const volatile u8 *f, unsigned len)
         else if (tag == 61 && tl >= 1 && !chan)
             chan = d[0];
         else if (tag == 48)
+        {
             sec = 3;
+            rsn_len = tl <= sizeof rsn ? tl : 0;
+            for (unsigned i = 0; i < rsn_len; i++)
+                rsn[i] = d[i];
+        }
         else if (tag == 221 && tl >= 4 && d[0] == 0x00 && d[1] == 0x50 && d[2] == 0xF2 && d[3] == 1 && sec < 2)
             sec = 2;
         p += 2 + tl;
@@ -2014,6 +2038,10 @@ static void scan_note(const volatile u8 *f, unsigned len)
     a->sec = (u8)sec;
     a->heard_on = (u8)SC.cur_channel;
     a->beacons = 1;
+    a->cap = (u16)cap;
+    a->rsn_len = (u8)rsn_len;
+    for (unsigned i = 0; i < rsn_len; i++)
+        a->rsn[i] = rsn[i];
 }
 
 /* the whole scan: for each channel, switch, listen, collect. The receiver stays on all the time. */
@@ -2023,7 +2051,7 @@ static void scan_run(void)
     for (unsigned i = 0; i < SCAN_NCH; i++)
         SC.per_channel[i] = 0;
     SC.state = 1;
-    RX.rp = RX.frames = RX.beacons = RX.probe_resp = RX.mgmt_other = RX.ctrl = RX.data = RX.c2h = RX.bad = 0;
+    rx_restart();
     wr32(R_RCR, RCR_RX_DEFAULT);
     wr8(R_CR, MAC_TRX_ENABLE);
     for (unsigned i = 0; i < SCAN_NCH; i++)
@@ -2041,7 +2069,7 @@ static void scan_run(void)
         }
         SC.per_channel[i] = RX.frames - before;
     }
-    wr8(R_CR, 0);
+    SC.beacons = RX.beacons;
     RX.state = RXS_OK;
 }
 
@@ -2084,7 +2112,7 @@ int rtl8821ce_scan_line(unsigned index, char *buf, unsigned cap)
         nic_puts(&t, " 5G ");
         nic_putd(&t, f5);
         nic_puts(&t, ", beacons ");
-        nic_putd(&t, RX.beacons);
+        nic_putd(&t, SC.beacons);
         if (SC.dropped)
         {
             nic_puts(&t, ", not listed ");
@@ -2128,6 +2156,821 @@ int rtl8821ce_scan_line(unsigned index, char *buf, unsigned cap)
     else
         return -1;
     return (int)t.n;
+}
+
+/* ---- stage 5a-1: transmit power ----
+ * Before the first frame goes out, the chip must be told how strongly to send each rate. The number is an index (about half a decibel
+ * per step; a rule of Realtek's chips, not something this driver checks) and it is made of three parts, as in Linux' phy.c:
+ *   - the base from the efuse: the factory calibrated value for the channel group (and the OFDM or CCK offset of that group);
+ *   - the "power by rate" table: how much weaker the higher rates are sent, relative to the last rate of the section (54M, 11M);
+ *   - the regulatory limit (include/rtl8821ce_txpwr.h): per country group and channel. The country of this PC is not known to the
+ *     driver, so it uses the world-wide row: the lowest limit of every country group that has one for the channel.
+ * The index of a rate is  base + min(by-rate offset, limit, no-limit) , at most 0x3F; the chip takes four rates per 32-bit register
+ * (0x1D00 + rate / 4 * 4), one byte per rate. Only the rates of the CCK (2.4 GHz) and OFDM sections at 20 MHz are computed: they are
+ * the ones used for management frames. */
+#include "rtl8821ce_txpwr.h"
+
+#define TXPWR_MAX_INDEX 0x3F
+#define R_TXAGC_A 0x1D00
+#define RATE_CCK_FIRST 0
+#define RATE_OFDM_FIRST 4
+#define RATE_OFDM_LAST 11
+#define RS_CCK 0
+#define RS_OFDM 1
+
+static const u8 CH5G[49] = {36,  38,  40,  42,  44,  46,  48,  52,  54,  56,  58,  60,  62,  64,  100, 102, 104,
+                            106, 108, 110, 112, 116, 118, 120, 122, 124, 126, 128, 132, 134, 136, 138, 140, 142,
+                            144, 149, 151, 153, 155, 157, 159, 161, 165, 167, 169, 171, 173, 175, 177};
+
+static int sext4(unsigned v) { return (v & 8) ? (int)(v & 0xF) - 16 : (int)(v & 0xF); }
+
+/* rtw_get_channel_group: which of the efuse's base values a channel uses */
+static int txpwr_group(unsigned channel, int cck)
+{
+    switch (channel)
+    {
+    case 1:
+    case 2:
+    case 36:
+    case 38:
+    case 40:
+    case 42:
+        return 0;
+    case 3:
+    case 4:
+    case 5:
+    case 44:
+    case 46:
+    case 48:
+    case 50:
+        return 1;
+    case 6:
+    case 7:
+    case 8:
+    case 52:
+    case 54:
+    case 56:
+    case 58:
+        return 2;
+    case 9:
+    case 10:
+    case 11:
+    case 60:
+    case 62:
+    case 64:
+        return 3;
+    case 12:
+    case 13:
+    case 100:
+    case 102:
+    case 104:
+    case 106:
+        return 4;
+    case 14:
+        return cck ? 5 : 4;
+    case 108:
+    case 110:
+    case 112:
+    case 114:
+        return 5;
+    case 116:
+    case 118:
+    case 120:
+    case 122:
+        return 6;
+    case 124:
+    case 126:
+    case 128:
+    case 130:
+        return 7;
+    case 132:
+    case 134:
+    case 136:
+    case 138:
+        return 8;
+    case 140:
+    case 142:
+    case 144:
+        return 9;
+    case 149:
+    case 151:
+    case 153:
+    case 155:
+        return 10;
+    case 157:
+    case 159:
+    case 161:
+        return 11;
+    case 165:
+    case 167:
+    case 169:
+    case 171:
+        return 12;
+    case 173:
+    case 175:
+    case 177:
+        return 13;
+    default:
+        return 0; /* Linux warns and uses group 0 */
+    }
+}
+
+/* the base index of the efuse, path A (rtw_phy_get_2g_tx_power_index / rtw_phy_get_5g_tx_power_index for a CCK or OFDM rate) */
+static u8 txpwr_base(const u8 *txpwr, unsigned channel, unsigned rate)
+{
+    int cck = rate <= 3;
+    unsigned group = (unsigned)txpwr_group(channel, cck);
+    if (channel <= 14)
+    {
+        if (cck)
+            return txpwr[group];                                       /* cck_base[group] */
+        return (u8)(txpwr[6 + group] + sext4(txpwr[11]));              /* bw40_base[group] + the OFDM difference (low nibble of ht_1s_diff) */
+    }
+    return (u8)(txpwr[18 + group] + sext4(txpwr[18 + 14]));            /* the 5 GHz block starts at 18: bw40_base[14], then ht_1s_diff */
+}
+
+/* one value of the "power by rate" table: four rates per register in the BCD-like form 0x32343638 = 32, 34, 36, 38; 0 if the table has none */
+static int txpwr_pg(unsigned band, unsigned rate)
+{
+    unsigned reg = 0xC20 + (rate / 4) * 4;
+    for (unsigned i = 0; i < sizeof rtl8821ce_tab_pg / sizeof rtl8821ce_tab_pg[0]; i++)
+        if (rtl8821ce_tab_pg[i][0] == band && rtl8821ce_tab_pg[i][1] == 0 && rtl8821ce_tab_pg[i][3] == reg)
+        {
+            unsigned b = (rtl8821ce_tab_pg[i][5] >> ((rate % 4) * 8)) & 0xFF; /* bcd2bin of one byte */
+            return (int)((b >> 4) * 10 + (b & 0xF));
+        }
+    return 0;
+}
+
+/* the world-wide limit: the lowest of the entries of all country groups for this band, 20 MHz, rate section and channel */
+static int txpwr_limit_ww(unsigned band, unsigned channel, unsigned rs)
+{
+    int lim = TXPWR_MAX_INDEX;
+    for (unsigned i = 0; i < sizeof rtl8821ce_tab_txpwr_lmt / sizeof rtl8821ce_tab_txpwr_lmt[0]; i++)
+    {
+        const short *e = rtl8821ce_tab_txpwr_lmt[i];
+        if ((unsigned)e[1] == band && e[2] == 0 && (unsigned)e[3] == rs && (unsigned)e[4] == channel)
+        {
+            int v = e[5] > TXPWR_MAX_INDEX ? TXPWR_MAX_INDEX : e[5] < -TXPWR_MAX_INDEX ? -TXPWR_MAX_INDEX : e[5];
+            if (v < lim)
+                lim = v;
+        }
+    }
+    return lim;
+}
+
+static int txpwr_channel_known(unsigned channel)
+{
+    if (channel >= 1 && channel <= 14)
+        return 1;
+    for (unsigned i = 0; i < sizeof CH5G; i++)
+        if (CH5G[i] == channel)
+            return 1;
+    return 0;
+}
+
+/* the power index of one CCK / OFDM rate at 20 MHz for path A: rtw_phy_get_tx_power_index with the world-wide limit and no SAR limit */
+static u8 tx_power_index(const u8 *txpwr, unsigned channel, unsigned rate)
+{
+    unsigned band = channel <= 14 ? 0 : 1;
+    unsigned rs = rate <= 3 ? RS_CCK : RS_OFDM;
+    unsigned base_rate = rs == RS_CCK ? 3 : RATE_OFDM_LAST; /* the last rate of the section: the one all offsets are relative to */
+    int base_pg = txpwr_pg(band, base_rate);
+    int offset = txpwr_pg(band, rate) - base_pg;
+    int limit = txpwr_channel_known(channel) ? txpwr_limit_ww(band, channel, rs) - base_pg : TXPWR_MAX_INDEX; /* an unknown channel: Linux gives up on the limit */
+    int m = offset < limit ? offset : limit;
+    if (m > TXPWR_MAX_INDEX)
+        m = TXPWR_MAX_INDEX;
+    u8 p = (u8)(txpwr_base(txpwr, channel, rate) + m); /* an unsigned byte, as in Linux: a negative sum becomes a large number and is capped */
+    return p > TXPWR_MAX_INDEX ? TXPWR_MAX_INDEX : p;
+}
+
+/* write the indices of the rates used for management frames: CCK on 2.4 GHz, OFDM on both bands (4 rates per register, byte = rate % 4) */
+static void tx_power_apply(const u8 *txpwr, unsigned channel)
+{
+    unsigned first = channel <= 14 ? RATE_CCK_FIRST : RATE_OFDM_FIRST;
+    u32 word = 0;
+    for (unsigned rate = first; rate <= RATE_OFDM_LAST; rate++)
+    {
+        word |= (u32)tx_power_index(txpwr, channel, rate) << ((rate & 3) * 8);
+        if ((rate & 3) == 3)
+        {
+            wr32(R_TXAGC_A + (rate & 0xFC), word);
+            word = 0;
+        }
+    }
+}
+
+/* ---- stage 5a-2: the first frame on the air ----
+ * A management frame goes to the chip through the management queue's ring: one buffer descriptor (16 bytes) = two entries, the first
+ * pointing at the 48 byte transmit descriptor (what to do with the frame: length, queue, rate, ...), the second at the frame itself.
+ * The host writes the index of the next free entry to 0x3B0; the chip reads the entry, fetches both pieces by DMA, sends the frame and
+ * moves its own read index (the upper half of the same register). The frame is given without its 4 byte FCS: the chip adds it. The
+ * sequence number is filled in by the hardware (EN_HWSEQ), and the rate is fixed (no rate adaptation: USE_RATE, no fallback).
+ * Used here for a probe request: "is there a network around? answer me" sent to everyone (broadcast), which every phone and laptop does
+ * when it looks for networks. The access points answer with probe responses, which only reach us if the chip knows its own address
+ * (written to 0x610), and which the scan then lists like beacons. */
+#define R_MACID 0x0610
+#define R_TXBD_IDX_MGMTQ 0x03B0
+#define TX_QSEL_MGMT 18
+#define TX_RATEID_G 7
+#define TX_RATEID_B_20M 8
+#define RATE_6M 4
+#define RATE_1M 0
+#define MGMT_RING_LEN 128
+
+/* the host tests of the earlier stages switch the probe-request test off (it resets the receive counters they look at) */
+static int TXP_ENABLE = 1;
+
+static struct
+{
+    int state;       /* 0 not tried, 1 done */
+    unsigned wp;     /* the next free entry of the management ring */
+    unsigned sent;   /* frames the chip took */
+    unsigned failed; /* frames the chip did not take within the time allowed */
+    unsigned replies; /* probe responses heard while it ran */
+    int variant;                /* which way of starting the transmit DMA worked first (0 = the plain one, -1 = none did) */
+    int kick32;                 /* variant 4: the index is written as a 32-bit register */
+    unsigned exq_before, exq_after, pub_before, pub_after; /* free pages of the extra queue (the one the management queue is mapped to) and of the public pool, before the first frame and after the last try */
+    unsigned channel;
+} TXP;
+
+/* one frame (without FCS, at most 1500 bytes) into the management queue and wait until the chip has fetched it: 0, or -1 */
+static int tx_mgmt(const u8 *frame, unsigned len, unsigned channel)
+{
+    if (!D.ready || !D.stage || len < 24 || len > 1500)
+        return -1;
+    unsigned rp = (rd32(R_TXBD_IDX_MGMTQ) >> 16) & 0xFFF;
+    if ((TXP.wp + 1) % MGMT_RING_LEN == rp) /* the ring is full */
+        return -1;
+    volatile u8 *s = D.stage;
+    u8 *d = D.stage;
+    zero_bytes(d, TX_DESC_SIZE);
+    for (unsigned i = 0; i < len; i++)
+        s[TX_DESC_SIZE + i] = frame[i];
+    unsigned bmc = frame[4] & 1; /* the destination address is a group address */
+    put32(d + 0, len | (TX_DESC_SIZE << 16) | (bmc << 24) | BIT(26) | BIT(31)); /* size, offset to the frame, bmc, last segment, no queue/sequence select */
+    put32(d + 4, (unsigned)TX_QSEL_MGMT << 8 | (unsigned)(channel <= 14 ? TX_RATEID_B_20M : TX_RATEID_G) << 16); /* MAC id 0, queue, rate id */
+    put32(d + 12, BIT(8) | BIT(10)); /* use the rate of this descriptor, no rate fallback */
+    put32(d + 16, channel <= 14 ? RATE_1M : RATE_6M);
+    put32(d + 32, BIT(15)); /* hardware sequence number */
+
+    u8 *bd = D.mem + Q_MGMT * PAGE + TXP.wp * 16;
+    zero_bytes(bd, 16);
+    put16(bd + 0, TX_DESC_SIZE);
+    put16(bd + 2, (TX_DESC_SIZE + len - 1) / 128 + 1); /* the length in 128 byte units, no OWN bit */
+    put32(bd + 4, D.stage_dma);
+    put16(bd + 8, len);
+    put16(bd + 10, 0);
+    put32(bd + 12, D.stage_dma + TX_DESC_SIZE);
+    fence();
+    unsigned next = (TXP.wp + 1) % MGMT_RING_LEN;
+    if (TXP.kick32)
+        wr32(R_TXBD_IDX_MGMTQ, next);
+    else
+        wr16(R_TXBD_IDX_MGMTQ, (u16)next);
+    TXP.wp = next;
+    for (int i = 0; i < 50000; i++) /* up to 50 ms for the chip to fetch it */
+    {
+        if (((rd32(R_TXBD_IDX_MGMTQ) >> 16) & 0xFFF) == next)
+            return 0;
+        udelay(1);
+    }
+    return -1;
+}
+
+/* a probe request for any network (empty SSID), asking with the basic rates of the band; returns its length */
+static unsigned build_probe_request(u8 *f, const u8 *mac, unsigned channel)
+{
+    unsigned n = 0;
+    f[n++] = 0x40; /* frame control: management, probe request */
+    f[n++] = 0x00;
+    f[n++] = 0;    /* duration */
+    f[n++] = 0;
+    for (int i = 0; i < 6; i++) /* addr1: everybody */
+        f[n++] = 0xFF;
+    for (int i = 0; i < 6; i++) /* addr2: us */
+        f[n++] = mac[i];
+    for (int i = 0; i < 6; i++) /* addr3: any BSSID */
+        f[n++] = 0xFF;
+    f[n++] = 0; /* sequence control: filled in by the hardware */
+    f[n++] = 0;
+    f[n++] = 0; /* SSID element: empty = any network */
+    f[n++] = 0;
+    f[n++] = 1; /* supported rates */
+    if (channel <= 14)
+    {
+        static const u8 R2[8] = {0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24}; /* 1, 2, 5.5, 11 (basic), 6, 9, 12, 18 Mb/s */
+        f[n++] = 8;
+        for (int i = 0; i < 8; i++)
+            f[n++] = R2[i];
+        f[n++] = 50; /* extended rates: 24, 36, 48, 54 */
+        f[n++] = 4;
+        f[n++] = 0x30;
+        f[n++] = 0x48;
+        f[n++] = 0x60;
+        f[n++] = 0x6C;
+    }
+    else
+    {
+        static const u8 R5[8] = {0x8C, 0x12, 0x98, 0x24, 0xB0, 0x48, 0x60, 0x6C}; /* 6 (basic), 9, 12 (basic), 18, 24 (basic), 36, 48, 54 Mb/s */
+        f[n++] = 8;
+        for (int i = 0; i < 8; i++)
+            f[n++] = R5[i];
+    }
+    return n;
+}
+
+/* tune to a channel with its transmit power, and make the chip answer to our address */
+static void tune_for_tx(unsigned channel)
+{
+    set_channel_20(channel, PH.ch_param, EF.swing2g, EF.swing5g);
+    tx_power_apply(EF.txpwr, channel);
+    for (int i = 0; i < 6; i++)
+        wr8(R_MACID + (u32)i, EF.mac[i]);
+}
+
+/* The first real card did not take a frame from the ring with the plain start (Linux' own sequence as far as it was ported). So the
+ * test tries, one frame at a time, a few ways of starting the transmit DMA, each one adding to the last, and remembers the first that
+ * worked. 0: the plain start. 1: the DMA interface of the PCI block is reset once more (bit 20 of the PCI control register off and on).
+ * 2: the transmit pause register and the "drop / sleep" registers of the MAC ids are cleared. 3: all eight enable bits of the top
+ * byte of the PCI control register (Linux sets 0xF7). 4: the ring index is written as a 32-bit register. */
+#define TX_VARIANTS 5
+
+static void tx_variant_setup(int v)
+{
+    wr16(0x0380, MGMT_RING_LEN); /* the ring, as hci_setup() wrote it */
+    wr32(0x0310, D.dma + Q_MGMT * PAGE);
+    wr32(R_TXBD_RWPTR_CLR, 0xFFFFFFFFu);
+    TXP.wp = 0;
+    TXP.kick32 = 0;
+    if (v >= 1)
+    {
+        u32 p = rd32(R_PCI_CTRL);
+        wr32(R_PCI_CTRL, p & ~BIT(20));
+        udelay(100);
+        wr32(R_PCI_CTRL, p | BIT(20));
+        udelay(100);
+    }
+    if (v >= 2)
+    {
+        wr16(R_TXPAUSE, 0);
+        wr32(0x04D0, 0); /* REG_MACID_PKT_DROP0 */
+        wr32(0x04D4, 0); /* REG_MACID_PKT_SLEEP */
+    }
+    if (v >= 3)
+        wr8(R_PCI_CTRL + 3, (u8)(rd8(R_PCI_CTRL + 3) | 0xFF));
+    if (v >= 4)
+        TXP.kick32 = 1;
+}
+
+/* listen for `ms` milliseconds, taking in what arrives */
+static void listen_ms(unsigned ms)
+{
+    for (unsigned i = 0; i < ms; i++)
+    {
+        udelay(1000);
+        rx_poll();
+    }
+}
+
+/* ask for probe responses three times on a channel, listening 100 ms after each, and count the answers. A way of starting the transmit
+ * DMA counts as working if the chip says it fetched the frame (its read index moved) OR an access point answered: on the first real
+ * card the index never moved, and it was not known whether the frame went out all the same. */
+static void tx_probe_test(unsigned channel)
+{
+    TXP.state = 1;
+    TXP.channel = channel;
+    TXP.sent = TXP.failed = 0;
+    TXP.variant = -1;
+    TXP.kick32 = 0;
+    TXP.exq_before = rd16(0x023E); /* REG_FIFOPAGE_INFO_4 + 2: free pages of the extra queue */
+    TXP.pub_before = rd16(0x0242); /* REG_FIFOPAGE_INFO_5 + 2: free pages of the public pool */
+    if (!D.ready || EF.state != EF_OK)
+        return;
+    tune_for_tx(channel);
+    rx_restart();
+    wr32(R_RCR, RCR_RX_DEFAULT);
+    wr8(R_CR, MAC_TRX_ENABLE);
+    u8 frame[96];
+    unsigned len = build_probe_request(frame, EF.mac, channel);
+    for (int v = 0; v < TX_VARIANTS && TXP.variant < 0; v++) /* the first frame decides how the DMA is started */
+    {
+        tx_variant_setup(v);
+        unsigned answers = RX.probe_resp;
+        int fetched = tx_mgmt(frame, len, channel) == 0;
+        listen_ms(100);
+        if (fetched || RX.probe_resp > answers)
+        {
+            TXP.variant = v;
+            TXP.sent++;
+        }
+    }
+    if (TXP.variant < 0)
+    {
+        TXP.failed = 3; /* no way worked: do not try more */
+        TXP.exq_after = rd16(0x023E);
+        TXP.pub_after = rd16(0x0242);
+    }
+    else
+        for (int k = 1; k < 3; k++)
+        {
+            if (tx_mgmt(frame, len, channel) == 0)
+                TXP.sent++;
+            else
+                TXP.failed++;
+            listen_ms(100);
+        }
+    TXP.replies = RX.probe_resp;
+}
+
+
+
+/* ---- stage 5b-0: which network to join ----
+ * WIFI.CFG sits in the top folder of the boot disk (pconfig/WIFI.CFG in the repository, which git ignores): two lines, "ssid=NAME" and
+ * "psk=PASSPHRASE". The passphrase is a secret: it is kept in this module's memory for the key derivation of the WPA2 handshake, and
+ * nothing here prints it, logs it, or puts a part of it into a status line or a test message. */
+#define CFG_NAME "WIFI.CFG"
+#define CFG_FILE_MAX 512
+
+enum { CFG_NOT_TRIED, CFG_OK, CFG_NONE, CFG_BAD };
+static struct
+{
+    int state;
+    const char *why;   /* CFG_BAD: "ssid" or "psk" (which line is wrong), static text */
+    char ssid[33];
+    unsigned ssid_len;
+    char psk[64];      /* the passphrase, 8 .. 63 characters */
+    unsigned psk_len;
+} CFG;
+
+/* the text between the end of the key and the end of the line, without a trailing carriage return or spaces; -1 if the line is not `key` */
+static int cfg_value(const char *line, unsigned n, const char *key, const char **value)
+{
+    unsigned k = 0;
+    while (key[k])
+        k++;
+    if (n < k + 1)
+        return -1;
+    for (unsigned i = 0; i < k; i++)
+        if (line[i] != key[i])
+            return -1;
+    if (line[k] != '=')
+        return -1;
+    *value = line + k + 1;
+    unsigned len = n - k - 1;
+    while (len && (line[k + len] == '\r' || line[k + len] == ' ' || line[k + len] == '\t'))
+        len--;
+    return (int)len;
+}
+
+/* the lines of the file (size bytes in buf) into CFG; sets CFG.state */
+static void cfg_parse(const char *buf, unsigned size)
+{
+    CFG.state = CFG_NONE;
+    int got_ssid = 0, got_psk = 0;
+    unsigned start = 0;
+    for (unsigned i = 0; i <= size; i++)
+    {
+        if (i < size && buf[i] != '\n')
+            continue;
+        const char *value = 0;
+        int len = cfg_value(buf + start, i - start, "ssid", &value);
+        if (len >= 0)
+        {
+            got_ssid = 1;
+            if (len < 1 || len > 32)
+            {
+                CFG.state = CFG_BAD;
+                CFG.why = "ssid";
+                return;
+            }
+            for (int k = 0; k < len; k++)
+                CFG.ssid[k] = value[k];
+            CFG.ssid[len] = 0;
+            CFG.ssid_len = (unsigned)len;
+        }
+        len = cfg_value(buf + start, i - start, "psk", &value);
+        if (len >= 0)
+        {
+            got_psk = 1;
+            if (len < 8 || len > 63)
+            {
+                CFG.state = CFG_BAD;
+                CFG.why = "psk";
+                return;
+            }
+            for (int k = 0; k < len; k++)
+                CFG.psk[k] = value[k];
+            CFG.psk[len] = 0;
+            CFG.psk_len = (unsigned)len;
+        }
+        start = i + 1;
+    }
+    if (!got_ssid)
+    {
+        CFG.state = CFG_BAD;
+        CFG.why = "ssid";
+        return;
+    }
+    if (!got_psk)
+    {
+        CFG.state = CFG_BAD;
+        CFG.why = "psk";
+        return;
+    }
+    CFG.state = CFG_OK;
+}
+
+/* the access point of the wanted network in the scan list: the one with the most beacons heard that has this exact name and WPA2 */
+static struct
+{
+    int found;
+    unsigned index;
+} TARGET;
+
+static void pick_target(void)
+{
+    TARGET.found = 0;
+    if (CFG.state != CFG_OK || !SC.state)
+        return;
+    for (unsigned i = 0; i < SC.n; i++)
+    {
+        const ScanAp *a = &SC.ap[i];
+        if (a->sec != 3 || a->ssid[0] == 0)
+            continue;
+        unsigned k = 0;
+        while (k < CFG.ssid_len && a->ssid[k] == CFG.ssid[k])
+            k++;
+        if (k != CFG.ssid_len || a->ssid[k] != 0)
+            continue;
+        if (!TARGET.found || a->beacons > SC.ap[TARGET.index].beacons)
+        {
+            TARGET.found = 1;
+            TARGET.index = i;
+        }
+    }
+}
+
+static void cfg_load(void)
+{
+    CFG.state = CFG_NONE;
+    CFG.why = 0;
+    CFG.ssid_len = CFG.psk_len = 0;
+    volatile char *wipe = CFG.psk;
+    for (unsigned i = 0; i < sizeof CFG.psk; i++)
+        wipe[i] = 0;
+    int node = exec_find(CFG_NAME);
+    if (node < 0)
+        return;
+    const VfsNode *vn = vfs_node(node);
+    if (!vn || vn->is_dir || vn->size == 0 || vn->size > CFG_FILE_MAX)
+        return;
+    char buf[CFG_FILE_MAX];
+    if (vfs_read(node, 0, buf, vn->size) == (int)vn->size)
+        cfg_parse(buf, vn->size);
+    volatile char *wipe_buf = buf; /* the file's text does not stay on the stack */
+    for (unsigned i = 0; i < sizeof buf; i++)
+        wipe_buf[i] = 0;
+}
+
+/* ---- stage 5b-1: authentication and association ----
+ * Joining a network takes two short exchanges of management frames with the access point (AP), both unicast to its BSSID:
+ *   1. authentication: we send "algorithm 0 (open system), sequence 1, status 0"; it answers "algorithm 0, sequence 2, status 0 = fine".
+ *      (Open system is only a formality; the real proof of the passphrase comes later, in the WPA2 handshake.)
+ *   2. association: we send who we are (capability bits, listen interval, network name, rates, and in the RSN element the WPA2 security
+ *      we want: group and pairwise cipher CCMP (AES), key management PSK); it answers with a status (0 = fine) and the association id.
+ * Every frame a station receives that is addressed to its own MAC address is acknowledged by the chip itself, and our frames are
+ * retried by the chip until the AP acknowledges. After association the AP expects the WPA2 handshake (the next stage); this stage
+ * ends by telling the AP that we are leaving (deauthentication), so that no half-joined station is left behind.
+ * Only 5 GHz and legacy OFDM rates are offered for now: no HT / VHT elements, so the link would be 54 Mb/s at best. */
+#define CAP_ESS 0x0001
+#define CAP_PRIVACY 0x0010
+
+enum { RSN_OK, RSN_BAD_VERSION, RSN_NO_CCMP, RSN_NO_PSK, RSN_PMF_REQUIRED, RSN_GROUP };
+
+/* Can we join with the security the RSN element of this access point describes? The element: version (2), group cipher suite (4),
+ * pairwise count (2) and suites (4 each), key management count (2) and suites (4 each), capabilities (2). A suite is the OUI 00-0F-AC
+ * and a number: ciphers 2 = TKIP, 4 = CCMP; key management 2 = PSK (WPA2-Personal), 8 = SAE (WPA3). Capability bit 6 = management
+ * frame protection REQUIRED, which needs a key exchange this driver does not have. */
+static int rsn_check(const u8 *e, unsigned len)
+{
+    if (len < 8 || le16(e) != 1)
+        return RSN_BAD_VERSION;
+    unsigned p = 2;
+    int group_ccmp = e[p] == 0x00 && e[p + 1] == 0x0F && e[p + 2] == 0xAC && e[p + 3] == 4;
+    p += 4;
+    unsigned n = le16(e + p);
+    p += 2;
+    int ccmp = 0;
+    for (unsigned i = 0; i < n; i++, p += 4)
+    {
+        if (p + 4 > len)
+            return RSN_BAD_VERSION;
+        if (e[p] == 0x00 && e[p + 1] == 0x0F && e[p + 2] == 0xAC && e[p + 3] == 4)
+            ccmp = 1;
+    }
+    if (p + 2 > len)
+        return RSN_BAD_VERSION;
+    n = le16(e + p);
+    p += 2;
+    int psk = 0;
+    for (unsigned i = 0; i < n; i++, p += 4)
+    {
+        if (p + 4 > len)
+            return RSN_BAD_VERSION;
+        if (e[p] == 0x00 && e[p + 1] == 0x0F && e[p + 2] == 0xAC && e[p + 3] == 2)
+            psk = 1;
+    }
+    unsigned caps = p + 2 <= len ? le16(e + p) : 0;
+    if (!ccmp)
+        return RSN_NO_CCMP;
+    if (!psk)
+        return RSN_NO_PSK;
+    if (caps & 0x0040)
+        return RSN_PMF_REQUIRED;
+    if (!group_ccmp)
+        return RSN_GROUP;
+    return RSN_OK;
+}
+
+static const char *const RSN_WHY[] = {"ok", "rsn", "ccmp", "akm", "pmf", "grp"};
+
+static struct
+{
+    int state;          /* 0 not tried, 1 tried */
+    u8 bssid[6];
+    unsigned channel;
+    int auth_seen;      /* an authentication answer arrived */
+    unsigned auth_status;
+    int assoc_seen;
+    unsigned assoc_status;
+    unsigned aid;
+    unsigned dropped;   /* the AP sent a deauthentication or disassociation: its reason code + 1 (0 = none) */
+    unsigned auth_tries, assoc_tries;
+} CONN;
+
+static int mac_is(const volatile u8 *a, const u8 *b)
+{
+    for (int i = 0; i < 6; i++)
+        if (a[i] != b[i])
+            return 0;
+    return 1;
+}
+
+static unsigned vget16(const volatile u8 *p) { return (unsigned)p[0] | (unsigned)p[1] << 8; }
+
+/* a management frame from the receive path (without FCS): is it an answer from the access point we talk to? */
+static void conn_note(const volatile u8 *f, unsigned len)
+{
+    if (!CONN.state || len < 26 || !mac_is(f + 4, EF.mac) || !mac_is(f + 10, CONN.bssid))
+        return;
+    unsigned fc0 = f[0];
+    if (fc0 == 0xB0 && len >= 30 && vget16(f + 24) == 0 && vget16(f + 26) == 2) /* authentication: open system, second message */
+    {
+        CONN.auth_status = vget16(f + 28);
+        CONN.auth_seen = 1;
+    }
+    else if (fc0 == 0x10 && len >= 30) /* association response: status, then the association id (the top two bits are always set) */
+    {
+        CONN.assoc_status = vget16(f + 26);
+        CONN.aid = len >= 30 ? vget16(f + 28) & 0x3FFF : 0;
+        CONN.assoc_seen = 1;
+    }
+    else if (fc0 == 0xC0 || fc0 == 0xA0) /* deauthentication / disassociation: the reason code */
+        CONN.dropped = vget16(f + 24) + 1;
+}
+
+/* the 24 byte management header to a unicast address: frame control, duration 0, receiver, us, BSSID, sequence (filled in by the chip) */
+static unsigned mgmt_header(u8 *f, unsigned fc0, const u8 *bssid)
+{
+    unsigned n = 0;
+    f[n++] = (u8)fc0;
+    f[n++] = 0x00;
+    f[n++] = 0;
+    f[n++] = 0;
+    for (int i = 0; i < 6; i++)
+        f[n++] = bssid[i];
+    for (int i = 0; i < 6; i++)
+        f[n++] = EF.mac[i];
+    for (int i = 0; i < 6; i++)
+        f[n++] = bssid[i];
+    f[n++] = 0;
+    f[n++] = 0;
+    return n;
+}
+
+static unsigned put_u16(u8 *f, unsigned n, unsigned v)
+{
+    f[n++] = (u8)v;
+    f[n++] = (u8)(v >> 8);
+    return n;
+}
+
+static unsigned build_auth(u8 *f, const u8 *bssid)
+{
+    unsigned n = mgmt_header(f, 0xB0, bssid);
+    n = put_u16(f, n, 0); /* algorithm: open system */
+    n = put_u16(f, n, 1); /* transaction sequence number 1 */
+    n = put_u16(f, n, 0); /* status: success (the field is reserved in a request) */
+    return n;
+}
+
+static unsigned build_deauth(u8 *f, const u8 *bssid)
+{
+    unsigned n = mgmt_header(f, 0xC0, bssid);
+    return put_u16(f, n, 3); /* reason 3: the station is leaving the network */
+}
+
+/* the association request; the security it asks for is what rsn_check() accepted: CCMP for both ciphers and PSK */
+static unsigned build_assoc(u8 *f, const u8 *bssid, const char *ssid, unsigned ssid_len, unsigned channel)
+{
+    unsigned n = mgmt_header(f, 0x00, bssid);
+    n = put_u16(f, n, CAP_ESS | CAP_PRIVACY | (channel <= 14 ? 0x0400 : 0)); /* an infrastructure station, with privacy (and short slot time at 2.4 GHz) */
+    n = put_u16(f, n, 10);                                                    /* listen interval, in beacon intervals */
+    f[n++] = 0;                                                               /* SSID */
+    f[n++] = (u8)ssid_len;
+    for (unsigned i = 0; i < ssid_len; i++)
+        f[n++] = (u8)ssid[i];
+    f[n++] = 1; /* supported rates: the legacy OFDM rates, 6, 12 and 24 Mb/s basic (the AP's own basic rates must be among ours) */
+    f[n++] = 8;
+    static const u8 R5[8] = {0x8C, 0x12, 0x98, 0x24, 0xB0, 0x48, 0x60, 0x6C};
+    static const u8 R2[8] = {0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24};
+    for (int i = 0; i < 8; i++)
+        f[n++] = channel <= 14 ? R2[i] : R5[i];
+    if (channel <= 14)
+    {
+        f[n++] = 50; /* extended supported rates: 24, 36, 48, 54 Mb/s */
+        f[n++] = 4;
+        f[n++] = 0x30;
+        f[n++] = 0x48;
+        f[n++] = 0x60;
+        f[n++] = 0x6C;
+    }
+    static const u8 RSN[22] = {48, 20, 1, 0,                  /* the RSN element: version 1 */
+                               0x00, 0x0F, 0xAC, 4,           /* group cipher CCMP */
+                               1, 0, 0x00, 0x0F, 0xAC, 4,     /* one pairwise cipher: CCMP */
+                               1, 0, 0x00, 0x0F, 0xAC, 2,     /* one key management: PSK */
+                               0, 0};                         /* no capabilities: no management frame protection */
+    for (int i = 0; i < 22; i++)
+        f[n++] = RSN[i];
+    return n;
+}
+
+#define CONN_TRIES 3
+#define CONN_WAIT_MS 120
+
+/* send a frame until the wanted answer has arrived (up to CONN_TRIES times); returns how many frames were sent */
+static unsigned conn_exchange(const u8 *frame, unsigned len, unsigned channel, int *flag)
+{
+    unsigned sent = 0;
+    for (int t = 0; t < CONN_TRIES && !*flag; t++)
+    {
+        if (tx_mgmt(frame, len, channel) == 0)
+            sent++;
+        for (int ms = 0; ms < CONN_WAIT_MS && !*flag; ms++)
+        {
+            udelay(1000);
+            rx_poll();
+        }
+    }
+    return sent;
+}
+
+/* the whole attempt: authenticate, associate, leave */
+static int CONN_ENABLE = 1; /* the host tests of the earlier stages switch it off */
+
+static void connect_try(void)
+{
+    CONN.state = 0;
+    if (!CONN_ENABLE || !TARGET.found || TXP.variant < 0 || !TXP.sent || SC.ap[TARGET.index].rsn_len == 0)
+        return;
+    const ScanAp *ap = &SC.ap[TARGET.index];
+    if (rsn_check(ap->rsn, ap->rsn_len) != RSN_OK)
+        return;
+    CONN.state = 1;
+    CONN.auth_seen = CONN.assoc_seen = 0;
+    CONN.auth_status = CONN.assoc_status = CONN.aid = CONN.dropped = 0;
+    CONN.auth_tries = CONN.assoc_tries = 0;
+    for (int i = 0; i < 6; i++)
+        CONN.bssid[i] = ap->bssid[i];
+    CONN.channel = ap->channel;
+    tx_variant_setup(TXP.variant < 0 ? 0 : TXP.variant); /* the way the DMA was found to start, and fresh ring pointers */
+    tune_for_tx(CONN.channel);
+    rx_restart();
+    wr32(R_RCR, RCR_RX_DEFAULT);
+    wr8(R_CR, MAC_TRX_ENABLE);
+    u8 frame[160];
+    unsigned len = build_auth(frame, CONN.bssid);
+    CONN.auth_tries = conn_exchange(frame, len, CONN.channel, &CONN.auth_seen);
+    if (CONN.auth_seen && CONN.auth_status == 0)
+    {
+        len = build_assoc(frame, CONN.bssid, CFG.ssid, CFG.ssid_len, CONN.channel);
+        CONN.assoc_tries = conn_exchange(frame, len, CONN.channel, &CONN.assoc_seen);
+        len = build_deauth(frame, CONN.bssid); /* tidy up: this stage does not do the handshake */
+        if (tx_mgmt(frame, len, CONN.channel) == 0)
+            listen_ms(20);
+    }
 }
 
 static int rtl8821ce_claims(const PciDevice *pd)
@@ -2177,6 +3020,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     }
     W.ok = 1;
     fw_check(); /* (only looks at a file; the chip is not involved) */
+    cfg_load();
 
     /* stage 3 needs the chip to reach RAM: bus mastering on, and the DMA rings set up (Linux does this before the power-on, too) */
     int dma_ok = 0;
@@ -2190,8 +3034,13 @@ static int rtl8821ce_probe(const PciDevice *pd)
     H2.why = 0;
     CHN.state = CH_NOT_TRIED;
     RX.state = RXS_NOT_TRIED;
+    CONN.state = 0;
+    TARGET.found = 0;
     SC.state = 0;
     SC.n = 0;
+    TXP.state = 0;
+    TXP.wp = 0;
+    TXP.replies = 0;
     EF.why = 0;
     DL.why = 0;
     DL.part = 0;
@@ -2246,12 +3095,19 @@ static int rtl8821ce_probe(const PciDevice *pd)
                     channel_probe(6); /* stage 4c-1: antenna to Wi-Fi, channel 6 */
                 if (CHN.state == CH_OK)
                     scan_run(); /* stage 4c-2/3: listen on every channel, note the networks */
+                if (TXP_ENABLE && SC.state && SC.channels_ok)
+                    tx_probe_test(149); /* stage 5a: the first frames on the air: probe requests on channel 149 */
+                pick_target();
+                connect_try();
             }
             else
             {
                 DL.state = DL_FAILED;
                 DL.mcufw = rd16(R_MCUFW_CTRL);
             }
+            /* The DMA engines stay on from mac_init() to here, as in Linux: switching the command register off and on again between the
+             * stages made the transmit queues lose their pages (see tx_probe_test()). Only now, before the power-off, they go off. */
+            wr8(R_CR, 0);
             if (RTL8821CE_OFF_AFTER || DL.state == DL_FAILED)
             {
                 W.pwr_phase = PHASE_OFF;
@@ -2314,7 +3170,7 @@ static void status_download(NicText *t)
             nic_putc(t, '.');
             nic_putd(t, FW.subversion);
         }
-        if (EF.state == EF_OK)
+        if (EF.state == EF_OK && !CONN.state) /* (the address leaves the line when a connection was tried: no room) */
         {
             nic_puts(t, ", MAC ");
             for (int i = 0; i < 6; i++)
@@ -2358,22 +3214,83 @@ static void status_download(NicText *t)
             nic_puts(t, H2.why ? H2.why : "?");
         }
         }
-        if (SC.state)
+        if (SC.state && TXP.state && !TXP.sent && TXP.failed)
         {
-            unsigned f2 = 0, f5 = 0;
-            for (unsigned i = 0; i < SCAN_NCH; i++)
-                if (SCAN_CHANNELS[i] <= 14)
-                    f2 += SC.per_channel[i];
-                else
-                    f5 += SC.per_channel[i];
+            /* the chip took no frame: show what it looked like, instead of the scan summary (the line has room for one of the two) */
+            nic_puts(t, ", tx0/");
+            nic_putd(t, TXP.failed);
+            nic_putc(t, ' ');
+            nic_puth(t, TXP.exq_before, 4);
+            nic_puth(t, TXP.exq_after, 4);
+            nic_putc(t, ' ');
+            nic_puth(t, TXP.pub_before, 4);
+            nic_puth(t, TXP.pub_after, 4);
+        }
+        else if (SC.state)
+        {
             nic_puts(t, ", ");
             nic_putd(t, SC.n);
-            nic_puts(t, "ap 2G");
-            nic_putd(t, f2);
-            nic_puts(t, " 5G");
-            nic_putd(t, f5);
-            nic_puts(t, " b");
-            nic_putd(t, RX.beacons);
+            nic_puts(t, "ap");
+            if (TXP.state)
+            {
+                nic_puts(t, ", tx");
+                nic_putd(t, TXP.sent);
+                if (TXP.variant > 0) /* the plain start did not work, this one did */
+                {
+                    nic_puts(t, " v");
+                    nic_putd(t, (unsigned)TXP.variant);
+                }
+                if (TXP.failed)
+                {
+                    nic_putc(t, '/');
+                    nic_putd(t, TXP.sent + TXP.failed);
+                }
+                nic_puts(t, " pr");
+                nic_putd(t, TXP.replies);
+            }
+            if (CFG.state == CFG_OK)
+            {
+                nic_puts(t, ", net ");
+                if (TARGET.found)
+                {
+                    int why = SC.ap[TARGET.index].rsn_len ? rsn_check(SC.ap[TARGET.index].rsn, SC.ap[TARGET.index].rsn_len) : RSN_BAD_VERSION;
+                    if (why == RSN_OK)
+                    {
+                        nic_puts(t, "ch");
+                        nic_putd(t, SC.ap[TARGET.index].channel);
+                    }
+                    else /* the AP's security is not one this driver can join (RSN_WHY) */
+                        nic_puts(t, RSN_WHY[why]);
+                }
+                else
+                    nic_puts(t, "absent");
+                if (CONN.state)
+                {
+                    if (!CONN.auth_seen)
+                        nic_puts(t, ", auth none");
+                    else if (CONN.auth_status)
+                    {
+                        nic_puts(t, ", auth s");
+                        nic_putd(t, CONN.auth_status);
+                    }
+                    else if (!CONN.assoc_seen)
+                        nic_puts(t, ", auth ok, assoc none");
+                    else if (CONN.assoc_status)
+                    {
+                        nic_puts(t, ", auth ok, assoc s");
+                        nic_putd(t, CONN.assoc_status);
+                    }
+                    else
+                        nic_puts(t, ", auth ok, assoc ok");
+                }
+            }
+            else if (CFG.state == CFG_BAD)
+            {
+                nic_puts(t, ", cfg ");
+                nic_puts(t, CFG.why ? CFG.why : "?");
+            }
+            else if (CFG.state == CFG_NONE)
+                nic_puts(t, ", no cfg");
         }
         else if (CHN.state == CH_OK)
         {

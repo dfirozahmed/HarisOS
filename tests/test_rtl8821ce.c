@@ -81,6 +81,13 @@ static void build_efuse(const unsigned char mac[6])
     EFUSE_MAP[i++] = ((25 & 7) << 5) | 0x0F;
     EFUSE_MAP[i++] = ((25 >> 3) << 4) | 0xD;
     EFUSE_MAP[i++] = EFUSE_RFE; EFUSE_MAP[i++] = 0x00;
+    /* blocks 2 .. 7 (0x10 .. 0x3F): the transmit power calibration, byte 0x10 + k = 5 + 3 * k */
+    for (int blk = 2; blk <= 7; blk++)
+    {
+        EFUSE_MAP[i++] = (unsigned char)((blk << 4) | 0x0);
+        for (int b = 0; b < 8; b++)
+            EFUSE_MAP[i++] = (unsigned char)(5 + 3 * ((blk - 2) * 8 + b));
+    }
 }
 /* ---- the pretend chip's insides ---- */
 static unsigned char TXFIFO[16384];
@@ -242,7 +249,7 @@ static void rx_deliver_one(void)
 }
 static void rx_deliver_one1(void)
 {
-    if (RXQ_NEXT >= RXQ_N || !D.ready || !(REGS[0x100] & 8))
+    if (RXQ_NEXT >= RXQ_N || !D.ready || !(REGS[0x100] & 8) || reg32(0x608) != 0xF410400Eu) /* only once the driver has set the receive filter for listening */
         return;
     if ((RX_HW + 1) % 32 == (unsigned)((REGS[0x3B4] | REGS[0x3B5] << 8) & 0xFFF)) /* the ring is full: the chip waits for the host */
         return;
@@ -261,12 +268,102 @@ static void rx_deliver_one1(void)
     REGS[0x3B7] = (unsigned char)((RX_HW >> 8) & 0x0F);
 }
 
+/* ---- the pretend chip's transmitter: what was kicked into the management ring is copied away, then the chip reports it has fetched it ---- */
+typedef struct { unsigned len; unsigned char b[200]; } TxFrame;
+static TxFrame TXLOG[32];
+static int TXLOG_N;
+typedef struct
+{
+    int count;
+    unsigned char desc[48];
+    unsigned char frame[256];
+    unsigned len;
+    unsigned char bd[16];
+    unsigned idx_written;
+    unsigned entry;
+} TxCapture;
+static TxCapture TXCAP;
+static int KNOB_TX_STUCK; /* the chip never fetches anything */
+static int KNOB_TX_ONLY32; /* the chip notices only a 32-bit write of the index */
+static int KNOB_TX_SILENT; /* the frames go out and are answered, but the read index never moves */
+static int POOL_OK = 1; /* the chip's transmit page pools are loaded: switching the command register off loses them until the next load (what the real card seemed to do) */
+static int TX_ANSWER;     /* answer a broadcast probe request with this many probe responses */
+static unsigned char TX_RESP[4][160];
+static unsigned TX_RESP_LEN[4];
+/* a pretend access point: answers authentication and association requests addressed to its BSSID */
+static int AP_MODE; /* 0 answers everything, 1 silent, 2 refuses authentication (status 1), 3 refuses association (status 17) */
+static const unsigned char AP_BSSID[6] = {2, 0, 0, 0, 0, 0xA1};
+static unsigned char AP_RESP[8][64];
+static int AP_RESP_N;
+static void ap_answer(const unsigned char *fr, unsigned len)
+{
+    if (AP_MODE == 1 || len < 24 || memcmp(fr + 4, AP_BSSID, 6) != 0)
+        return;
+    unsigned char *r = AP_RESP[AP_RESP_N++ % 8];
+    memset(r, 0, 64);
+    memcpy(r + 4, fr + 10, 6); /* to the sender */
+    memcpy(r + 10, AP_BSSID, 6);
+    memcpy(r + 16, AP_BSSID, 6);
+    if (fr[0] == 0xB0)
+    {
+        r[0] = 0xB0;
+        r[26] = 2; /* algorithm 0, sequence 2 */
+        r[28] = AP_MODE == 2 ? 1 : 0;
+        rxq_add_frame(r, 34); /* header, 6 bytes of body, 4 bytes FCS */
+    }
+    else if (fr[0] == 0x00)
+    {
+        r[0] = 0x10;
+        r[24] = 0x11;
+        r[25] = 0x04;
+        r[26] = AP_MODE == 3 ? 17 : 0;
+        r[28] = 5;
+        r[29] = 0xC0; /* association id 5, with the two top bits set */
+        rxq_add_frame(r, 34);
+    }
+}
+
+static void tx_kick(unsigned next)
+{
+    unsigned entry = (next + 127) % 128;
+    TXCAP.count++;
+    if (TXLOG_N < 32)
+    {
+        unsigned fl = (unsigned)D.mem[Q_MGMT * PAGE + ((next + 127) % 128) * 16 + 8] | (unsigned)D.mem[Q_MGMT * PAGE + ((next + 127) % 128) * 16 + 9] << 8;
+        TXLOG[TXLOG_N].len = fl;
+        memcpy(TXLOG[TXLOG_N].b, D.stage + 48, fl > 200 ? 200 : fl);
+        TXLOG_N++;
+    }
+    TXCAP.idx_written = next;
+    TXCAP.entry = entry;
+    memcpy(TXCAP.bd, D.mem + Q_MGMT * PAGE + entry * 16, 16);
+    memcpy(TXCAP.desc, D.stage, 48);
+    unsigned len = (unsigned)TXCAP.bd[8] | (unsigned)TXCAP.bd[9] << 8;
+    TXCAP.len = len;
+    memcpy(TXCAP.frame, D.stage + 48, len > sizeof TXCAP.frame ? sizeof TXCAP.frame : len);
+    if (KNOB_TX_STUCK || !POOL_OK)
+        return;
+    if (!KNOB_TX_SILENT)
+    {
+        REGS[0x3B2] = (unsigned char)(next & 0xFF); /* the chip's read index: it has fetched everything */
+        REGS[0x3B3] = (unsigned char)((next >> 8) & 0x0F);
+    }
+    if ((TXCAP.frame[0] & 0xFC) == 0x40 && (TXCAP.frame[4] & 1)) /* a probe request to everybody */
+        for (int i = 0; i < TX_ANSWER; i++)
+            rxq_add_frame(TX_RESP[i], TX_RESP_LEN[i]);
+    ap_answer(TXCAP.frame, TXCAP.len);
+}
+
 void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
 {
     if (CAPTURE)
         cap_ev(1, off, size, value);
     if (NLOG < 4096)
         LOG[NLOG++] = (Wr){off, size, value};
+    if (size == 1 && off == 0x100 && value == 0)
+        POOL_OK = 0;
+    else if (size == 4 && off == 0x22C && (value & BIT(31)))
+        POOL_OK = 1;
     if (size == 2 && off == 0x204)
     {
         BCN_PAGE = value & 0xFFF;
@@ -289,6 +386,8 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
             set32(0x1708, LTEM[o]);
         REGS[0x1703] |= 0x20; /* ready again */
     }
+    else if (off == 0x3B0 && size == (KNOB_TX_ONLY32 ? 4u : 2u))
+        tx_kick(value & 0xFFF);
     else if (size == 4 && off == 0x1D0)
         REGS[0x1CC] |= 1; /* HMETFR: the box holds a command until the firmware has read it */
     else if (size == 4 && off == 0xC90 && !PH_BREAK_RF_READBACK)
@@ -347,14 +446,39 @@ static const unsigned char *FILE_BYTES;
 static unsigned FILE_BYTES_LEN;
 static char LAST_NAME[32];
 
+/* the settings file WIFI.CFG: a made-up text for the tests (never the user's own file) */
+static const char *CFG_TEXT;
+static VfsNode CFG_NODE;
 int exec_find(const char *name)
 {
+    if (strcmp(name, "WIFI.CFG") == 0)
+        return CFG_TEXT ? 8 : -1;
     strncpy(LAST_NAME, name, sizeof LAST_NAME - 1);
     return FILE_PRESENT && strcmp(name, "RTW8821C.BIN") == 0 ? 7 : -1;
 }
-const VfsNode *vfs_node(int id) { return id == 7 && FILE_PRESENT ? &FILE_NODE : 0; }
+const VfsNode *vfs_node(int id)
+{
+    if (id == 8 && CFG_TEXT)
+    {
+        memset(&CFG_NODE, 0, sizeof CFG_NODE);
+        CFG_NODE.used = 1;
+        CFG_NODE.size = (unsigned)strlen(CFG_TEXT);
+        return &CFG_NODE;
+    }
+    return id == 7 && FILE_PRESENT ? &FILE_NODE : 0;
+}
 int vfs_read(int id, unsigned offset, void *buf, unsigned len)
 {
+    if (id == 8 && CFG_TEXT)
+    {
+        unsigned n = (unsigned)strlen(CFG_TEXT);
+        if (offset > n)
+            return -1;
+        if (offset + len > n)
+            len = n - offset;
+        memcpy(buf, CFG_TEXT + offset, len);
+        return (int)len;
+    }
     if (READS_LEFT == 0)
         return -1;
     if (READS_LEFT > 0)
@@ -458,6 +582,7 @@ static int count_writes(u32 off, unsigned size)
 
 int main(void)
 {
+    TXP_ENABLE = 0; /* the probe-request test (stage 5a) has its own section below */
     /* ---- the claim ---- */
     PciDevice p = WIFI;
     CHECK(NIC_RTL8821CE.claims(&p));
@@ -622,7 +747,7 @@ int main(void)
     CHECK(DL.off_after == 1);
     CHECK((DL.mcufw & 0xC078) == 0xC078);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(strstr(st, "cut B, MAC 00:e0:4c:68:12:34, init ok, 0ap 2G0 5G0 b0, off") &&
+    CHECK(strstr(st, "cut B, MAC 00:e0:4c:68:12:34, init ok, 0ap, no cfg, off") &&
           strlen(st) < sizeof st);
     /* the order of the register sequence, by landmarks */
     static const Wr LANDMARKS[] = {
@@ -764,9 +889,7 @@ int main(void)
     MI.state = MI_NOT_TRIED;
     mac_init();
     CHECK(MI.state == MI_OK && MI.why == 0);
-    CHECK(NLOG == (int)(sizeof MAC_INIT_LINUX / sizeof MAC_INIT_LINUX[0]) + 1); /* Linux's list, plus our final "receive DMA off" */
-    CHECK(LOG[NLOG - 1].off == 0x100 && LOG[NLOG - 1].size == 1 && LOG[NLOG - 1].value == 0);
-    NLOG--;
+    /* exactly Linux's writes: the DMA engines are left on (see the final CR write in probe()) */
     check_log(MAC_INIT_LINUX, (int)(sizeof MAC_INIT_LINUX / sizeof MAC_INIT_LINUX[0]), "mac init vs Linux");
 
     /* the auto-LLT never finishes: the init stops there, and says so */
@@ -973,7 +1096,7 @@ int main(void)
     {
         char s5[96];
         NIC_RTL8821CE.status(s5, sizeof s5);
-        CHECK(strstr(s5, ", init ok, 0ap 2G0 5G0 b0, off") && strlen(s5) < sizeof s5);
+        CHECK(strstr(s5, ", init ok, 0ap, no cfg, off") && strlen(s5) < sizeof s5);
     }
 
     /* ---- stage 4c-2: receive. The pretend chip delivers the frames the test queued; the driver must classify them, hand the
@@ -1013,7 +1136,7 @@ int main(void)
     {
         char s6[96];
         NIC_RTL8821CE.status(s6, sizeof s6);
-        CHECK(strstr(s6, ", init ok, 1ap 2G7 5G0 b3, off") && strlen(s6) < sizeof s6);
+        CHECK(strstr(s6, ", init ok, 1ap, no cfg, off") && strlen(s6) < sizeof s6);
     }
     /* more frames than the ring has buffers: it must wrap around and nothing is lost */
     build_image(1);
@@ -1097,7 +1220,29 @@ int main(void)
         CHECK(SC.per_channel[0] == 10); /* everything arrived while the receiver listened on the first channel */
         char s7[96];
         NIC_RTL8821CE.status(s7, sizeof s7);
-        CHECK(strstr(s7, ", init ok, 8ap 2G10 5G0 b9, off") && strlen(s7) < sizeof s7);
+        CHECK(strstr(s7, ", init ok, 8ap, no cfg, off") && strlen(s7) < sizeof s7);
+        /* the target access point: the WPA2 network with the name of the settings file; the passphrase stays out of the status line */
+        static const char *const TARGETS[] = {"ssid=HomeNet\npsk=secret-pass-phrase\n", "ssid=OldWep\npsk=secret-pass-phrase\n", "ssid=Nope\npsk=secret-pass-phrase\n",
+                                                  "ssid=Home\npsk=secret-pass-phrase\n"}; /* the last: a prefix of a name is not the name */
+        for (int t = 0; t < 4; t++)
+        {
+            CFG_TEXT = TARGETS[t];
+            chip_for_download();
+            file(IMG, IMG_SIZE, IMG_SIZE);
+            RXQ_N = RXQ_NEXT = 0;
+            RX_HW = 0;
+            for (int i = 0; i < nf; i++)
+                rxq_add_frame(FR[i], FL[i]);
+            NIC_RTL8821CE.probe(&WIFI);
+            char s9[96];
+            NIC_RTL8821CE.status(s9, sizeof s9);
+            CHECK(!strstr(s9, "secret") && !strstr(s9, "phrase") && strlen(s9) < sizeof s9);
+            if (t == 0)
+                CHECK(TARGET.found && SC.ap[TARGET.index].channel == 6 && SC.ap[TARGET.index].beacons == 3 && strstr(s9, ", net rsn, off")) /* (the test beacons carry only a version number in the RSN element: not a security the driver can join) */;
+            else
+                CHECK(!TARGET.found && strstr(s9, ", net absent, off")); /* a WEP network is not a target: the plan is WPA2 only */
+        }
+        CFG_TEXT = 0;
         /* the same result as text lines (SYS_WIFISCAN reads these) */
         char ln[256];
         CHECK(rtl8821ce_scan_line(0, ln, sizeof ln) > 0 && strcmp(ln, "8 networks, 11/11 channels tuned, frames 2.4G 10 5G 0, beacons 9") == 0);
@@ -1122,6 +1267,508 @@ int main(void)
         CHECK(SC.n == 0);
         scan_note(FR[0], FL[0] - 4);
         CHECK(SC.n == 1 && strcmp(SC.ap[0].ssid, "HomeNet") == 0);
+    }
+
+    /* ---- stage 5a-1: transmit power against Linux's whole pipeline (phy.c: parse the power-by-rate table and the limit table, the
+     * by-rate and limit configuration, rtw_phy_set_tx_power_level_by_path, rtw8821c_set_tx_power_index) run on the real 8821c tables with
+     * the world-wide limits. The efuse is made up from the seed: byte i = (seed * 131 + i * 29 + (i >> 1) * 7) & 0x3F. ---- */
+    static const struct
+    {
+        unsigned seed, channel;
+        unsigned char idx[12]; /* the power index of rates 0 .. 11 (CCK 1M .. 11M, OFDM 6M .. 54M) */
+        unsigned w0, w4, w8;   /* the registers 0x1D00, 0x1D04, 0x1D08 */
+    } PWR_LINUX[] = {
+    {1, 1, {63,63,63,63,13,13,13,13,13,13,13,11}, 0x3F3F3F3F, 0x0D0D0D0D, 0x0B0D0D0D},
+    {1, 6, {0,0,0,0,14,14,14,14,14,14,14,12}, 0x00000000, 0x0E0E0E0E, 0x0C0E0E0E},
+    {1, 11, {29,29,29,29,35,35,35,35,35,35,35,35}, 0x1D1D1D1D, 0x23232323, 0x23232323},
+    {1, 13, {63,63,63,63,63,63,63,63,63,63,63,63}, 0x3F3F3F3F, 0x3F3F3F3F, 0x3F3F3F3F},
+    {1, 14, {36,36,36,34,21,21,21,21,19,17,15,13}, 0x22242424, 0x15151515, 0x0D0F1113},
+    {1, 36, {0,0,0,0,16,16,16,16,16,16,16,15}, 0x00000000, 0x10101010, 0x0F101010},
+    {1, 40, {0,0,0,0,16,16,16,16,16,16,16,15}, 0x00000000, 0x10101010, 0x0F101010},
+    {1, 44, {0,0,0,0,45,45,45,45,45,45,45,44}, 0x00000000, 0x2D2D2D2D, 0x2C2D2D2D},
+    {1, 48, {0,0,0,0,45,45,45,45,45,45,45,44}, 0x00000000, 0x2D2D2D2D, 0x2C2D2D2D},
+    {1, 52, {0,0,0,0,6,6,6,6,6,6,6,6}, 0x00000000, 0x06060606, 0x06060606},
+    {1, 56, {0,0,0,0,17,17,17,17,17,17,17,16}, 0x00000000, 0x11111111, 0x10111111},
+    {1, 60, {0,0,0,0,46,46,46,46,46,46,46,45}, 0x00000000, 0x2E2E2E2E, 0x2D2E2E2E},
+    {1, 64, {0,0,0,0,46,46,46,46,46,46,46,45}, 0x00000000, 0x2E2E2E2E, 0x2D2E2E2E},
+    {1, 100, {0,0,0,0,18,18,18,18,18,18,18,17}, 0x00000000, 0x12121212, 0x11121212},
+    {1, 108, {0,0,0,0,47,47,47,47,47,47,47,46}, 0x00000000, 0x2F2F2F2F, 0x2E2F2F2F},
+    {1, 116, {0,0,0,0,19,19,19,19,19,19,19,18}, 0x00000000, 0x13131313, 0x12131313},
+    {1, 124, {0,0,0,0,48,48,48,48,48,48,48,47}, 0x00000000, 0x30303030, 0x2F303030},
+    {1, 132, {0,0,0,0,20,20,20,20,20,20,20,19}, 0x00000000, 0x14141414, 0x13141414},
+    {1, 140, {0,0,0,0,49,49,49,49,49,49,49,48}, 0x00000000, 0x31313131, 0x30313131},
+    {1, 149, {0,0,0,0,8,8,8,8,8,8,8,8}, 0x00000000, 0x08080808, 0x08080808},
+    {1, 153, {0,0,0,0,8,8,8,8,8,8,8,8}, 0x00000000, 0x08080808, 0x08080808},
+    {1, 157, {0,0,0,0,37,37,37,37,37,37,37,37}, 0x00000000, 0x25252525, 0x25252525},
+    {1, 161, {0,0,0,0,37,37,37,37,37,37,37,37}, 0x00000000, 0x25252525, 0x25252525},
+    {1, 165, {0,0,0,0,9,9,9,9,9,9,9,9}, 0x00000000, 0x09090909, 0x09090909},
+    {2, 1, {2,2,2,2,3,3,3,3,3,3,3,1}, 0x02020202, 0x03030303, 0x01030303},
+    {2, 6, {3,3,3,3,4,4,4,4,4,4,4,2}, 0x03030303, 0x04040404, 0x02040404},
+    {2, 11, {32,32,32,32,25,25,25,25,25,25,25,25}, 0x20202020, 0x19191919, 0x19191919},
+    {2, 13, {63,63,63,63,63,63,63,63,63,63,63,63}, 0x3F3F3F3F, 0x3F3F3F3F, 0x3F3F3F3F},
+    {2, 14, {39,39,39,37,11,11,11,11,9,7,5,3}, 0x25272727, 0x0B0B0B0B, 0x03050709},
+    {2, 36, {0,0,0,0,22,22,22,22,22,22,22,21}, 0x00000000, 0x16161616, 0x15161616},
+    {2, 40, {0,0,0,0,22,22,22,22,22,22,22,21}, 0x00000000, 0x16161616, 0x15161616},
+    {2, 44, {0,0,0,0,51,51,51,51,51,51,51,50}, 0x00000000, 0x33333333, 0x32333333},
+    {2, 48, {0,0,0,0,51,51,51,51,51,51,51,50}, 0x00000000, 0x33333333, 0x32333333},
+    {2, 52, {0,0,0,0,12,12,12,12,12,12,12,12}, 0x00000000, 0x0C0C0C0C, 0x0C0C0C0C},
+    {2, 56, {0,0,0,0,23,23,23,23,23,23,23,22}, 0x00000000, 0x17171717, 0x16171717},
+    {2, 60, {0,0,0,0,52,52,52,52,52,52,52,51}, 0x00000000, 0x34343434, 0x33343434},
+    {2, 64, {0,0,0,0,52,52,52,52,52,52,52,51}, 0x00000000, 0x34343434, 0x33343434},
+    {2, 100, {0,0,0,0,24,24,24,24,24,24,24,23}, 0x00000000, 0x18181818, 0x17181818},
+    {2, 108, {0,0,0,0,53,53,53,53,53,53,53,52}, 0x00000000, 0x35353535, 0x34353535},
+    {2, 116, {0,0,0,0,25,25,25,25,25,25,25,24}, 0x00000000, 0x19191919, 0x18191919},
+    {2, 124, {0,0,0,0,54,54,54,54,54,54,54,53}, 0x00000000, 0x36363636, 0x35363636},
+    {2, 132, {0,0,0,0,26,26,26,26,26,26,26,25}, 0x00000000, 0x1A1A1A1A, 0x191A1A1A},
+    {2, 140, {0,0,0,0,55,55,55,55,55,55,55,54}, 0x00000000, 0x37373737, 0x36373737},
+    {2, 149, {0,0,0,0,14,14,14,14,14,14,14,14}, 0x00000000, 0x0E0E0E0E, 0x0E0E0E0E},
+    {2, 153, {0,0,0,0,14,14,14,14,14,14,14,14}, 0x00000000, 0x0E0E0E0E, 0x0E0E0E0E},
+    {2, 157, {0,0,0,0,43,43,43,43,43,43,43,43}, 0x00000000, 0x2B2B2B2B, 0x2B2B2B2B},
+    {2, 161, {0,0,0,0,43,43,43,43,43,43,43,43}, 0x00000000, 0x2B2B2B2B, 0x2B2B2B2B},
+    {2, 165, {0,0,0,0,15,15,15,15,15,15,15,15}, 0x00000000, 0x0F0F0F0F, 0x0F0F0F0F},
+    {3, 1, {5,5,5,5,9,9,9,9,9,9,9,7}, 0x05050505, 0x09090909, 0x07090909},
+    {3, 6, {6,6,6,6,10,10,10,10,10,10,10,8}, 0x06060606, 0x0A0A0A0A, 0x080A0A0A},
+    {3, 11, {35,35,35,35,31,31,31,31,31,31,31,31}, 0x23232323, 0x1F1F1F1F, 0x1F1F1F1F},
+    {3, 13, {63,63,63,63,63,63,63,63,63,63,63,63}, 0x3F3F3F3F, 0x3F3F3F3F, 0x3F3F3F3F},
+    {3, 14, {42,42,42,40,17,17,17,17,15,13,11,9}, 0x282A2A2A, 0x11111111, 0x090B0D0F},
+    {3, 36, {0,0,0,0,12,12,12,12,12,12,12,11}, 0x00000000, 0x0C0C0C0C, 0x0B0C0C0C},
+    {3, 40, {0,0,0,0,12,12,12,12,12,12,12,11}, 0x00000000, 0x0C0C0C0C, 0x0B0C0C0C},
+    {3, 44, {0,0,0,0,41,41,41,41,41,41,41,40}, 0x00000000, 0x29292929, 0x28292929},
+    {3, 48, {0,0,0,0,41,41,41,41,41,41,41,40}, 0x00000000, 0x29292929, 0x28292929},
+    {3, 52, {0,0,0,0,2,2,2,2,2,2,2,2}, 0x00000000, 0x02020202, 0x02020202},
+    {3, 56, {0,0,0,0,13,13,13,13,13,13,13,12}, 0x00000000, 0x0D0D0D0D, 0x0C0D0D0D},
+    {3, 60, {0,0,0,0,42,42,42,42,42,42,42,41}, 0x00000000, 0x2A2A2A2A, 0x292A2A2A},
+    {3, 64, {0,0,0,0,42,42,42,42,42,42,42,41}, 0x00000000, 0x2A2A2A2A, 0x292A2A2A},
+    {3, 100, {0,0,0,0,14,14,14,14,14,14,14,13}, 0x00000000, 0x0E0E0E0E, 0x0D0E0E0E},
+    {3, 108, {0,0,0,0,43,43,43,43,43,43,43,42}, 0x00000000, 0x2B2B2B2B, 0x2A2B2B2B},
+    {3, 116, {0,0,0,0,15,15,15,15,15,15,15,14}, 0x00000000, 0x0F0F0F0F, 0x0E0F0F0F},
+    {3, 124, {0,0,0,0,44,44,44,44,44,44,44,43}, 0x00000000, 0x2C2C2C2C, 0x2B2C2C2C},
+    {3, 132, {0,0,0,0,16,16,16,16,16,16,16,15}, 0x00000000, 0x10101010, 0x0F101010},
+    {3, 140, {0,0,0,0,45,45,45,45,45,45,45,44}, 0x00000000, 0x2D2D2D2D, 0x2C2D2D2D},
+    {3, 149, {0,0,0,0,4,4,4,4,4,4,4,4}, 0x00000000, 0x04040404, 0x04040404},
+    {3, 153, {0,0,0,0,4,4,4,4,4,4,4,4}, 0x00000000, 0x04040404, 0x04040404},
+    {3, 157, {0,0,0,0,33,33,33,33,33,33,33,33}, 0x00000000, 0x21212121, 0x21212121},
+    {3, 161, {0,0,0,0,33,33,33,33,33,33,33,33}, 0x00000000, 0x21212121, 0x21212121},
+    {3, 165, {0,0,0,0,5,5,5,5,5,5,5,5}, 0x00000000, 0x05050505, 0x05050505},
+    {4, 1, {8,8,8,8,15,15,15,15,15,15,15,13}, 0x08080808, 0x0F0F0F0F, 0x0D0F0F0F},
+    {4, 6, {9,9,9,9,16,16,16,16,16,16,16,14}, 0x09090909, 0x10101010, 0x0E101010},
+    {4, 11, {38,38,38,38,37,37,37,37,37,37,37,37}, 0x26262626, 0x25252525, 0x25252525},
+    {4, 13, {63,63,63,63,63,63,63,63,63,63,63,63}, 0x3F3F3F3F, 0x3F3F3F3F, 0x3F3F3F3F},
+    {4, 14, {45,45,45,43,23,23,23,23,21,19,17,15}, 0x2B2D2D2D, 0x17171717, 0x0F111315},
+    {4, 36, {0,0,0,0,18,18,18,18,18,18,18,17}, 0x00000000, 0x12121212, 0x11121212},
+    {4, 40, {0,0,0,0,18,18,18,18,18,18,18,17}, 0x00000000, 0x12121212, 0x11121212},
+    {4, 44, {0,0,0,0,47,47,47,47,47,47,47,46}, 0x00000000, 0x2F2F2F2F, 0x2E2F2F2F},
+    {4, 48, {0,0,0,0,47,47,47,47,47,47,47,46}, 0x00000000, 0x2F2F2F2F, 0x2E2F2F2F},
+    {4, 52, {0,0,0,0,8,8,8,8,8,8,8,8}, 0x00000000, 0x08080808, 0x08080808},
+    {4, 56, {0,0,0,0,19,19,19,19,19,19,19,18}, 0x00000000, 0x13131313, 0x12131313},
+    {4, 60, {0,0,0,0,48,48,48,48,48,48,48,47}, 0x00000000, 0x30303030, 0x2F303030},
+    {4, 64, {0,0,0,0,48,48,48,48,48,48,48,47}, 0x00000000, 0x30303030, 0x2F303030},
+    {4, 100, {0,0,0,0,20,20,20,20,20,20,20,19}, 0x00000000, 0x14141414, 0x13141414},
+    {4, 108, {0,0,0,0,49,49,49,49,49,49,49,48}, 0x00000000, 0x31313131, 0x30313131},
+    {4, 116, {0,0,0,0,21,21,21,21,21,21,21,20}, 0x00000000, 0x15151515, 0x14151515},
+    {4, 124, {0,0,0,0,50,50,50,50,50,50,50,49}, 0x00000000, 0x32323232, 0x31323232},
+    {4, 132, {0,0,0,0,22,22,22,22,22,22,22,21}, 0x00000000, 0x16161616, 0x15161616},
+    {4, 140, {0,0,0,0,51,51,51,51,51,51,51,50}, 0x00000000, 0x33333333, 0x32333333},
+    {4, 149, {0,0,0,0,10,10,10,10,10,10,10,10}, 0x00000000, 0x0A0A0A0A, 0x0A0A0A0A},
+    {4, 153, {0,0,0,0,10,10,10,10,10,10,10,10}, 0x00000000, 0x0A0A0A0A, 0x0A0A0A0A},
+    {4, 157, {0,0,0,0,39,39,39,39,39,39,39,39}, 0x00000000, 0x27272727, 0x27272727},
+    {4, 161, {0,0,0,0,39,39,39,39,39,39,39,39}, 0x00000000, 0x27272727, 0x27272727},
+    {4, 165, {0,0,0,0,11,11,11,11,11,11,11,11}, 0x00000000, 0x0B0B0B0B, 0x0B0B0B0B},
+    {5, 1, {11,11,11,11,21,21,21,21,21,21,21,19}, 0x0B0B0B0B, 0x15151515, 0x13151515},
+    {5, 6, {12,12,12,12,22,22,22,22,22,22,22,20}, 0x0C0C0C0C, 0x16161616, 0x14161616},
+    {5, 11, {41,41,41,41,43,43,43,43,43,43,43,43}, 0x29292929, 0x2B2B2B2B, 0x2B2B2B2B},
+    {5, 13, {1,1,1,1,63,63,63,63,63,63,63,63}, 0x01010101, 0x3F3F3F3F, 0x3F3F3F3F},
+    {5, 14, {48,48,48,46,29,29,29,29,27,25,23,21}, 0x2E303030, 0x1D1D1D1D, 0x1517191B},
+    {5, 36, {0,0,0,0,24,24,24,24,24,24,24,23}, 0x00000000, 0x18181818, 0x17181818},
+    {5, 40, {0,0,0,0,24,24,24,24,24,24,24,23}, 0x00000000, 0x18181818, 0x17181818},
+    {5, 44, {0,0,0,0,53,53,53,53,53,53,53,52}, 0x00000000, 0x35353535, 0x34353535},
+    {5, 48, {0,0,0,0,53,53,53,53,53,53,53,52}, 0x00000000, 0x35353535, 0x34353535},
+    {5, 52, {0,0,0,0,14,14,14,14,14,14,14,14}, 0x00000000, 0x0E0E0E0E, 0x0E0E0E0E},
+    {5, 56, {0,0,0,0,25,25,25,25,25,25,25,24}, 0x00000000, 0x19191919, 0x18191919},
+    {5, 60, {0,0,0,0,54,54,54,54,54,54,54,53}, 0x00000000, 0x36363636, 0x35363636},
+    {5, 64, {0,0,0,0,54,54,54,54,54,54,54,53}, 0x00000000, 0x36363636, 0x35363636},
+    {5, 100, {0,0,0,0,26,26,26,26,26,26,26,25}, 0x00000000, 0x1A1A1A1A, 0x191A1A1A},
+    {5, 108, {0,0,0,0,55,55,55,55,55,55,55,54}, 0x00000000, 0x37373737, 0x36373737},
+    {5, 116, {0,0,0,0,27,27,27,27,27,27,27,26}, 0x00000000, 0x1B1B1B1B, 0x1A1B1B1B},
+    {5, 124, {0,0,0,0,56,56,56,56,56,56,56,55}, 0x00000000, 0x38383838, 0x37383838},
+    {5, 132, {0,0,0,0,28,28,28,28,28,28,28,27}, 0x00000000, 0x1C1C1C1C, 0x1B1C1C1C},
+    {5, 140, {0,0,0,0,57,57,57,57,57,57,57,56}, 0x00000000, 0x39393939, 0x38393939},
+    {5, 149, {0,0,0,0,16,16,16,16,16,16,16,16}, 0x00000000, 0x10101010, 0x10101010},
+    {5, 153, {0,0,0,0,16,16,16,16,16,16,16,16}, 0x00000000, 0x10101010, 0x10101010},
+    {5, 157, {0,0,0,0,45,45,45,45,45,45,45,45}, 0x00000000, 0x2D2D2D2D, 0x2D2D2D2D},
+    {5, 161, {0,0,0,0,45,45,45,45,45,45,45,45}, 0x00000000, 0x2D2D2D2D, 0x2D2D2D2D},
+    {5, 165, {0,0,0,0,17,17,17,17,17,17,17,17}, 0x00000000, 0x11111111, 0x11111111},
+    {6, 1, {14,14,14,14,27,27,27,27,27,27,27,25}, 0x0E0E0E0E, 0x1B1B1B1B, 0x191B1B1B},
+    {6, 6, {15,15,15,15,28,28,28,28,28,28,28,26}, 0x0F0F0F0F, 0x1C1C1C1C, 0x1A1C1C1C},
+    {6, 11, {44,44,44,44,49,49,49,49,49,49,49,49}, 0x2C2C2C2C, 0x31313131, 0x31313131},
+    {6, 13, {4,4,4,4,1,1,1,1,1,1,1,1}, 0x04040404, 0x01010101, 0x01010101},
+    {6, 14, {51,51,51,49,35,35,35,35,33,31,29,27}, 0x31333333, 0x23232323, 0x1B1D1F21},
+    {6, 36, {0,0,0,0,30,30,30,30,30,30,30,29}, 0x00000000, 0x1E1E1E1E, 0x1D1E1E1E},
+    {6, 40, {0,0,0,0,30,30,30,30,30,30,30,29}, 0x00000000, 0x1E1E1E1E, 0x1D1E1E1E},
+    {6, 44, {0,0,0,0,59,59,59,59,59,59,59,58}, 0x00000000, 0x3B3B3B3B, 0x3A3B3B3B},
+    {6, 48, {0,0,0,0,59,59,59,59,59,59,59,58}, 0x00000000, 0x3B3B3B3B, 0x3A3B3B3B},
+    {6, 52, {0,0,0,0,20,20,20,20,20,20,20,20}, 0x00000000, 0x14141414, 0x14141414},
+    {6, 56, {0,0,0,0,31,31,31,31,31,31,31,30}, 0x00000000, 0x1F1F1F1F, 0x1E1F1F1F},
+    {6, 60, {0,0,0,0,60,60,60,60,60,60,60,59}, 0x00000000, 0x3C3C3C3C, 0x3B3C3C3C},
+    {6, 64, {0,0,0,0,60,60,60,60,60,60,60,59}, 0x00000000, 0x3C3C3C3C, 0x3B3C3C3C},
+    {6, 100, {0,0,0,0,32,32,32,32,32,32,32,31}, 0x00000000, 0x20202020, 0x1F202020},
+    {6, 108, {0,0,0,0,61,61,61,61,61,61,61,60}, 0x00000000, 0x3D3D3D3D, 0x3C3D3D3D},
+    {6, 116, {0,0,0,0,33,33,33,33,33,33,33,32}, 0x00000000, 0x21212121, 0x20212121},
+    {6, 124, {0,0,0,0,62,62,62,62,62,62,62,61}, 0x00000000, 0x3E3E3E3E, 0x3D3E3E3E},
+    {6, 132, {0,0,0,0,34,34,34,34,34,34,34,33}, 0x00000000, 0x22222222, 0x21222222},
+    {6, 140, {0,0,0,0,63,63,63,63,63,63,63,62}, 0x00000000, 0x3F3F3F3F, 0x3E3F3F3F},
+    {6, 149, {0,0,0,0,22,22,22,22,22,22,22,22}, 0x00000000, 0x16161616, 0x16161616},
+    {6, 153, {0,0,0,0,22,22,22,22,22,22,22,22}, 0x00000000, 0x16161616, 0x16161616},
+    {6, 157, {0,0,0,0,51,51,51,51,51,51,51,51}, 0x00000000, 0x33333333, 0x33333333},
+    {6, 161, {0,0,0,0,51,51,51,51,51,51,51,51}, 0x00000000, 0x33333333, 0x33333333},
+    {6, 165, {0,0,0,0,23,23,23,23,23,23,23,23}, 0x00000000, 0x17171717, 0x17171717},
+    {7, 1, {17,17,17,17,33,33,33,33,33,33,33,31}, 0x11111111, 0x21212121, 0x1F212121},
+    {7, 6, {18,18,18,18,34,34,34,34,34,34,34,32}, 0x12121212, 0x22222222, 0x20222222},
+    {7, 11, {47,47,47,47,55,55,55,55,55,55,55,55}, 0x2F2F2F2F, 0x37373737, 0x37373737},
+    {7, 13, {7,7,7,7,7,7,7,7,7,7,7,7}, 0x07070707, 0x07070707, 0x07070707},
+    {7, 14, {54,54,54,52,41,41,41,41,39,37,35,33}, 0x34363636, 0x29292929, 0x21232527},
+    {7, 36, {0,0,0,0,36,36,36,36,36,36,36,35}, 0x00000000, 0x24242424, 0x23242424},
+    {7, 40, {0,0,0,0,36,36,36,36,36,36,36,35}, 0x00000000, 0x24242424, 0x23242424},
+    {7, 44, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 48, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 52, {0,0,0,0,26,26,26,26,26,26,26,26}, 0x00000000, 0x1A1A1A1A, 0x1A1A1A1A},
+    {7, 56, {0,0,0,0,37,37,37,37,37,37,37,36}, 0x00000000, 0x25252525, 0x24252525},
+    {7, 60, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 64, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 100, {0,0,0,0,38,38,38,38,38,38,38,37}, 0x00000000, 0x26262626, 0x25262626},
+    {7, 108, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 116, {0,0,0,0,39,39,39,39,39,39,39,38}, 0x00000000, 0x27272727, 0x26272727},
+    {7, 124, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 132, {0,0,0,0,40,40,40,40,40,40,40,39}, 0x00000000, 0x28282828, 0x27282828},
+    {7, 140, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 149, {0,0,0,0,28,28,28,28,28,28,28,28}, 0x00000000, 0x1C1C1C1C, 0x1C1C1C1C},
+    {7, 153, {0,0,0,0,28,28,28,28,28,28,28,28}, 0x00000000, 0x1C1C1C1C, 0x1C1C1C1C},
+    {7, 157, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 161, {0,0,0,0,63,63,63,63,63,63,63,63}, 0x00000000, 0x3F3F3F3F, 0x3F3F3F3F},
+    {7, 165, {0,0,0,0,29,29,29,29,29,29,29,29}, 0x00000000, 0x1D1D1D1D, 0x1D1D1D1D},
+    };
+    for (unsigned k = 0; k < sizeof PWR_LINUX / sizeof PWR_LINUX[0]; k++)
+    {
+        unsigned char tp[42];
+        for (unsigned i = 0; i < 42; i++)
+            tp[i] = (unsigned char)((PWR_LINUX[k].seed * 131u + i * 29u + (i >> 1) * 7u) & 0x3F);
+        unsigned ch = PWR_LINUX[k].channel;
+        for (unsigned r = ch <= 14 ? 0 : 4; r < 12; r++)
+            if (tx_power_index(tp, ch, r) != PWR_LINUX[k].idx[r])
+            {
+                printf("FAIL tx power seed %u channel %u rate %u: %u, Linux %u\n", PWR_LINUX[k].seed, ch, r, tx_power_index(tp, ch, r),
+                       PWR_LINUX[k].idx[r]);
+                fails++;
+            }
+        chip_for_download();
+        NLOG = 0;
+        tx_power_apply(tp, ch);
+        int n_expected = ch <= 14 ? 3 : 2;
+        CHECK(NLOG == n_expected);
+        for (int i = 0; i < NLOG; i++)
+        {
+            unsigned want = LOG[i].off == 0x1D00 ? PWR_LINUX[k].w0 : LOG[i].off == 0x1D04 ? PWR_LINUX[k].w4 : PWR_LINUX[k].w8;
+            if (LOG[i].size != 4 || (LOG[i].off != 0x1D00 && LOG[i].off != 0x1D04 && LOG[i].off != 0x1D08) || LOG[i].value != want)
+            {
+                printf("FAIL tx power register seed %u channel %u: 0x%X = 0x%08X, Linux 0x%08X\n", PWR_LINUX[k].seed, ch, LOG[i].off, LOG[i].value, want);
+                fails++;
+            }
+        }
+    }
+
+    /* ---- stage 5a-2: the first frames on the air. The pretend chip answers a broadcast probe request with two probe responses. ---- */
+    {
+        TXP_ENABLE = 1;
+        static const unsigned char MAC6[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+        /* two access points' probe responses: a header of 24 bytes, 12 fixed bytes, SSID and DS elements, 4 bytes FCS */
+        for (int a = 0; a < 2; a++)
+        {
+            unsigned char *f = TX_RESP[a];
+            memset(f, 0, 160);
+            f[0] = 0x50;
+            memcpy(f + 4, MAC6, 6);
+            f[10] = 2;
+            f[15] = (unsigned char)(0x70 + a);
+            f[16] = 2;
+            f[21] = (unsigned char)(0x70 + a);
+            f[34] = 0x31;
+            f[35] = 0x14;
+            unsigned p = 36;
+            f[p++] = 0;
+            f[p++] = 5;
+            memcpy(f + p, a ? "Other" : "Reply", 5);
+            p += 5;
+            f[p++] = 3;
+            f[p++] = 1;
+            f[p++] = 149;
+            f[p++] = 48; /* RSN */
+            f[p++] = 2;
+            f[p++] = 1;
+            f[p++] = 0;
+            p += 4;
+            TX_RESP_LEN[a] = p;
+        }
+        TX_ANSWER = 2;
+        build_image(1);
+        chip_for_download();
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        RXQ_N = RXQ_NEXT = 0;
+        RX_HW = 0;
+        memset(&TXCAP, 0, sizeof TXCAP);
+        NIC_RTL8821CE.probe(&WIFI);
+        CHECK(EF.state == EF_OK && EF.txpwr[0] == 5 && EF.txpwr[41] == 5 + 3 * 41); /* the calibration comes from the efuse */
+        CHECK(TXP.state == 1 && TXP.sent == 3 && TXP.failed == 0 && TXP.channel == 149);
+        CHECK(TXCAP.count == 3 && TXCAP.idx_written == 3 && TXCAP.entry == 2);
+        for (int i = 0; i < 6; i++)
+            CHECK(REGS[0x610 + i] == MAC6[i]); /* the chip answers to our address */
+        /* the transmit descriptor of the third frame */
+        unsigned w[10];
+        memcpy(w, TXCAP.desc, 40);
+        CHECK((w[0] & 0xFFFF) == TXCAP.len && ((w[0] >> 16) & 0xFF) == 48 && (w[0] & BIT(24)) && (w[0] & BIT(26)) && (w[0] & BIT(31)));
+        CHECK((w[1] & 0xFF) == 0 && ((w[1] >> 8) & 0x1F) == 18 && ((w[1] >> 16) & 0x1F) == 7 && ((w[1] >> 22) & 3) == 0); /* MAC id 0, management queue, rate id G */
+        CHECK(w[2] == 0 && (w[3] & BIT(8)) && (w[3] & BIT(10)) && (w[3] & 0xC0) == 0 && (w[4] & 0x7F) == 4 && w[5] == 0);   /* use rate 6M, no fallback */
+        CHECK((w[8] & BIT(15)) && (w[9] & 0xFFF000) == 0);                                                                   /* hardware sequence number */
+        /* the buffer descriptor: the descriptor, then the frame */
+        unsigned bd0 = TXCAP.bd[0] | TXCAP.bd[1] << 8, psb = TXCAP.bd[2] | TXCAP.bd[3] << 8, bd1 = TXCAP.bd[8] | TXCAP.bd[9] << 8;
+        unsigned d0 = TXCAP.bd[4] | TXCAP.bd[5] << 8 | TXCAP.bd[6] << 16 | (unsigned)TXCAP.bd[7] << 24;
+        unsigned d1 = TXCAP.bd[12] | TXCAP.bd[13] << 8 | TXCAP.bd[14] << 16 | (unsigned)TXCAP.bd[15] << 24;
+        CHECK(bd0 == 48 && bd1 == TXCAP.len && psb == (48 + TXCAP.len - 1) / 128 + 1 && !(psb & BIT(15)) && d0 == D.stage_dma && d1 == D.stage_dma + 48);
+        /* the frame: a probe request from our address to everybody with an empty name and the 5 GHz rates */
+        static const unsigned char WANT[] = {0x40, 0x00, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34, 0xFF, 0xFF, 0xFF,
+                                             0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 1, 8, 0x8C, 0x12, 0x98, 0x24, 0xB0, 0x48, 0x60, 0x6C};
+        CHECK(TXCAP.len == sizeof WANT && memcmp(TXCAP.frame, WANT, sizeof WANT) == 0);
+        /* the answers were heard, and the networks that answered are in the list */
+        CHECK(TXP.replies == 6 && SC.n >= 2); /* two responses to each of the three requests */
+        char s8[96];
+        NIC_RTL8821CE.status(s8, sizeof s8);
+        CHECK(strstr(s8, ", init ok, ") && strstr(s8, ", tx3 pr6, no cfg, off") && strlen(s8) < sizeof s8);
+        /* a power on 5 GHz channel 149 was written: the rates 6M .. 54M */
+        CHECK(count_writes(0x1D04, 4) >= 1 && count_writes(0x1D08, 4) >= 1 && count_writes(0x1D00, 4) == 0);
+
+        /* the chip fetches nothing: every frame fails and says so */
+        chip_for_download();
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        RXQ_N = RXQ_NEXT = 0;
+        RX_HW = 0;
+        KNOB_TX_STUCK = 1;
+        NIC_RTL8821CE.probe(&WIFI);
+        CHECK(TXP.sent == 0 && TXP.failed == 3 && TXP.replies == 0);
+        NIC_RTL8821CE.status(s8, sizeof s8);
+        CHECK(TXP.variant == -1 && strstr(s8, ", init ok, tx0/3 00000000 00000000, off") && strlen(s8) < sizeof s8); /* no way of starting the DMA worked: the DMA error status and the pause register are shown */
+        KNOB_TX_STUCK = 0;
+
+        /* a chip that takes the index only as a 32-bit write: the fifth way of starting works, and the line says so */
+        chip_for_download();
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        RXQ_N = RXQ_NEXT = 0;
+        RX_HW = 0;
+        KNOB_TX_ONLY32 = 1;
+        TX_ANSWER = 2;
+        NIC_RTL8821CE.probe(&WIFI);
+        CHECK(TXP.variant == 4 && TXP.sent == 3 && TXP.failed == 0 && TXP.replies == 6);
+        NIC_RTL8821CE.status(s8, sizeof s8);
+        CHECK(strstr(s8, ", tx3 v4 pr6, no cfg, off") && strlen(s8) < sizeof s8);
+        KNOB_TX_ONLY32 = 0;
+        TXP.kick32 = 0;
+
+        /* the index never moves but the access points answer: that counts as working, and the line says how it went */
+        chip_for_download();
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        RXQ_N = RXQ_NEXT = 0;
+        RX_HW = 0;
+        KNOB_TX_SILENT = 1;
+        NIC_RTL8821CE.probe(&WIFI);
+        CHECK(TXP.variant == 0 && TXP.sent == 1 && TXP.failed == 2 && TXP.replies == 6);
+        NIC_RTL8821CE.status(s8, sizeof s8);
+        CHECK(strstr(s8, ", tx1/3 pr6, no cfg, off") && strlen(s8) < sizeof s8);
+        KNOB_TX_SILENT = 0;
+
+        /* the ring wraps after 128 entries, and a full ring is not written */
+        chip_for_download();
+        memset(REGS, 0, sizeof REGS);
+        POOL_OK = 1;
+        TXP.wp = 0;
+        unsigned char fr[40] = {0x40};
+        memset(fr + 4, 0xFF, 6);
+        int okc = 0;
+        for (int i = 0; i < 130; i++)
+            okc += tx_mgmt(fr, sizeof fr, 6) == 0;
+        CHECK(okc == 130 && TXP.wp == 2);
+        REGS[0x3B2] = 3; /* the chip's read index is 3: entry 2 is the last one that may be filled */
+        REGS[0x3B3] = 0;
+        CHECK(tx_mgmt(fr, sizeof fr, 6) == -1 && TXP.wp == 2);
+        CHECK(tx_mgmt(fr, 10, 6) == -1 && tx_mgmt(fr, 2000, 6) == -1); /* a frame that is too short or too long */
+        TXP_ENABLE = 0;
+        TX_ANSWER = 0;
+    }
+
+    /* ---- stage 5b-0: the settings file (made-up texts; the user's own file is never read by anything but the driver on their PC) ---- */
+    {
+        CFG_TEXT = 0;
+        cfg_load();
+        CHECK(CFG.state == CFG_NONE);
+        const char *ok1 = "ssid=TestNet\npsk=hunter2hunter2\n";
+        CFG_TEXT = ok1;
+        cfg_load();
+        CHECK(CFG.state == CFG_OK && CFG.ssid_len == 7 && strcmp(CFG.ssid, "TestNet") == 0 && CFG.psk_len == 14 && strcmp(CFG.psk, "hunter2hunter2") == 0);
+        const char *ok2 = "# a comment\r\nother=1\r\nssid=My Net  \r\n\r\npsk=pass word 12 \r\n"; /* CRLF, trailing blanks, other lines, spaces inside, no final newline needed */
+        CFG_TEXT = ok2;
+        cfg_load();
+        CHECK(CFG.state == CFG_OK && strcmp(CFG.ssid, "My Net") == 0 && strcmp(CFG.psk, "pass word 12") == 0);
+        const char *ok3 = "psk=abcdefgh\nssid=X"; /* the other order, the last line without a newline */
+        CFG_TEXT = ok3;
+        cfg_load();
+        CHECK(CFG.state == CFG_OK && strcmp(CFG.ssid, "X") == 0 && strcmp(CFG.psk, "abcdefgh") == 0);
+        static const struct { const char *text; const char *why; } BAD[] = {
+            {"ssid=\npsk=12345678\n", "ssid"},
+            {"ssid=012345678901234567890123456789012\npsk=12345678\n", "ssid"}, /* 33 characters */
+            {"psk=12345678\n", "ssid"},                                        /* no ssid line */
+            {"ssid=A\npsk=1234567\n", "psk"},                                  /* 7 characters */
+            {"ssid=A\npsk=0123456789012345678901234567890123456789012345678901234567890123\n", "psk"}, /* 64 characters */
+            {"ssid=A\n", "psk"},
+        };
+        for (unsigned i = 0; i < sizeof BAD / sizeof BAD[0]; i++)
+        {
+            CFG_TEXT = BAD[i].text;
+            cfg_load();
+            if (CFG.state != CFG_BAD || strcmp(CFG.why, BAD[i].why) != 0)
+            {
+                printf("FAIL settings text %u: state %d why %s, want bad %s\n", i, CFG.state, CFG.why ? CFG.why : "-", BAD[i].why);
+                fails++;
+            }
+        }
+        const char *lim = "ssid=01234567890123456789012345678901\npsk=01234567890123456789012345678901234567890123456789012345678901\n"; /* 32 and 62 */
+        CFG_TEXT = lim;
+        cfg_load();
+        CHECK(CFG.state == CFG_OK && CFG.ssid_len == 32 && CFG.psk_len == 62);
+    }
+
+    /* ---- stage 5b-1: authentication and association against a pretend access point ---- */
+    {
+        /* the RSN element of a WPA2-Personal network, as the AP sends it: version, group CCMP, pairwise CCMP, key management PSK, no capabilities */
+        static const unsigned char RSN_OK_[20] = {1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0};
+        static unsigned char RSN_TKIP[20], RSN_SAE[20], RSN_PMF[20], RSN_GTKIP[20];
+        memcpy(RSN_TKIP, RSN_OK_, 20);
+        RSN_TKIP[11] = 2; /* pairwise TKIP only */
+        memcpy(RSN_SAE, RSN_OK_, 20);
+        RSN_SAE[17] = 8; /* key management SAE only */
+        memcpy(RSN_PMF, RSN_OK_, 20);
+        RSN_PMF[18] = 0x40; /* management frame protection required */
+        memcpy(RSN_GTKIP, RSN_OK_, 20);
+        RSN_GTKIP[5] = 2; /* group cipher TKIP */
+        CHECK(rsn_check(RSN_OK_, 20) == RSN_OK && rsn_check(RSN_TKIP, 20) == RSN_NO_CCMP && rsn_check(RSN_SAE, 20) == RSN_NO_PSK);
+        CHECK(rsn_check(RSN_PMF, 20) == RSN_PMF_REQUIRED && rsn_check(RSN_GTKIP, 20) == RSN_GROUP);
+        CHECK(rsn_check(RSN_OK_, 2) == RSN_BAD_VERSION && rsn_check(RSN_OK_, 12) == RSN_BAD_VERSION && rsn_check(RSN_OK_, 7) == RSN_BAD_VERSION);
+        unsigned char two[20];
+        memcpy(two, RSN_OK_, 20);
+        two[0] = 2; /* version 2 */
+        CHECK(rsn_check(two, 20) == RSN_BAD_VERSION);
+        /* an AP that offers both PSK and SAE (WPA2/WPA3 mixed): fine, PMF is only capable, not required */
+        unsigned char mixed[24] = {1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 2, 0, 0x00, 0x0F, 0xAC, 8, 0x00, 0x0F, 0xAC, 2, 0x80, 0};
+        CHECK(rsn_check(mixed, 24) == RSN_OK);
+
+        static const struct { const unsigned char *rsn; int mode; const char *line; int frames; } CASES[] = {
+            {RSN_OK_, 0, ", net ch149, auth ok, assoc ok, off", 6},   /* 3 probe requests, authentication, association, deauthentication */
+            {RSN_OK_, 1, ", net ch149, auth none, off", 6},           /* the AP stays silent: three authentication attempts, nothing more */
+            {RSN_OK_, 2, ", net ch149, auth s1, off", 4},             /* authentication refused: no association */
+            {RSN_OK_, 3, ", net ch149, auth ok, assoc s17, off", 6},  /* association refused: still says goodbye */
+            {RSN_TKIP, 0, ", net ccmp, off", 3},                      /* a security this driver cannot join: no frame is sent to it */
+            {RSN_SAE, 0, ", net akm, off", 3},
+            {RSN_PMF, 0, ", net pmf, off", 3},
+            {RSN_GTKIP, 0, ", net grp, off", 3},
+        };
+        for (unsigned c = 0; c < sizeof CASES / sizeof CASES[0]; c++)
+        {
+            static unsigned char beacon[128];
+            memset(beacon, 0, sizeof beacon);
+            beacon[0] = 0x80;
+            memset(beacon + 4, 0xFF, 6);
+            memcpy(beacon + 10, AP_BSSID, 6);
+            memcpy(beacon + 16, AP_BSSID, 6);
+            beacon[32] = 0x64;
+            beacon[34] = 0x31;
+            beacon[35] = 0x14;
+            unsigned p = 36;
+            beacon[p++] = 0;
+            beacon[p++] = 7;
+            memcpy(beacon + p, "TestNet", 7);
+            p += 7;
+            beacon[p++] = 3;
+            beacon[p++] = 1;
+            beacon[p++] = 149;
+            beacon[p++] = 48;
+            beacon[p++] = 20;
+            memcpy(beacon + p, CASES[c].rsn, 20);
+            p += 20;
+            p += 4; /* FCS */
+            CFG_TEXT = "ssid=TestNet\npsk=secret-pass-phrase\n";
+            TXP_ENABLE = 1;
+            TX_ANSWER = 0;
+            AP_MODE = CASES[c].mode;
+            build_image(1);
+            chip_for_download();
+            file(IMG, IMG_SIZE, IMG_SIZE);
+            RXQ_N = RXQ_NEXT = 0;
+            RX_HW = 0;
+            TXLOG_N = 0;
+            AP_RESP_N = 0;
+            rxq_add_frame(beacon, p);
+            NIC_RTL8821CE.probe(&WIFI);
+            char sc[96];
+            NIC_RTL8821CE.status(sc, sizeof sc);
+            if (!strstr(sc, CASES[c].line) || strlen(sc) >= sizeof sc || TXLOG_N != CASES[c].frames || strstr(sc, "secret"))
+            {
+                printf("FAIL connect case %u: [%s] with %d frames, wanted %s and %d frames\n", c, sc, TXLOG_N, CASES[c].line, CASES[c].frames);
+                fails++;
+            }
+            if (c == 0)
+            {
+                static const unsigned char PROBE_TYPES[3] = {0x40, 0x40, 0x40};
+                for (int i = 0; i < 3; i++)
+                    CHECK(TXLOG[i].b[0] == PROBE_TYPES[i]);
+                /* authentication: open system, sequence 1, status 0, to the BSSID, from our MAC */
+                static const unsigned char MAC6[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+                unsigned char want_auth[30] = {0xB0, 0, 0, 0};
+                memcpy(want_auth + 4, AP_BSSID, 6);
+                memcpy(want_auth + 10, MAC6, 6);
+                memcpy(want_auth + 16, AP_BSSID, 6);
+                want_auth[26] = 1;
+                CHECK(TXLOG[3].len == 30 && memcmp(TXLOG[3].b, want_auth, 30) == 0);
+                /* association: capability ESS + privacy, listen interval 10, the name, the 5 GHz rates, the RSN element */
+                unsigned char want_assoc[69] = {0x00, 0, 0, 0};
+                memcpy(want_assoc + 4, AP_BSSID, 6);
+                memcpy(want_assoc + 10, MAC6, 6);
+                memcpy(want_assoc + 16, AP_BSSID, 6);
+                unsigned q = 24; /* the body follows the 24 byte header */
+                want_assoc[q++] = 0x11;
+                want_assoc[q++] = 0x00;
+                want_assoc[q++] = 10;
+                want_assoc[q++] = 0;
+                want_assoc[q++] = 0;
+                want_assoc[q++] = 7;
+                memcpy(want_assoc + q, "TestNet", 7);
+                q += 7;
+                static const unsigned char TAIL[] = {1, 8, 0x8C, 0x12, 0x98, 0x24, 0xB0, 0x48, 0x60, 0x6C, 48, 20, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0};
+                memcpy(want_assoc + q, TAIL, sizeof TAIL);
+                q += sizeof TAIL;
+                CHECK(q == 69 && TXLOG[4].len == 69 && memcmp(TXLOG[4].b, want_assoc, 69) == 0);
+                /* deauthentication: reason 3 */
+                unsigned char want_deauth[26] = {0xC0, 0, 0, 0};
+                memcpy(want_deauth + 4, AP_BSSID, 6);
+                memcpy(want_deauth + 10, MAC6, 6);
+                memcpy(want_deauth + 16, AP_BSSID, 6);
+                want_deauth[24] = 3;
+                CHECK(TXLOG[5].len == 26 && memcmp(TXLOG[5].b, want_deauth, 26) == 0);
+                CHECK(CONN.aid == 5 && CONN.auth_seen && CONN.assoc_seen && CONN.auth_status == 0 && CONN.assoc_status == 0);
+                CHECK(CONN.auth_tries == 1 && CONN.assoc_tries == 1);
+                CHECK(!strstr(sc, "MAC")); /* no room for the address when a connection was tried */
+            }
+            if (c == 1)
+                CHECK(CONN.auth_tries == 3 && !CONN.auth_seen && !CONN.assoc_seen);
+        }
+        CFG_TEXT = 0;
+        AP_MODE = 0;
+        TXP_ENABLE = 0;
     }
 
     /* a firmware without extended memory: two parts only */
