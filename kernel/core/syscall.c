@@ -6,6 +6,7 @@
 #include "gdt.h"
 #include "gui.h"
 #include "heap.h"
+#include "net.h"
 #include "mq.h"
 #include "pipe.h"
 #include "sem.h"
@@ -1334,6 +1335,20 @@ static long long sys_resolve(const SyscallFrame *f)
     return (long long)((ull)ip[0] << 24 | (ull)ip[1] << 16 | (ull)ip[2] << 8 | ip[3]);
 }
 
+/* SYS_WIFISCAN: rdi = line number, rsi = buffer, rdx = its size (2 .. 256). One line of the last Wi-Fi scan; its length or -1. */
+static long long sys_wifiscan(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current() || f->rdi > 0xFFFF || f->rdx < 2 || f->rdx > 256 || !aspace_user_ok(as, f->rsi, f->rdx, 1))
+        return -1;
+    char line[256];
+    int n = net_wifi_scan_line((unsigned)f->rdi, line, (unsigned)f->rdx);
+    if (n < 0 || (unsigned)n >= (unsigned)f->rdx)
+        return -1;
+    copy_to_user(f->rsi, line, (unsigned)n + 1); /* with the terminating NUL */
+    return n;
+}
+
 /* SYS_BIND: rdi = socket descriptor, rsi = local address (0 = any; nothing else is accepted: there is one address), rdx = port 1 .. 65535.
  * Claims the port for this socket. 0, or -1 (not a new socket, port in use, bad port). */
 static long long sys_bind(const SyscallFrame *f)
@@ -1930,6 +1945,8 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_listen(f);
     case SYS_ACCEPT:
         return sys_accept(f);
+    case SYS_WIFISCAN:
+        return sys_wifiscan(f);
     case SYS_SIGACTION:
         return sys_sigaction(f);
     case SYS_SIGRETURN:

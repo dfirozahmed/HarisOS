@@ -158,6 +158,9 @@
  *                  Sleeps until a client has completed the handshake, then returns a NEW descriptor for that connection (read, write, close
  *                  as for a connected socket); the listening one stays. -1: not a listening socket, bad pointer, no free socket (SOCK_MAX = 8 in all) or
  *                  descriptor, or a signal handler ran during the wait. Closing the listening descriptor resets connections not accepted yet.
+ *   SYS_WIFISCAN (60) rdi = line number, rsi = pointer to a buffer, rdx = its size (2 .. 256): the result of the last Wi-Fi scan as one line of
+ *                  text (NUL-terminated; see net_wifi_scan_line in net.h): line 0 is a summary, lines 1 .. n one network each, the last a
+ *                  count of frames per channel. Returns the length of the line, or -1 (no Wi-Fi adapter or no scan, no such line, bad buffer).
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
@@ -244,6 +247,7 @@
 #define SYS_BIND 57
 #define SYS_LISTEN 58
 #define SYS_ACCEPT 59
+#define SYS_WIFISCAN 60
 
 /* SYS_SOCKET types */
 #define SYS_SOCK_STREAM 1 /* TCP */

@@ -2045,6 +2045,91 @@ static void scan_run(void)
     RX.state = RXS_OK;
 }
 
+/* The result of the last scan as lines of text, for the SYS_WIFISCAN system call (net.h: net_wifi_scan_line). Line 0 is a summary, lines
+ * 1 .. n one network each, line n + 1 the frames heard on every channel. Returns the length of the line, or -1 if there is no such line
+ * (no scan yet, or past the end). */
+static const char *const SEC_NAME[] = {"open", "WEP", "WPA", "WPA2"};
+
+static void put_pad(NicText *t, const char *s, unsigned width)
+{
+    unsigned n = 0;
+    while (s[n])
+        n++;
+    nic_puts(t, s);
+    for (; n < width; n++)
+        nic_putc(t, ' ');
+}
+
+int rtl8821ce_scan_line(unsigned index, char *buf, unsigned cap)
+{
+    if (!SC.state || !buf || cap < 2)
+        return -1;
+    NicText t;
+    nic_text_init(&t, buf, cap);
+    if (index == 0)
+    {
+        unsigned f2 = 0, f5 = 0;
+        for (unsigned i = 0; i < SCAN_NCH; i++)
+            if (SCAN_CHANNELS[i] <= 14)
+                f2 += SC.per_channel[i];
+            else
+                f5 += SC.per_channel[i];
+        nic_putd(&t, SC.n);
+        nic_puts(&t, " networks, ");
+        nic_putd(&t, SC.channels_ok);
+        nic_putc(&t, '/');
+        nic_putd(&t, SCAN_NCH);
+        nic_puts(&t, " channels tuned, frames 2.4G ");
+        nic_putd(&t, f2);
+        nic_puts(&t, " 5G ");
+        nic_putd(&t, f5);
+        nic_puts(&t, ", beacons ");
+        nic_putd(&t, RX.beacons);
+        if (SC.dropped)
+        {
+            nic_puts(&t, ", not listed ");
+            nic_putd(&t, SC.dropped);
+        }
+    }
+    else if (index <= SC.n)
+    {
+        const ScanAp *a = &SC.ap[index - 1];
+        nic_puts(&t, "ch ");
+        if (a->channel < 100)
+            nic_putc(&t, ' ');
+        if (a->channel < 10)
+            nic_putc(&t, ' ');
+        nic_putd(&t, a->channel);
+        nic_puts(&t, "  ");
+        put_pad(&t, SEC_NAME[a->sec & 3], 4);
+        nic_puts(&t, "  ");
+        for (int i = 0; i < 6; i++)
+        {
+            nic_puth(&t, a->bssid[i], 2);
+            if (i < 5)
+                nic_putc(&t, ':');
+        }
+        nic_puts(&t, "  ");
+        nic_puts(&t, a->ssid[0] ? a->ssid : "(hidden)");
+        nic_puts(&t, "  x");
+        nic_putd(&t, a->beacons);
+    }
+    else if (index == SC.n + 1)
+    {
+        nic_puts(&t, "frames per channel:");
+        for (unsigned i = 0; i < SCAN_NCH; i++)
+        {
+            nic_putc(&t, ' ');
+            nic_putd(&t, SCAN_CHANNELS[i]);
+            nic_putc(&t, ':');
+            nic_putd(&t, SC.per_channel[i]);
+        }
+    }
+    else
+        return -1;
+    return (int)t.n;
+}
+
 static int rtl8821ce_claims(const PciDevice *pd)
 {
     return pd->vendor_id == 0x10EC && (pd->device_id == 0xB821 || pd->device_id == 0xC821);

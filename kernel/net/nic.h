@@ -28,6 +28,9 @@ extern const NicDriver NIC_E1000;
 extern const NicDriver NIC_RTL8168;
 extern const NicDriver NIC_RTL8821CE; /* Wi-Fi: identification only for now, probe always fails (rtl8821ce.c) */
 
+/* The last Wi-Fi scan as text lines (rtl8821ce.c); see net_wifi_scan_line() in net.h. */
+int rtl8821ce_scan_line(unsigned index, char *buf, unsigned cap);
+
 /* Tiny text builder for status lines (no libc here): appends to buf[cap], always NUL-terminated. */
 typedef struct
 {

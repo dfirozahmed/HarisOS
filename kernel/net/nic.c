@@ -98,3 +98,5 @@ int net_adapter(unsigned char loc[3], int *working, char *status, unsigned cap)
 }
 
 const char *net_driver_name(void) { return ACTIVE ? ACTIVE->name : "no adapter"; }
+
+int net_wifi_scan_line(unsigned index, char *buf, unsigned cap) { return rtl8821ce_scan_line(index, buf, cap); }

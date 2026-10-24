@@ -44,6 +44,9 @@ int net_poll(void);
 int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms);
 int net_self_test(void);
 int net_adapter(unsigned char loc[3], int *working, char *status, unsigned cap);
+/* The result of the last Wi-Fi scan as text: line 0 is a summary, lines 1 .. n one network each (channel, security, BSSID, name), then a line
+ * with the frames heard per channel. Returns the length of the line, or -1 (no Wi-Fi scan has been done, or no such line). */
+int net_wifi_scan_line(unsigned index, char *buf, unsigned cap);
 int net_irq_init(void);
 int net_irq_active(void);
 int net_irq_take(void);

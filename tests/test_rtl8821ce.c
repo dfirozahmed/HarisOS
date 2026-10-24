@@ -1098,6 +1098,21 @@ int main(void)
         char s7[96];
         NIC_RTL8821CE.status(s7, sizeof s7);
         CHECK(strstr(s7, ", init ok, 8ap 2G10 5G0 b9, off") && strlen(s7) < sizeof s7);
+        /* the same result as text lines (SYS_WIFISCAN reads these) */
+        char ln[256];
+        CHECK(rtl8821ce_scan_line(0, ln, sizeof ln) > 0 && strcmp(ln, "8 networks, 11/11 channels tuned, frames 2.4G 10 5G 0, beacons 9") == 0);
+        CHECK(rtl8821ce_scan_line(1, ln, sizeof ln) > 0 && strcmp(ln, "ch   6  WPA2  02:00:00:00:00:01  HomeNet  x3") == 0);
+        CHECK(rtl8821ce_scan_line(2, ln, sizeof ln) > 0 && strcmp(ln, "ch  11  open  02:00:00:00:00:02  Cafe  x1") == 0);
+        CHECK(rtl8821ce_scan_line(3, ln, sizeof ln) > 0 && strcmp(ln, "ch   1  WEP   02:00:00:00:00:03  OldWep  x1") == 0);
+        CHECK(rtl8821ce_scan_line(5, ln, sizeof ln) > 0 && strcmp(ln, "ch   6  open  02:00:00:00:00:05  (hidden)  x1") == 0);
+        CHECK(rtl8821ce_scan_line(7, ln, sizeof ln) > 0 && strcmp(ln, "ch  36  WPA2  02:00:00:00:00:07  Fast5  x1") == 0);
+        CHECK(rtl8821ce_scan_line(9, ln, sizeof ln) > 0 && strncmp(ln, "frames per channel: 1:10 6:0 11:0 36:0", 38) == 0);
+        CHECK(rtl8821ce_scan_line(10, ln, sizeof ln) == -1);            /* past the end */
+        CHECK(rtl8821ce_scan_line(1, ln, 8) == 7 && strcmp(ln, "ch   6 ") == 0); /* a short buffer gets a cut line, always NUL-terminated */
+        CHECK(rtl8821ce_scan_line(0, ln, 1) == -1);
+        SC.state = 0;
+        CHECK(rtl8821ce_scan_line(0, ln, sizeof ln) == -1); /* no scan, no lines */
+        SC.state = 1;
         /* a frame whose element runs past its end, and one that is too short: nothing is read beyond the frame */
         SC.n = 0;
         static unsigned char SHORT[40] = {0x80};

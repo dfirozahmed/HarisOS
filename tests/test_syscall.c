@@ -748,6 +748,19 @@ int sock_recv(int id, void *buf, unsigned max)
     FS_IN_POS += n;
     return n; /* 0 once everything is read: the server closed */
 }
+/* the Wi-Fi scan result the kernel would hold: a summary and two networks */
+static int WIFI_SCAN = 1;
+int net_wifi_scan_line(unsigned index, char *buf, unsigned cap)
+{
+    static const char *const LINES[] = {"2 networks, 11/11 channels tuned", "ch   6  WPA2  02:00:00:00:00:01  HomeNet  x3", "ch 149  open  02:00:00:00:00:02  Cafe  x1", "frames per channel: 1:0 6:5"};
+    if (!WIFI_SCAN || index >= 4)
+        return -1;
+    unsigned n = (unsigned)strlen(LINES[index]);
+    if (n + 1 > cap)
+        return -1;
+    memcpy(buf, LINES[index], n + 1);
+    return (int)n;
+}
 int sock_resolve(const char *name, unsigned char ip[4])
 {
     if (strcmp(name, "example.com") == 0)
@@ -2332,6 +2345,27 @@ int main(void)
         static char longname[400];
         memset(longname, 'a', sizeof longname - 1);
         CHECK(call(SYS_RESOLVE, U(longname), 0, 0) == -1);                              /* does not fit the 256 byte buffer */
+    }
+
+    /* ================= SYS_WIFISCAN ================= */
+    reset();
+    {
+        char line[256];
+        memset(line, 'x', sizeof line);
+        CHECK(call(SYS_WIFISCAN, 0, U(line), sizeof line) == 32 && strcmp(line, "2 networks, 11/11 channels tuned") == 0);
+        CHECK(call(SYS_WIFISCAN, 2, U(line), sizeof line) == 41 && strcmp(line, "ch 149  open  02:00:00:00:00:02  Cafe  x1") == 0);
+        CHECK(OK_WRITE == 1 && OK_LEN == sizeof line);                              /* the buffer was checked for writing */
+        CHECK(call(SYS_WIFISCAN, 3, U(line), 100) == 27);                              /* the last line */
+        CHECK(call(SYS_WIFISCAN, 4, U(line), sizeof line) == -1);                      /* past the end */
+        CHECK(call(SYS_WIFISCAN, 1, U(line), 10) == -1);                               /* the line does not fit */
+        CHECK(call(SYS_WIFISCAN, 0, U(line), 1) == -1 && call(SYS_WIFISCAN, 0, U(line), 257) == -1);
+        CHECK(call(SYS_WIFISCAN, 0x10000, U(line), sizeof line) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_WIFISCAN, 0, U(line), sizeof line) == -1);                      /* bad pointer */
+        USER_OK = 1;
+        WIFI_SCAN = 0;
+        CHECK(call(SYS_WIFISCAN, 0, U(line), sizeof line) == -1);                      /* no scan result */
+        WIFI_SCAN = 1;
     }
 
     /* ================= sockets: the server calls ================= */
