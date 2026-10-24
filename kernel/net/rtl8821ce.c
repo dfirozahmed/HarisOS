@@ -2175,8 +2175,18 @@ static void scan_note(const volatile u8 *f, unsigned len)
     a->vht_cap = vht_cap32;
 }
 
-/* the whole scan: for each channel, switch, listen, collect. The receiver stays on all the time. */
-static void scan_run(void)
+/* tune to the i-th channel of the scan; 0 if the synthesizer did not take it (the channel is skipped) */
+static int scan_chan_begin(unsigned i)
+{
+    SC.cur_channel = SCAN_CHANNELS[i];
+    set_channel_20(SC.cur_channel, PH.ch_param, EF.swing2g, EF.swing5g);
+    if ((rf_read(0x18) & RF18_CHANNEL_MASK) != SC.cur_channel)
+        return 0;
+    SC.channels_ok++;
+    return 1;
+}
+
+static void scan_start_state(void)
 {
     SC.n = SC.dropped = SC.channels_ok = 0;
     for (unsigned i = 0; i < SCAN_NCH; i++)
@@ -2185,13 +2195,23 @@ static void scan_run(void)
     rx_restart();
     wr32(R_RCR, RCR_RX_DEFAULT);
     wr8(R_CR, MAC_TRX_ENABLE);
+}
+
+static void scan_end_state(void)
+{
+    SC.beacons = RX.beacons;
+    RX.state = RXS_OK;
+}
+
+/* the whole scan in one go: for each channel, switch, listen, collect. The receiver stays on all the time. (The Wi-Fi window uses the stepwise
+ * version of stage 11 instead, which does not hold up the rest of the system.) */
+static void scan_run(void)
+{
+    scan_start_state();
     for (unsigned i = 0; i < SCAN_NCH; i++)
     {
-        SC.cur_channel = SCAN_CHANNELS[i];
-        set_channel_20(SC.cur_channel, PH.ch_param, EF.swing2g, EF.swing5g);
-        if ((rf_read(0x18) & RF18_CHANNEL_MASK) != SC.cur_channel) /* the synthesizer did not take the channel */
+        if (!scan_chan_begin(i))
             continue;
-        SC.channels_ok++;
         unsigned before = RX.frames;
         for (unsigned ms = 0; ms < SCAN_DWELL_MS; ms++)
         {
@@ -2200,8 +2220,7 @@ static void scan_run(void)
         }
         SC.per_channel[i] = RX.frames - before;
     }
-    SC.beacons = RX.beacons;
-    RX.state = RXS_OK;
+    scan_end_state();
 }
 
 /* The result of the last scan as lines of text, for the SYS_WIFISCAN system call (net.h: net_wifi_scan_line). Line 0 is a summary, lines
@@ -4489,12 +4508,16 @@ static void reconnect_try(void)
     LINK.backoff = LINK.backoff * 2 > LINK_RETRY_MAX_MS ? LINK_RETRY_MAX_MS : LINK.backoff * 2;
 }
 
+static void scan_service(u64 now);
+static int scan_active(void);
+
 static void link_service(void)
 {
     if (!clock_ok())
         return;
     u64 now = now_ms();
-    if (LINK.up)
+    scan_service(now); /* (a scan in steps goes on from here) */
+    if (LINK.up && !scan_active()) /* (while the radio is away on other channels nothing is heard from the access point) */
     {
         u64 quiet = now - LINK.last_rx;
         if (CONN.dropped || quiet >= LINK_DEAD_MS)
@@ -4512,7 +4535,7 @@ static void link_service(void)
             LINK.last_probe = now;
         }
     }
-    if (LINK.up)
+    if (LINK.up && !scan_active()) /* (while the radio is away on other channels nothing is heard from the access point) */
     {
         if (EAPQ.pending)
             keys_service();
@@ -4521,7 +4544,7 @@ static void link_service(void)
         ba_expire(now);
         ba_tx_service(now);
     }
-    else if (LINK.want && now >= LINK.next_try)
+    else if (LINK.want && !scan_active() && now >= LINK.next_try)
         reconnect_try();
 }
 
@@ -4577,20 +4600,81 @@ int rtl8821ce_ap(unsigned index, NetWifiAp *out)
     return 0;
 }
 
-/* scan every channel again: the radio leaves the channel of the connection for a few seconds (nothing is sent meanwhile) and goes back */
-int rtl8821ce_wifi_rescan(void)
+/* A scan in steps, so that nothing stands still for the four seconds it takes: scan_start() tunes the first channel and returns; link_service()
+ * (called from every poll of the network stack) calls scan_service(), which after SCAN_DWELL_MS on a channel notes what was heard and tunes the next,
+ * and at the end puts the radio back on the channel of the connection. Meanwhile nothing is sent (LINK.scanning) and the connection is not
+ * judged dead for its silence. */
+static struct
 {
-    if (!LINK.adapter || !D.ready)
-        return NET_WIFI_E_NO_ADAPTER;
-    int was_up = LINK.up;
-    LINK.scanning = 1;
-    scan_run();
-    LINK.scanning = 0;
+    int active;
+    int was_up;
+    unsigned idx;    /* the channel being listened to */
+    unsigned before; /* RX.frames when it started */
+    u64 t0;
+} SCN;
+
+/* tune to the next channel that works from SCN.idx on, or finish */
+static void scan_next(u64 now)
+{
+    while (SCN.idx < SCAN_NCH && !scan_chan_begin(SCN.idx))
+        SCN.idx++;
+    if (SCN.idx < SCAN_NCH)
+    {
+        SCN.before = RX.frames;
+        SCN.t0 = now;
+        return;
+    }
+    scan_end_state();
     pick_target();
-    if (was_up && LINK.up)
+    if (SCN.was_up && LINK.up)
     {
         tune_chan(&CONN.cc);
-        LINK.last_rx = LINK.last_probe = now_ms(); /* (nothing could be heard from the access point meanwhile) */
+        LINK.last_rx = LINK.last_probe = now; /* (nothing could be heard from the access point meanwhile) */
+    }
+    LINK.scanning = 0;
+    SCN.active = 0;
+}
+
+static void scan_service(u64 now)
+{
+    if (!SCN.active || now - SCN.t0 < SCAN_DWELL_MS)
+        return;
+    SC.per_channel[SCN.idx] = RX.frames - SCN.before;
+    SCN.idx++;
+    scan_next(now);
+}
+
+static int scan_active(void) { return SCN.active; }
+
+int rtl8821ce_wifi_scan_start(void)
+{
+    if (!LINK.adapter || !D.ready || !clock_ok())
+        return NET_WIFI_E_NO_ADAPTER;
+    if (SCN.active)
+        return NET_WIFI_OK; /* already going on */
+    scan_start_state();
+    LINK.scanning = 1;
+    SCN.active = 1;
+    SCN.was_up = LINK.up;
+    SCN.idx = 0;
+    scan_next(now_ms());
+    return NET_WIFI_OK;
+}
+
+/* how far the scan is, in percent; -1 when none is going on */
+int rtl8821ce_wifi_scan_progress(void) { return SCN.active ? (int)(SCN.idx * 100 / SCAN_NCH) : -1; }
+
+/* the same, waiting for the end */
+int rtl8821ce_wifi_rescan(void)
+{
+    int r = rtl8821ce_wifi_scan_start();
+    if (r < 0)
+        return r;
+    while (SCN.active)
+    {
+        udelay(1000);
+        rx_poll();
+        scan_service(now_ms());
     }
     return (int)SC.n;
 }
@@ -4612,6 +4696,8 @@ int rtl8821ce_wifi_connect(const char *ssid, const char *psk)
 {
     if (!LINK.adapter || !D.ready || TXP.variant < 0 || !TXP.sent || !SC.state)
         return NET_WIFI_E_NO_ADAPTER;
+    if (SCN.active)
+        return NET_WIFI_E_BUSY; /* a scan is going on: wait for its end */
     unsigned sl = 0, pl = 0;
     while (ssid && ssid[sl])
         sl++;
@@ -4808,6 +4894,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     LINK.up = 0;
     LINK.adapter = 0;
     LINK.want = LINK.scanning = 0;
+    SCN.active = 0;
     RA.on = 0;
     CONN.state = 0;
     TARGET.found = 0;

@@ -78,12 +78,17 @@ typedef struct
 #define NET_WIFI_E_UNSUPPORTED -4  /* open, WEP, WPA1 or another security than WPA2-Personal with CCMP */
 #define NET_WIFI_E_NO_ANSWER -5    /* the access point did not answer (authentication / association) */
 #define NET_WIFI_E_HANDSHAKE -6    /* it answered, but the key exchange failed: most likely a wrong passphrase */
+#define NET_WIFI_E_BUSY -7         /* a scan is going on */
 
 void net_wifi_status(NetWifiStatus *st);
 int net_wifi_ap_count(void);                       /* networks in the last scan, -1 = no scan has been done */
 int net_wifi_ap(unsigned index, NetWifiAp *out);   /* 0 = ok, -1 = no such entry */
 /* Scan all channels again (about 4 seconds; the connection, if there is one, pauses meanwhile). Returns the number of networks, or a NET_WIFI_E_ code. */
 int net_wifi_rescan(void);
+/* The same in steps that do not hold anything up: _scan_start() returns at once, the scan goes on from every poll of the network stack (net_poll); _scan_progress() says
+ * how far it is in percent, -1 when none is going on (then net_wifi_ap_count() / net_wifi_ap() show the new list). */
+int net_wifi_scan_start(void);
+int net_wifi_scan_progress(void);
 /* Join a network from the scan list (several seconds, then DHCP). The network the card was connected to before stays the one to reconnect to when
  * this fails. Returns NET_WIFI_OK or a NET_WIFI_E_ code. */
 int net_wifi_connect(const char *ssid, const char *passphrase);

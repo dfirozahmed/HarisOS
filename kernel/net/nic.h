@@ -37,6 +37,8 @@ void rtl8821ce_wifi_status(NetWifiStatus *st);
 int rtl8821ce_ap_count(void);
 int rtl8821ce_ap(unsigned index, NetWifiAp *out);
 int rtl8821ce_wifi_rescan(void);
+int rtl8821ce_wifi_scan_start(void);
+int rtl8821ce_wifi_scan_progress(void);
 int rtl8821ce_wifi_connect(const char *ssid, const char *psk);
 
 /* Tiny text builder for status lines (no libc here): appends to buf[cap], always NUL-terminated. */

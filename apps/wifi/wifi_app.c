@@ -20,7 +20,8 @@
 #define BTN_RESCAN 0
 #define BTN_CONNECT 1
 
-enum { OP_NONE, OP_SCAN_WAIT, OP_SCAN, OP_JOIN_WAIT, OP_JOIN };
+enum { OP_NONE, OP_SCAN, OP_JOIN_WAIT, OP_JOIN }; /* OP_SCAN: a scan in steps goes on in the driver; the join waits for a redraw first, then holds the system up */
+static int SCAN_PCT = -1;
 
 static Window *WF_WIN;
 static NetWifiAp APS[APS_MAX]; /* one row per network name: the nearest access point of it */
@@ -237,8 +238,13 @@ static void wf_draw(Window *w, UiRect body)
     ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 2, l.head.w - 48 - 112, 26), line, UI_TEXT_TITLE, UI_ALIGN_LEFT, col);
     line[0] = 0;
     n = 0;
-    if (OP == OP_SCAN_WAIT || OP == OP_SCAN)
-        put_str(line, sizeof line, &n, "Scanning the channels...");
+    if (OP == OP_SCAN)
+    {
+        put_str(line, sizeof line, &n, "Scanning the channels... ");
+        put_dec(line, sizeof line, &n, (unsigned)(SCAN_PCT < 0 ? 0 : SCAN_PCT));
+        put_str(line, sizeof line, &n, "%");
+        ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 112, 8), SCAN_PCT < 0 ? 0 : SCAN_PCT);
+    }
     else if (OP == OP_JOIN_WAIT || OP == OP_JOIN)
     {
         put_str(line, sizeof line, &n, "Connecting to ");
@@ -327,11 +333,21 @@ static void poll_status(void)
     LAST_POLL = timer_ms();
 }
 
+static const char *join_error(int code);
+
 static void start_scan(Window *w)
 {
     if (OP != OP_NONE || !ST.present)
         return;
-    OP = OP_SCAN_WAIT;
+    int r = net_wifi_scan_start(); /* returns at once: the driver goes on from every poll of the network stack */
+    if (r < 0)
+    {
+        set_msg(2, join_error(r));
+        wm_invalidate();
+        return;
+    }
+    OP = OP_SCAN;
+    SCAN_PCT = 0;
     MSG[0] = 0;
     MSG_KIND = 0;
     update_buttons(w);
@@ -364,6 +380,8 @@ static const char *join_error(int code)
         return "The security of this network is not supported (WPA2-Personal with CCMP only).";
     case NET_WIFI_E_NO_ANSWER:
         return "The access point did not answer. Come closer or Rescan.";
+    case NET_WIFI_E_BUSY:
+        return "A scan is still going on.";
     case NET_WIFI_E_HANDSHAKE:
         return "Could not join: the key exchange failed - is the passphrase right?";
     default:
@@ -373,21 +391,27 @@ static const char *join_error(int code)
 
 static int wf_tick(Window *w)
 {
-    if (OP == OP_SCAN_WAIT || OP == OP_JOIN_WAIT)
+    if (OP == OP_JOIN_WAIT)
     {
-        OP++; /* the "...ing" screen was drawn: now do it */
+        OP++; /* the "Connecting..." screen was drawn: now do it */
         return 1;
     }
     if (OP == OP_SCAN)
     {
-        int r = net_wifi_rescan();
+        int p = net_wifi_scan_progress();
+        if (p >= 0)
+        {
+            if (p == SCAN_PCT)
+                return 0;
+            SCAN_PCT = p;
+            return 1; /* the bar moves */
+        }
         OP = OP_NONE;
+        SCAN_PCT = -1;
         poll_status();
         rebuild();
-        if (r < 0)
-            set_msg(2, join_error(r));
-        else
-            set_msg(1, r == 0 ? "No networks heard." : "Scan finished.");
+        int n = net_wifi_ap_count();
+        set_msg(1, n <= 0 ? "No networks heard." : "Scan finished.");
         update_buttons(w);
         return 1;
     }

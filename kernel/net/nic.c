@@ -121,6 +121,8 @@ void net_wifi_status(NetWifiStatus *st)
 int net_wifi_ap_count(void) { return wifi_active() ? rtl8821ce_ap_count() : -1; }
 int net_wifi_ap(unsigned index, NetWifiAp *out) { return wifi_active() ? rtl8821ce_ap(index, out) : -1; }
 int net_wifi_rescan(void) { return wifi_active() ? rtl8821ce_wifi_rescan() : NET_WIFI_E_NO_ADAPTER; }
+int net_wifi_scan_start(void) { return wifi_active() ? rtl8821ce_wifi_scan_start() : NET_WIFI_E_NO_ADAPTER; }
+int net_wifi_scan_progress(void) { return wifi_active() ? rtl8821ce_wifi_scan_progress() : -1; }
 
 int net_wifi_connect(const char *ssid, const char *passphrase)
 {

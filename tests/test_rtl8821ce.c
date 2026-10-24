@@ -3442,6 +3442,33 @@ int main(void)
             CHECK((reg32(0x2800 + 0x18 * 4) & 0xFF) == 149);
             CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
 
+            /* the same in steps: it returns at once, nothing can be sent while the radio is away, the connection is not judged dead for its silence, and
+             * it ends by itself with the radio back on the channel of the connection */
+            RXQ_N = RXQ_NEXT = 0;
+            rxq_add_frame(bc, bl);
+            rxq_add_frame(bc2, bl2);
+            {
+                int tx_before = TXCAP.count;
+                CHECK(rtl8821ce_wifi_scan_start() == NET_WIFI_OK && LINK.scanning && rtl8821ce_wifi_scan_progress() == 0);
+                CHECK(NIC_RTL8821CE.send(arp, 42) == -1);                          /* nothing is sent while the radio is on other channels */
+                CHECK(rtl8821ce_wifi_connect("TestNet", "secret-pass-phrase") == NET_WIFI_E_BUSY);
+                int steps = 0, last = 0;
+                while (rtl8821ce_wifi_scan_progress() >= 0 && steps < 40)
+                {
+                    int p = rtl8821ce_wifi_scan_progress();
+                    CHECK(p >= last);
+                    last = p;
+                    MS_JUMP += 310; /* one channel's dwell time (300 ms) */
+                    NIC_RTL8821CE.recv(got, sizeof got);
+                    rtl8821ce_host_udelay(1);
+                    steps++;
+                }
+                CHECK(steps >= 10 && steps <= 12);                                   /* eleven channels, one step each */
+                CHECK(rtl8821ce_wifi_scan_progress() == -1 && !LINK.scanning && LINK.up && rtl8821ce_ap_count() == 2);
+                CHECK(TXCAP.count == tx_before);                                      /* no probe request for the silence: the link was not judged dead */
+                CHECK((reg32(0x2800 + 0x18 * 4) & 0xFF) == 149);
+                CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+            }
             /* joining another passphrase for the same network fails: the old connection was left, the old passphrase is the one that is reconnected */
             int dr0 = 0;
             for (int i = 0; i < TXLOG_N; i++)
