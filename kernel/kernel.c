@@ -22,6 +22,7 @@
 #include "idle.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "net.h"
 #include "ntfs.h"
 #include "paging.h"
 #include "pci.h"
@@ -175,6 +176,9 @@ void kernel_main(const BootInfo *info)
     if (pmm_ok)
     {
         serial_init();
+
+        net_init(); /* Intel e1000 on PCI, if any; the self test needs the serial port and the timer */
+        net_self_test();
 
         /* SMEP / SMAP before anything touches user memory (the address space test below does). */
         protect_init();
