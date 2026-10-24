@@ -279,7 +279,7 @@ static void rx_deliver_one1(void)
 {
     if (RXQ_NEXT >= RXQ_N || !D.ready || !(REGS[0x100] & 8) || reg32(0x608) != 0xF410400Eu) /* only once the driver has set the receive filter for listening */
         return;
-    if ((RX_HW + 1) % 32 == (unsigned)((REGS[0x3B4] | REGS[0x3B5] << 8) & 0xFFF)) /* the ring is full: the chip waits for the host */
+    if ((RX_HW + 1) % RX_COUNT == (unsigned)((REGS[0x3B4] | REGS[0x3B5] << 8) & 0xFFF)) /* the ring is full: the chip waits for the host */
         return;
     unsigned char *buf = D.mem + Q_COUNT * PAGE + PAGE + RX_HW * RX_BUF_SLOT; /* the transmit rings, the receive ring, then the buffers */
     RxFrame *f = &RXQ[RXQ_NEXT++];
@@ -291,14 +291,14 @@ static void rx_deliver_one1(void)
     buf[24 + 32] = f->fc0;
     if (f->data)
         memcpy(buf + 24 + 32, f->data, f->len);
-    RX_HW = (RX_HW + 1) % 32;
+    RX_HW = (RX_HW + 1) % RX_COUNT;
     REGS[0x3B6] = (unsigned char)(RX_HW & 0xFF); /* bits 27..16 of 0x3B4 */
     REGS[0x3B7] = (unsigned char)((RX_HW >> 8) & 0x0F);
 }
 
 /* ---- the pretend chip's transmitter: what was kicked into the management ring is copied away, then the chip reports it has fetched it ---- */
 typedef struct { unsigned len; unsigned char b[200]; } TxFrame;
-static TxFrame TXLOG[32];
+static TxFrame TXLOG[128];
 static int TXLOG_N;
 typedef struct
 {
@@ -523,7 +523,7 @@ static void tx_kick(unsigned next)
 {
     unsigned entry = (next + 127) % 128;
     TXCAP.count++;
-    if (TXLOG_N < 32)
+    if (TXLOG_N < 128)
     {
         unsigned fl = (unsigned)D.mem[Q_MGMT * PAGE + ((next + 127) % 128) * 16 + 8] | (unsigned)D.mem[Q_MGMT * PAGE + ((next + 127) % 128) * 16 + 9] << 8;
         TXLOG[TXLOG_N].len = fl;
@@ -812,6 +812,64 @@ static int count_writes(u32 off, unsigned size)
 
 /* a beacon of the pretend access point "TestNet" on `chan`, WPA2-PSK/CCMP, with the capabilities of stage 8: legacy rates of the band, HT (MCS 0..7, short GI at 20 MHz) and VHT
  * (receive map `vht_map` for the first stream) when asked */
+/* a QoS data frame of the pretend access point to the station "MAC6": traffic class `tid`, sequence number `seq`, packet number `pn` (below 65536),
+ * an ARP-sized payload of 28 bytes all equal to `mark`; as the chip hands it over after decrypting (the MIC and the FCS after the payload) */
+static unsigned ap_qos_data(unsigned char *b, unsigned tid, unsigned seq, unsigned pn, unsigned char mark)
+{
+    static const unsigned char MAC6[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+    static const unsigned char GW[6] = {0x02, 0x00, 0x00, 0x00, 0xB0, 0x01};
+    memset(b, 0, 120);
+    b[0] = 0x88;
+    b[1] = 0x42;
+    memcpy(b + 4, MAC6, 6);
+    memcpy(b + 10, AP_BSSID, 6);
+    memcpy(b + 16, GW, 6);
+    b[22] = (unsigned char)(seq << 4);
+    b[23] = (unsigned char)(seq >> 4);
+    b[24] = (unsigned char)tid;
+    b[26] = (unsigned char)pn;
+    b[27] = (unsigned char)(pn >> 8);
+    b[29] = 0x20;
+    memcpy(b + 34, "\xAA\xAA\x03\x00\x00\x00\x08\x06", 8);
+    memset(b + 42, mark, 28);
+    return 26 + 8 + 8 + 28 + 12;
+}
+
+/* an action frame of the access point to us, body of `blen` bytes */
+static unsigned ap_action(unsigned char *b, const unsigned char *body, unsigned blen)
+{
+    static const unsigned char MAC6[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+    memset(b, 0, 80);
+    b[0] = 0xD0;
+    memcpy(b + 4, MAC6, 6);
+    memcpy(b + 10, AP_BSSID, 6);
+    memcpy(b + 16, AP_BSSID, 6);
+    memcpy(b + 24, body, blen);
+    return 24 + blen + 4;
+}
+
+/* the action frames the station has sent (frame control 0xD0), and the last of them */
+static int count_actions(void)
+{
+    int n = 0;
+    for (int i = 0; i < TXLOG_N; i++)
+        if (TXLOG[i].b[0] == 0xD0)
+            n++;
+    return n;
+}
+
+static const unsigned char *last_action(void)
+{
+    for (int i = TXLOG_N - 1; i >= 0; i--)
+        if (TXLOG[i].b[0] == 0xD0)
+            return TXLOG[i].b;
+    return (const unsigned char *)"";
+}
+
+static int X_HTAMPDU; /* the A-MPDU parameters byte of the HT capabilities of the beacon */
+
+static int X_HTOP = -1, X_VHTOP_W = -1, X_VHTOP_SEG; /* extra elements of the beacon: HT operation byte (-1 = none), VHT operation width (-1 = none) and centre */
+static unsigned X_VHTCAP;
 static unsigned build_beacon_caps(unsigned char *b, unsigned chan, int ht, int vht, unsigned vht_map)
 {
     static const unsigned char RSN_OK2[20] = {1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0};
@@ -860,6 +918,7 @@ static unsigned build_beacon_caps(unsigned char *b, unsigned chan, int ht, int v
         b[p++] = 45;
         b[p++] = 26;
         b[p + 0] = 0x2C; /* short GI at 20 MHz */
+        b[p + 2] = (unsigned char)X_HTAMPDU;
         b[p + 3] = 0xFF; /* MCS 0..7 */
         p += 26;
     }
@@ -869,7 +928,24 @@ static unsigned build_beacon_caps(unsigned char *b, unsigned chan, int ht, int v
         b[p++] = 12;
         b[p + 4] = (unsigned char)vht_map;
         b[p + 5] = (unsigned char)(vht_map >> 8);
+        b[p + 0] = (unsigned char)X_VHTCAP; /* the capability bits: 0x20 = short GI at 80 MHz */
         p += 12;
+    }
+    if (X_HTOP >= 0) /* HT operation: the primary channel, secondary channel offset (bits 0-1) and "40 MHz in use" (bit 2) */
+    {
+        b[p++] = 61;
+        b[p++] = 22;
+        b[p] = (unsigned char)chan;
+        b[p + 1] = (unsigned char)X_HTOP;
+        p += 22;
+    }
+    if (X_VHTOP_W >= 0) /* VHT operation: width (1 = 80 MHz) and the centre channel of the 80 MHz channel */
+    {
+        b[p++] = 192;
+        b[p++] = 5;
+        b[p] = (unsigned char)X_VHTOP_W;
+        b[p + 1] = (unsigned char)X_VHTOP_SEG;
+        p += 5;
     }
     p += 4; /* the FCS */
     return p;
@@ -903,7 +979,7 @@ int main(void)
 
     /* ---- the tables: sizes (the contents are checked against Linux' own tables by compiling them) ---- */
     CHECK(NPOWER_ON == 18 && NPOWER_OFF == 12);
-    CHECK(DMA_PAGES == 107);
+    CHECK(DMA_PAGES == 8 + 1 + 128 + 2); /* eight rings, the receive ring, 128 receive buffers of one page, the staging page and one more */
 
     /* ---- MAC off (CR = 0xEA), no firmware file: the power-on sequence, write by write ---- */
     file(0, 0, 0);
@@ -1391,6 +1467,49 @@ int main(void)
             fails++;
         }
     }
+    /* ---- stage 9: 40 and 80 MHz channels. The register writes of rtw8821c_set_channel (bb, mac, rf, rx filter) for each width against Linux' own
+     * functions (copied unchanged into a host program, after the same phy_set_param, no coex set-up before). 20 MHz is in the list too: the
+     * generalised function must still write what Linux writes there. ---- */
+    {
+        static const struct
+        {
+            unsigned channel, bw, sc;
+            long events;
+            unsigned long long hash;
+        } BW_LINUX[] = {
+            {6, 0, 0, 37, 0x85e3c5e0344f82adULL},   {149, 0, 0, 30, 0xd5665caffaa4962bULL}, {151, 1, 2, 31, 0xff75be0299bb3f69ULL},
+            {38, 1, 1, 31, 0xba86b2b7e005bb7cULL},  {3, 1, 2, 38, 0xafc6e3e5709e75b8ULL},   {11, 1, 1, 38, 0xc88a165e41b5a06fULL},
+            {155, 2, 4, 30, 0x322dd644ca6589acULL}, {155, 2, 3, 30, 0x3e121583d87c9e53ULL},  {42, 2, 1, 30, 0x58464c6ca3f7d4e3ULL},
+            {42, 2, 2, 30, 0x68008cd0def901c8ULL},  {138, 2, 4, 30, 0x1550d072e05c95a7ULL}, {171, 2, 1, 30, 0xf2b261b7e655cae1ULL},
+        };
+        for (unsigned k = 0; k < sizeof BW_LINUX / sizeof BW_LINUX[0]; k++)
+        {
+            chip_for_download();
+            memset(REGS, 0, sizeof REGS);
+            memset(LTEM, 0, sizeof LTEM);
+            REGS[0x1703] |= 0x20;
+            EF.map_ok = 1;
+            EF.rfe = 4;
+            EF.pkg = 0;
+            EF.xtal = 0x2A;
+            EF.swing2g = 0xFF;
+            EF.swing5g = 0xFF;
+            CX.rfe_btg = 0; /* (no coex set-up here: the Linux program has none either) */
+            phy_init(1);
+            CAP_N = 0;
+            CAP_H = 1469598103934665603ULL;
+            CAPTURE = 1;
+            set_channel_bw(BW_LINUX[k].channel, BW_LINUX[k].bw, BW_LINUX[k].sc, PH.ch_param, EF.swing2g, EF.swing5g);
+            CAPTURE = 0;
+            if (CAP_N != BW_LINUX[k].events || CAP_H != BW_LINUX[k].hash)
+            {
+                printf("FAIL set_channel centre %u bw %u sc %u: %ld events hash %016llx, Linux %ld events hash %016llx\n", BW_LINUX[k].channel, BW_LINUX[k].bw,
+                       BW_LINUX[k].sc, CAP_N, CAP_H, BW_LINUX[k].events, BW_LINUX[k].hash);
+                fails++;
+            }
+        }
+    }
+
     /* the full flow tunes channel 6 and checks it by reading RF register 0x18 back */
     build_image(1);
     chip_for_download();
@@ -1453,7 +1572,7 @@ int main(void)
     for (int i = 0; i < 100; i++)
         rxq_add(i % 2 ? 0x80 : 0x08, 60 + i, 0, 0);
     NIC_RTL8821CE.probe(&WIFI);
-    CHECK(RX.frames == 100 && RX.beacons == 50 && RX.data == 50 && RX.bad == 0 && RX.rp == 100 % 32);
+    CHECK(RX.frames == 100 && RX.beacons == 50 && RX.data == 50 && RX.bad == 0 && RX.rp == 100 % RX_COUNT);
     RX_BURST = 1;
     /* nonsense in the index register is ignored */
     RX.rp = 0;
@@ -1768,16 +1887,81 @@ int main(void)
         chip_for_download();
         NLOG = 0;
         tx_power_apply(tp, ch);
-        int n_expected = ch <= 14 ? 3 : 2;
+        int n_expected = ch <= 14 ? 8 : 7; /* CCK (2.4 GHz), OFDM, HT MCS 0-7 and VHT MCS 0-9 of the first stream: the CCK / OFDM words are the ones Linux gave above */
         CHECK(NLOG == n_expected);
         for (int i = 0; i < NLOG; i++)
         {
+            if (LOG[i].off != 0x1D00 && LOG[i].off != 0x1D04 && LOG[i].off != 0x1D08)
+                continue;
             unsigned want = LOG[i].off == 0x1D00 ? PWR_LINUX[k].w0 : LOG[i].off == 0x1D04 ? PWR_LINUX[k].w4 : PWR_LINUX[k].w8;
-            if (LOG[i].size != 4 || (LOG[i].off != 0x1D00 && LOG[i].off != 0x1D04 && LOG[i].off != 0x1D08) || LOG[i].value != want)
+            if (LOG[i].size != 4 || LOG[i].value != want)
             {
                 printf("FAIL tx power register seed %u channel %u: 0x%X = 0x%08X, Linux 0x%08X\n", PWR_LINUX[k].seed, ch, LOG[i].off, LOG[i].value, want);
                 fails++;
             }
+        }
+    }
+
+    /* ---- stage 9: the power of the HT and VHT rates, and of 40 and 80 MHz channels, against the same Linux functions (phy.c, the real 8821c power
+     * and limit tables with the world-wide limits). Every register word of the whole set, in order. seed, centre channel, bandwidth, position of
+     * the primary channel. ---- */
+    {
+        static const struct
+        {
+            unsigned seed, center, bw, sc;
+            int n;
+            struct { unsigned off, val; } w[8];
+        } PWR_BW[] = {
+            {1, 6, 0, 0, 8, {{0x1D00, 0x00000000}, {0x1D04, 0x0E0E0E0E}, {0x1D08, 0x0C0E0E0E}, {0x1D0C, 0x0D0D0D0D}, {0x1D10, 0x090B0D0D}, {0x1D2C, 0x11131313}, {0x1D30, 0x090B0D0F}, {0x1D34, 0x00000507}, }},
+            {1, 3, 1, 2, 8, {{0x1D00, 0x1C1C1C1C}, {0x1D04, 0x2A2A2A2A}, {0x1D08, 0x282A2A2A}, {0x1D0C, 0x23232323}, {0x1D10, 0x23232323}, {0x1D2C, 0x2B2D2D2D}, {0x1D30, 0x23252729}, {0x1D34, 0x00001F21}, }},
+            {7, 11, 1, 1, 8, {{0x1D00, 0x23232323}, {0x1D04, 0x23232323}, {0x1D08, 0x23232323}, {0x1D0C, 0x1C1C1C1C}, {0x1D10, 0x1C1C1C1C}, {0x1D2C, 0x3E3F3F3F}, {0x1D30, 0x36383A3C}, {0x1D34, 0x00003234}, }},
+            {3, 1, 0, 0, 8, {{0x1D00, 0x05050505}, {0x1D04, 0x09090909}, {0x1D08, 0x07090909}, {0x1D0C, 0x0E0E0E0E}, {0x1D10, 0x0E0E0E0E}, {0x1D2C, 0x16181818}, {0x1D30, 0x0E101214}, {0x1D34, 0x00000A0C}, }},
+            {7, 149, 0, 0, 7, {{0x1D04, 0x1C1C1C1C}, {0x1D08, 0x1C1C1C1C}, {0x1D0C, 0x1B1B1B1B}, {0x1D10, 0x1B1B1B1B}, {0x1D2C, 0x1B1B1B1B}, {0x1D30, 0x1B1B1B1B}, {0x1D34, 0x00001B1B}, }},
+            {1, 36, 0, 0, 7, {{0x1D04, 0x10101010}, {0x1D08, 0x0F101010}, {0x1D0C, 0x10101010}, {0x1D10, 0x0D0F1010}, {0x1D2C, 0x10101010}, {0x1D30, 0x0D0F1010}, {0x1D34, 0x0000090B}, }},
+            {3, 100, 0, 0, 7, {{0x1D04, 0x0E0E0E0E}, {0x1D08, 0x0D0E0E0E}, {0x1D0C, 0x18181818}, {0x1D10, 0x15171818}, {0x1D2C, 0x18181818}, {0x1D30, 0x15171818}, {0x1D34, 0x00001113}, }},
+            {7, 151, 1, 2, 7, {{0x1D04, 0x1C1C1C1C}, {0x1D08, 0x1C1C1C1C}, {0x1D0C, 0x19191919}, {0x1D10, 0x19191919}, {0x1D2C, 0x19191919}, {0x1D30, 0x19191919}, {0x1D34, 0x00001919}, }},
+            {1, 38, 1, 1, 7, {{0x1D04, 0x10101010}, {0x1D08, 0x0F101010}, {0x1D0C, 0x0A0A0A0A}, {0x1D10, 0x0A0A0A0A}, {0x1D2C, 0x0A0A0A0A}, {0x1D30, 0x0A0A0A0A}, {0x1D34, 0x0000080A}, }},
+            {3, 102, 1, 2, 7, {{0x1D04, 0x0E0E0E0E}, {0x1D08, 0x0D0E0E0E}, {0x1D0C, 0x11111111}, {0x1D10, 0x11111111}, {0x1D2C, 0x11111111}, {0x1D30, 0x11111111}, {0x1D34, 0x00001011}, }},
+            {5, 134, 1, 1, 7, {{0x1D04, 0x1C1C1C1C}, {0x1D08, 0x1B1C1C1C}, {0x1D0C, 0x1F1F1F1F}, {0x1D10, 0x1C1E1F1F}, {0x1D2C, 0x1F1F1F1F}, {0x1D30, 0x1C1E1F1F}, {0x1D34, 0x0000181A}, }},
+            {7, 159, 1, 1, 7, {{0x1D04, 0x3F3F3F3F}, {0x1D08, 0x3F3F3F3F}, {0x1D0C, 0x3F3F3F3F}, {0x1D10, 0x3F3F3F3F}, {0x1D2C, 0x3F3F3F3F}, {0x1D30, 0x3F3F3F3F}, {0x1D34, 0x00003F3F}, }},
+            {7, 155, 2, 4, 7, {{0x1D04, 0x1C1C1C1C}, {0x1D08, 0x1C1C1C1C}, {0x1D0C, 0x09090909}, {0x1D10, 0x09090909}, {0x1D2C, 0x09090909}, {0x1D30, 0x09090909}, {0x1D34, 0x00000909}, }},
+            {7, 155, 2, 3, 7, {{0x1D04, 0x1C1C1C1C}, {0x1D08, 0x1C1C1C1C}, {0x1D0C, 0x09090909}, {0x1D10, 0x09090909}, {0x1D2C, 0x09090909}, {0x1D30, 0x09090909}, {0x1D34, 0x00000909}, }},
+            {1, 42, 2, 1, 7, {{0x1D04, 0x10101010}, {0x1D08, 0x0F101010}, {0x1D0C, 0x1E1E1E1E}, {0x1D10, 0x1B1D1E1E}, {0x1D2C, 0x16161616}, {0x1D30, 0x16161616}, {0x1D34, 0x00001616}, }},
+            {3, 106, 2, 2, 7, {{0x1D04, 0x0E0E0E0E}, {0x1D08, 0x0D0E0E0E}, {0x1D0C, 0x20202020}, {0x1D10, 0x20202020}, {0x1D2C, 0x1D1D1D1D}, {0x1D30, 0x1D1D1D1D}, {0x1D34, 0x00001D1D}, }},
+            {5, 138, 2, 4, 7, {{0x1D04, 0x1C1C1C1C}, {0x1D08, 0x1B1C1C1C}, {0x1D0C, 0x2F2F2F2F}, {0x1D10, 0x2C2E2F2F}, {0x1D2C, 0x2F2F2F2F}, {0x1D30, 0x2C2E2F2F}, {0x1D34, 0x0000282A}, }},
+            {7, 171, 2, 1, 7, {{0x1D04, 0x31313131}, {0x1D08, 0x292B2D2F}, {0x1D0C, 0x1C1E1E1E}, {0x1D10, 0x1416181A}, {0x1D2C, 0x1C1E1E1E}, {0x1D30, 0x1416181A}, {0x1D34, 0x00001012}, }},
+            {2, 58, 2, 3, 7, {{0x1D04, 0x17171717}, {0x1D08, 0x16171717}, {0x1D0C, 0x1E1E1E1E}, {0x1D10, 0x1E1E1E1E}, {0x1D2C, 0x1D1D1D1D}, {0x1D30, 0x1D1D1D1D}, {0x1D34, 0x00001B1D}, }},
+            {4, 122, 2, 2, 7, {{0x1D04, 0x15151515}, {0x1D08, 0x14151515}, {0x1D0C, 0x2A2A2A2A}, {0x1D10, 0x27292A2A}, {0x1D2C, 0x29292929}, {0x1D30, 0x27292929}, {0x1D34, 0x00002325}, }},
+            {6, 106, 2, 4, 7, {{0x1D04, 0x20202020}, {0x1D08, 0x1F202020}, {0x1D0C, 0x2A2A2A2A}, {0x1D10, 0x2A2A2A2A}, {0x1D2C, 0x27272727}, {0x1D30, 0x27272727}, {0x1D34, 0x00002727}, }},
+            {9, 42, 2, 4, 7, {{0x1D04, 0x20202020}, {0x1D08, 0x1F202020}, {0x1D0C, 0x12121212}, {0x1D10, 0x12121212}, {0x1D2C, 0x0F0F0F0F}, {0x1D30, 0x0F0F0F0F}, {0x1D34, 0x00000F0F}, }},
+            {12, 46, 1, 2, 7, {{0x1D04, 0x0F0F0F0F}, {0x1D08, 0x0E0F0F0F}, {0x1D0C, 0x0D0D0D0D}, {0x1D10, 0x0A0C0D0D}, {0x1D2C, 0x0D0D0D0D}, {0x1D30, 0x0A0C0D0D}, {0x1D34, 0x00000608}, }},
+        };
+        for (unsigned k = 0; k < sizeof PWR_BW / sizeof PWR_BW[0]; k++)
+        {
+            unsigned char tp[42];
+            for (unsigned i = 0; i < 42; i++)
+                tp[i] = (unsigned char)((PWR_BW[k].seed * 131u + i * 29u + (i >> 1) * 7u) & 0x3F);
+            Chan c = {PWR_BW[k].center, PWR_BW[k].center, PWR_BW[k].bw, PWR_BW[k].sc};
+            if (c.bw == 1)
+                c.prim = c.sc == 1 ? c.center + 2 : c.center - 2;
+            else if (c.bw == 2)
+                c.prim = c.sc == 1 ? c.center + 2 : c.sc == 2 ? c.center - 2 : c.sc == 3 ? c.center + 6 : c.center - 6;
+            chip_for_download();
+            NLOG = 0;
+            tx_power_apply_c(tp, &c);
+            if (NLOG != PWR_BW[k].n)
+            {
+                printf("FAIL tx power seed %u centre %u bw %u: %d register writes, Linux %d\n", PWR_BW[k].seed, PWR_BW[k].center, PWR_BW[k].bw, NLOG, PWR_BW[k].n);
+                fails++;
+                continue;
+            }
+            for (int i = 0; i < NLOG; i++)
+                if (LOG[i].size != 4 || LOG[i].off != PWR_BW[k].w[i].off || LOG[i].value != PWR_BW[k].w[i].val)
+                {
+                    printf("FAIL tx power seed %u centre %u bw %u sc %u: 0x%X = 0x%08X, Linux 0x%X = 0x%08X\n", PWR_BW[k].seed, PWR_BW[k].center, PWR_BW[k].bw,
+                           PWR_BW[k].sc, LOG[i].off, LOG[i].value, PWR_BW[k].w[i].off, PWR_BW[k].w[i].val);
+                    fails++;
+                }
         }
     }
 
@@ -2359,17 +2543,17 @@ int main(void)
             rtl8821ce_host_udelay(1);
         CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 42 && NIC_RTL8821CE.recv(got, sizeof got) == 42 && NIC_RTL8821CE.recv(got, sizeof got) == 0);
         /* 5. the queue of received frames is bounded: what the stack does not take is dropped, nothing is overwritten */
-        for (int k = 0; k < 12; k++)
+        for (int k = 0; k < 70; k++)
         {
             AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 10 + k, 1);
             rxq_add_frame_w0(rb, rxlen, 4u << 20);
         }
-        for (int i = 0; i < 30; i++)
+        for (int i = 0; i < 100; i++)
             rtl8821ce_host_udelay(1);
         int taken = 0;
         while (NIC_RTL8821CE.recv(got, sizeof got) > 0)
             taken++;
-        CHECK(taken == 7 && LINK.rx_dropped >= 5); /* the 8 slots hold 7 frames */
+        CHECK(taken == RXE_SLOTS - 1 && LINK.rx_dropped >= 7); /* the 64 slots hold 63 frames */
         /* 5b. the group key renewal: answered (encrypted, signed), installed in the chip, never shown to the network stack */
 #define PUMP(n)                                    \
     do                                             \
@@ -2739,6 +2923,428 @@ int main(void)
         }
         CHECK(H2CLOG_N == 3 && H2CLOG[1].w0 == 0x40A30040u && H2CLOG[1].w1 == 0x000FF015u);
 
+        /* ---- stage 9: wide channels. The access point says which channel it uses (HT operation: 40 MHz and the side of the other half; VHT operation: 80
+         * MHz and the centre channel); the radio is tuned to it, the association request offers it, and the firmware is told the width. The registers
+         * are looked at in the pretend chip afterwards: where the primary channel sits (0x483), the width of the MAC (0x668 bits 7 / 8), and the RF
+         * channel register (the centre channel, and the width bits 11 / 10). ---- */
+        /* 80 MHz: primary 149, the 80 MHz channel is centred on 155 (149 is its lowest 20 MHz channel), the other half of the 40 MHz pair is above */
+        X_HTOP = 0x05;
+        X_VHTOP_W = 1;
+        X_VHTOP_SEG = 155;
+        X_VHTCAP = 0x20;
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && RA.on && RA.vht && RA.bw == 2);
+        CHECK(CONN.channel == 149 && CONN.cc.prim == 149 && CONN.cc.center == 155 && CONN.cc.bw == 2 && CONN.cc.sc == 4);
+        CHECK(REGS[0x483] == 0xA4);                                  /* primary = lowest of 80 MHz: 4; its 40 MHz half is the lower one: 10 */
+        CHECK((reg32(0x668) & 0x180) == 0x100);                      /* BIT_RFMOD_80M */
+        CHECK((reg32(0x2800 + 0x18 * 4) & 0xFF) == 155 && (reg32(0x2800 + 0x18 * 4) & 0xC00) == 0x400);
+        {
+            FIND_ASSOC(as);
+            CHECK(as != 0);
+            if (as)
+            {
+                const unsigned char *ie = find_ie(as->b, as->len, 28, 45);
+                CHECK(ie && ie[2] == 0x6E && ie[3] == 0 && ie[15] == 150);                       /* 40 MHz, short GI at 20 and 40 */
+                ie = find_ie(as->b, as->len, 28, 191);
+                CHECK(ie && ie[2] == 0x20 && ie[6] == 0xFE && ie[7] == 0xFF && ie[8] == 0xB1 && ie[9] == 0x01); /* short GI at 80, MCS 0-9, 433 Mb/s */
+                CHECK(find_ie(as->b, as->len, 28, 199) == 0);                                   /* 80 MHz is the default: no operating mode element */
+            }
+        }
+        CHECK(H2CLOG_N == 3 && H2CLOG[1].w0 == 0x52AA0040u && H2CLOG[1].w1 == 0x003FF010u); /* rate table 10, short GI (the AP's VHT bit), bandwidth 80 */
+        CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+        memcpy(w, BECAP.desc, 40);
+        CHECK(((w[5] >> 5) & 3) == 2);
+        {
+            char sl[96];
+            NIC_RTL8821CE.status(sl, sizeof sl);
+            CHECK(strcmp(sl, "RTL8821CE Wi-Fi: TestNet ch149, up, vht80, tx 1 rx 0") == 0);
+        }
+
+        /* 40 MHz by configuration ("bw=40"): the VHT operation element is not used; HT operation: the other half above, so the primary channel is the lower half */
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\nbw=40\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && CFG.bw == 1 && CONN.cc.bw == 1 && CONN.cc.center == 151 && CONN.cc.sc == 2);
+        CHECK(REGS[0x483] == 0x02 && (reg32(0x668) & 0x180) == 0x080 && (reg32(0x2800 + 0x18 * 4) & 0xFF) == 151 && (reg32(0x2800 + 0x18 * 4) & 0xC00) == 0x800);
+        {
+            FIND_ASSOC(as);
+            const unsigned char *ie = as ? find_ie(as->b, as->len, 28, 199) : 0;
+            CHECK(ie && ie[1] == 1 && ie[2] == 1); /* "I listen on 40 MHz" for a VHT station that does not take 80 */
+            ie = as ? find_ie(as->b, as->len, 28, 191) : 0;
+            CHECK(ie && ie[2] == 0 && ie[8] == 200);
+        }
+        CHECK(H2CLOG[1].w0 == 0x512A0040u); /* rate table 10, no short GI (the AP's HT bit for 40 MHz is clear), bandwidth 40 */
+
+        /* "bw=20": 20 MHz as before, whatever the access point says */
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\nbw=20\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && CFG.bw == 0 && CONN.cc.bw == 0 && CONN.cc.center == 149 && REGS[0x483] == 0 && (reg32(0x668) & 0x180) == 0);
+        {
+            FIND_ASSOC(as);
+            const unsigned char *ie = as ? find_ie(as->b, as->len, 28, 45) : 0;
+            CHECK(ie && ie[2] == 0x2C);
+        }
+
+        /* an access point that does not use 40 MHz (the width bit of its HT operation is clear): 20 MHz, even with "bw=80" */
+        X_HTOP = 0x01;
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && CONN.cc.bw == 0);
+        /* an 80 MHz channel whose centre does not fit the primary channel (8 channel numbers away): the 40 MHz part is used */
+        X_HTOP = 0x05;
+        X_VHTOP_SEG = 159;
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && CONN.cc.bw == 1 && CONN.cc.center == 151);
+        /* 80 MHz, primary the third channel (157, the other 40 MHz half below: secondary offset 3), centre 155: 157 is above the centre by 2 channel numbers */
+        X_HTOP = 0x07;
+        X_VHTOP_SEG = 155;
+        bl = build_beacon_caps(bc, 157, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && CONN.cc.bw == 2 && CONN.cc.center == 155 && CONN.cc.sc == 1 && REGS[0x483] == 0x91);
+        /* 2.4 GHz, 40 MHz: primary 6, the other half above: the centre is 8, the primary channel is the lower half; no VHT there */
+        X_HTOP = 0x05;
+        X_VHTOP_W = -1;
+        bl = build_beacon_caps(bc, 6, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && RA.on && !RA.vht && CONN.cc.bw == 1 && CONN.cc.center == 8 && CONN.cc.sc == 2);
+        CHECK(REGS[0x483] == 0x02 && (reg32(0x2800 + 0x18 * 4) & 0xFF) == 8);
+        CHECK(H2CLOG_N == 3 && H2CLOG[1].w0 == 0x41210040u && H2CLOG[1].w1 == 0x000FF015u); /* rate table 1 (CCK, OFDM, HT at 40 MHz), bandwidth 40 */
+        X_HTOP = -1;
+        X_VHTOP_W = -1;
+        X_VHTCAP = 0;
+
+        /* ---- stage 10: aggregation. The access point asks for an agreement for the traffic it sends (ADDBA request); we answer; its frames then come
+         * in any order and are put in order before the network stack sees them. We ask for one for what we send; the data frames then say "may be
+         * aggregated". ---- */
+        {
+            static const unsigned char MAC6X[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+            unsigned char fr[120];
+            unsigned fl;
+            unsigned char order[64];
+            int norder;
+#define INJ(len, w0)                      \
+    do                                    \
+    {                                     \
+        rxq_add_frame_w0(fr, len, w0);    \
+        for (int _i = 0; _i < 8; _i++)    \
+            rtl8821ce_host_udelay(1);     \
+    } while (0)
+#define ALIVE() /* a beacon: the access point is there (nothing is heard from it otherwise, and the card would ask, and in the end give up) */ \
+    do                                    \
+    {                                     \
+        rxq_add_frame(bc, bl);            \
+        for (int _i = 0; _i < 8; _i++)    \
+            rtl8821ce_host_udelay(1);     \
+    } while (0)
+#define DRAIN()                                                          \
+    do                                                                   \
+    {                                                                    \
+        norder = 0;                                                      \
+        int _n;                                                          \
+        while ((_n = NIC_RTL8821CE.recv(got, sizeof got)) > 0 && norder < 64) \
+            order[norder++] = got[14];                                   \
+    } while (0)
+            X_HTOP = -1;
+            X_VHTOP_W = -1;
+            X_VHTCAP = 0;
+            X_HTAMPDU = 0x17; /* the longest aggregate 64 KB (exponent 3), the least spacing 16 us / 8: 5 */
+            bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+            CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+            CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && RA.on && !BA.rx_on && BA.tx_state == 0);
+            {
+                /* the request: starting sequence number 100, window 64, traffic class 0, immediate block acknowledgement */
+                static const unsigned char REQ[9] = {3, 0, 7, 0x02, 0x10, 0, 0, 0x40, 0x06};
+                fl = ap_action(fr, REQ, 9);
+                int t0 = count_actions();
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.rx_on && BA.rx_head == 100 && BA.rx_sessions == 1);
+                CHECK(count_actions() == t0 + 1);
+                const unsigned char *r = last_action();
+                CHECK(r[0] == 0xD0 && memcmp(r + 4, AP_BSSID, 6) == 0 && memcmp(r + 10, MAC6X, 6) == 0);
+                static const unsigned char RSP[9] = {3, 1, 7, 0, 0, 0x02, 0x08, 0, 0}; /* yes; immediate; window 32 (our buffer) */
+                CHECK(memcmp(r + 24, RSP, 9) == 0);
+            }
+            /* in order, and with a gap: 100 at once; 102 waits; 101 releases 101 and 102 */
+            fl = ap_qos_data(fr, 0, 100, 1, 0x10);
+            INJ(fl, 4u << 20);
+            fl = ap_qos_data(fr, 0, 102, 3, 0x12);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x10 && BA.buffered == 1 && BA.rx_head == 101);
+            fl = ap_qos_data(fr, 0, 101, 2, 0x11);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 2 && order[0] == 0x11 && order[1] == 0x12 && BA.buffered == 0 && BA.rx_head == 103);
+            /* a copy of a frame that went out already: too late, dropped */
+            unsigned late0 = BA.rx_late;
+            fl = ap_qos_data(fr, 0, 101, 2, 0x11);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 0 && BA.rx_late == late0 + 1);
+            /* a gap that is not filled: 105 waits (103 and 104 are missing); after 100 ms it goes out, the head moves behind it */
+            fl = ap_qos_data(fr, 0, 105, 6, 0x15);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 0 && BA.buffered == 1);
+            MS_JUMP += 50;
+            ALIVE();
+            ALIVE();
+            DRAIN();
+            CHECK(norder == 0 && BA.buffered == 1); /* not yet */
+            MS_JUMP += 80;
+            ALIVE();
+            ALIVE();
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x15 && BA.buffered == 0 && BA.rx_head == 106 && BA.rx_timeouts == 1);
+            /* the same frame twice while it waits: the second is a duplicate */
+            unsigned dups0 = BA.rx_dups;
+            fl = ap_qos_data(fr, 0, 108, 9, 0x18);
+            INJ(fl, 4u << 20);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 0 && BA.rx_dups == dups0 + 1 && BA.buffered == 1);
+            /* the window moves when a number far ahead arrives (the access point gave up on the old ones): 200 is 94 ahead of 106, the window is 32 */
+            fl = ap_qos_data(fr, 0, 200, 40, 0x20);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x18 && BA.rx_head == 169 && BA.buffered == 1); /* 108 went out when the window left it behind; 200 waits */
+            MS_JUMP += 150;
+            ALIVE();
+            ALIVE();
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x20 && BA.rx_head == 201 && BA.buffered == 0);
+            /* the packet number is checked in the order of the sequence numbers: 202 with a number below the one of 201 is a replay */
+            fl = ap_qos_data(fr, 0, 201, 50, 0x21);
+            INJ(fl, 4u << 20);
+            unsigned rep0 = LINK.rx_replay;
+            fl = ap_qos_data(fr, 0, 202, 49, 0x22);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x21 && LINK.rx_replay == rep0 + 1);
+            /* a QoS null frame uses up a sequence number: 203 is a null frame, 204 then comes through without waiting */
+            memset(fr, 0, sizeof fr);
+            fr[0] = 0xC8;
+            fr[1] = 0x02;
+            memcpy(fr + 4, MAC6X, 6);
+            memcpy(fr + 10, AP_BSSID, 6);
+            memcpy(fr + 16, AP_BSSID, 6);
+            fr[22] = (unsigned char)(203 << 4);
+            fr[23] = (unsigned char)(203 >> 4);
+            INJ(26 + 4, 0);
+            fl = ap_qos_data(fr, 0, 204, 51, 0x24);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x24 && BA.rx_head == 205);
+            /* another traffic class is not part of the agreement: straight through */
+            fl = ap_qos_data(fr, 5, 3000, 52, 0x55);
+            INJ(fl, 4u << 20);
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x55 && BA.rx_head == 205);
+            /* the sequence numbers wrap at 4096: a new agreement starting at 4094; 4095 waits, then 0 (after the wrap) waits, 4094 releases all three */
+            {
+                static const unsigned char REQ2[9] = {3, 0, 8, 0x02, 0x10, 0, 0, 0xE0, 0xFF}; /* 4094 << 4 = 0xFFE0 */
+                fl = ap_action(fr, REQ2, 9);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.rx_on && BA.rx_head == 4094 && BA.rx_sessions == 2);
+                fl = ap_qos_data(fr, 0, 4095, 61, 0x61);
+                INJ(fl, 4u << 20);
+                fl = ap_qos_data(fr, 0, 0, 62, 0x62);
+                INJ(fl, 4u << 20);
+                DRAIN();
+                CHECK(norder == 0 && BA.buffered == 2);
+                fl = ap_qos_data(fr, 0, 4094, 60, 0x60);
+                INJ(fl, 4u << 20);
+                DRAIN();
+                CHECK(norder == 3 && order[0] == 0x60 && order[1] == 0x61 && order[2] == 0x62 && BA.rx_head == 1);
+            }
+            /* a request for another traffic class is declined (status 37), the agreement stays as it is */
+            {
+                static const unsigned char REQ3[9] = {3, 0, 9, 0x02 | 3 << 2, 0x10, 0, 0, 0x10, 0x00}; /* traffic class 3 */
+                fl = ap_action(fr, REQ3, 9);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                const unsigned char *r = last_action();
+                CHECK(r[0] == 0xD0 && r[24] == 3 && r[25] == 1 && r[26] == 9 && r[27] == 37 && BA.rx_on && BA.rx_sessions == 2);
+            }
+            /* the access point ends its agreement (DELBA, the initiator): the buffer is emptied in order, the receive side is off */
+            fl = ap_qos_data(fr, 0, 3, 70, 0x73);
+            INJ(fl, 4u << 20);
+            {
+                static const unsigned char DEL[6] = {3, 2, 0x00, 0x08, 0, 0}; /* initiator, traffic class 0 */
+                fl = ap_action(fr, DEL, 6);
+                INJ(fl, 0);
+            }
+            DRAIN();
+            CHECK(norder == 1 && order[0] == 0x73 && !BA.rx_on && BA.buffered == 0);
+
+            /* what we send: 16 frames make an agreement worth asking for, after a second */
+            CHECK(BA.tx_state == 0);
+            for (int i = 0; i < 16; i++)
+                CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+            memcpy(w, BECAP.desc, 40);
+            CHECK((w[2] & BIT(12)) == 0); /* no agreement yet: not aggregated */
+            {
+                int t0 = count_actions();
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 0 && count_actions() == t0); /* the link is too young */
+                MS_JUMP += 1200;
+                ALIVE();
+                ALIVE();
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 1 && count_actions() == t0 + 1 && BA.tx_tries == 1);
+                const unsigned char *r = last_action();
+                unsigned ssc = (unsigned)r[31] | (unsigned)r[32] << 8;
+                CHECK(r[0] == 0xD0 && r[24] == 3 && r[25] == 0 && r[26] == BA.tx_token && r[27] == 0x02 && r[28] == 0x10 && (ssc >> 4) == (LINK.seq & 0xFFF)); /* the next number we use */
+                /* no answer: asked again after 1.5 s, three times in all, then given up */
+                MS_JUMP += 1000;
+                ALIVE();
+                ALIVE();
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_tries == 1);
+                MS_JUMP += 700;
+                ALIVE();
+                ALIVE();
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_tries == 2 && count_actions() == t0 + 2);
+                MS_JUMP += 1600;
+                ALIVE();
+                ALIVE();
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_tries == 3 && count_actions() == t0 + 3);
+                unsigned char tok = BA.tx_token;
+                /* the answer of the access point (a wrong dialog token first: ignored) */
+                unsigned char rsp[9] = {3, 1, (unsigned char)(tok + 1), 0, 0, 0x02, 0x08, 0, 0};
+                fl = ap_action(fr, rsp, 9);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 1);
+                rsp[2] = tok;
+                fl = ap_action(fr, rsp, 9);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 2 && BA.tx_buf == 32);
+            }
+            /* the descriptor of the next data frame: may be aggregated, the spacing and the number from the access point's HT capabilities */
+            CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+            memcpy(w, BECAP.desc, 40);
+            CHECK((w[2] & BIT(12)) != 0 && ((w[2] >> 20) & 7) == 5 && ((w[3] >> 17) & 0x1F) == 31);
+            {
+                char sl[96];
+                NIC_RTL8821CE.status(sl, sizeof sl);
+                CHECK(strstr(sl, ", agg") != 0);
+            }
+            /* an EAPOL frame is never part of it (the group key renewal answer): sent as an ordinary frame */
+            {
+                unsigned char eap[60];
+                memset(eap, 0, sizeof eap);
+                memcpy(eap, AP_BSSID, 6);
+                memcpy(eap + 6, MAC6X, 6);
+                eap[12] = 0x88;
+                eap[13] = 0x8E;
+                CHECK(NIC_RTL8821CE.send(eap, 60) == 0);
+                memcpy(w, BECAP.desc, 40);
+                CHECK((w[2] & BIT(12)) == 0 && ((w[3] >> 17) & 0x1F) == 0);
+            }
+            /* the access point ends it (DELBA, not the initiator): no aggregation, a new request may follow */
+            {
+                static const unsigned char DEL2[6] = {3, 2, 0x00, 0x00, 0, 0};
+                fl = ap_action(fr, DEL2, 6);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 0);
+                CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+                memcpy(w, BECAP.desc, 40);
+                CHECK((w[2] & BIT(12)) == 0);
+            }
+            /* a refusal (status 37) is final for this connection */
+            MS_JUMP += 4000; /* (the access point ended the last agreement: not asked again before 5 s are over) */
+            ALIVE();
+            ALIVE();
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(BA.tx_state == 0);
+            MS_JUMP += 1200;
+            ALIVE();
+            ALIVE();
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(BA.tx_state == 1);
+            {
+                unsigned char rsp[9] = {3, 1, BA.tx_token, 37, 0, 0, 0, 0, 0};
+                fl = ap_action(fr, rsp, 9);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 3);
+                int t0 = count_actions();
+                MS_JUMP += 5000;
+                ALIVE();
+                ALIVE();
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 3 && count_actions() == t0);
+            }
+            /* the link is lost: nothing of the agreements stays */
+            {
+                static const unsigned char REQ4[9] = {3, 0, 4, 0x02, 0x10, 0, 0, 0x10, 0x00};
+                fl = ap_action(fr, REQ4, 9);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.rx_on);
+                AP_MODE = 1;
+                unsigned char dr[40];
+                memset(dr, 0, sizeof dr);
+                dr[0] = 0xC0;
+                memcpy(dr + 4, MAC6X, 6);
+                memcpy(dr + 10, AP_BSSID, 6);
+                memcpy(dr + 16, AP_BSSID, 6);
+                dr[24] = 7;
+                rxq_add_frame_w0(dr, 24 + 2 + 4, 0);
+                for (int i = 0; i < 6; i++)
+                    rtl8821ce_host_udelay(1);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(NIC_RTL8821CE.link_up() == 0 && !BA.rx_on && BA.tx_state == 0 && BA.buffered == 0);
+                AP_MODE = 0;
+            }
+            /* "ampdu=off" in WIFI.CFG: the request of the access point is declined, nothing is offered or asked for */
+            bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+            CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\nampdu=off\n");
+            CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && CFG.ampdu == 0 && RA.on);
+            {
+                FIND_ASSOC(as);
+                const unsigned char *ie = as ? find_ie(as->b, as->len, 28, 45) : 0;
+                CHECK(ie && ie[4] == 0); /* the A-MPDU parameters: nothing */
+                ie = as ? find_ie(as->b, as->len, 28, 191) : 0;
+                CHECK(ie && ie[5] == 0);
+                static const unsigned char REQ5[9] = {3, 0, 5, 0x02, 0x10, 0, 0, 0x10, 0x00};
+                fl = ap_action(fr, REQ5, 9);
+                INJ(fl, 0);
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(!BA.rx_on && last_action()[27] == 37);
+                for (int i = 0; i < 20; i++)
+                    NIC_RTL8821CE.send(arp, 42);
+                MS_JUMP += 3000;
+                ALIVE();
+                ALIVE();
+                int t0 = count_actions();
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(BA.tx_state == 0 && count_actions() == t0);
+            }
+            /* with it on (the default) the request carries the aggregate parameters: A-MPDU exponent 2 and spacing 7 (16 us), VHT exponent 2 */
+            bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+            CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+            CHECK(NIC_RTL8821CE.probe(&WIFI) == 1);
+            {
+                FIND_ASSOC(as);
+                const unsigned char *ie = as ? find_ie(as->b, as->len, 28, 45) : 0;
+                CHECK(ie && ie[4] == 0x1E);
+                ie = as ? find_ie(as->b, as->len, 28, 191) : 0;
+                CHECK(ie && ie[2] == 0 && ie[3] == 0 && ie[4] == 0 && ie[5] == 0x01); /* bit 24: the exponent 2 in bits 23-25 */
+            }
+            X_HTAMPDU = 0;
+#undef INJ
+#undef DRAIN
+#undef ALIVE
+        }
         /* an access point without HT: the fixed rate, no QoS */
         bl = build_beacon_caps(bc, 149, 0, 0, 0);
         CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");

@@ -399,9 +399,9 @@ static const TxQueue QUEUES[Q_COUNT] = {
     [Q_HI0] = {0x038C, 0x0340, 128},  [Q_H2C] = {0x1328, 0x1320, 128},
 };
 
-#define RX_COUNT 32            /* Linux uses 512 buffers; the firmware download does not receive anything */
-#define RX_BUF_SIZE (11454 + 24)
-#define RX_BUF_SLOT 12288      /* a buffer and its slack, a multiple of 4096 */
+#define RX_COUNT 128           /* Linux uses 512 buffers; a burst of an aggregate (up to 32 frames) has to find room while the host is busy */
+#define RX_BUF_SIZE (4096 - 128) /* one frame of at most 3895 bytes (the longest MPDU we say we take) with its descriptor; no A-MSDU, so no jumbo buffers */
+#define RX_BUF_SLOT 4096       /* a buffer and its slack, a multiple of 4096 */
 
 /* DMA memory for the rings: one block, 4 KiB aligned pieces. */
 #define PAGE 4096u
@@ -1440,6 +1440,7 @@ static void h2c_probe(void)
 #define R_ADCCLK 0x08AC
 #define R_ADC160 0x08C4
 #define R_CHFIR 0x08F0
+#define R_RXSB 0x0A00
 #define R_ACBB0 0x0948
 #define R_ACBBRXFIR 0x094C
 #define R_TXDFIR 0x0C20
@@ -1705,9 +1706,10 @@ static void switch_rf_set(int to)
     wr32(R_RFECTL, reg);
 }
 
-/* rtw8821c_set_channel() for a 20 MHz channel: baseband, bb swing, MAC, RF, RX filter. ch_param are the three filter values that
- * rtw8821c_phy_set_param() reads back after the tables; bb_swing_* come from the efuse (0xC6 and 0xC7). */
-static void set_channel_20(unsigned channel, const u32 ch_param[3], unsigned bb_swing_2g, unsigned bb_swing_5g)
+/* rtw8821c_set_channel: baseband, bb swing, MAC, RF, RX filter. ch_param are the three filter values that rtw8821c_phy_set_param() reads back
+ * after the tables; bb_swing_* come from the efuse (0xC6 and 0xC7). `channel` is the centre channel of the (20 / 40 / 80 MHz) channel, `bw` 0 / 1 / 2,
+ * `sc` the position of the primary 20 MHz channel in it (1 = the upper half of 40 MHz, 2 = the lower half, 3 / 4 = the topmost / lowest of 80 MHz; 0 at 20 MHz) */
+static void set_channel_bw(unsigned channel, unsigned bw, unsigned sc, const u32 ch_param[3], unsigned bb_swing_2g, unsigned bb_swing_5g)
 {
     /* rtw8821c_set_channel_bb */
     if (channel <= 14)
@@ -1752,10 +1754,30 @@ static void set_channel_20(unsigned channel, const u32 ch_param[3], unsigned bb_
         else if (channel >= 118 && channel <= 177)
             mask32(R_CLKTRK, 0x1FFE0000, 0x412);
     }
-    /* the 20 MHz case of the bandwidth setting */
-    u32 val32 = rd32(R_ADCCLK);
-    val32 &= 0xFFCFFC00u;
-    val32 |= 0x10010000u;
+    /* the bandwidth setting: the ADC clock / filter selection of the baseband (and for 40 MHz which side the primary channel is on) */
+    u32 val32;
+    if (bw == 1)
+    {
+        if (sc == 1)
+            wr32(R_RXSB, rd32(R_RXSB) | BIT(4));
+        else
+            wr32(R_RXSB, rd32(R_RXSB) & ~BIT(4));
+        val32 = rd32(R_ADCCLK);
+        val32 &= 0xFF3FF300u;
+        val32 |= 0x20020000u | ((sc & 0xF) << 2) | 1;
+    }
+    else if (bw == 2)
+    {
+        val32 = rd32(R_ADCCLK);
+        val32 &= 0xFCFFCF00u;
+        val32 |= 0x40040000u | ((sc & 0xF) << 2) | 2;
+    }
+    else
+    {
+        val32 = rd32(R_ADCCLK);
+        val32 &= 0xFFCFFC00u;
+        val32 |= 0x10010000u;
+    }
     mask32(R_ADCCLK, 0xFFFFFFFFu, val32);
     mask32(R_ADC160, BIT(30), 1);
 
@@ -1767,9 +1789,16 @@ static void set_channel_20(unsigned channel, const u32 ch_param[3], unsigned bb_
     mask32(R_TXSCALE_A, 0xFFE00000u, SWING2SETTING[swing / 3]);
 
     /* rtw_set_channel_mac */
-    wr8(R_DATA_SC, 0); /* no secondary channels at 20 MHz */
+    unsigned txsc40 = 0;
+    if (bw == 2)
+        txsc40 = (sc == 1 || sc == 3) ? 9 : 10; /* RTW_SC_40_UPPER / RTW_SC_40_LOWER: which 40 MHz half of the 80 MHz the primary channel is in */
+    wr8(R_DATA_SC, (u8)((sc & 0xF) | txsc40 << 4)); /* BIT_TXSC_20M | BIT_TXSC_40M: where the primary channel sits */
     u32 v = rd32(R_WMAC_TRXPTCL_CTL);
-    v &= ~0x180u; /* BIT_RFMOD: 20 MHz */
+    v &= ~0x180u; /* BIT_RFMOD */
+    if (bw == 2)
+        v |= BIT(8); /* BIT_RFMOD_80M */
+    else if (bw == 1)
+        v |= BIT(7); /* BIT_RFMOD_40M */
     wr32(R_WMAC_TRXPTCL_CTL, v);
     v = rd32(R_AFE_CTRL1) & ~0x300000u; /* BIT_MAC_CLK_SEL, set to MAC_CLK_HW_DEF_80M = 0 */
     wr32(R_AFE_CTRL1, v);
@@ -1789,7 +1818,7 @@ static void set_channel_20(unsigned channel, const u32 ch_param[3], unsigned bb_
         rf18 |= RF18_RFSI_GE;
     else if (channel > 140)
         rf18 |= RF18_RFSI_GT;
-    rf18 |= RF18_BW_20M;
+    rf18 |= bw == 2 ? 0x400u : bw == 1 ? 0x800u : RF18_BW_20M; /* RF18_BW_80M / RF18_BW_40M / RF18_BW_20M */
     if (channel <= 14)
     {
         switch_rf_set(CX.rfe_btg ? 0 : 1);
@@ -1805,11 +1834,18 @@ static void set_channel_20(unsigned channel, const u32 ch_param[3], unsigned bb_
     rf_write_mask(RF_XTALX2, BIT(19), 0);
     rf_write_mask(RF_XTALX2, BIT(19), 1);
 
-    /* rtw8821c_set_channel_rxdfir, 20 MHz */
+    /* rtw8821c_set_channel_rxdfir: the receive / transmit filters for the width */
     mask32(R_ACBB0, BIT(29) | BIT(28), 0x2);
-    mask32(R_ACBBRXFIR, BIT(29) | BIT(28), 0x2);
-    mask32(R_TXDFIR, BIT(31), 0x1);
-    mask32(R_CHFIR, BIT(31), 0x0);
+    mask32(R_ACBBRXFIR, BIT(29) | BIT(28), bw == 2 ? 0x1 : 0x2);
+    mask32(R_TXDFIR, BIT(31), bw == 0 ? 0x1 : 0x0);
+    mask32(R_CHFIR, BIT(31), bw == 2 ? 0x1 : 0x0);
+}
+
+/* rtw8821c_set_channel() for a 20 MHz channel: baseband, bb swing, MAC, RF, RX filter. ch_param are the three filter values that
+ * rtw8821c_phy_set_param() reads back after the tables; bb_swing_* come from the efuse (0xC6 and 0xC7). */
+static void set_channel_20(unsigned channel, const u32 ch_param[3], unsigned bb_swing_2g, unsigned bb_swing_5g)
+{
+    set_channel_bw(channel, 0, 0, ch_param, bb_swing_2g, bb_swing_5g);
 }
 
 enum { CH_NOT_TRIED, CH_OK, CH_FAILED };
@@ -1864,6 +1900,7 @@ static u32 vle32(const volatile u8 *p) { return (u32)p[0] | (u32)p[1] << 8 | (u3
 static u32 rx_buf_dma(unsigned i) { return D.dma + (u32)(D.mem + Q_COUNT * PAGE + PAGE - D.mem) + i * RX_BUF_SLOT; }
 
 static void scan_note(const volatile u8 *f, unsigned len);
+static void act_note(const volatile u8 *f, unsigned len);
 static void conn_note(const volatile u8 *f, unsigned len);
 static void eapol_note(const volatile u8 *f, unsigned len);
 static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0);
@@ -1902,6 +1939,8 @@ static void rx_one(const volatile u8 *b)
             RX.mgmt_other++;
         if (subtype == 11 || subtype == 1 || subtype == 12 || subtype == 10) /* authentication, association response, deauthentication, disassociation */
             conn_note(f, len - 4);
+        if (subtype == 13) /* action */
+            act_note(f, len - 4);
         if (subtype == 8 || subtype == 5)
             scan_note(f, len - 4); /* the frame without its FCS */
     }
@@ -1982,6 +2021,10 @@ typedef struct
     u16 ht_cap;  /* ... its HT capability bits (bit 5 = short guard interval at 20 MHz) */
     u8 vht;      /* it has a VHT capabilities element (802.11ac) */
     u16 vht_map; /* ... its receive MCS map: two bits per spatial stream, 0 = MCS 0-7, 1 = 0-8, 2 = 0-9, 3 = none */
+    u32 vht_cap; /* ... its capability bits (bit 5 = short guard interval at 80 MHz) */
+    u8 ht_sec;   /* the channel it uses: secondary channel offset (0 none, 1 above, 3 below), 40 MHz in use, VHT width (1 = 80 MHz) and the centre of the 80 MHz channel */
+    u8 ht_w40, vht_w, vht_seg0;
+    u8 ht_ampdu; /* its HT A-MPDU parameters: the longest aggregate it takes (bits 0-1) and the least spacing it needs between frames (bits 2-4) */
 } ScanAp;
 
 static const u8 SCAN_CHANNELS[] = {1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161};
@@ -2017,13 +2060,24 @@ static void scan_note(const volatile u8 *f, unsigned len)
     unsigned chan = 0, sec = (cap & 0x10) ? 1 : 0;
     u8 rsn[40];
     unsigned rsn_len = 0;
-    unsigned rates = 0, ht = 0, ht_mcs0 = 0, ht_cap = 0, vht = 0, vht_map = 0;
+    unsigned rates = 0, ht = 0, ht_mcs0 = 0, ht_cap = 0, vht = 0, vht_map = 0, ht_sec = 0, ht_w40 = 0, vht_w = 0, vht_seg0 = 0, ht_ampdu = 0;
+    u32 vht_cap32 = 0;
     for (unsigned p = 36; p + 2 <= len;)
     {
         unsigned tag = f[p], tl = f[p + 1];
         if (p + 2 + tl > len)
             break; /* an element that runs past the frame: stop reading */
         const volatile u8 *d = f + p + 2;
+        if (tag == 61 && tl >= 2) /* HT operation: the primary channel, then the secondary channel offset (1 = above, 3 = below) and whether 40 MHz is in use */
+        {
+            ht_sec = d[1] & 3;
+            ht_w40 = (d[1] >> 2) & 1;
+        }
+        else if (tag == 192 && tl >= 3) /* VHT operation: the width (0 = 20 or 40 MHz, 1 = 80 MHz ...) and the centre channel of the 80 MHz channel */
+        {
+            vht_w = d[0];
+            vht_seg0 = d[1];
+        }
         if (tag == 0 && !have_ssid && tl <= 32)
         {
             for (unsigned i = 0; i < tl; i++)
@@ -2050,11 +2104,13 @@ static void scan_note(const volatile u8 *f, unsigned len)
             ht = 1;
             ht_cap = (unsigned)d[0] | (unsigned)d[1] << 8;
             ht_mcs0 = d[3];
+            ht_ampdu = d[2];
         }
         else if (tag == 191 && tl >= 12) /* VHT capabilities: capability bits (4), then the receive MCS map (2) ... */
         {
             vht = 1;
             vht_map = (unsigned)d[4] | (unsigned)d[5] << 8;
+            vht_cap32 = (u32)d[0] | (u32)d[1] << 8 | (u32)d[2] << 16 | (u32)d[3] << 24;
         }
         else if (tag == 3 && tl >= 1)
             chan = d[0];
@@ -2111,6 +2167,12 @@ static void scan_note(const volatile u8 *f, unsigned len)
     a->ht_cap = (u16)ht_cap;
     a->vht = (u8)vht;
     a->vht_map = (u16)vht_map;
+    a->ht_sec = (u8)ht_sec;
+    a->ht_w40 = (u8)ht_w40;
+    a->ht_ampdu = (u8)ht_ampdu;
+    a->vht_w = (u8)vht_w;
+    a->vht_seg0 = (u8)vht_seg0;
+    a->vht_cap = vht_cap32;
 }
 
 /* the whole scan: for each channel, switch, listen, collect. The receiver stays on all the time. */
@@ -2344,46 +2406,114 @@ static int txpwr_group(unsigned channel, int cck)
     }
 }
 
-/* the base index of the efuse, path A (rtw_phy_get_2g_tx_power_index / rtw_phy_get_5g_tx_power_index for a CCK or OFDM rate) */
-static u8 txpwr_base(const u8 *txpwr, unsigned channel, unsigned rate)
+/* The channel the radio is tuned to: the primary 20 MHz channel (where management frames go, and the beacons are), and the whole channel of
+ * `bw` (0 = 20, 1 = 40, 2 = 80 MHz) around the centre channel; `sc` says where the primary channel sits in it (rtw_update_channel: 0 at
+ * 20 MHz; at 40 MHz 1 = the upper half, 2 = the lower half; at 80 MHz 1 / 2 = the third / second 20 MHz channel, 3 / 4 = the topmost / lowest). */
+typedef struct
+{
+    unsigned prim, center, bw, sc;
+} Chan;
+
+/* the centre channel of the 20 / 40 / 80 MHz channel of the width `bw` that holds the primary channel (hal->cch_by_bw) */
+static unsigned chan_cch(const Chan *c, unsigned bw)
+{
+    if (bw == 0)
+        return c->prim;
+    if (bw == c->bw)
+        return c->center;
+    if (bw == 1 && c->bw == 2) /* the 40 MHz half of an 80 MHz channel that holds the primary channel */
+        return (c->sc == 1 || c->sc == 3) ? c->center + 4 : c->center - 4;
+    return c->center;
+}
+
+/* the base index of the efuse, path A (rtw_phy_get_2g_tx_power_index / rtw_phy_get_5g_tx_power_index): CCK, OFDM, HT (MCS 0-7) or VHT (one stream)
+ * rate, for the width of the channel. The efuse block: 2.4 GHz cck_base[6], bw40_base[5], ht_1s_diff (low nibble OFDM, high nibble 20 MHz) ...
+ * 18 bytes in all; then 5 GHz bw40_base[14] at 18, ht_1s_diff at 32 (the same nibbles), ... vht_1s_diff at 38 (low nibble 160 MHz, high nibble 80 MHz). */
+static u8 txpwr_base(const u8 *txpwr, const Chan *c, unsigned rate)
 {
     int cck = rate <= 3;
-    unsigned group = (unsigned)txpwr_group(channel, cck);
-    if (channel <= 14)
+    int mcs = rate >= 12; /* HT or VHT */
+    unsigned ch = c->center;
+    unsigned group = (unsigned)txpwr_group(ch, cck);
+    u8 p;
+    if (ch <= 14)
     {
         if (cck)
-            return txpwr[group];                                       /* cck_base[group] */
-        return (u8)(txpwr[6 + group] + sext4(txpwr[11]));              /* bw40_base[group] + the OFDM difference (low nibble of ht_1s_diff) */
+            return txpwr[group];                          /* cck_base[group] */
+        p = txpwr[6 + group];                             /* bw40_base[group]: the 40 MHz power is the base of everything else */
+        if (!mcs)
+            return (u8)(p + sext4(txpwr[11]));            /* the OFDM difference */
+        if (c->bw == 0)
+            p = (u8)(p + sext4(txpwr[11] >> 4));          /* the 20 MHz difference */
+        return p;
     }
-    return (u8)(txpwr[18 + group] + sext4(txpwr[18 + 14]));            /* the 5 GHz block starts at 18: bw40_base[14], then ht_1s_diff */
+    p = txpwr[18 + group];                                /* the 5 GHz block starts at 18: bw40_base[14], then ht_1s_diff */
+    if (!mcs)
+        return (u8)(p + sext4(txpwr[18 + 14]));
+    if (c->bw == 0)
+        return (u8)(p + sext4(txpwr[18 + 14] >> 4));
+    if (c->bw == 2) /* the 80 MHz base is the mean of the two neighbouring 40 MHz bases, plus the 80 MHz difference */
+        return (u8)((txpwr[18 + group] + txpwr[18 + group + 1]) / 2 + sext4(txpwr[18 + 20] >> 4));
+    return p;
 }
+
+/* the register of the "power by rate" table that holds a rate, and the byte in it (the rows of rtl8821ce_tab_pg): CCK, OFDM and HT in the order
+ * of the rate numbers from 0xC20, VHT (one stream) from 0xC3C */
+static unsigned txpwr_pg_reg(unsigned rate) { return rate < 44 ? 0xC20 + (rate / 4) * 4 : 0xC3C + ((rate - 44) / 4) * 4; }
 
 /* one value of the "power by rate" table: four rates per register in the BCD-like form 0x32343638 = 32, 34, 36, 38; 0 if the table has none */
 static int txpwr_pg(unsigned band, unsigned rate)
 {
-    unsigned reg = 0xC20 + (rate / 4) * 4;
+    unsigned reg = txpwr_pg_reg(rate);
+    unsigned byte = rate < 44 ? rate % 4 : (rate - 44) % 4;
     for (unsigned i = 0; i < sizeof rtl8821ce_tab_pg / sizeof rtl8821ce_tab_pg[0]; i++)
         if (rtl8821ce_tab_pg[i][0] == band && rtl8821ce_tab_pg[i][1] == 0 && rtl8821ce_tab_pg[i][3] == reg)
         {
-            unsigned b = (rtl8821ce_tab_pg[i][5] >> ((rate % 4) * 8)) & 0xFF; /* bcd2bin of one byte */
+            unsigned b = (rtl8821ce_tab_pg[i][5] >> (byte * 8)) & 0xFF; /* bcd2bin of one byte */
             return (int)((b >> 4) * 10 + (b & 0xF));
         }
     return 0;
 }
 
-/* the world-wide limit: the lowest of the entries of all country groups for this band, 20 MHz, rate section and channel */
-static int txpwr_limit_ww(unsigned band, unsigned channel, unsigned rs)
+/* the rate sections of the limit table, and the rate all offsets of a section are relative to (the last rate; of the 10 VHT rates the eighth) */
+#define RS_HT1 2
+#define RS_VHT1 4
+static unsigned txpwr_rs(unsigned rate) { return rate <= 3 ? RS_CCK : rate <= 11 ? RS_OFDM : rate <= 19 ? RS_HT1 : RS_VHT1; }
+static unsigned txpwr_base_rate(unsigned rs) { return rs == RS_CCK ? 3 : rs == RS_OFDM ? 11 : rs == RS_HT1 ? 19 : 51; }
+
+/* the world-wide limit: the lowest of the entries of all country groups for this band, bandwidth, rate section and channel (63 when there is none) */
+static int txpwr_limit_raw(unsigned band, unsigned bw, unsigned channel, unsigned rs)
 {
     int lim = TXPWR_MAX_INDEX;
     for (unsigned i = 0; i < sizeof rtl8821ce_tab_txpwr_lmt / sizeof rtl8821ce_tab_txpwr_lmt[0]; i++)
     {
         const short *e = rtl8821ce_tab_txpwr_lmt[i];
-        if ((unsigned)e[1] == band && e[2] == 0 && (unsigned)e[3] == rs && (unsigned)e[4] == channel)
+        if ((unsigned)e[1] == band && (unsigned)e[2] == bw && (unsigned)e[3] == rs && (unsigned)e[4] == channel)
         {
             int v = e[5] > TXPWR_MAX_INDEX ? TXPWR_MAX_INDEX : e[5] < -TXPWR_MAX_INDEX ? -TXPWR_MAX_INDEX : e[5];
             if (v < lim)
                 lim = v;
         }
+    }
+    return lim;
+}
+
+/* ... and rtw_xref_txpwr_lmt: at 5 GHz, 20 and 40 MHz, where the table has a limit for the HT rates but none for the VHT ones (or the other way
+ * round), the one that exists is taken for both */
+static int txpwr_limit_ww(unsigned band, unsigned bw, unsigned channel, unsigned rs)
+{
+    int lim = txpwr_limit_raw(band, bw, channel, rs);
+    if (band == 1 && bw <= 1 && (rs == RS_HT1 || rs == RS_VHT1))
+    {
+        int ht = txpwr_limit_raw(band, bw, channel, RS_HT1), vht = txpwr_limit_raw(band, bw, channel, RS_VHT1);
+        if (ht != vht)
+        {
+            if (ht == TXPWR_MAX_INDEX)
+                ht = vht;
+            else if (vht == TXPWR_MAX_INDEX)
+                vht = ht;
+        }
+        lim = rs == RS_HT1 ? ht : vht;
     }
     return lim;
 }
@@ -2398,37 +2528,78 @@ static int txpwr_channel_known(unsigned channel)
     return 0;
 }
 
-/* the power index of one CCK / OFDM rate at 20 MHz for path A: rtw_phy_get_tx_power_index with the world-wide limit and no SAR limit */
-static u8 tx_power_index(const u8 *txpwr, unsigned channel, unsigned rate)
+/* rtw_phy_get_tx_power_limit: the lowest of the limits of the 20 MHz channel up to the current width (CCK and OFDM only at 20 MHz, HT at most 40 MHz),
+ * each for its own centre channel, relative to the base of the rate section; an unknown channel: Linux gives up and takes no limit */
+static int txpwr_limit(const Chan *c, unsigned rate, unsigned rs, int base_pg)
 {
-    unsigned band = channel <= 14 ? 0 : 1;
-    unsigned rs = rate <= 3 ? RS_CCK : RS_OFDM;
-    unsigned base_rate = rs == RS_CCK ? 3 : RATE_OFDM_LAST; /* the last rate of the section: the one all offsets are relative to */
-    int base_pg = txpwr_pg(band, base_rate);
+    unsigned band = c->center <= 14 ? 0 : 1;
+    unsigned bw = c->bw;
+    if (rs == RS_CCK || rs == RS_OFDM)
+        bw = 0;
+    else if (rs == RS_HT1 && bw > 1)
+        bw = 1;
+    (void)rate;
+    int lim = TXPWR_MAX_INDEX;
+    for (unsigned cur = 0; cur <= bw; cur++)
+    {
+        unsigned ch = chan_cch(c, cur);
+        if (!txpwr_channel_known(ch))
+            return TXPWR_MAX_INDEX;
+        int l = txpwr_limit_ww(band, cur, ch, rs) - base_pg;
+        if (l < lim)
+            lim = l;
+    }
+    return lim;
+}
+
+/* the power index of one rate (CCK 0-3, OFDM 4-11, HT MCS 0-7 = 12-19, VHT one stream MCS 0-9 = 44-53) for path A: rtw_phy_get_tx_power_index
+ * with the world-wide limit and no SAR limit */
+static u8 tx_power_index_c(const u8 *txpwr, const Chan *c, unsigned rate)
+{
+    unsigned band = c->center <= 14 ? 0 : 1;
+    unsigned rs = txpwr_rs(rate);
+    int base_pg = txpwr_pg(band, txpwr_base_rate(rs));
     int offset = txpwr_pg(band, rate) - base_pg;
-    int limit = txpwr_channel_known(channel) ? txpwr_limit_ww(band, channel, rs) - base_pg : TXPWR_MAX_INDEX; /* an unknown channel: Linux gives up on the limit */
+    int limit = txpwr_limit(c, rate, rs, base_pg);
     int m = offset < limit ? offset : limit;
     if (m > TXPWR_MAX_INDEX)
         m = TXPWR_MAX_INDEX;
-    u8 p = (u8)(txpwr_base(txpwr, channel, rate) + m); /* an unsigned byte, as in Linux: a negative sum becomes a large number and is capped */
+    u8 p = (u8)(txpwr_base(txpwr, c, rate) + m); /* an unsigned byte, as in Linux: a negative sum becomes a large number and is capped */
     return p > TXPWR_MAX_INDEX ? TXPWR_MAX_INDEX : p;
 }
 
-/* write the indices of the rates used for management frames: CCK on 2.4 GHz, OFDM on both bands (4 rates per register, byte = rate % 4) */
+/* write the indices of all rates the card sends with: CCK on 2.4 GHz, OFDM, HT MCS 0-7 and VHT MCS 0-9 of the first stream (4 rates per register,
+ * byte = rate % 4; the last register of the VHT rates holds MCS 8 and 9) in the order Linux writes them (rtw8821c_set_tx_power_index) */
+static void tx_power_apply_c(const u8 *txpwr, const Chan *c)
+{
+    static const u8 FIRST[4] = {0, 4, 12, 44}, LAST[4] = {3, 11, 19, 53};
+    u32 word = 0;
+    for (unsigned s = c->center <= 14 ? 0 : 1; s < 4; s++)
+        for (unsigned rate = FIRST[s]; rate <= LAST[s]; rate++)
+        {
+            word |= (u32)tx_power_index_c(txpwr, c, rate) << ((rate & 3) * 8);
+            if ((rate & 3) == 3 || rate == 53)
+            {
+                wr32(R_TXAGC_A + (rate & 0xFC), word);
+                word = 0;
+            }
+        }
+}
+
+/* the 20 MHz channel `channel` */
+#ifdef HARIS_HOST /* (the host test checks the 20 MHz values; the driver itself works with a Chan) */
+static u8 tx_power_index(const u8 *txpwr, unsigned channel, unsigned rate)
+{
+    Chan c = {channel, channel, 0, 0};
+    return tx_power_index_c(txpwr, &c, rate);
+}
+
 static void tx_power_apply(const u8 *txpwr, unsigned channel)
 {
-    unsigned first = channel <= 14 ? RATE_CCK_FIRST : RATE_OFDM_FIRST;
-    u32 word = 0;
-    for (unsigned rate = first; rate <= RATE_OFDM_LAST; rate++)
-    {
-        word |= (u32)tx_power_index(txpwr, channel, rate) << ((rate & 3) * 8);
-        if ((rate & 3) == 3)
-        {
-            wr32(R_TXAGC_A + (rate & 0xFC), word);
-            word = 0;
-        }
-    }
+    Chan c = {channel, channel, 0, 0};
+    tx_power_apply_c(txpwr, &c);
 }
+#endif
 
 /* ---- stage 5a-2: the first frame on the air ----
  * A management frame goes to the chip through the management queue's ring: one buffer descriptor (16 bytes) = two entries, the first
@@ -2550,13 +2721,19 @@ static unsigned build_probe_request(u8 *f, const u8 *mac, unsigned channel)
     return n;
 }
 
-/* tune to a channel with its transmit power, and make the chip answer to our address */
-static void tune_for_tx(unsigned channel)
+/* tune to a channel (of 20, 40 or 80 MHz) with its transmit power, and make the chip answer to our address */
+static void tune_chan(const Chan *c)
 {
-    set_channel_20(channel, PH.ch_param, EF.swing2g, EF.swing5g);
-    tx_power_apply(EF.txpwr, channel);
+    set_channel_bw(c->center, c->bw, c->sc, PH.ch_param, EF.swing2g, EF.swing5g);
+    tx_power_apply_c(EF.txpwr, c);
     for (int i = 0; i < 6; i++)
         wr8(R_MACID + (u32)i, EF.mac[i]);
+}
+
+static void tune_for_tx(unsigned channel)
+{
+    Chan c = {channel, channel, 0, 0};
+    tune_chan(&c);
 }
 
 /* The first real card did not take a frame from the ring with the plain start (Linux' own sequence as far as it was ported). So the
@@ -2673,6 +2850,8 @@ static struct
     char psk[64];      /* the passphrase, 8 .. 63 characters */
     unsigned psk_len;
     int rate;          /* CFG_RATE_*: how fast to try to be, from the optional line "rate=legacy / ht / auto" */
+    unsigned bw;       /* the widest channel to use: 0 = 20, 1 = 40, 2 = 80 MHz (the optional line "bw=20 / 40 / 80") */
+    int ampdu;         /* aggregation allowed (the optional line "ampdu=off / on") */
 } CFG;
 
 /* the text between the end of the key and the end of the line, without a trailing carriage return or spaces; -1 if the line is not `key` */
@@ -2700,6 +2879,8 @@ static void cfg_parse(const char *buf, unsigned size)
 {
     CFG.state = CFG_NONE;
     CFG.rate = CFG_RATE_AUTO;
+    CFG.bw = 2;
+    CFG.ampdu = 1;
     int got_ssid = 0, got_psk = 0;
     unsigned start = 0;
     for (unsigned i = 0; i <= size; i++)
@@ -2730,6 +2911,18 @@ static void cfg_parse(const char *buf, unsigned size)
             else if (len == 2 && value[0] == 'h' && value[1] == 't')
                 CFG.rate = CFG_RATE_HT;
         }
+        len = cfg_value(buf + start, i - start, "ampdu", &value);
+        if (len == 3 && value[0] == 'o' && value[1] == 'f' && value[2] == 'f')
+            CFG.ampdu = 0;
+        else if (len == 2 && value[0] == 'o' && value[1] == 'n')
+            CFG.ampdu = 1;
+        len = cfg_value(buf + start, i - start, "bw", &value);
+        if (len == 2 && value[0] == '2' && value[1] == '0')
+            CFG.bw = 0;
+        else if (len == 2 && value[0] == '4' && value[1] == '0')
+            CFG.bw = 1;
+        else if (len == 2 && value[0] == '8' && value[1] == '0')
+            CFG.bw = 2;
         len = cfg_value(buf + start, i - start, "psk", &value);
         if (len >= 0)
         {
@@ -2893,7 +3086,47 @@ static struct
     u16 ht_cap;
     u8 vht;
     u16 vht_map;
+    u32 vht_cap;
+    u8 ht_sec, ht_w40, vht_w, vht_seg0;
+    u8 ht_ampdu;
+    Chan cc;     /* the channel we use: the primary channel CONN.channel, and the wider channel around it that the radio is tuned to (chan_plan) */
 } CONN;
+
+/* what we offer in the association request, for the access point to choose the rates from (stage 8): HT with one spatial stream when the access
+ * point has HT and the configuration allows it, VHT as well on 5 GHz. Nothing that the card is not ready for is claimed: no aggregation (see
+ * "stage 9"), no beamforming, no STBC, no LDPC. */
+static int use_ht(void) { return CFG.rate >= CFG_RATE_HT && CONN.ht; }
+static int use_vht(void) { return CFG.rate >= CFG_RATE_AUTO && CONN.ht && CONN.vht && CONN.channel > 14; }
+
+/* the channel to use (stage 9): the width the access point uses, but not wider than the configuration says (bw=). The access point says in its
+ * HT operation element whether it uses 40 MHz and on which side of the primary channel the other half is, and in the VHT operation element
+ * whether it uses 80 MHz and which channel is the centre of that (the primary channel is one of the four 20 MHz channels in it). Anything that does
+ * not fit together (a centre that is not 2 or 6 channel numbers from the primary channel) is not used: then the narrower width stays. */
+static void chan_plan(void)
+{
+    Chan *c = &CONN.cc;
+    c->prim = c->center = CONN.channel;
+    c->bw = c->sc = 0;
+    if (!use_ht() || CFG.bw == 0)
+        return;
+    if (CONN.ht_w40 && (CONN.ht_sec == 1 || CONN.ht_sec == 3))
+    {
+        c->bw = 1;
+        c->center = CONN.ht_sec == 1 ? CONN.channel + 2 : CONN.channel - 2;
+        c->sc = CONN.ht_sec == 1 ? 2 : 1; /* the other half above: the primary channel is the lower one */
+    }
+    if (CFG.bw >= 2 && c->bw == 1 && use_vht() && CONN.vht_w == 1)
+    {
+        int d = (int)CONN.channel - (int)CONN.vht_seg0;
+        unsigned sc = d == 2 ? 1 : d == -2 ? 2 : d == 6 ? 3 : d == -6 ? 4 : 0;
+        if (sc)
+        {
+            c->bw = 2;
+            c->center = CONN.vht_seg0;
+            c->sc = sc;
+        }
+    }
+}
 
 static void conn_set_caps(const ScanAp *ap)
 {
@@ -2903,13 +3136,14 @@ static void conn_set_caps(const ScanAp *ap)
     CONN.ht_cap = ap->ht_cap;
     CONN.vht = ap->vht;
     CONN.vht_map = ap->vht_map;
+    CONN.vht_cap = ap->vht_cap;
+    CONN.ht_sec = ap->ht_sec;
+    CONN.ht_w40 = ap->ht_w40;
+    CONN.vht_w = ap->vht_w;
+    CONN.vht_seg0 = ap->vht_seg0;
+    CONN.ht_ampdu = ap->ht_ampdu;
+    chan_plan();
 }
-
-/* what we offer in the association request, for the access point to choose the rates from (stage 8): HT at 20 MHz with one spatial stream when the
- * access point has HT and the configuration allows it, VHT as well on 5 GHz. Nothing that the card is not ready for is claimed: no 40 / 80 MHz,
- * no aggregation (the access point only aggregates after an ADDBA exchange that is not answered), no beamforming, no STBC, no LDPC. */
-static int use_ht(void) { return CFG.rate >= CFG_RATE_HT && CONN.ht; }
-static int use_vht(void) { return CFG.rate >= CFG_RATE_AUTO && CONN.ht && CONN.vht && CONN.channel > 14; }
 
 static int mac_is(const volatile u8 *a, const u8 *b)
 {
@@ -3020,30 +3254,35 @@ static unsigned build_assoc(u8 *f, const u8 *bssid, const char *ssid, unsigned s
         f[n++] = RSN[i];
     if (use_ht())
     {
-        f[n++] = 45; /* HT capabilities: 20 MHz only, spatial multiplexing power save off, short guard interval at 20 MHz */
+        unsigned bw = CONN.cc.bw;
+        f[n++] = 45; /* HT capabilities: spatial multiplexing power save off, short guard interval; 40 MHz (and short GI at 40 MHz) when that is the channel */
         f[n++] = 26;
-        n = put_u16(f, n, 0x002C);
-        f[n++] = 0;    /* A-MPDU parameters: nothing to ask for */
+        n = put_u16(f, n, bw >= 1 ? 0x006E : 0x002C);
+        f[n++] = CFG.ampdu ? 0x1E : 0; /* A-MPDU parameters: the longest aggregate we take (exponent 2: 32 KB) and the least spacing between its frames (16 us) */
         f[n++] = 0xFF; /* the receive MCS set: MCS 0 to 7 (one spatial stream) */
         for (int i = 0; i < 9; i++)
             f[n++] = 0;
-        n = put_u16(f, n, 72); /* the highest rate we receive: 72 Mb/s */
+        n = put_u16(f, n, bw >= 1 ? 150 : 72); /* the highest rate we receive: 72 Mb/s at 20 MHz, 150 at 40 MHz */
         for (int i = 0; i < 11; i++) /* the transmit MCS set, extended capabilities, beamforming, antenna selection: none */
             f[n++] = 0;
     }
     if (use_vht())
     {
-        f[n++] = 191; /* VHT capabilities: nothing special (no 160 MHz, no beamforming, no STBC), MCS 0 to 8 on one stream, none on the others */
+        unsigned bw = CONN.cc.bw;
+        f[n++] = 191; /* VHT capabilities: nothing special (no 160 MHz, no beamforming, no STBC); short guard interval at 80 MHz; MCS 0 to 8 (to 9 when the channel is wider than 20 MHz) on one stream, none on the others */
         f[n++] = 12;
-        n = put_u16(f, n, 0);
-        n = put_u16(f, n, 0);
-        n = put_u16(f, n, 0xFFFD); /* receive MCS map */
-        n = put_u16(f, n, 87);     /* the highest receive rate (20 MHz, short guard interval): 86.7 Mb/s */
-        n = put_u16(f, n, 0xFFFD); /* transmit MCS map */
-        n = put_u16(f, n, 87);
-        f[n++] = 199; /* operating mode notification: a VHT station must take 80 MHz, so it says up front that it listens on 20 MHz and on one stream only */
-        f[n++] = 1;
-        f[n++] = 0x00;
+        n = put_u16(f, n, bw == 2 ? 0x0020 : 0);
+        n = put_u16(f, n, CFG.ampdu ? 0x0100 : 0); /* ... the high half: the longest aggregate we take, exponent 2 (bits 23-25): 32 KB */
+        n = put_u16(f, n, bw >= 1 ? 0xFFFE : 0xFFFD); /* receive MCS map */
+        n = put_u16(f, n, bw == 2 ? 433 : bw == 1 ? 200 : 87); /* the highest receive rate (short guard interval): 86.7 / 200 / 433 Mb/s */
+        n = put_u16(f, n, bw >= 1 ? 0xFFFE : 0xFFFD); /* transmit MCS map */
+        n = put_u16(f, n, bw == 2 ? 433 : bw == 1 ? 200 : 87);
+        if (bw < 2)
+        {
+            f[n++] = 199; /* operating mode notification: a VHT station must take 80 MHz, so it says up front that it listens on 20 (or 40) MHz and on one stream only */
+            f[n++] = 1;
+            f[n++] = (u8)bw;
+        }
     }
     if (use_ht())
     {
@@ -3099,7 +3338,7 @@ static void connect_try(void)
     CONN.channel = ap->channel;
     conn_set_caps(ap);
     tx_variant_setup(TXP.variant < 0 ? 0 : TXP.variant); /* the way the DMA was found to start, and fresh ring pointers */
-    tune_for_tx(CONN.channel);
+    tune_chan(&CONN.cc);
     rx_restart();
     wr32(R_RCR, RCR_RX_DEFAULT);
     wr8(R_CR, MAC_TRX_ENABLE);
@@ -3119,6 +3358,7 @@ static void connect_try(void)
  * baseband set up for the wider channel; not done. Frames are sent as QoS data frames then (an HT station is a QoS station): two more header bytes. */
 #define H2C_CMD_MEDIA_STATUS_RPT 0x01
 #define H2C_CMD_RA_INFO 0x40
+#define RATEID_BGN_40M_1SS 1
 #define RATEID_BGN_20M_1SS 3
 #define RATEID_GN_N1SS 5
 #define RATEID_ARFR1_AC_1SS 10
@@ -3156,6 +3396,7 @@ static struct
     unsigned rate_id; /* the rate table of the firmware */
     unsigned tx_rate; /* the highest rate, written in the descriptor where the firmware ignores it */
     unsigned sgi;
+    unsigned bw;      /* 0 = 20, 1 = 40, 2 = 80 MHz */
     u32 mask;         /* the rate mask that was sent */
 } RA;
 
@@ -3167,6 +3408,7 @@ static void ra_start(void)
     RA.on = 0;
     RA.ht = use_ht();
     RA.vht = use_vht();
+    RA.bw = CONN.cc.bw;
     if (!RA.ht) /* an access point without HT, or "rate=legacy": the fixed rate stays */
         return;
     u32 mask = 0, bak;
@@ -3214,18 +3456,20 @@ static void ra_start(void)
         mask |= CONN.rates & 0x0FFF;
         bak = mask;
         mask &= RA_MASK_HT_1SS | 0x05 | 0x10; /* HT at 2.4 GHz keeps CCK 1 and 5.5 and OFDM 6 beside it */
-        rate_id = RATEID_BGN_20M_1SS;
+        rate_id = RA.bw == 1 ? RATEID_BGN_40M_1SS : RATEID_BGN_20M_1SS;
     }
     if ((mask & ~0x0FFFu) == 0) /* rtw_rate_mask_recover: never leave only legacy rates when the access point has more, and never nothing */
         mask |= bak & ~0x0FFFu;
     if (mask == 0)
         mask |= bak & 0x0FFFu;
+    if (!RA.vht && RA.bw == 2)
+        RA.bw = 1; /* (no VHT rate left: HT rates are 20 / 40 MHz rates) */
     RA.rate_id = rate_id;
     RA.mask = mask;
-    RA.sgi = (CONN.ht_cap >> 5) & 1; /* its short guard interval at 20 MHz */
+    RA.sgi = RA.bw == 2 && RA.vht ? (CONN.vht_cap >> 5) & 1 : RA.bw == 1 ? (CONN.ht_cap >> 6) & 1 : (CONN.ht_cap >> 5) & 1; /* its short guard interval at this width */
     RA.tx_rate = RA.vht ? DESC_RATE_VHT1SS_MCS0 + vht_mcs : DESC_RATE_MCS7;
     /* station 0, the rate table, initial level 1, short GI, 20 MHz (0), no LDPC, update the mask, VHT, no power tracking */
-    u32 w0 = H2C_CMD_RA_INFO | rate_id << 16 | 1u << 21 | RA.sgi << 23 | (RA.vht ? 1u << 28 : 0) | 1u << 30;
+    u32 w0 = H2C_CMD_RA_INFO | rate_id << 16 | 1u << 21 | RA.sgi << 23 | RA.bw << 24 | (RA.vht ? 1u << 28 : 0) | 1u << 30;
     RA.on = h2c_send(w0, mask) == 0;
     if (RA.on)
         media_status(1);
@@ -3544,7 +3788,7 @@ static void handshake_run(void)
 #define TX_QSEL_BE 0 /* traffic class 0: the best-effort queue */
 #define RATE_24M 8   /* the fixed rate of data frames: no rate adaptation yet (the firmware's would need more H2C set-up) */
 #define ETH_MAX 1514
-#define RXE_SLOTS 8
+#define RXE_SLOTS 64 /* frames waiting for the network stack: a burst of an aggregate comes in one go */
 
 typedef struct
 {
@@ -3567,6 +3811,7 @@ static struct
     EthFrame q[RXE_SLOTS];
     /* keeping the link alive (link_service) */
     u64 last_rx;              /* when a frame from the access point (beacon, data ...) was last heard */
+    u64 up_since;             /* when the link came up */
     u64 last_probe;           /* when we last asked it whether it is there */
     u64 next_try;             /* not before this time the next reconnection is tried */
     unsigned backoff;         /* ms between reconnection attempts: doubles with every failure up to LINK_RETRY_MAX_MS */
@@ -3586,8 +3831,311 @@ static int ONLINE_ENABLE = 1; /* the host tests of the earlier stages switch it 
 
 static const u8 LLC_SNAP[6] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00};
 
+/* ---- stage 10: aggregation (A-MPDU) and the block acknowledgement ----
+ * At high rates the time on the air goes mostly into the preamble and the waiting between frames, not into the data. Aggregation sends many
+ * frames in one transmission (an A-MPDU) and acknowledges them together with one "block acknowledgement" (BA). The two sides agree first, per
+ * traffic class (TID, here only 0, the normal one), with an "ADDBA" exchange of action frames: request (starting sequence number, how many frames
+ * the receiver can hold = the window), response (yes / no, its window). The chip does the rest in hardware: it sends the BA for what it received
+ * (the receive side), and for what we send it builds the aggregates from the frames that wait in its queue, collects the BA, repeats what was
+ * lost (the transmit side; the descriptor of a frame says "may be aggregated", with how many and how densely, taken from the access point's HT
+ * capabilities).
+ * What the host has to do is the ORDER. A frame of an aggregate that was lost arrives again later, after the frames that followed it: the
+ * receiver must hold those back until the gap is filled, or the access point gives up on it (it moves its window on) or 100 ms have passed, and then
+ * give them to the network stack in the order of their sequence numbers (12 bits, counting up, wrapping): the "reorder buffer" below. The packet
+ * number check of the encryption (a number must be larger than the last one) has to come after that, on the frames in order; a retransmitted frame
+ * keeps its packet number, so in the order of the sequence numbers the packet numbers rise. Frames that are no part of an agreement (other traffic
+ * classes, broadcasts) go straight through as before. */
+#define BA_WIN 32           /* the frames our reorder buffer holds: the window we offer; a power of two, so that the sequence number wraps in step with the slot */
+#define BA_TIMEOUT_MS 100   /* a gap that is not filled for so long is given up (as mac80211 does) */
+
+typedef struct
+{
+    int used;
+    u64 pn;
+    u64 t; /* when it arrived */
+    EthFrame f;
+} BaSlot;
+
+static struct
+{
+    int rx_on;         /* an agreement for the receive side of traffic class 0 */
+    unsigned rx_head;  /* the sequence number that comes next */
+    unsigned buffered; /* frames waiting for a gap to be filled */
+    BaSlot slot[BA_WIN];
+    unsigned rx_late, rx_dups, rx_timeouts, rx_sessions;
+    int tx_state;      /* 0 none yet, 1 request sent, 2 in use, 3 refused or given up (until the next connection) */
+    u8 tx_token;
+    unsigned tx_tries;
+    u64 tx_req_ms;
+    unsigned tx_buf;   /* the window the access point accepted */
+    u64 tx_cool;       /* not before this time a new request (after the access point ended an agreement) */
+} BA;
+
+static unsigned sn_diff(unsigned a, unsigned b) { return (a - b) & 0xFFF; } /* 12 bit sequence numbers: how far a is ahead of b */
+
+/* one frame, in its turn, to the network stack: the packet number must be larger than the last one (`last`); a frame of length 0 (a QoS null
+ * frame, which only uses up a sequence number) is not a packet */
+static void rx_deliver(const EthFrame *e, u64 pn, u64 *last)
+{
+    if (e->len == 0)
+        return;
+    if (pn <= *last)
+    {
+        LINK.rx_replay++;
+        return;
+    }
+    if ((LINK.head + 1) % RXE_SLOTS == LINK.tail)
+    {
+        LINK.rx_dropped++; /* the queue is full: the network stack is behind */
+        return;
+    }
+    *last = pn;
+    EthFrame *q = &LINK.q[LINK.head];
+    for (unsigned i = 0; i < e->len; i++)
+        q->b[i] = e->b[i];
+    q->len = e->len;
+    LINK.head = (LINK.head + 1) % RXE_SLOTS;
+    LINK.rx_frames++;
+}
+
+static void ba_release(BaSlot *s)
+{
+    rx_deliver(&s->f, s->pn, &LINK.rx_pn_pairwise);
+    s->used = 0;
+    BA.buffered--;
+}
+
+/* hand over the frames that follow the head without a gap */
+static void ba_flush_ready(void)
+{
+    while (BA.slot[BA.rx_head % BA_WIN].used)
+    {
+        ba_release(&BA.slot[BA.rx_head % BA_WIN]);
+        BA.rx_head = (BA.rx_head + 1) & 0xFFF;
+    }
+}
+
+/* give up waiting for the frames before new_head: what is buffered there goes out in order, the head moves */
+static void ba_skip_to(unsigned new_head)
+{
+    while (BA.rx_head != new_head)
+    {
+        BaSlot *s = &BA.slot[BA.rx_head % BA_WIN];
+        if (s->used)
+            ba_release(s);
+        BA.rx_head = (BA.rx_head + 1) & 0xFFF;
+    }
+}
+
+/* a frame of the agreement (sequence number, packet number, the Ethernet frame) */
+static void ba_rx_frame(unsigned seq, u64 pn, const EthFrame *e)
+{
+    unsigned d = sn_diff(seq, BA.rx_head);
+    if (d >= 0x800) /* behind the head: a copy of what was delivered already, or too late */
+    {
+        BA.rx_late++;
+        return;
+    }
+    if (d >= BA_WIN) /* beyond the window: the access point has moved on, so the window moves with it */
+    {
+        ba_skip_to((seq - (BA_WIN - 1)) & 0xFFF);
+        ba_flush_ready();
+        d = sn_diff(seq, BA.rx_head);
+    }
+    if (d == 0)
+    {
+        rx_deliver(e, pn, &LINK.rx_pn_pairwise);
+        BA.rx_head = (BA.rx_head + 1) & 0xFFF;
+        ba_flush_ready();
+        return;
+    }
+    BaSlot *s = &BA.slot[seq % BA_WIN];
+    if (s->used)
+    {
+        BA.rx_dups++;
+        return;
+    }
+    s->used = 1;
+    s->pn = pn;
+    s->t = now_ms();
+    for (unsigned i = 0; i < e->len; i++)
+        s->f.b[i] = e->b[i];
+    s->f.len = e->len;
+    BA.buffered++;
+}
+
+/* a gap that has been open for BA_TIMEOUT_MS is given up: the frames behind it go out */
+static void ba_expire(u64 now)
+{
+    while (BA.buffered)
+    {
+        unsigned i = 0;
+        while (i < BA_WIN && !BA.slot[(BA.rx_head + i) % BA_WIN].used)
+            i++;
+        if (i >= BA_WIN || now - BA.slot[(BA.rx_head + i) % BA_WIN].t < BA_TIMEOUT_MS)
+            return;
+        ba_skip_to((BA.rx_head + i) & 0xFFF);
+        ba_flush_ready();
+        BA.rx_timeouts++;
+    }
+}
+
+/* the agreement for the receive side starts (or starts again) at sequence number ssn: what is buffered of an earlier one goes out first */
+static void ba_rx_start(unsigned ssn)
+{
+    if (BA.rx_on)
+        ba_skip_to((BA.rx_head + BA_WIN) & 0xFFF);
+    BA.rx_head = ssn & 0xFFF;
+    BA.rx_on = 1;
+    BA.rx_sessions++;
+}
+
+static void ba_rx_stop(void)
+{
+    if (BA.rx_on)
+        ba_skip_to((BA.rx_head + BA_WIN) & 0xFFF);
+    BA.rx_on = 0;
+}
+
+/* the link is gone: nothing of the agreements is left (the access point forgets them as well) */
+static void ba_reset(void)
+{
+    for (unsigned i = 0; i < BA_WIN; i++)
+        BA.slot[i].used = 0;
+    BA.buffered = 0;
+    BA.rx_on = 0;
+    BA.tx_state = 0;
+    BA.tx_tries = 0;
+    BA.tx_cool = 0;
+}
+
+/* ---- stage 10, the agreements (ADDBA / DELBA action frames) ----
+ * An action frame (frame control 0xD0) of the category "block acknowledgement" (3) has an action number and its fields:
+ *   0 ADDBA request   dialog token, parameters (bit 0 A-MSDU allowed, bit 1 immediate BA, bits 2..5 traffic class, bits 6..15 window in frames),
+ *                     timeout, starting sequence control (sequence number << 4)
+ *   1 ADDBA response  dialog token, status (0 = yes), parameters (the same), timeout
+ *   2 DELBA           parameters (bit 11 the sender of the data ("initiator") ends it, bits 12..15 traffic class), reason
+ * Receiving an ADDBA request from the access point: answered with yes (immediate BA, no A-MSDU, window BA_WIN) for traffic class 0, no (37, "request
+ * declined") for the rest; from then on the frames of class 0 go through the reorder buffer. Sending data: once the link has carried some traffic
+ * (BA_TX_TRIGGER frames) we ask for an agreement of our own; when the access point says yes, the descriptors of the data frames allow aggregation. */
+#define BA_TX_TRIGGER 16     /* data frames sent before it is worth asking for an agreement */
+#define BA_TX_WAIT_MS 1500   /* how long to wait for the answer, three tries */
+#define BA_TX_COOL_MS 5000   /* the pause before a new request when the access point ended the agreement */
+
+static struct
+{
+    int pending;
+    unsigned len;
+    u8 b[48];
+} ACTQ;
+
+/* a management frame from the receive path (without FCS): an action frame of the access point to us? */
+static void act_note(const volatile u8 *f, unsigned len)
+{
+    if (!LINK.up || ACTQ.pending || len < 24 + 3 || !mac_is(f + 4, EF.mac) || !mac_is(f + 10, CONN.bssid))
+        return;
+    if (f[24] != 3) /* only the block acknowledgement category */
+        return;
+    unsigned n = len < sizeof ACTQ.b ? len : (unsigned)sizeof ACTQ.b;
+    for (unsigned i = 0; i < n; i++)
+        ACTQ.b[i] = f[i];
+    ACTQ.len = n;
+    ACTQ.pending = 1;
+}
+
+static int tx_action(const u8 *body, unsigned blen)
+{
+    u8 f[24 + 16];
+    unsigned n = mgmt_header(f, 0xD0, CONN.bssid);
+    for (unsigned i = 0; i < blen && n < sizeof f; i++)
+        f[n++] = body[i];
+    return tx_mgmt(f, n, CONN.channel);
+}
+
+static void act_service(void)
+{
+    const u8 *b = ACTQ.b + 24; /* the category, the action number, the fields */
+    unsigned blen = ACTQ.len - 24;
+    unsigned action = b[1];
+    if (action == 0 && blen >= 9) /* ADDBA request */
+    {
+        unsigned params = (unsigned)b[3] | (unsigned)b[4] << 8, tid = (params >> 2) & 0xF, buf = (params >> 6) & 0x3FF;
+        unsigned ssn = ((unsigned)b[7] | (unsigned)b[8] << 8) >> 4;
+        unsigned status = 0;
+        if (!CFG.ampdu || !RA.on || tid != 0 || !((params >> 1) & 1)) /* only traffic class 0, immediate block acknowledgement, and only when we offered it */
+            status = 37;
+        if (buf == 0 || buf > BA_WIN)
+            buf = BA_WIN;
+        u8 r[9] = {3, 1, b[2], (u8)status, 0, 0, 0, 0, 0};
+        unsigned rp = status ? params & ~0xFFC0u : 0x0002u | tid << 2 | buf << 6; /* immediate, no A-MSDU, our window */
+        r[5] = (u8)rp;
+        r[6] = (u8)(rp >> 8);
+        if (status == 0)
+            ba_rx_start(ssn); /* before the answer: the access point may send at once */
+        tx_action(r, 9);
+    }
+    else if (action == 1 && blen >= 9) /* ADDBA response to ours */
+    {
+        unsigned status = (unsigned)b[3] | (unsigned)b[4] << 8, params = (unsigned)b[5] | (unsigned)b[6] << 8;
+        if (BA.tx_state == 1 && b[2] == BA.tx_token)
+        {
+            if (status == 0 && ((params >> 2) & 0xF) == 0)
+            {
+                BA.tx_state = 2;
+                BA.tx_buf = (params >> 6) & 0x3FF;
+            }
+            else
+                BA.tx_state = 3; /* refused: not again on this connection */
+        }
+    }
+    else if (action == 2 && blen >= 6) /* DELBA */
+    {
+        unsigned params = (unsigned)b[2] | (unsigned)b[3] << 8;
+        if ((params >> 12) == 0)
+        {
+            if ((params >> 11) & 1) /* the access point ends the data it sends: our receive side */
+                ba_rx_stop();
+            else /* it ends what we send: we do not ask again at once */
+            {
+                BA.tx_state = 0;
+                BA.tx_cool = now_ms() + BA_TX_COOL_MS;
+            }
+        }
+    }
+    ACTQ.pending = 0;
+}
+
+/* ask for an agreement for what we send, when the link has seen some traffic */
+static void ba_tx_service(u64 now)
+{
+    if (!CFG.ampdu || !RA.on || BA.tx_state == 2 || BA.tx_state == 3)
+        return;
+    if (BA.tx_state == 0)
+    {
+        if (LINK.tx_frames < BA_TX_TRIGGER || now - LINK.up_since < 1000 || now < BA.tx_cool)
+            return;
+        BA.tx_tries = 0;
+    }
+    else if (now - BA.tx_req_ms < BA_TX_WAIT_MS)
+        return;
+    else if (BA.tx_tries >= 3)
+    {
+        BA.tx_state = 3;
+        return;
+    }
+    BA.tx_token = (u8)(BA.tx_token + 1);
+    if (BA.tx_token == 0)
+        BA.tx_token = 1;
+    unsigned ssc = (LINK.seq & 0xFFF) << 4; /* the next sequence number we use starts the window */
+    u8 q[9] = {3, 0, BA.tx_token, 0x02, 0x10, 0, 0, (u8)ssc, (u8)(ssc >> 8)}; /* immediate BA, traffic class 0, window 64 (bits 6..15 = 64 -> 0x1002) */
+    tx_action(q, 9);
+    BA.tx_state = 1;
+    BA.tx_tries++;
+    BA.tx_req_ms = now;
+}
+
 /* one prepared frame (802.11 header + CCMP header + LLC/SNAP + payload, no MIC, no FCS) into the best-effort queue; 0 once the chip fetched it */
-static int tx_be(const u8 *frame, unsigned len, unsigned seq)
+static int tx_be(const u8 *frame, unsigned len, unsigned seq, int agg)
 {
     if (!D.ready || !D.stage || len < 24 + 8 + 8 || len > 26 + 8 + 8 + ETH_MAX)
         return -1;
@@ -3601,8 +4149,10 @@ static int tx_be(const u8 *frame, unsigned len, unsigned seq)
         s[TX_DESC_SIZE + i] = frame[i];
     put32(d + 0, len | (TX_DESC_SIZE << 16) | BIT(26));                                              /* size, offset to the frame, last segment */
     put32(d + 4, (unsigned)TX_QSEL_BE << 8 | (RA.on ? RA.rate_id : (unsigned)TX_RATEID_G) << 16 | 3u << 22); /* MAC id 0, queue, rate id (the firmware's rate table, or the fixed-rate one), security type 3 = AES */
-    put32(d + 12, RA.on ? 0 : BIT(8) | BIT(10));                                                    /* the rate of this descriptor and no fallback, unless the firmware chooses */
+    put32(d + 8, agg ? BIT(12) | (unsigned)((CONN.ht_ampdu >> 2) & 7) << 20 : 0); /* may be aggregated, and the least spacing the access point needs between the frames of an aggregate */
+    put32(d + 12, (RA.on ? 0 : BIT(8) | BIT(10)) | (agg ? ((4u << (CONN.ht_ampdu & 3)) - 1) << 17 : 0)); /* the rate of this descriptor and no fallback, unless the firmware chooses; with an aggregate the most frames (half of that number, as Linux defines it: from the access point's longest A-MPDU) */
     put32(d + 16, RA.on ? RA.tx_rate : RATE_24M);
+    put32(d + 20, RA.on ? RA.bw << 5 : 0); /* the data bandwidth: 20 / 40 / 80 MHz (bits 6..5); the primary channel was told to the MAC with the channel (DATA_SC) */
     put32(d + 36, (seq & 0xFFF) << 12);                                                              /* the sequence number we put in the header */
     u8 *bd = D.mem + Q_BE * PAGE + LINK.be_wp * 16;
     zero_bytes(bd, 16);
@@ -3666,7 +4216,8 @@ static int wifi_send(const void *eth, unsigned len)
     f[n++] = e[13];
     for (unsigned i = 14; i < len; i++)
         f[n++] = e[i];
-    if (tx_be(f, n, seq) != 0)
+    int agg = BA.tx_state == 2 && RA.on && !(e[12] == 0x88 && e[13] == 0x8E); /* an agreement is in use, and this is not an EAPOL frame */
+    if (tx_be(f, n, seq, agg) != 0)
     {
         LINK.tx_failed++;
         return -1;
@@ -3684,13 +4235,21 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
     if (!LINK.up)
         return 0;
     unsigned fc0 = f[0], fc1 = f[1];
-    if ((fc0 & 0x0C) != 0x08 || ((fc0 >> 4) != 0 && (fc0 >> 4) != 8)) /* data or QoS data (not null frames etc.) */
+    unsigned subtype = fc0 >> 4;
+    if ((fc0 & 0x0C) != 0x08 || (subtype != 0 && subtype != 8 && subtype != 12)) /* data or QoS data (not null frames etc.), and QoS null for the reorder buffer */
         return 1;
     if ((fc1 & 3) != 2 || !mac_is(f + 10, CONN.bssid)) /* from the access point only */
         return 1;
     int group = f[4] & 1;
     if (!group && !mac_is(f + 4, EF.mac))
         return 1;
+    if (subtype == 12) /* a QoS null frame carries nothing, but it uses up a sequence number of its traffic class: inside an agreement the order must go on over it */
+    {
+        static const EthFrame EMPTY; /* length 0 */
+        if (BA.rx_on && !group && len >= 26 && (f[24] & 0x0F) == 0)
+            ba_rx_frame(vget16(f + 22) >> 4, 0, &EMPTY);
+        return 1;
+    }
     /* protected, and decrypted by the chip without an error (descriptor word 0: type of encryption bits 22..20, "software decrypt" bit 27, ICV error bit 15) */
     if (!(fc1 & 0x40) || ((w0 >> 15) & 1) || ((w0 >> 27) & 1) || !((w0 >> 20) & 7))
     {
@@ -3716,7 +4275,9 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
     }
     u64 pn = (u64)c[0] | (u64)c[1] << 8 | (u64)c[4] << 16 | (u64)c[5] << 24 | (u64)c[6] << 32 | (u64)c[7] << 40;
     u64 *last = group ? &LINK.rx_pn_group[c[3] >> 6] : &LINK.rx_pn_pairwise; /* (the key id: the top two bits of the fourth byte) */
-    if (pn <= *last)
+    /* a frame of traffic class 0 inside an agreement is put in order first, the packet number is checked afterwards (see the stage 10 comment) */
+    int ordered = BA.rx_on && !group && (fc0 & 0x80) && (f[24] & 0x0F) == 0;
+    if (!ordered && pn <= *last)
     {
         LINK.rx_replay++;
         return 1;
@@ -3740,7 +4301,8 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
             LINK.rx_dropped++;
             return 1;
         }
-        *last = pn;
+        if (!ordered) /* (inside an agreement the packet numbers are not in step with the arrival; the EAPOL replay counter protects these) */
+            *last = pn;
         for (unsigned i = 0; i < n; i++)
             EAPQ.b[i] = p[8 + i];
         EAPQ.len = n;
@@ -3766,25 +4328,21 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
         LINK.rx_dropped++;
         return 1;
     }
-    if ((LINK.head + 1) % RXE_SLOTS == LINK.tail)
-    {
-        LINK.rx_dropped++; /* the queue is full: the network stack is behind */
-        return 1;
-    }
-    *last = pn;
-    EthFrame *q = &LINK.q[LINK.head];
+    static EthFrame e; /* (one frame at a time: no need to have it on the stack) */
     for (int i = 0; i < 6; i++)
     {
-        q->b[i] = f[4 + i];       /* destination: address 1 */
-        q->b[6 + i] = f[16 + i];  /* source: address 3 */
+        e.b[i] = f[4 + i];       /* destination: address 1 */
+        e.b[6 + i] = f[16 + i];  /* source: address 3 */
     }
-    q->b[12] = p[6];
-    q->b[13] = p[7];
+    e.b[12] = p[6];
+    e.b[13] = p[7];
     for (unsigned i = 0; i < plen; i++)
-        q->b[14 + i] = p[8 + i];
-    q->len = 14 + plen;
-    LINK.head = (LINK.head + 1) % RXE_SLOTS;
-    LINK.rx_frames++;
+        e.b[14 + i] = p[8 + i];
+    e.len = 14 + plen;
+    if (ordered)
+        ba_rx_frame(vget16(f + 22) >> 4, pn, &e); /* the sequence number is the upper 12 bits of the sequence control field */
+    else
+        rx_deliver(&e, pn, last);
     return 1;
 }
 
@@ -3809,7 +4367,8 @@ static void link_try(void)
         LINK.be_wp = 0;
         LINK.reconnects = LINK.rekeys = LINK.eapol_bad = LINK.fails = 0;
     }
-    LINK.last_rx = LINK.last_probe = now_ms();
+    LINK.last_rx = LINK.last_probe = LINK.up_since = now_ms();
+    ba_reset();
     LINK.adapter = 1;
     LINK.up = 1;
 }
@@ -3884,6 +4443,7 @@ static void link_lost(u64 now)
 {
     LINK.up = 0;
     ra_stop();
+    ba_reset();
     LINK.fails = 0;
     LINK.backoff = LINK_RETRY_MIN_MS;
     LINK.next_try = now;
@@ -3907,7 +4467,7 @@ static void reconnect_try(void)
                 conn_set_caps(ap);
             }
         }
-        tune_for_tx(CONN.channel); /* (the scan left the radio on its last channel) */
+        tune_chan(&CONN.cc); /* (the scan left the radio on its last channel) */
     }
     cam_clear();
     connect_exchange();
@@ -3950,6 +4510,10 @@ static void link_service(void)
     {
         if (EAPQ.pending)
             keys_service();
+        if (ACTQ.pending)
+            act_service();
+        ba_expire(now);
+        ba_tx_service(now);
     }
     else if (now >= LINK.next_try)
         reconnect_try();
@@ -4380,6 +4944,10 @@ static void rtl8821ce_status(char *buf, unsigned cap)
         nic_puts(&t, link_is_up() ? ", up" : ", reconnecting");
         if (RA.on) /* the firmware chooses the rates: HT or VHT, at 20 MHz */
             nic_puts(&t, RA.vht ? ", vht" : ", ht");
+        if (RA.on && RA.bw) /* ... and the width, when it is more than 20 MHz */
+            nic_putd(&t, RA.bw == 2 ? 80 : 40);
+        if (RA.on && (BA.rx_on || BA.tx_state == 2)) /* aggregation is in use, in either direction */
+            nic_puts(&t, ", agg");
         nic_puts(&t, ", tx ");
         nic_putd(&t, LINK.tx_frames);
         nic_puts(&t, " rx ");
