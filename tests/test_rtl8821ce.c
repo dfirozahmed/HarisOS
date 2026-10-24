@@ -27,6 +27,10 @@ static unsigned le16p(const unsigned char *p) { return p[0] | p[1] << 8; }
 
 /* ---- the write log ---- */
 typedef struct { u32 off; unsigned size; u32 value; } Wr;
+/* the commands to the firmware (mailboxes 0 to 3): which mailbox, the two words */
+typedef struct { u32 box_off; u32 w0, w1; } H2cCmd;
+static H2cCmd H2CLOG[64];
+static int H2CLOG_N;
 static Wr LOG[4096];
 static int NLOG;
 
@@ -606,8 +610,12 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
         tx_kick(value & 0xFFF);
     else if (off == 0x3A8 && size == 2)
         tx_kick_be(value & 0xFFF);
-    else if (size == 4 && off == 0x1D0)
-        REGS[0x1CC] |= 1; /* HMETFR: the box holds a command until the firmware has read it */
+    else if (size == 4 && off >= 0x1D0 && off <= 0x1DC && (off & 3) == 0)
+    {
+        REGS[0x1CC] |= (unsigned char)(1u << ((off - 0x1D0) / 4)); /* HMETFR: the box holds a command until the firmware has read it */
+        if (H2CLOG_N < 64)
+            H2CLOG[H2CLOG_N++] = (H2cCmd){off, value, reg32(0x1F0 + (off - 0x1D0))};
+    }
     else if (size == 4 && off == 0xC90 && !PH_BREAK_RF_READBACK)
         set32(0x2800 + ((value >> 20) & 0xFF) * 4, (value & 0xFFFFF) ^ (((value >> 20) & 0xFF) == 0x18 || ((value >> 20) & 0xFF) == 0x51 ? PH_FLIP_RF_BITS : 0)); /* the RF register answers in its direct-read window */
     else if (size == 1 && off == 0x208 && (value & 1) && !KNOB_LLT_STUCK)
@@ -633,7 +641,7 @@ void rtl8821ce_host_udelay(unsigned us)
     UDELAY_US += us;
     rx_deliver_one();
     if (!KNOB_H2C_STUCK)
-        REGS[0x1CC] &= (unsigned char)~1; /* the firmware takes the command */
+        REGS[0x1CC] = 0; /* the firmware takes the commands */
     if (!CHIP_COMPLETES)
         return;
     if (REGS[5] & 2)
@@ -800,6 +808,80 @@ static int count_writes(u32 off, unsigned size)
     for (int i = 0; i < NLOG; i++)
         n += LOG[i].off == off && LOG[i].size == size;
     return n;
+}
+
+/* a beacon of the pretend access point "TestNet" on `chan`, WPA2-PSK/CCMP, with the capabilities of stage 8: legacy rates of the band, HT (MCS 0..7, short GI at 20 MHz) and VHT
+ * (receive map `vht_map` for the first stream) when asked */
+static unsigned build_beacon_caps(unsigned char *b, unsigned chan, int ht, int vht, unsigned vht_map)
+{
+    static const unsigned char RSN_OK2[20] = {1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0};
+    memset(b, 0, 200);
+    b[0] = 0x80;
+    memset(b + 4, 0xFF, 6);
+    memcpy(b + 10, AP_BSSID, 6);
+    memcpy(b + 16, AP_BSSID, 6);
+    b[34] = 0x31;
+    b[35] = 0x14;
+    unsigned p = 36;
+    b[p++] = 0;
+    b[p++] = 7;
+    memcpy(b + p, "TestNet", 7);
+    p += 7;
+    if (chan > 14)
+    {
+        static const unsigned char R5[8] = {0x8C, 0x12, 0x98, 0x24, 0xB0, 0x48, 0x60, 0x6C};
+        b[p++] = 1;
+        b[p++] = 8;
+        memcpy(b + p, R5, 8);
+        p += 8;
+    }
+    else
+    {
+        static const unsigned char R2[8] = {0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24};
+        static const unsigned char X2[4] = {0x30, 0x48, 0x60, 0x6C};
+        b[p++] = 1;
+        b[p++] = 8;
+        memcpy(b + p, R2, 8);
+        p += 8;
+        b[p++] = 50;
+        b[p++] = 4;
+        memcpy(b + p, X2, 4);
+        p += 4;
+    }
+    b[p++] = 3;
+    b[p++] = 1;
+    b[p++] = (unsigned char)chan;
+    b[p++] = 48;
+    b[p++] = 20;
+    memcpy(b + p, RSN_OK2, 20);
+    p += 20;
+    if (ht)
+    {
+        b[p++] = 45;
+        b[p++] = 26;
+        b[p + 0] = 0x2C; /* short GI at 20 MHz */
+        b[p + 3] = 0xFF; /* MCS 0..7 */
+        p += 26;
+    }
+    if (vht)
+    {
+        b[p++] = 191;
+        b[p++] = 12;
+        b[p + 4] = (unsigned char)vht_map;
+        b[p + 5] = (unsigned char)(vht_map >> 8);
+        p += 12;
+    }
+    p += 4; /* the FCS */
+    return p;
+}
+
+/* the information element `tag` of a management frame body that starts at `from`; 0 if there is none */
+static const unsigned char *find_ie(const unsigned char *f, unsigned len, unsigned from, unsigned tag)
+{
+    for (unsigned p = from; p + 2 <= len; p += 2 + f[p + 1])
+        if (f[p] == tag)
+            return f + p;
+    return 0;
 }
 
 int main(void)
@@ -2468,6 +2550,202 @@ int main(void)
 #undef DEAUTH
 #undef PUMP
 #undef AP_DATA
+        ONLINE_ENABLE = 0;
+        TXP_ENABLE = 0;
+        AP_HS = 0;
+        CFG_TEXT = 0;
+    }
+
+    /* ---- stage 8: speed. An access point with HT / VHT: the association request offers them, the firmware is told about the access point (media
+     * status + RA info, with the exact words Linux would build), and data goes out as QoS data frames with a rate table instead of a fixed rate. ---- */
+    {
+        static const unsigned char MAC6[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+        static const unsigned char GW[6] = {0x02, 0x00, 0x00, 0x00, 0xB0, 0x01};
+        static unsigned char bc[200];
+        unsigned bl;
+        unsigned char arp[42];
+        memset(arp, 0, sizeof arp);
+        memset(arp, 0xFF, 6);
+        memcpy(arp + 6, MAC6, 6);
+        arp[12] = 0x08;
+        arp[13] = 0x06;
+#define CONNECT8(cfg)                    \
+    do                                   \
+    {                                    \
+        CFG_TEXT = cfg;                  \
+        ONLINE_ENABLE = 1;               \
+        TXP_ENABLE = 1;                  \
+        TX_ANSWER = 0;                   \
+        AP_MODE = 0;                     \
+        AP_HS = 1;                       \
+        AP_PASS = "secret-pass-phrase";  \
+        AP_BAD_MIC = 0;                  \
+        build_image(1);                  \
+        chip_for_download();             \
+        file(IMG, IMG_SIZE, IMG_SIZE);   \
+        RXQ_N = RXQ_NEXT = 0;            \
+        RX_HW = 0;                       \
+        TXLOG_N = 0;                     \
+        AP_RESP_N = 0;                   \
+        H2CLOG_N = 0;                    \
+        memset(&BECAP, 0, sizeof BECAP); \
+        rxq_add_frame(bc, bl);           \
+    } while (0)
+#define FIND_ASSOC(var)                                    \
+    const TxFrame *var = 0;                                \
+    for (int _i = 0; _i < TXLOG_N; _i++)                   \
+        if (TXLOG[_i].b[0] == 0x00 && TXLOG[_i].len >= 40) \
+            var = &TXLOG[_i];
+        unsigned w[10];
+        unsigned char got[ETH_MAX];
+
+        /* A: 5 GHz, HT and VHT (the first stream up to MCS 9) */
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && LINK.up && RA.on && RA.vht && RA.ht);
+        CHECK(TARGET.found && SC.ap[TARGET.index].rates == 0x0FF0 && SC.ap[TARGET.index].ht && SC.ap[TARGET.index].ht_mcs0 == 0xFF &&
+              SC.ap[TARGET.index].ht_cap == 0x2C && SC.ap[TARGET.index].vht && SC.ap[TARGET.index].vht_map == 0xFFFE);
+        {
+            FIND_ASSOC(as);
+            CHECK(as != 0);
+            if (as)
+            {
+                CHECK(((as->b[24] | as->b[25] << 8) & 0x0200) != 0); /* the QoS capability bit */
+                const unsigned char *ie = find_ie(as->b, as->len, 28, 45);
+                CHECK(ie && ie[1] == 26 && ie[2] == 0x2C && ie[3] == 0 && ie[5] == 0xFF && ie[15] == 72 && ie[16] == 0 && ie[17] == 0);
+                ie = find_ie(as->b, as->len, 28, 191);
+                CHECK(ie && ie[1] == 12 && ie[2] == 0 && ie[6] == 0xFD && ie[7] == 0xFF && ie[8] == 87 && ie[10] == 0xFD && ie[11] == 0xFF && ie[12] == 87);
+                ie = find_ie(as->b, as->len, 28, 199);
+                CHECK(ie && ie[1] == 1 && ie[2] == 0x00); /* "20 MHz, one stream" */
+                ie = find_ie(as->b, as->len, 28, 221);
+                CHECK(ie && ie[1] == 7 && memcmp(ie + 2, "\x00\x50\xF2\x02\x00\x01\x00", 7) == 0);
+                CHECK(find_ie(as->b, as->len, 28, 48) != 0); /* the security element is still there */
+            }
+        }
+        /* the commands: "ignore WLAN actions" from the stage before, then RA info (rate table 10, level 1, short GI, VHT, mask: VHT MCS 0-9 and 6 Mb/s) and "station 0 is connected" */
+        CHECK(H2CLOG_N == 3);
+        CHECK(H2CLOG[0].box_off == 0x1D0 && H2CLOG[0].w0 == 0x63);
+        CHECK(H2CLOG[1].box_off == 0x1D4 && H2CLOG[1].w0 == 0x50AA0040u && H2CLOG[1].w1 == 0x003FF010u);
+        CHECK(H2CLOG[2].box_off == 0x1D8 && H2CLOG[2].w0 == 0x00000101u && H2CLOG[2].w1 == 0);
+        {
+            char sl[96];
+            NIC_RTL8821CE.status(sl, sizeof sl);
+            CHECK(strcmp(sl, "RTL8821CE Wi-Fi: TestNet ch149, up, vht, tx 0 rx 0") == 0);
+        }
+        CHECK(NIC_RTL8821CE.send(arp, 42) == 0 && BECAP.len == 26 + 8 + 8 + 28);
+        {
+            const unsigned char *fr = BECAP.frame;
+            CHECK(fr[0] == 0x88 && fr[1] == 0x41 && fr[24] == 0 && fr[25] == 0); /* QoS data, QoS control: traffic class 0 */
+            CHECK(fr[26] == 1 && fr[29] == 0x20);                                /* the CCMP header after the longer header */
+            static const unsigned char LLC[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x06};
+            CHECK(memcmp(fr + 34, LLC, 8) == 0 && memcmp(fr + 42, arp + 14, 28) == 0);
+            memcpy(w, BECAP.desc, 40);
+            CHECK(((w[1] >> 16) & 0x1F) == 10 && ((w[1] >> 22) & 3) == 3); /* rate table 10, AES */
+            CHECK((w[3] & (BIT(8) | BIT(10))) == 0 && (w[4] & 0x7F) == 0x2C + 9 && (w[5] & 0x60) == 0); /* no fixed rate, fallback allowed; 20 MHz */
+        }
+        /* an A-MSDU is not understood: dropped; a plain QoS data frame is taken */
+        {
+            unsigned char q[120];
+            memset(q, 0, sizeof q);
+            q[0] = 0x88;
+            q[1] = 0x42;
+            memcpy(q + 4, MAC6, 6);
+            memcpy(q + 10, AP_BSSID, 6);
+            memcpy(q + 16, GW, 6);
+            q[26] = 1;
+            q[29] = 0x20;
+            memcpy(q + 34, "\xAA\xAA\x03\x00\x00\x00\x08\x06", 8);
+            memset(q + 42, 0x77, 28);
+            rxq_add_frame_w0(q, 26 + 8 + 8 + 28 + 12, 4u << 20);
+            q[26] = 2;
+            q[24] = 0x80;
+            rxq_add_frame_w0(q, 26 + 8 + 8 + 28 + 12, 4u << 20);
+            for (int i = 0; i < 10; i++)
+                rtl8821ce_host_udelay(1);
+            unsigned d0 = LINK.rx_dropped;
+            CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 42 && got[14] == 0x77 && NIC_RTL8821CE.recv(got, sizeof got) == 0 && LINK.rx_dropped == d0 + 1);
+        }
+        /* the link is lost and made again: the firmware hears "station 0 left", then the same two commands as the first time */
+        {
+            unsigned char dr[40];
+            memset(dr, 0, sizeof dr);
+            dr[0] = 0xC0;
+            memcpy(dr + 4, MAC6, 6);
+            memcpy(dr + 10, AP_BSSID, 6);
+            memcpy(dr + 16, AP_BSSID, 6);
+            dr[24] = 7;
+            rxq_add_frame_w0(dr, 24 + 2 + 4, 0);
+            for (int i = 0; i < 6; i++)
+                rtl8821ce_host_udelay(1);
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(NIC_RTL8821CE.link_up() == 1 && LINK.reconnects == 1 && RA.on);
+            CHECK(H2CLOG_N == 6);
+            CHECK(H2CLOG[3].box_off == 0x1DC && H2CLOG[3].w0 == 0x00000001u);
+            CHECK(H2CLOG[4].box_off == 0x1D0 && H2CLOG[4].w0 == 0x50AA0040u && H2CLOG[4].w1 == 0x003FF010u);
+            CHECK(H2CLOG[5].box_off == 0x1D4 && H2CLOG[5].w0 == 0x00000101u);
+        }
+
+        /* B: 5 GHz, HT only (no VHT element): rate table 5, the HT rates and 6 / 9 Mb/s; no VHT and no operating mode element in the request */
+        bl = build_beacon_caps(bc, 149, 1, 0, 0);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && RA.on && !RA.vht && RA.ht);
+        {
+            FIND_ASSOC(as);
+            CHECK(as && find_ie(as->b, as->len, 28, 45) && !find_ie(as->b, as->len, 28, 191) && !find_ie(as->b, as->len, 28, 199) && find_ie(as->b, as->len, 28, 221));
+        }
+        CHECK(H2CLOG_N == 3 && H2CLOG[1].w0 == 0x40A50040u && H2CLOG[1].w1 == 0x000FF030u && H2CLOG[2].w0 == 0x101);
+        CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+        memcpy(w, BECAP.desc, 40);
+        CHECK(((w[1] >> 16) & 0x1F) == 5 && (w[3] & (BIT(8) | BIT(10))) == 0 && (w[4] & 0x7F) == 0x13);
+        {
+            char sl[96];
+            NIC_RTL8821CE.status(sl, sizeof sl);
+            CHECK(strstr(sl, ", up, ht, tx") != 0);
+        }
+
+        /* C: "rate=legacy" in WIFI.CFG: as before stage 8, whatever the access point can do */
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\nrate=legacy\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && !RA.on && CFG.rate == CFG_RATE_LEGACY);
+        {
+            FIND_ASSOC(as);
+            CHECK(as && !find_ie(as->b, as->len, 28, 45) && !find_ie(as->b, as->len, 28, 191) && !find_ie(as->b, as->len, 28, 221) &&
+                  ((as->b[24] | as->b[25] << 8) & 0x0200) == 0);
+        }
+        CHECK(H2CLOG_N == 1);
+        CHECK(NIC_RTL8821CE.send(arp, 42) == 0 && BECAP.len == 24 + 8 + 8 + 28 && BECAP.frame[0] == 0x08);
+        memcpy(w, BECAP.desc, 40);
+        CHECK(((w[1] >> 16) & 0x1F) == 7 && (w[3] & (BIT(8) | BIT(10))) == (BIT(8) | BIT(10)) && (w[4] & 0x7F) == 8);
+        /* "rate=ht": HT but no VHT */
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\nrate=ht\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && RA.on && !RA.vht && CFG.rate == CFG_RATE_HT);
+        {
+            FIND_ASSOC(as);
+            CHECK(as && find_ie(as->b, as->len, 28, 45) && !find_ie(as->b, as->len, 28, 191));
+        }
+        /* an unknown value is "auto" */
+        bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\nrate=turbo\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && RA.vht && CFG.rate == CFG_RATE_AUTO);
+
+        /* D: 2.4 GHz, HT (a VHT element there is not answered): rate table 3, HT MCS 0-7 beside CCK 1 / 5.5 and OFDM 6 Mb/s */
+        bl = build_beacon_caps(bc, 6, 1, 1, 0xFFFE);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && RA.on && !RA.vht && CONN.channel == 6);
+        {
+            FIND_ASSOC(as);
+            CHECK(as && find_ie(as->b, as->len, 28, 45) && !find_ie(as->b, as->len, 28, 191));
+        }
+        CHECK(H2CLOG_N == 3 && H2CLOG[1].w0 == 0x40A30040u && H2CLOG[1].w1 == 0x000FF015u);
+
+        /* an access point without HT: the fixed rate, no QoS */
+        bl = build_beacon_caps(bc, 149, 0, 0, 0);
+        CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && !RA.on && H2CLOG_N == 1);
+        CHECK(NIC_RTL8821CE.send(arp, 42) == 0 && BECAP.frame[0] == 0x08);
+#undef CONNECT8
+#undef FIND_ASSOC
         ONLINE_ENABLE = 0;
         TXP_ENABLE = 0;
         AP_HS = 0;

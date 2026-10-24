@@ -1385,9 +1385,12 @@ static int h2c_box_free(void)
     return 0;
 }
 
+static unsigned H2C_BOX; /* the mailbox the next command goes into: the firmware takes them in turn, 0 to 3, as Linux rotates through them (see h2c_send) */
+
 static void h2c_probe(void)
 {
     H2.state = H2_FAILED;
+    H2C_BOX = 0; /* (a firmware just started) */
     H2.why = 0;
     if (!h2c_box_free())
     {
@@ -1396,6 +1399,7 @@ static void h2c_probe(void)
     }
     wr32(R_HMEBOX0_EX, 0);
     wr32(R_HMEBOX0, H2C_CMD_IGNORE_WLAN_ACTION); /* bit 8 = enable = 0 */
+    H2C_BOX = 1;                                 /* the first mailbox is used */
     for (int i = 0; i < 200; i++) /* up to 20 ms for the firmware to take it */
     {
         if (!(rd8(R_HMETFR) & BIT(0)))
@@ -1971,6 +1975,13 @@ typedef struct
     u8 rsn_len;  /* the RSN element (WPA2 security description) without its tag and length; 0 = none or too long to keep */
     u8 rsn[40];
     unsigned beacons;
+    /* what the access point can do, from its beacon (for the rate adaptation, see "stage 8") */
+    u16 rates;   /* its legacy rates: bit 0..3 = CCK 1, 2, 5.5, 11 Mb/s, bit 4..11 = OFDM 6, 9, 12, 18, 24, 36, 48, 54 Mb/s */
+    u8 ht;       /* it has an HT capabilities element (802.11n) */
+    u8 ht_mcs0;  /* ... the receive MCS set, MCS 0..7 (one spatial stream) */
+    u16 ht_cap;  /* ... its HT capability bits (bit 5 = short guard interval at 20 MHz) */
+    u8 vht;      /* it has a VHT capabilities element (802.11ac) */
+    u16 vht_map; /* ... its receive MCS map: two bits per spatial stream, 0 = MCS 0-7, 1 = 0-8, 2 = 0-9, 3 = none */
 } ScanAp;
 
 static const u8 SCAN_CHANNELS[] = {1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161};
@@ -2006,6 +2017,7 @@ static void scan_note(const volatile u8 *f, unsigned len)
     unsigned chan = 0, sec = (cap & 0x10) ? 1 : 0;
     u8 rsn[40];
     unsigned rsn_len = 0;
+    unsigned rates = 0, ht = 0, ht_mcs0 = 0, ht_cap = 0, vht = 0, vht_map = 0;
     for (unsigned p = 36; p + 2 <= len;)
     {
         unsigned tag = f[p], tl = f[p + 1];
@@ -2024,6 +2036,25 @@ static void scan_note(const volatile u8 *f, unsigned len)
             ssid_len = named ? tl : 0; /* a hidden network sends an empty name or only zeros */
 
             have_ssid = 1;
+        }
+        else if (tag == 1 || tag == 50) /* supported rates / extended supported rates: the rate in units of 500 kb/s, the top bit marks a basic rate */
+        {
+            static const u8 UNITS[12] = {2, 4, 11, 22, 12, 18, 24, 36, 48, 72, 96, 108};
+            for (unsigned i = 0; i < tl; i++)
+                for (unsigned k = 0; k < 12; k++)
+                    if ((d[i] & 0x7F) == UNITS[k])
+                        rates |= 1u << k;
+        }
+        else if (tag == 45 && tl >= 26) /* HT capabilities: capability bits (2), A-MPDU parameters (1), then the receive MCS set */
+        {
+            ht = 1;
+            ht_cap = (unsigned)d[0] | (unsigned)d[1] << 8;
+            ht_mcs0 = d[3];
+        }
+        else if (tag == 191 && tl >= 12) /* VHT capabilities: capability bits (4), then the receive MCS map (2) ... */
+        {
+            vht = 1;
+            vht_map = (unsigned)d[4] | (unsigned)d[5] << 8;
         }
         else if (tag == 3 && tl >= 1)
             chan = d[0];
@@ -2074,6 +2105,12 @@ static void scan_note(const volatile u8 *f, unsigned len)
     a->rsn_len = (u8)rsn_len;
     for (unsigned i = 0; i < rsn_len; i++)
         a->rsn[i] = rsn[i];
+    a->rates = (u16)rates;
+    a->ht = (u8)ht;
+    a->ht_mcs0 = (u8)ht_mcs0;
+    a->ht_cap = (u16)ht_cap;
+    a->vht = (u8)vht;
+    a->vht_map = (u16)vht_map;
 }
 
 /* the whole scan: for each channel, switch, listen, collect. The receiver stays on all the time. */
@@ -2626,6 +2663,7 @@ static void tx_probe_test(unsigned channel)
 #define CFG_FILE_MAX 512
 
 enum { CFG_NOT_TRIED, CFG_OK, CFG_NONE, CFG_BAD };
+enum { CFG_RATE_LEGACY, CFG_RATE_HT, CFG_RATE_AUTO }; /* fixed 24 Mb/s as before / HT (802.11n) / HT and VHT (802.11ac) where the access point has them */
 static struct
 {
     int state;
@@ -2634,6 +2672,7 @@ static struct
     unsigned ssid_len;
     char psk[64];      /* the passphrase, 8 .. 63 characters */
     unsigned psk_len;
+    int rate;          /* CFG_RATE_*: how fast to try to be, from the optional line "rate=legacy / ht / auto" */
 } CFG;
 
 /* the text between the end of the key and the end of the line, without a trailing carriage return or spaces; -1 if the line is not `key` */
@@ -2660,6 +2699,7 @@ static int cfg_value(const char *line, unsigned n, const char *key, const char *
 static void cfg_parse(const char *buf, unsigned size)
 {
     CFG.state = CFG_NONE;
+    CFG.rate = CFG_RATE_AUTO;
     int got_ssid = 0, got_psk = 0;
     unsigned start = 0;
     for (unsigned i = 0; i <= size; i++)
@@ -2681,6 +2721,14 @@ static void cfg_parse(const char *buf, unsigned size)
                 CFG.ssid[k] = value[k];
             CFG.ssid[len] = 0;
             CFG.ssid_len = (unsigned)len;
+        }
+        len = cfg_value(buf + start, i - start, "rate", &value);
+        if (len >= 0) /* anything that is not recognised stays "auto": a typo must not stop the connection */
+        {
+            if (len == 6 && value[0] == 'l' && value[1] == 'e' && value[2] == 'g' && value[3] == 'a' && value[4] == 'c' && value[5] == 'y')
+                CFG.rate = CFG_RATE_LEGACY;
+            else if (len == 2 && value[0] == 'h' && value[1] == 't')
+                CFG.rate = CFG_RATE_HT;
         }
         len = cfg_value(buf + start, i - start, "psk", &value);
         if (len >= 0)
@@ -2840,7 +2888,28 @@ static struct
     unsigned aid;
     unsigned dropped;   /* the AP sent a deauthentication or disassociation: its reason code + 1 (0 = none) */
     unsigned auth_tries, assoc_tries;
+    u16 rates;   /* the capabilities of the access point (copied from its scan entry by conn_set_caps) */
+    u8 ht, ht_mcs0;
+    u16 ht_cap;
+    u8 vht;
+    u16 vht_map;
 } CONN;
+
+static void conn_set_caps(const ScanAp *ap)
+{
+    CONN.rates = ap->rates;
+    CONN.ht = ap->ht;
+    CONN.ht_mcs0 = ap->ht_mcs0;
+    CONN.ht_cap = ap->ht_cap;
+    CONN.vht = ap->vht;
+    CONN.vht_map = ap->vht_map;
+}
+
+/* what we offer in the association request, for the access point to choose the rates from (stage 8): HT at 20 MHz with one spatial stream when the
+ * access point has HT and the configuration allows it, VHT as well on 5 GHz. Nothing that the card is not ready for is claimed: no 40 / 80 MHz,
+ * no aggregation (the access point only aggregates after an ADDBA exchange that is not answered), no beamforming, no STBC, no LDPC. */
+static int use_ht(void) { return CFG.rate >= CFG_RATE_HT && CONN.ht; }
+static int use_vht(void) { return CFG.rate >= CFG_RATE_AUTO && CONN.ht && CONN.vht && CONN.channel > 14; }
 
 static int mac_is(const volatile u8 *a, const u8 *b)
 {
@@ -2921,7 +2990,7 @@ static unsigned build_deauth(u8 *f, const u8 *bssid)
 static unsigned build_assoc(u8 *f, const u8 *bssid, const char *ssid, unsigned ssid_len, unsigned channel)
 {
     unsigned n = mgmt_header(f, 0x00, bssid);
-    n = put_u16(f, n, CAP_ESS | CAP_PRIVACY | (channel <= 14 ? 0x0400 : 0)); /* an infrastructure station, with privacy (and short slot time at 2.4 GHz) */
+    n = put_u16(f, n, CAP_ESS | CAP_PRIVACY | (channel <= 14 ? 0x0400 : 0) | (use_ht() ? 0x0200 : 0)); /* an infrastructure station, with privacy (and short slot time at 2.4 GHz, QoS when it is HT) */
     n = put_u16(f, n, 10);                                                    /* listen interval, in beacon intervals */
     f[n++] = 0;                                                               /* SSID */
     f[n++] = (u8)ssid_len;
@@ -2949,6 +3018,45 @@ static unsigned build_assoc(u8 *f, const u8 *bssid, const char *ssid, unsigned s
                                0, 0};                         /* no capabilities: no management frame protection */
     for (int i = 0; i < 22; i++)
         f[n++] = RSN[i];
+    if (use_ht())
+    {
+        f[n++] = 45; /* HT capabilities: 20 MHz only, spatial multiplexing power save off, short guard interval at 20 MHz */
+        f[n++] = 26;
+        n = put_u16(f, n, 0x002C);
+        f[n++] = 0;    /* A-MPDU parameters: nothing to ask for */
+        f[n++] = 0xFF; /* the receive MCS set: MCS 0 to 7 (one spatial stream) */
+        for (int i = 0; i < 9; i++)
+            f[n++] = 0;
+        n = put_u16(f, n, 72); /* the highest rate we receive: 72 Mb/s */
+        for (int i = 0; i < 11; i++) /* the transmit MCS set, extended capabilities, beamforming, antenna selection: none */
+            f[n++] = 0;
+    }
+    if (use_vht())
+    {
+        f[n++] = 191; /* VHT capabilities: nothing special (no 160 MHz, no beamforming, no STBC), MCS 0 to 8 on one stream, none on the others */
+        f[n++] = 12;
+        n = put_u16(f, n, 0);
+        n = put_u16(f, n, 0);
+        n = put_u16(f, n, 0xFFFD); /* receive MCS map */
+        n = put_u16(f, n, 87);     /* the highest receive rate (20 MHz, short guard interval): 86.7 Mb/s */
+        n = put_u16(f, n, 0xFFFD); /* transmit MCS map */
+        n = put_u16(f, n, 87);
+        f[n++] = 199; /* operating mode notification: a VHT station must take 80 MHz, so it says up front that it listens on 20 MHz and on one stream only */
+        f[n++] = 1;
+        f[n++] = 0x00;
+    }
+    if (use_ht())
+    {
+        f[n++] = 221; /* WMM (QoS) information element: an HT station is a QoS station */
+        f[n++] = 7;
+        f[n++] = 0x00;
+        f[n++] = 0x50;
+        f[n++] = 0xF2;
+        f[n++] = 2;
+        f[n++] = 0;
+        f[n++] = 1;
+        f[n++] = 0;
+    }
     return n;
 }
 
@@ -2989,12 +3097,145 @@ static void connect_try(void)
     for (int i = 0; i < 6; i++)
         CONN.bssid[i] = ap->bssid[i];
     CONN.channel = ap->channel;
+    conn_set_caps(ap);
     tx_variant_setup(TXP.variant < 0 ? 0 : TXP.variant); /* the way the DMA was found to start, and fresh ring pointers */
     tune_for_tx(CONN.channel);
     rx_restart();
     wr32(R_RCR, RCR_RX_DEFAULT);
     wr8(R_CR, MAC_TRX_ENABLE);
     connect_exchange();
+}
+
+/* ---- stage 8: speed ----
+ * Until now every data frame went out at one fixed rate, 24 Mb/s (OFDM). The chip's firmware can choose the rate itself, for each frame, from what
+ * the access point can receive and how the last frames went (the "rate adaptation"): the driver tells it once, after the association,
+ *   - H2C "media status report" (0x01): station number 0 is now connected (Linux: rtw_fw_media_status_report), and
+ *   - H2C "RA info" (0x40): which rate table to use (rate id), whether the access point is VHT, short guard interval, the bandwidth, and the
+ *     mask of rates the access point accepts: bit 0..3 CCK, 4..11 OFDM, 12..19 HT MCS 0..7, 12..21 VHT MCS 0..9 (one spatial stream; the
+ *     second stream would be bits 20.. for HT and 22.. for VHT) (Linux: rtw_update_sta_info + rtw_fw_send_ra_info).
+ * After that a data frame says "use rate table N" (descriptor: rate id) and no fixed rate: the firmware picks from the mask, up and down.
+ * What limits the speed now: one antenna (one spatial stream) and 20 MHz, the width the radio is tuned for (set_channel_20). That is
+ * 72 Mb/s (HT, MCS 7, short guard interval) or 86 Mb/s (VHT, MCS 8) at best, from the fixed 24 before. 40 / 80 MHz need the radio and the
+ * baseband set up for the wider channel; not done. Frames are sent as QoS data frames then (an HT station is a QoS station): two more header bytes. */
+#define H2C_CMD_MEDIA_STATUS_RPT 0x01
+#define H2C_CMD_RA_INFO 0x40
+#define RATEID_BGN_20M_1SS 3
+#define RATEID_GN_N1SS 5
+#define RATEID_ARFR1_AC_1SS 10
+#define DESC_RATE_MCS7 0x13
+#define DESC_RATE_VHT1SS_MCS0 0x2C
+#define RA_MASK_OFDM 0x0FF0u
+#define RA_MASK_HT_1SS (0xFFu << 12)
+#define RA_MASK_VHT_1SS (0x3FFu << 12)
+
+
+/* one command of 8 bytes into the next mailbox, once the firmware has taken the last one from it: 0, or -1 */
+static int h2c_send(u32 w0, u32 w1)
+{
+    unsigned box = H2C_BOX;
+    int ok = 0;
+    for (int i = 0; i < 30 && !ok; i++) /* 3 ms in steps of 100 us, like Linux */
+    {
+        if (!((rd8(R_HMETFR) >> box) & 1))
+            ok = 1;
+        else
+            udelay(100);
+    }
+    if (!ok)
+        return -1;
+    wr32(R_HMEBOX0_EX + box * 4, w1);
+    wr32(R_HMEBOX0 + box * 4, w0);
+    H2C_BOX = (box + 1) & 3;
+    return 0;
+}
+
+static struct
+{
+    int on;           /* the firmware chooses the rates (an HT access point, rate not "legacy", and the firmware took the commands) */
+    int ht, vht;      /* what was offered and accepted */
+    unsigned rate_id; /* the rate table of the firmware */
+    unsigned tx_rate; /* the highest rate, written in the descriptor where the firmware ignores it */
+    unsigned sgi;
+    u32 mask;         /* the rate mask that was sent */
+} RA;
+
+static void media_status(int connected) { h2c_send(H2C_CMD_MEDIA_STATUS_RPT | (connected ? 1u << 8 : 0), 0); }
+
+/* after the association: tell the firmware about the access point. rtw_update_sta_info() for a station with one spatial stream at 20 MHz. */
+static void ra_start(void)
+{
+    RA.on = 0;
+    RA.ht = use_ht();
+    RA.vht = use_vht();
+    if (!RA.ht) /* an access point without HT, or "rate=legacy": the fixed rate stays */
+        return;
+    u32 mask = 0, bak;
+    unsigned rate_id, vht_mcs = 0;
+    if (RA.vht)
+    {
+        switch (CONN.vht_map & 3) /* the access point's receive MCS map, the first stream */
+        {
+        case 2:
+            mask = RA_MASK_VHT_1SS;
+            vht_mcs = 9;
+            break;
+        case 1:
+            mask = 0x1FFu << 12;
+            vht_mcs = 8;
+            break;
+        case 0:
+            mask = 0x0FFu << 12;
+            vht_mcs = 7;
+            break;
+        default:
+            RA.vht = 0; /* no VHT rate: HT it is */
+            break;
+        }
+    }
+    if (!RA.vht)
+        mask = (u32)CONN.ht_mcs0 << 12;
+    if (CONN.channel > 14)
+    {
+        mask |= CONN.rates & RA_MASK_OFDM;
+        bak = mask;
+        if (RA.vht)
+        {
+            mask &= RA_MASK_VHT_1SS | 0x10; /* with VHT only the 6 Mb/s OFDM rate stays beside it */
+            rate_id = RATEID_ARFR1_AC_1SS;
+        }
+        else
+        {
+            mask &= RA_MASK_HT_1SS | 0x30;
+            rate_id = RATEID_GN_N1SS;
+        }
+    }
+    else
+    {
+        mask |= CONN.rates & 0x0FFF;
+        bak = mask;
+        mask &= RA_MASK_HT_1SS | 0x05 | 0x10; /* HT at 2.4 GHz keeps CCK 1 and 5.5 and OFDM 6 beside it */
+        rate_id = RATEID_BGN_20M_1SS;
+    }
+    if ((mask & ~0x0FFFu) == 0) /* rtw_rate_mask_recover: never leave only legacy rates when the access point has more, and never nothing */
+        mask |= bak & ~0x0FFFu;
+    if (mask == 0)
+        mask |= bak & 0x0FFFu;
+    RA.rate_id = rate_id;
+    RA.mask = mask;
+    RA.sgi = (CONN.ht_cap >> 5) & 1; /* its short guard interval at 20 MHz */
+    RA.tx_rate = RA.vht ? DESC_RATE_VHT1SS_MCS0 + vht_mcs : DESC_RATE_MCS7;
+    /* station 0, the rate table, initial level 1, short GI, 20 MHz (0), no LDPC, update the mask, VHT, no power tracking */
+    u32 w0 = H2C_CMD_RA_INFO | rate_id << 16 | 1u << 21 | RA.sgi << 23 | (RA.vht ? 1u << 28 : 0) | 1u << 30;
+    RA.on = h2c_send(w0, mask) == 0;
+    if (RA.on)
+        media_status(1);
+}
+
+static void ra_stop(void)
+{
+    if (RA.on)
+        media_status(0); /* (Linux: when the station is removed) */
+    RA.on = 0;
 }
 
 /* authenticate, associate, 4-way handshake, keys in the chip; the chip is tuned to CONN.channel and CONN.bssid is the access point. The first
@@ -3005,7 +3246,7 @@ static void connect_exchange(void)
     CONN.auth_seen = CONN.assoc_seen = 0;
     CONN.auth_status = CONN.assoc_status = CONN.aid = CONN.dropped = 0;
     CONN.auth_tries = CONN.assoc_tries = 0;
-    u8 frame[160];
+    u8 frame[256];
     unsigned len = build_auth(frame, CONN.bssid);
     CONN.auth_tries = conn_exchange(frame, len, CONN.channel, &CONN.auth_seen);
     if (CONN.auth_seen && CONN.auth_status == 0)
@@ -3013,10 +3254,14 @@ static void connect_exchange(void)
         len = build_assoc(frame, CONN.bssid, CFG.ssid, CFG.ssid_len, CONN.channel);
         CONN.assoc_tries = conn_exchange(frame, len, CONN.channel, &CONN.assoc_seen);
         if (CONN.assoc_seen && CONN.assoc_status == 0)
+        {
+            ra_start(); /* (the firmware is told about the access point before the first data frame, as Linux does it when it adds the station) */
             handshake_run();
+        }
         link_try(); /* a handshake that worked and put the keys in the chip: the card stays connected */
         if (!link_is_up()) /* nothing worked out: tidy up */
         {
+            ra_stop();
             len = build_deauth(frame, CONN.bssid);
             if (tx_mgmt(frame, len, CONN.channel) == 0)
                 listen_ms(20);
@@ -3344,7 +3589,7 @@ static const u8 LLC_SNAP[6] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00};
 /* one prepared frame (802.11 header + CCMP header + LLC/SNAP + payload, no MIC, no FCS) into the best-effort queue; 0 once the chip fetched it */
 static int tx_be(const u8 *frame, unsigned len, unsigned seq)
 {
-    if (!D.ready || !D.stage || len < 24 + 8 + 8 || len > 24 + 8 + 8 + ETH_MAX)
+    if (!D.ready || !D.stage || len < 24 + 8 + 8 || len > 26 + 8 + 8 + ETH_MAX)
         return -1;
     unsigned rp = (rd32(R_TXBD_IDX_BEQ) >> 16) & 0xFFF;
     if ((LINK.be_wp + 1) % BEQ_RING_LEN == rp) /* the ring is full */
@@ -3355,9 +3600,9 @@ static int tx_be(const u8 *frame, unsigned len, unsigned seq)
     for (unsigned i = 0; i < len; i++)
         s[TX_DESC_SIZE + i] = frame[i];
     put32(d + 0, len | (TX_DESC_SIZE << 16) | BIT(26));                                              /* size, offset to the frame, last segment */
-    put32(d + 4, (unsigned)TX_QSEL_BE << 8 | (unsigned)TX_RATEID_G << 16 | 3u << 22);                /* MAC id 0, queue, rate id, security type 3 = AES */
-    put32(d + 12, BIT(8) | BIT(10));                                                                 /* the rate of this descriptor, no fallback */
-    put32(d + 16, RATE_24M);
+    put32(d + 4, (unsigned)TX_QSEL_BE << 8 | (RA.on ? RA.rate_id : (unsigned)TX_RATEID_G) << 16 | 3u << 22); /* MAC id 0, queue, rate id (the firmware's rate table, or the fixed-rate one), security type 3 = AES */
+    put32(d + 12, RA.on ? 0 : BIT(8) | BIT(10));                                                    /* the rate of this descriptor and no fallback, unless the firmware chooses */
+    put32(d + 16, RA.on ? RA.tx_rate : RATE_24M);
     put32(d + 36, (seq & 0xFFF) << 12);                                                              /* the sequence number we put in the header */
     u8 *bd = D.mem + Q_BE * PAGE + LINK.be_wp * 16;
     zero_bytes(bd, 16);
@@ -3386,9 +3631,9 @@ static int wifi_send(const void *eth, unsigned len)
     if (!LINK.up || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
         return -1;
     const u8 *e = (const u8 *)eth;
-    u8 f[24 + 8 + 8 + ETH_MAX];
+    u8 f[26 + 8 + 8 + ETH_MAX];
     unsigned n = 0;
-    f[n++] = 0x08; /* data */
+    f[n++] = RA.on ? 0x88 : 0x08; /* data (QoS data: an HT station sends those) */
     f[n++] = 0x41; /* to the distribution system, protected */
     f[n++] = 0;
     f[n++] = 0;
@@ -3401,6 +3646,11 @@ static int wifi_send(const void *eth, unsigned len)
     unsigned seq = LINK.seq++ & 0xFFF;
     f[n++] = (u8)(seq << 4);
     f[n++] = (u8)(seq >> 4);
+    if (RA.on)
+    {
+        f[n++] = 0; /* QoS control: traffic class 0 (best effort), normal acknowledgement, no A-MSDU */
+        f[n++] = 0;
+    }
     u64 pn = ++LINK.tx_pn;
     f[n++] = (u8)pn; /* the CCMP header: PN0, PN1, reserved, key id (0) with the "extended IV" bit, PN2 .. PN5 */
     f[n++] = (u8)(pn >> 8);
@@ -3448,6 +3698,11 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
         return 1;
     }
     unsigned hdr = 24 + ((fc0 & 0x80) ? 2 : 0) + ((fc1 & 0x80) ? 4 : 0);
+    if ((fc0 & 0x80) && (f[24] & 0x80)) /* QoS control: "A-MSDU present", several packets in one frame; the access point only does that after an ADDBA exchange, which is not answered */
+    {
+        LINK.rx_dropped++;
+        return 1;
+    }
     if (len < hdr + 8 + 8 + 2)
     {
         LINK.rx_dropped++;
@@ -3628,6 +3883,7 @@ static void keys_service(void)
 static void link_lost(u64 now)
 {
     LINK.up = 0;
+    ra_stop();
     LINK.fails = 0;
     LINK.backoff = LINK_RETRY_MIN_MS;
     LINK.next_try = now;
@@ -3648,6 +3904,7 @@ static void reconnect_try(void)
                 for (int i = 0; i < 6; i++)
                     CONN.bssid[i] = ap->bssid[i];
                 CONN.channel = ap->channel;
+                conn_set_caps(ap);
             }
         }
         tune_for_tx(CONN.channel); /* (the scan left the radio on its last channel) */
@@ -3778,6 +4035,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     RX.state = RXS_NOT_TRIED;
     LINK.up = 0;
     LINK.adapter = 0;
+    RA.on = 0;
     CONN.state = 0;
     TARGET.found = 0;
     HS.state = 0;
@@ -4120,6 +4378,8 @@ static void rtl8821ce_status(char *buf, unsigned cap)
         nic_puts(&t, " ch");
         nic_putd(&t, CONN.channel);
         nic_puts(&t, link_is_up() ? ", up" : ", reconnecting");
+        if (RA.on) /* the firmware chooses the rates: HT or VHT, at 20 MHz */
+            nic_puts(&t, RA.vht ? ", vht" : ", ht");
         nic_puts(&t, ", tx ");
         nic_putd(&t, LINK.tx_frames);
         nic_puts(&t, " rx ");
