@@ -35,6 +35,7 @@ try {
         @('I2C-HID discovery tests', 'tests/run_i2chid_tests.sh'),
         @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),
         @('Display adapter tests', 'tests/run_display_tests.sh'),
+        @('Network protocol tests', 'tests/run_netproto_tests.sh'),
         @('CPU load tests', 'tests/run_cpuload_tests.sh'),
         @('CPU information tests', 'tests/run_cpuinfo_tests.sh'),
         @('Virtual file system tests', 'tests/run_vfs_tests.sh'),

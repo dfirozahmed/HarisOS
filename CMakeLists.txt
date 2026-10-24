@@ -97,7 +97,8 @@ set(KERNEL_SOURCES
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/e1000.c               # network: Intel e1000 NIC driver (polled), raw Ethernet frames
-    kernel/net/net.c                 # network: boot self test (ARP request to the QEMU gateway)
+    kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
+    kernel/net/net.c                 # network: ARP cache, answering ARP / ping, ping, boot self test
     kernel/storage/blk.c             # block devices: sector I/O and the write lock
     kernel/storage/part.c            # partition tables (GPT, MBR)
     kernel/storage/ahci.c            # SATA SSD / hard disk driver (AHCI)
