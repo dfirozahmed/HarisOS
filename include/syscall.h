@@ -143,12 +143,21 @@
  *                  bytes, or -1, if the connection broke part way), SYS_READ receives (sleeps until something arrives; 0 = the server closed its
  *                  side and everything was read, -1 = reset or broken connection, or a signal handler ran) and SYS_CLOSE closes the connection and
  *                  frees the socket once no holder is left (fork copies the descriptor: both processes then share the connection). It cannot
- *                  be seeked, redirected or given to SYS_SPAWN. Only connections we open (no bind / listen / accept yet).
+ *                  be seeked, redirected or given to SYS_SPAWN. Servers use SYS_BIND, SYS_LISTEN and SYS_ACCEPT.
  *   SYS_CONNECT (55) rdi = socket descriptor, rsi = the server's IPv4 address as one number (a << 24 | b << 16 | c << 8 | d for a.b.c.d),
  *                  rdx = port 1 .. 65535. Waits for the TCP handshake (ARP, SYN, up to about 5 seconds, retrying). 0, or -1 (not a socket,
  *                  already connected, no answer, refused). Other threads keep running while it waits.
  *   SYS_RESOLVE (56) rdi = pointer to a NUL-terminated host name ("example.com") or dotted number ("10.0.2.2"): its IPv4 address in the form
  *                  SYS_CONNECT takes (0 .. 2^32-1), or -1 (no such name, no DNS server, no network, name too long or not valid).
+ *   SYS_BIND (57)  rdi = socket descriptor, rsi = local address (0 = any; the only value accepted), rdx = port 1 .. 65535: claims the port for this
+ *                  new socket. 0, or -1 (not a new socket, port already used by a listener, connection or other bound socket).
+ *   SYS_LISTEN (58) rdi = a bound socket descriptor, rsi = backlog (accepted, ignored: TCP_BACKLOG = 4 connections wait at most; a client
+ *                  that finds the queue full is not answered and tries again). From now on the port answers connection requests. 0, or -1.
+ *                  At most TCP_MAX_LISTENERS (4) ports listen at once.
+ *   SYS_ACCEPT (59) rdi = a listening socket descriptor, rsi = 0 or a pointer to a SysSockAddr (peer address as for SYS_CONNECT, and its port).
+ *                  Sleeps until a client has completed the handshake, then returns a NEW descriptor for that connection (read, write, close
+ *                  as for a connected socket); the listening one stays. -1: not a listening socket, bad pointer, no free socket (SOCK_MAX = 8 in all) or
+ *                  descriptor, or a signal handler ran during the wait. Closing the listening descriptor resets connections not accepted yet.
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
@@ -232,6 +241,9 @@
 #define SYS_SOCKET 54
 #define SYS_CONNECT 55
 #define SYS_RESOLVE 56
+#define SYS_BIND 57
+#define SYS_LISTEN 58
+#define SYS_ACCEPT 59
 
 /* SYS_SOCKET types */
 #define SYS_SOCK_STREAM 1 /* TCP */
@@ -286,6 +298,13 @@ typedef struct
     int stride;                 /* out: pixels per row (= width) */
     unsigned long long pixels;  /* out: address of the picture in this process */
 } SysGuiInfo;
+
+/* What SYS_ACCEPT fills in (the same layout in user/sys.h). */
+typedef struct
+{
+    unsigned ip;   /* the peer's IPv4 address, a << 24 | b << 16 | c << 8 | d */
+    unsigned port; /* the peer's port */
+} SysSockAddr;
 
 /* What the entry code saves on the kernel stack, lowest address first (the push order in syscall.c). */
 typedef struct

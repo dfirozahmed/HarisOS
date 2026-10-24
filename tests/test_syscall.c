@@ -671,6 +671,8 @@ int vfs_volume_of(int id)
 /* ---- sockets: a fake of sock.c (the real one is tested with tcp.c in test_tcp.c) ---- */
 #include "sock.h"
 static int FS_NET, FS_USED[SOCK_MAX], FS_REFS[SOCK_MAX], FS_CONN[SOCK_MAX];
+static int FS_BOUND[SOCK_MAX], FS_LISTEN[SOCK_MAX], FS_ACCEPT_WAITS, FS_CLIENTS, FS_ACCEPTED;
+static unsigned FS_BPORT[SOCK_MAX];
 static unsigned char FS_IP[4];
 static unsigned FS_PORT;
 static unsigned char FS_SENT[8192];
@@ -681,11 +683,12 @@ static void fake_sock_reset(void)
 {
     FS_NET = 1;
     for (int i = 0; i < SOCK_MAX; i++)
-        FS_USED[i] = FS_REFS[i] = FS_CONN[i] = 0;
+        FS_USED[i] = FS_REFS[i] = FS_CONN[i] = FS_BOUND[i] = FS_LISTEN[i] = 0;
     FS_PORT = 0;
     FS_SENT_N = FS_SEND_CALLS = FS_MAX_PIECE = FS_SEND_FAIL_AFTER = 0;
     FS_IN = "";
     FS_IN_POS = FS_WOULDBLOCKS = FS_ERR = 0;
+    FS_ACCEPT_WAITS = FS_CLIENTS = FS_ACCEPTED = 0;
 }
 int sock_create(void)
 {
@@ -696,6 +699,7 @@ int sock_create(void)
         {
             FS_USED[i] = 1;
             FS_REFS[i] = 0;
+            FS_BOUND[i] = FS_LISTEN[i] = FS_CONN[i] = 0;
             return i;
         }
     return -1;
@@ -704,11 +708,11 @@ void sock_ref(int id) { if (id >= 0 && id < SOCK_MAX && FS_USED[id]) FS_REFS[id]
 void sock_unref(int id)
 {
     if (id >= 0 && id < SOCK_MAX && FS_USED[id] && --FS_REFS[id] <= 0)
-        FS_USED[id] = FS_CONN[id] = 0;
+        FS_USED[id] = FS_CONN[id] = FS_BOUND[id] = FS_LISTEN[id] = 0;
 }
 int sock_connect(int id, const unsigned char ip[4], unsigned port)
 {
-    if (id < 0 || id >= SOCK_MAX || !FS_USED[id] || FS_CONN[id] || port == 0 || port > 65535)
+    if (id < 0 || id >= SOCK_MAX || !FS_USED[id] || FS_CONN[id] || FS_BOUND[id] || port == 0 || port > 65535)
         return -1;
     memcpy(FS_IP, ip, 4);
     FS_PORT = port;
@@ -753,6 +757,56 @@ int sock_resolve(const char *name, unsigned char ip[4])
         return 1;
     }
     return 0;
+}
+
+/* the server side of the fake: bound / listening state per socket, and clients that "arrive" for sock_accept */
+int sock_bind(int id, unsigned port)
+{
+    if (id < 0 || id >= SOCK_MAX || !FS_USED[id] || FS_CONN[id] || FS_BOUND[id] || port == 0 || port > 65535)
+        return -1;
+    for (int i = 0; i < SOCK_MAX; i++)
+        if (FS_USED[i] && FS_BOUND[i] && FS_BPORT[i] == port)
+            return -1;
+    FS_BOUND[id] = 1;
+    FS_BPORT[id] = port;
+    return 0;
+}
+int sock_listen(int id)
+{
+    if (id < 0 || id >= SOCK_MAX || !FS_USED[id] || !FS_BOUND[id] || FS_LISTEN[id])
+        return -1;
+    FS_LISTEN[id] = 1;
+    return 0;
+}
+int sock_accept(int id, unsigned char ip[4], unsigned *port)
+{
+    if (id < 0 || id >= SOCK_MAX || !FS_USED[id] || !FS_LISTEN[id])
+        return -1;
+    if (FS_ACCEPT_WAITS > 0)
+    {
+        FS_ACCEPT_WAITS--;
+        return SOCK_WOULDBLOCK;
+    }
+    if (FS_CLIENTS == 0)
+        return -1; /* (the real one would keep waiting; the fake ends the test's loop) */
+    int n = -1;
+    for (int i = 0; i < SOCK_MAX; i++)
+        if (!FS_USED[i])
+        {
+            n = i;
+            break;
+        }
+    if (n < 0)
+        return -1;
+    FS_CLIENTS--;
+    FS_USED[n] = 1;
+    FS_REFS[n] = 0;
+    FS_CONN[n] = 1;
+    FS_BOUND[n] = FS_LISTEN[n] = 0;
+    unsigned char a[4] = {10, 0, 2, 2};
+    memcpy(ip, a, 4);
+    *port = 4321 + (unsigned)FS_ACCEPTED++;
+    return n;
 }
 
 /* ---- helpers ---- */
@@ -2278,6 +2332,77 @@ int main(void)
         static char longname[400];
         memset(longname, 'a', sizeof longname - 1);
         CHECK(call(SYS_RESOLVE, U(longname), 0, 0) == -1);                              /* does not fit the 256 byte buffer */
+    }
+
+    /* ================= sockets: the server calls ================= */
+    reset();
+    {
+        char rb[64];
+        SysSockAddr addr;
+        long long ls = call(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0);
+        long long other = call(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0);
+        CHECK(ls == 3 && other == 4);
+
+        /* bind: a port 1 .. 65535 and any address (0) */
+        CHECK(call(SYS_BIND, (ull)ls, 0, 0) == -1 && call(SYS_BIND, (ull)ls, 0, 65536) == -1);
+        CHECK(call(SYS_BIND, (ull)ls, 1, 9000) == -1);                 /* only the any address */
+        CHECK(call(SYS_BIND, 1, 0, 9000) == -1 && call(SYS_BIND, 99, 0, 9000) == -1);
+        CHECK(call(SYS_LISTEN, (ull)ls, 4, 0) == -1);                  /* not bound yet */
+        CHECK(call(SYS_ACCEPT, (ull)ls, 0, 0) == -1);                  /* not listening */
+        CHECK(call(SYS_BIND, (ull)ls, 0, 9000) == 0);
+        CHECK(call(SYS_BIND, (ull)ls, 0, 9001) == -1);                 /* bound already */
+        CHECK(call(SYS_BIND, (ull)other, 0, 9000) == -1);              /* port taken */
+        CHECK(call(SYS_LISTEN, (ull)ls, 0x100000000ULL, 0) == -1);     /* silly backlog */
+        CHECK(call(SYS_LISTEN, (ull)ls, 4, 0) == 0);
+        CHECK(call(SYS_LISTEN, (ull)ls, 4, 0) == -1);                  /* listening already */
+        CHECK(call(SYS_CONNECT, (ull)ls, 0x0A000202ULL, 80) == -1);   /* a listener cannot connect */
+
+        /* accept: sleeps (yields) until a client is there, then a NEW descriptor; the listener stays */
+        FS_CLIENTS = 1;
+        FS_ACCEPT_WAITS = 3;
+        YIELDS = 0;
+        memset(&addr, 0xAA, sizeof addr);
+        long long c = call(SYS_ACCEPT, (ull)ls, U(&addr), 0);
+        CHECK(c == 5 && YIELDS == 3 && FS_REFS[2] == 1);               /* (the fake gave it table entry 2) */
+        CHECK(PROC.file[2].node == PROCESS_SOCK_NODE + 2 && pfile_is_sock(&PROC.file[2]));
+        CHECK(addr.ip == 0x0A000202u && addr.port == 4321);
+        CHECK(FS_LISTEN[0] && FS_USED[0]);                             /* the listening socket is still there */
+        FS_IN = "GET / HTTP/1.0";
+        CHECK(call(SYS_READ, (ull)c, U(rb), sizeof rb) == 14 && memcmp(rb, "GET /", 5) == 0);
+        CHECK(call(SYS_WRITE, (ull)c, U("200 OK"), 6) == 6 && FS_SENT_N == 6); /* it reads and writes like a connected socket */
+        CHECK(call(SYS_CLOSE, (ull)c, 0, 0) == 0 && !FS_USED[2]);
+
+        /* without a pointer for the peer; a bad pointer is refused and the connection stays queued */
+        FS_CLIENTS = 1;
+        CHECK((c = call(SYS_ACCEPT, (ull)ls, 0, 0)) >= 3);
+        CHECK(call(SYS_CLOSE, (ull)c, 0, 0) == 0);
+        FS_CLIENTS = 1;
+        USER_OK = 0;
+        CHECK(call(SYS_ACCEPT, (ull)ls, U(&addr), 0) == -1 && FS_CLIENTS == 1);
+        USER_OK = 1;
+
+        /* no client, no free socket, no free descriptor... a signal ends the wait */
+        FS_CLIENTS = 0;
+        CHECK(call(SYS_ACCEPT, (ull)ls, 0, 0) == -1);
+        FS_CLIENTS = 1;
+        long long fill[SOCK_MAX];
+        int nf = 0;
+        while (nf < SOCK_MAX && (fill[nf] = call(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0)) >= 3)
+            nf++;
+        CHECK(call(SYS_ACCEPT, (ull)ls, 0, 0) == -1 && FS_CLIENTS == 1); /* the table is full: the client waits */
+        for (int i = 0; i < nf; i++)
+            call(SYS_CLOSE, (ull)fill[i], 0, 0);
+        FS_ACCEPT_WAITS = 1000000;
+        YIELD_ACTION = raise_int_yield;
+        CHECK(call(SYS_ACCEPT, (ull)ls, 0, 0) == -1);
+        PROC.sig_pending = 0;
+        FS_ACCEPT_WAITS = 0;
+        YIELD_ACTION = 0;
+
+        /* closing the listening descriptor frees its port for another socket */
+        CHECK(call(SYS_CLOSE, (ull)ls, 0, 0) == 0);
+        CHECK(call(SYS_BIND, (ull)other, 0, 9000) == 0);
+        call(SYS_CLOSE, (ull)other, 0, 0);
     }
 
     /* ================= semaphores ================= */

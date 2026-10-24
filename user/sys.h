@@ -63,6 +63,9 @@
 #define SYS_SOCKET 54
 #define SYS_CONNECT 55
 #define SYS_RESOLVE 56
+#define SYS_BIND 57
+#define SYS_LISTEN 58
+#define SYS_ACCEPT 59
 #define SYS_SOCK_STREAM 1
 #define SYS_GUI_DESTROY 0
 #define SYS_GUI_SET_TITLE 1
@@ -197,6 +200,19 @@ static inline long long sys_send(int fd, const void *buf, usize len)
 }
 /* receive up to len bytes: how many (>0), 0 = the server closed and everything was read, -1 = error. Waits for the first byte. */
 static inline long long sys_recv(int fd, void *buf, usize len) { return sys_read(fd, buf, len); }
+/* ---- sockets, server side ---- */
+/* the peer's address and port, as sys_accept fills them in */
+typedef struct
+{
+    unsigned ip; /* a << 24 | b << 16 | c << 8 | d, like SOCK_IP */
+    unsigned port;
+} SockAddr;
+/* claim a local port (1 .. 65535) for a new socket: 0, or -1 (port in use) */
+static inline long long sys_bind(int fd, unsigned port) { return syscall3(SYS_BIND, fd, 0, port); }
+/* start answering connection requests on the bound port: 0, or -1. backlog is ignored (the kernel keeps 4 waiting) */
+static inline long long sys_listen(int fd, int backlog) { return syscall3(SYS_LISTEN, fd, backlog, 0); }
+/* wait for a client: a NEW descriptor for the connection (read / write / close it), or -1. addr may be NULL. */
+static inline long long sys_accept(int fd, SockAddr *addr) { return syscall3(SYS_ACCEPT, fd, (long long)(usize)addr, 0); }
 /* ---- GUI windows (gui.h, SYS_GUI_* in include/syscall.h) ---- */
 #define GUI_EV_KEY 1        /* key, ch, pressed, mods (KEY_* values of keyboard.h: KEY_ESC is 256) */
 #define GUI_EV_MOUSE_MOVE 2 /* x, y, buttons (bit 0 = left, bit 1 = right) */

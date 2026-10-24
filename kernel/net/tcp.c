@@ -23,6 +23,7 @@ typedef enum
 {
     ST_CLOSED,
     ST_SYN_SENT,
+    ST_SYN_RCVD,   /* a server got a SYN and answered SYN+ACK; waits for the third message of the handshake */
     ST_ESTABLISHED,
     ST_FIN_WAIT_1, /* we sent FIN, not yet acknowledged */
     ST_FIN_WAIT_2, /* our FIN was acknowledged, waiting for the peer's FIN */
@@ -52,6 +53,8 @@ typedef struct
     unsigned rcv_head, rcv_count;
     int rcv_fin; /* the peer's FIN arrived and everything before it was received */
     int err;     /* reset, or too many retransmissions */
+    int embryo;   /* made by a SYN to a listening port and not handed out by tcp_accept yet: nobody owns it, so it is freed on failure */
+    int listener; /* ... made by this listener (index in LISTENERS) */
 } Sock;
 
 static Sock SOCKS[TCP_MAX_SOCKETS];
@@ -130,6 +133,73 @@ static void send_rst_for(const TcpSeg *g)
         net_send(f, n);
 }
 
+/* ---- listening ports ---------------------------------------------------------------------------------------------------------- */
+/* A listener waits for SYNs to one port. Each SYN makes an "embryo" connection in SYN_RCVD (a slot of SOCKS) that answers SYN+ACK; when the
+ * client's ACK completes the handshake the embryo is ESTABLISHED and goes into the listener's queue; tcp_accept takes it out. The embryos
+ * and the queued connections together are at most TCP_BACKLOG: a SYN beyond that is dropped (the client sends it again later). */
+typedef struct
+{
+    int used;
+    unsigned port;
+    int queue[TCP_BACKLOG]; /* handles of established connections waiting for tcp_accept, oldest first */
+    int qn;
+} Listener;
+
+static Listener LISTENERS[TCP_MAX_LISTENERS];
+
+static Listener *find_listener(unsigned port)
+{
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++)
+        if (LISTENERS[i].used && LISTENERS[i].port == port)
+            return &LISTENERS[i];
+    return 0;
+}
+
+/* Is the local port taken: a listener on it, or a live connection that uses it? */
+static int port_busy(unsigned port)
+{
+    if (find_listener(port))
+        return 1;
+    for (int i = 0; i < TCP_MAX_SOCKETS; i++)
+        if (SOCKS[i].used && SOCKS[i].state != ST_CLOSED && SOCKS[i].lport == port)
+            return 1;
+    return 0;
+}
+
+/* A SYN for a listening port: start the handshake as the server. Dropped silently when there is no room (a client repeats its SYN). */
+static void accept_syn(int li, const TcpSeg *g)
+{
+    int backlog = 0, h = -1;
+    for (int i = 0; i < TCP_MAX_SOCKETS; i++)
+    {
+        if (SOCKS[i].used && SOCKS[i].embryo && SOCKS[i].listener == li)
+            backlog++;
+        if (!SOCKS[i].used && h < 0)
+            h = i;
+    }
+    if (h < 0 || backlog >= TCP_BACKLOG)
+        return;
+    Sock *s = &SOCKS[h];
+    volatile unsigned char *z = (volatile unsigned char *)s; /* no memset in a freestanding build */
+    for (unsigned i = 0; i < sizeof *s; i++)
+        z[i] = 0;
+    s->used = 1;
+    s->embryo = 1;
+    s->listener = li;
+    copy(s->ip, g->src_ip, 4);
+    copy(s->mac, g->src_mac, 6); /* the sender of the frame is the next hop for the answer, whether the client is near or behind a router */
+    s->port = g->src_port;
+    s->lport = g->dst_port;
+    s->rcv_nxt = g->seq + 1;
+    s->peer_wnd = g->window;
+    s->peer_mss = g->mss ? g->mss : DEFAULT_MSS;
+    if (s->peer_mss > TCP_MAX_PAYLOAD)
+        s->peer_mss = TCP_MAX_PAYLOAD;
+    s->snd_una = s->snd_nxt = (unsigned)timer_us() * 250u + s->port + s->lport;
+    s->state = ST_SYN_RCVD;
+    emit(s, TCP_SYN | TCP_ACK, 0, 0); /* kept and repeated until the client's ACK arrives */
+}
+
 static Sock *find(const TcpSeg *g)
 {
     for (int i = 0; i < TCP_MAX_SOCKETS; i++)
@@ -169,9 +239,59 @@ void tcp_input(const TcpSeg *g)
     Sock *s = find(g);
     if (!s)
     {
+        if ((g->flags & (TCP_SYN | TCP_ACK | TCP_RST)) == TCP_SYN) /* a new connection to a port we listen on? */
+        {
+            for (int i = 0; i < TCP_MAX_LISTENERS; i++)
+                if (LISTENERS[i].used && LISTENERS[i].port == g->dst_port)
+                {
+                    accept_syn(i, g);
+                    return;
+                }
+        }
         if (!(g->flags & TCP_RST))
             send_rst_for(g);
         return;
+    }
+
+    if (s->state == ST_SYN_RCVD)
+    {
+        if (g->flags & TCP_RST)
+        {
+            if (g->seq == s->rcv_nxt) /* the client gives up: forget the half-open connection */
+            {
+                s->used = 0;
+                s->state = ST_CLOSED;
+                s->rtx = 0;
+            }
+            return;
+        }
+        if (g->flags & TCP_SYN) /* the client repeats its SYN (our SYN+ACK was lost): answer again */
+        {
+            send_raw(s, s->snd_una, s->rtx_flags, 0, 0);
+            return;
+        }
+        if (!(g->flags & TCP_ACK))
+            return;
+        if (g->ack != s->snd_nxt) /* not the answer to our SYN+ACK */
+        {
+            send_rst_for(g);
+            return;
+        }
+        /* the handshake is done: the connection is established and waits in the listener's queue. The same segment may
+         * carry the first data; it is handled below like in any established connection. */
+        s->snd_una = g->ack;
+        s->rtx = 0;
+        s->peer_wnd = g->window;
+        s->state = ST_ESTABLISHED;
+        Listener *l = &LISTENERS[s->listener];
+        if (l->used && l->qn < TCP_BACKLOG)
+            l->queue[l->qn++] = (int)(s - SOCKS);
+        else /* the listener is gone (cannot happen: tcp_unlisten frees its embryos) */
+        {
+            s->used = 0;
+            s->state = ST_CLOSED;
+            return;
+        }
     }
 
     if (s->state == ST_SYN_SENT)
@@ -283,7 +403,14 @@ void tcp_tick(void)
             continue;
         if (s->retries >= MAX_RETRIES)
         {
-            abort_conn(s);
+            if (s->state == ST_SYN_RCVD) /* the client never completed the handshake: nobody knows this connection, just forget it */
+            {
+                s->used = 0;
+                s->state = ST_CLOSED;
+                s->rtx = 0;
+            }
+            else
+                abort_conn(s);
             continue;
         }
         send_raw(s, s->snd_una, s->rtx_flags, s->rtx_data, s->rtx_len);
@@ -318,9 +445,12 @@ int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
     copy(s->ip, ip, 4);
     copy(s->mac, mac, 6);
     s->port = port;
-    s->lport = NEXT_PORT++;
-    if (NEXT_PORT > 60000)
-        NEXT_PORT = 40000;
+    do /* a port that is not a listener's and not in use */
+    {
+        s->lport = NEXT_PORT++;
+        if (NEXT_PORT > 60000)
+            NEXT_PORT = 40000;
+    } while (port_busy(s->lport));
     /* the first sequence number: from the clock, so a new connection on a reused port does not mix with an old one
      * (not unpredictable enough for security, which is fine for now) */
     s->snd_una = s->snd_nxt = (unsigned)timer_us() * 250u + s->lport;
@@ -441,4 +571,66 @@ void tcp_close(int h)
         send_raw(s, s->snd_nxt, TCP_RST | TCP_ACK, 0, 0); /* we give up waiting: tell the peer the connection is gone */
     s->used = 0;
     s->state = ST_CLOSED;
+}
+
+/* ---- server side ---------------------------------------------------------------------------------------------------------------- */
+int tcp_listen(unsigned port)
+{
+    if (port == 0 || port > 65535 || port_busy(port))
+        return -1;
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++)
+        if (!LISTENERS[i].used)
+        {
+            LISTENERS[i].used = 1;
+            LISTENERS[i].port = port;
+            LISTENERS[i].qn = 0;
+            return i;
+        }
+    return -1;
+}
+
+int tcp_port_busy(unsigned port) { return port_busy(port); }
+
+int tcp_accept(int l)
+{
+    if (l < 0 || l >= TCP_MAX_LISTENERS || !LISTENERS[l].used)
+        return -1;
+    Listener *L = &LISTENERS[l];
+    if (L->qn == 0)
+        return -2; /* nothing yet: ask again later (net_poll brings the handshakes forward) */
+    int h = L->queue[0];
+    for (int i = 1; i < L->qn; i++)
+        L->queue[i - 1] = L->queue[i];
+    L->qn--;
+    SOCKS[h].embryo = 0; /* from now on the program owns it: tcp_close frees it */
+    return h;
+}
+
+void tcp_unlisten(int l)
+{
+    if (l < 0 || l >= TCP_MAX_LISTENERS || !LISTENERS[l].used)
+        return;
+    LISTENERS[l].used = 0;
+    LISTENERS[l].qn = 0;
+    /* connections that were started or finished but never accepted have no owner: reset and forget them */
+    for (int i = 0; i < TCP_MAX_SOCKETS; i++)
+    {
+        Sock *s = &SOCKS[i];
+        if (!s->used || !s->embryo || s->listener != l)
+            continue;
+        if (s->state != ST_CLOSED)
+            send_raw(s, s->snd_nxt, TCP_RST | TCP_ACK, 0, 0);
+        s->used = 0;
+        s->state = ST_CLOSED;
+        s->rtx = 0;
+    }
+}
+
+int tcp_peer(int h, unsigned char ip[4], unsigned *port)
+{
+    if (!valid(h))
+        return -1;
+    copy(ip, SOCKS[h].ip, 4);
+    *port = SOCKS[h].port;
+    return 0;
 }

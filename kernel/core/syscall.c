@@ -1334,6 +1334,64 @@ static long long sys_resolve(const SyscallFrame *f)
     return (long long)((ull)ip[0] << 24 | (ull)ip[1] << 16 | (ull)ip[2] << 8 | ip[3]);
 }
 
+/* SYS_BIND: rdi = socket descriptor, rsi = local address (0 = any; nothing else is accepted: there is one address), rdx = port 1 .. 65535.
+ * Claims the port for this socket. 0, or -1 (not a new socket, port in use, bad port). */
+static long long sys_bind(const SyscallFrame *f)
+{
+    int s = sock_of(process_current(), f->rdi);
+    if (s < 0 || f->rsi != 0 || f->rdx == 0 || f->rdx > 65535)
+        return -1;
+    return sock_bind(s, (unsigned)f->rdx);
+}
+
+/* SYS_LISTEN: rdi = a bound socket descriptor, rsi = backlog (accepted and ignored: the kernel keeps TCP_BACKLOG connections waiting).
+ * From now on the port answers connection requests. 0, or -1 (not bound, no free listener). */
+static long long sys_listen(const SyscallFrame *f)
+{
+    int s = sock_of(process_current(), f->rdi);
+    if (s < 0 || f->rsi > 0xFFFFFFFFULL)
+        return -1;
+    return sock_listen(s);
+}
+
+/* SYS_ACCEPT: rdi = a listening socket descriptor, rsi = 0 or a pointer to a SysSockAddr that gets the peer's address and port. Sleeps (the other
+ * threads run) until a client has completed the handshake, then returns a NEW descriptor for that connection. -1: not a listening socket, bad
+ * pointer, no free socket or descriptor, or a signal handler ran during the wait. */
+static long long sys_accept(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    Process *p = process_current();
+    int s = sock_of(p, f->rdi);
+    if (s < 0 || !as || (f->rsi && !aspace_user_ok(as, f->rsi, sizeof(SysSockAddr), 1)))
+        return -1;
+    int slot = process_file_slot(p); /* a free entry; the list grows when all are in use */
+    if (slot < 0)
+        return -1;
+    unsigned char ip[4];
+    unsigned port = 0;
+    int n;
+    while ((n = sock_accept(s, ip, &port)) == SOCK_WOULDBLOCK)
+    {
+        task_yield();
+        if (sig_interrupted(p))
+            return -1;
+    }
+    if (n < 0)
+        return -1;
+    p->file[slot].node = PROCESS_SOCK_NODE + n;
+    p->file[slot].pos = 0;
+    p->file[slot].flags = 0;
+    sock_ref(n);
+    if (f->rsi)
+    {
+        SysSockAddr a;
+        a.ip = (unsigned)ip[0] << 24 | (unsigned)ip[1] << 16 | (unsigned)ip[2] << 8 | ip[3];
+        a.port = port;
+        copy_to_user(f->rsi, (const char *)&a, sizeof a);
+    }
+    return PROCESS_FD_FIRST + slot;
+}
+
 /* ---- semaphores -------------------------------------------------------------------------------------------------------------- */
 /* SYS_SEM_OPEN: rdi = name, rsi = flags (SYS_CREATE, SYS_EXCL), rdx = the starting count for one that is made (0 .. 2^31-1).
  * A descriptor for the semaphore, or -1. SYS_CLOSE lets go; fork copies the descriptor. */
@@ -1866,6 +1924,12 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_connect(f);
     case SYS_RESOLVE:
         return sys_resolve(f);
+    case SYS_BIND:
+        return sys_bind(f);
+    case SYS_LISTEN:
+        return sys_listen(f);
+    case SYS_ACCEPT:
+        return sys_accept(f);
     case SYS_SIGACTION:
         return sys_sigaction(f);
     case SYS_SIGRETURN:

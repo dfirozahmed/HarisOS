@@ -29,16 +29,35 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
     CHECK(sys_resolve((const char *)0) == -1);                      /* a bad pointer */
 
     /* the table: SOCK_MAX sockets, then no more; closing gives them back */
-    long long all[8];
+    long long all[10];
     int n = 0;
-    while (n < 8 && (all[n] = sys_socket()) >= 0)
+    while (n < 10 && (all[n] = sys_socket()) >= 0)
         n++;
-    CHECK(n == 4);
+    CHECK(n == 8);
     for (int i = 0; i < n; i++)
         sys_close((int)all[i]);
     s = sys_socket();
     CHECK(s >= 0);
     sys_close((int)s);
+
+    /* the server calls: order and arguments (accept itself would wait for a client, so it is only tried where it must refuse) */
+    long long a = sys_socket(), b = sys_socket();
+    CHECK(a >= 0 && b >= 0);
+    CHECK(sys_listen((int)a, 4) == -1);                  /* not bound yet */
+    CHECK(sys_accept((int)a, 0) == -1);                  /* not listening */
+    CHECK(sys_bind((int)a, 0) == -1 && sys_bind((int)a, 70000) == -1);
+    CHECK(sys_bind(1, 9000) == -1);                      /* the console is no socket */
+    CHECK(sys_bind((int)a, 9000) == 0);
+    CHECK(sys_bind((int)a, 9001) == -1);                 /* already bound */
+    CHECK(sys_bind((int)b, 9000) == -1);                 /* the port is taken, even before listen */
+    CHECK(sys_listen((int)a, 4) == 0);
+    CHECK(sys_listen((int)a, 4) == -1);                  /* already listening */
+    CHECK(sys_bind((int)b, 9000) == -1);
+    CHECK(sys_connect((int)a, SOCK_IP(10, 0, 2, 2), 80) == -1); /* a listener cannot connect */
+    CHECK(sys_write((int)a, "x", 1) == -1 && sys_read((int)a, buf, sizeof buf) == -1);
+    CHECK(sys_close((int)a) == 0);
+    CHECK(sys_bind((int)b, 9000) == 0);                  /* closing the listener gave the port back */
+    sys_close((int)b);
 
     /* the real thing, if the internet is there */
     long long ip = sys_resolve("example.com");

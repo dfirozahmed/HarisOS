@@ -138,11 +138,52 @@ static void srv_on_frame(const Frame *fr)
     }
 }
 
+/* ---- the fake client (for the listening tests): CLI_HOOK replaces the fake server, it sees every frame we send ---- */
+static void (*CLI_HOOK)(const Frame *);
+#define LPORT 8080
+
+static void cli_inject(unsigned cport, unsigned flags, unsigned seq, unsigned ack, const void *data, unsigned len, unsigned mss)
+{
+    unsigned char f[1600];
+    unsigned n = tcp_build(f, MAC_S, MAC_C, IP_S, IP_C, cport, LPORT, seq, ack, flags, 4000, mss, 1,
+                           (const unsigned char *)data, len);
+    TcpSeg g;
+    CHECK(n && tcp_parse(f, n, &g));
+    tcp_input(&g);
+}
+
+/* the sequence number of our SYN+ACK to the client at this port (the last one) */
+static unsigned synack_of(unsigned cport)
+{
+    unsigned seq = 0;
+    for (unsigned i = 0; i < QN; i++)
+    {
+        TcpSeg g;
+        if (tcp_parse(Q[i].d, Q[i].n, &g) && g.dst_port == cport && g.flags == (TCP_SYN | TCP_ACK))
+            seq = g.seq;
+    }
+    return seq;
+}
+
+/* acknowledges whatever data or FIN we send, as a client that reads everything would */
+static void cli_auto_ack(const Frame *fr)
+{
+    TcpSeg g;
+    if (tcp_parse(fr->d, fr->n, &g) && g.src_port == LPORT && (g.payload_len || (g.flags & TCP_FIN)))
+        cli_inject(g.dst_port, TCP_ACK, g.ack, g.seq + g.payload_len + ((g.flags & TCP_FIN) ? 1 : 0), 0, 0, 0);
+}
+
 int net_poll(void)
 {
     NOW += 10;
     while (QDONE < QN)
-        srv_on_frame(&Q[QDONE++]);
+    {
+        const Frame *fr_ = &Q[QDONE++];
+        if (CLI_HOOK)
+            CLI_HOOK(fr_);
+        else
+            srv_on_frame(fr_);
+    }
     tcp_tick();
     return 0;
 }
@@ -380,6 +421,146 @@ int main(void)
     CHECK(S.client_fin);
     CHECK(count_frames(TCP_FIN, TCP_RST, 0) == 1);
     CHECK(count_frames(TCP_RST, 0, 0) == 0); /* it closed cleanly, no reset needed */
+
+    /* ================= the server side: listen, accept ================= */
+    CLI_HOOK = cli_auto_ack;
+    {
+        TcpSeg sa;
+        unsigned char peer_ip[4];
+        unsigned peer_port;
+        const unsigned CS = 1000; /* the client's first sequence number */
+
+        /* 14. a whole connection: handshake, data both ways, the client closes first, then we */
+        begin();
+        int l = tcp_listen(LPORT);
+        CHECK(l == 0 && tcp_listen(LPORT) == -1 && tcp_port_busy(LPORT)); /* a port can be listened on once */
+        CHECK(tcp_listen(0) == -1 && tcp_listen(70000) == -1);
+        CHECK(tcp_accept(l) == -2 && tcp_accept(5) == -1);
+        cli_inject(5555, TCP_SYN, CS, 0, 0, 0, 1200);
+        CHECK(last_seg(&sa) && sa.flags == (TCP_SYN | TCP_ACK) && sa.ack == CS + 1 && sa.mss == 1460);
+        CHECK(sa.src_port == LPORT && sa.dst_port == 5555 && memcmp(sa.dst_mac, MAC_S, 6) == 0);
+        CHECK(tcp_accept(l) == -2); /* the handshake is not finished */
+        unsigned iss = sa.seq;
+        cli_inject(5555, TCP_ACK, CS + 1, iss + 1, 0, 0, 0);
+        int c = tcp_accept(l);
+        CHECK(c >= 0 && tcp_accept(l) == -2);
+        CHECK(tcp_peer(c, peer_ip, &peer_port) == 0 && memcmp(peer_ip, IP_S, 4) == 0 && peer_port == 5555);
+        cli_inject(5555, TCP_ACK | TCP_PSH, CS + 1, iss + 1, "hello", 5, 0);
+        CHECK(last_seg(&sa) && sa.flags == TCP_ACK && sa.ack == CS + 6); /* acknowledged */
+        CHECK(read_all(c, buf, 5, 50) == 5 && memcmp(buf, "hello", 5) == 0);
+        CHECK(tcp_send(c, "world!", 6, 2000) == 6);                      /* the client acknowledges it */
+        CHECK(count_frames(TCP_PSH, 0, 1) == 1);
+        cli_inject(5555, TCP_FIN | TCP_ACK, CS + 6, iss + 7, 0, 0, 0);
+        CHECK(tcp_recv(c, buf, 10, 50) == 0); /* end of stream */
+        tcp_close(c);                          /* sends our FIN, the client acknowledges it: closed */
+        CHECK(count_frames(TCP_FIN, TCP_RST, 0) == 1 && count_frames(TCP_RST, 0, 0) == 0); /* our FIN (the client's was injected, not sent) */
+        CHECK(tcp_peer(c, peer_ip, &peer_port) == -1); /* the handle is gone */
+        tcp_unlisten(l);
+
+        /* 15. our SYN+ACK is lost: it is sent again after a second; a repeated SYN gets it at once */
+        begin();
+        l = tcp_listen(LPORT);
+        cli_inject(5555, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == 1);
+        unsigned long long t0 = NOW;
+        while (NOW - t0 < 1100)
+            net_poll();
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == 2);
+        cli_inject(5555, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == 3);
+        CHECK(last_seg(&sa));
+        cli_inject(5555, TCP_ACK, CS + 1, sa.seq + 1, 0, 0, 0);
+        c = tcp_accept(l);
+        CHECK(c >= 0 && count_frames(TCP_SYN | TCP_ACK, 0, 0) == 3);
+        tcp_close(c);
+        tcp_unlisten(l);
+
+        /* 16. the backlog: TCP_BACKLOG half open or waiting connections, a SYN beyond that is dropped */
+        begin();
+        l = tcp_listen(LPORT);
+        for (unsigned i = 0; i < TCP_BACKLOG; i++)
+            cli_inject(6000 + i, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == TCP_BACKLOG);
+        cli_inject(6100, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == TCP_BACKLOG && count_frames(TCP_RST, 0, 0) == 0); /* ignored */
+        for (unsigned i = 0; i < 2; i++) /* two of them complete: they wait in the queue, still counted */
+            for (unsigned k = 0; k < QN; k++)
+                if (tcp_parse(Q[k].d, Q[k].n, &sa) && sa.dst_port == 6000 + i && (sa.flags & TCP_SYN))
+                    cli_inject(6000 + i, TCP_ACK, CS + 1, sa.seq + 1, 0, 0, 0);
+        cli_inject(6100, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == TCP_BACKLOG);
+        int h1 = tcp_accept(l); /* taking one out makes room */
+        CHECK(h1 >= 0 && tcp_peer(h1, peer_ip, &peer_port) == 0 && peer_port == 6000); /* the oldest first */
+        cli_inject(6100, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == TCP_BACKLOG + 1);
+        int h2 = tcp_accept(l);
+        CHECK(h2 >= 0 && tcp_peer(h2, peer_ip, &peer_port) == 0 && peer_port == 6001 && tcp_accept(l) == -2);
+
+        /* 17. connections of different clients to the same port keep their data apart */
+        cli_inject(6000, TCP_ACK | TCP_PSH, CS + 1, synack_of(6000) + 1, "AAA", 3, 0);
+        cli_inject(6001, TCP_ACK | TCP_PSH, CS + 1, synack_of(6001) + 1, "BB", 2, 0);
+        CHECK(read_all(h1, buf, 3, 50) == 3 && memcmp(buf, "AAA", 3) == 0);
+        CHECK(read_all(h2, buf, 2, 50) == 2 && memcmp(buf, "BB", 2) == 0);
+        tcp_close(h1);
+        tcp_close(h2);
+
+        /* 18. unlisten resets what was never accepted (half open or waiting) and the port stops answering */
+        unsigned rst0 = count_frames(TCP_RST, 0, 0);
+        tcp_unlisten(l);
+        CHECK(count_frames(TCP_RST, 0, 0) >= rst0 + 2 && tcp_accept(l) == -1 && !tcp_port_busy(LPORT));
+        unsigned before = QN;
+        cli_inject(7000, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(QN == before + 1 && last_seg(&sa) && (sa.flags & TCP_RST)); /* nobody listens: refused */
+
+        /* 19. a wrong ACK in the handshake is answered with a reset only; the right one still completes it */
+        begin();
+        l = tcp_listen(LPORT);
+        cli_inject(5555, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(last_seg(&sa));
+        unsigned iss2 = sa.seq;
+        before = QN;
+        cli_inject(5555, TCP_ACK, CS + 1, iss2 + 99, 0, 0, 0); /* acknowledges something we never sent */
+        CHECK(QN == before + 1 && last_seg(&sa) && sa.flags == TCP_RST && tcp_accept(l) == -2);
+        cli_inject(5555, TCP_ACK, CS + 1, iss2 + 1, 0, 0, 0);
+        c = tcp_accept(l);
+        CHECK(c >= 0);
+        tcp_close(c);
+        /* a reset during the handshake: the half open connection is forgotten, no more repeats of the SYN+ACK */
+        cli_inject(5556, TCP_SYN, CS, 0, 0, 0, 0);
+        cli_inject(5556, TCP_RST, CS + 1, 0, 0, 0, 0);
+        before = QN;
+        t0 = NOW;
+        while (NOW - t0 < 70000)
+            net_poll();
+        CHECK(QN == before);
+        tcp_unlisten(l);
+
+        /* 20. the first data may ride on the third handshake message */
+        begin();
+        l = tcp_listen(LPORT);
+        cli_inject(5555, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(last_seg(&sa));
+        cli_inject(5555, TCP_ACK | TCP_PSH, CS + 1, sa.seq + 1, "hi", 2, 0);
+        c = tcp_accept(l);
+        CHECK(c >= 0 && read_all(c, buf, 2, 50) == 2 && memcmp(buf, "hi", 2) == 0);
+        tcp_close(c);
+        tcp_unlisten(l);
+
+        /* 21. clients that never finish the handshake: SYN+ACK is repeated MAX_RETRIES times, then the slots are free again */
+        begin();
+        l = tcp_listen(LPORT);
+        for (unsigned i = 0; i < TCP_BACKLOG; i++)
+            cli_inject(6000 + i, TCP_SYN, CS, 0, 0, 0, 0);
+        t0 = NOW;
+        while (NOW - t0 < 70000)
+            net_poll();
+        CHECK(count_frames(TCP_SYN | TCP_ACK, 0, 0) == TCP_BACKLOG * 7); /* the first answer and six repeats each */
+        before = QN;
+        cli_inject(6200, TCP_SYN, CS, 0, 0, 0, 0);
+        CHECK(QN == before + 1 && last_seg(&sa) && sa.flags == (TCP_SYN | TCP_ACK)); /* room again */
+        tcp_unlisten(l);
+    }
+    CLI_HOOK = 0;
 
     if (fails == 0)
         printf("tcp tests passed\n");
