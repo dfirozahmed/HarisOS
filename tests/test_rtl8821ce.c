@@ -251,10 +251,15 @@ static void rxq_add_frame(const unsigned char *data, unsigned len)
         RXQ[RXQ_N++] = (RxFrame){data[0], len, 0, 0, data, 0};
 }
 /* a frame as the receive descriptor describes it after decryption: w0_or = the extra bits of descriptor word 0 */
+static unsigned char RXPOOL[128][256];
 static void rxq_add_frame_w0(const unsigned char *data, unsigned len, unsigned w0_or)
 {
-    if (RXQ_N < 128)
-        RXQ[RXQ_N++] = (RxFrame){data[0], len, 0, 0, data, w0_or};
+    if (RXQ_N < 128 && len <= 256)
+    {
+        memcpy(RXPOOL[RXQ_N], data, len); /* a copy: the caller reuses its buffer */
+        int at = RXQ_N++;
+        RXQ[at] = (RxFrame){data[0], len, 0, 0, RXPOOL[at], w0_or};
+    }
 }
 static int RX_BURST = 1; /* frames the chip delivers between two polls of the driver */
 static void rx_deliver_one(void)
@@ -497,6 +502,30 @@ static void tx_kick(unsigned next)
     ap_answer(TXCAP.frame, TXCAP.len);
 }
 
+/* the pretend chip's best-effort queue (the data frames): what was kicked in is copied away, then the chip reports it has fetched it */
+typedef struct
+{
+    int count;
+    unsigned char desc[48];
+    unsigned char frame[1700];
+    unsigned len;
+    unsigned char bd[16];
+    unsigned idx_written;
+} BeCapture;
+static BeCapture BECAP;
+static void tx_kick_be(unsigned next)
+{
+    unsigned entry = (next + 255) % 256;
+    BECAP.count++;
+    BECAP.idx_written = next;
+    memcpy(BECAP.bd, D.mem + Q_BE * PAGE + entry * 16, 16);
+    memcpy(BECAP.desc, D.stage, 48);
+    BECAP.len = (unsigned)BECAP.bd[8] | (unsigned)BECAP.bd[9] << 8;
+    memcpy(BECAP.frame, D.stage + 48, BECAP.len > sizeof BECAP.frame ? sizeof BECAP.frame : BECAP.len);
+    REGS[0x3AA] = (unsigned char)(next & 0xFF);
+    REGS[0x3AB] = (unsigned char)((next >> 8) & 0x0F);
+}
+
 void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
 {
     if (CAPTURE)
@@ -531,6 +560,8 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
     }
     else if (off == 0x3B0 && size == (KNOB_TX_ONLY32 ? 4u : 2u))
         tx_kick(value & 0xFFF);
+    else if (off == 0x3A8 && size == 2)
+        tx_kick_be(value & 0xFFF);
     else if (size == 4 && off == 0x1D0)
         REGS[0x1CC] |= 1; /* HMETFR: the box holds a command until the firmware has read it */
     else if (size == 4 && off == 0xC90 && !PH_BREAK_RF_READBACK)
@@ -726,6 +757,7 @@ static int count_writes(u32 off, unsigned size)
 int main(void)
 {
     TXP_ENABLE = 0; /* the probe-request test (stage 5a) has its own section below */
+    ONLINE_ENABLE = 0; /* the data path has its own section below */
     /* ---- the claim ---- */
     PciDevice p = WIFI;
     CHECK(NIC_RTL8821CE.claims(&p));
@@ -2008,6 +2040,227 @@ int main(void)
         cam_write(1, gk, 1, 1, BC);
         CAPTURE = 0;
         CHECK(CAP_N == 34 && CAP_H == 0x65cd1cffa28d0113ULL);
+    }
+
+    /* ---- stage 7: the data path. The pretend access point does the handshake; then Ethernet frames go out as encrypted data frames (the pretend chip
+     * only records them) and protected frames the pretend chip "decrypted" come in as Ethernet frames. ---- */
+    {
+        static const unsigned char MAC6[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+        static const unsigned char GW[6] = {0x02, 0x00, 0x00, 0x00, 0xB0, 0x01}; /* a host behind the access point */
+        static unsigned char beacon[128];
+        static const unsigned char RSN_OK2[20] = {1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0};
+        memset(beacon, 0, sizeof beacon);
+        beacon[0] = 0x80;
+        memset(beacon + 4, 0xFF, 6);
+        memcpy(beacon + 10, AP_BSSID, 6);
+        memcpy(beacon + 16, AP_BSSID, 6);
+        beacon[34] = 0x31;
+        beacon[35] = 0x14;
+        unsigned p = 36;
+        beacon[p++] = 0;
+        beacon[p++] = 7;
+        memcpy(beacon + p, "TestNet", 7);
+        p += 7;
+        beacon[p++] = 3;
+        beacon[p++] = 1;
+        beacon[p++] = 149;
+        beacon[p++] = 48;
+        beacon[p++] = 20;
+        memcpy(beacon + p, RSN_OK2, 20);
+        p += 20;
+        p += 4;
+        CFG_TEXT = "ssid=TestNet\npsk=secret-pass-phrase\n";
+        ONLINE_ENABLE = 1;
+        TXP_ENABLE = 1;
+        TX_ANSWER = 0;
+        AP_MODE = 0;
+        AP_HS = 1;
+        AP_PASS = "secret-pass-phrase";
+        AP_BAD_MIC = 0;
+        build_image(1);
+        chip_for_download();
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        RXQ_N = RXQ_NEXT = 0;
+        RX_HW = 0;
+        TXLOG_N = 0;
+        AP_RESP_N = 0;
+        memset(&BECAP, 0, sizeof BECAP);
+        rxq_add_frame(beacon, p);
+        CHECK(NIC_RTL8821CE.probe(&WIFI) == 1); /* connected: a working adapter, the card stays on */
+        CHECK(LINK.up && HS.result == HS_OK && HS.keys);
+        CHECK(NIC_RTL8821CE.link_up() == 1 && memcmp(NIC_RTL8821CE.mac(), MAC6, 6) == 0);
+        {
+            char sl[96];
+            NIC_RTL8821CE.status(sl, sizeof sl);
+            CHECK(strcmp(sl, "RTL8821CE Wi-Fi: TestNet ch149, up, tx 0 rx 0") == 0);
+        }
+        /* no deauthentication was sent: the link stays */
+        for (int i = 0; i < TXLOG_N; i++)
+            CHECK(TXLOG[i].b[0] != 0xC0);
+
+        /* send an ARP request (broadcast) and an ICMP-sized frame */
+        unsigned char arp[42];
+        memset(arp, 0, sizeof arp);
+        memset(arp, 0xFF, 6);
+        memcpy(arp + 6, MAC6, 6);
+        arp[12] = 0x08;
+        arp[13] = 0x06;
+        for (unsigned i = 14; i < 42; i++)
+            arp[i] = (unsigned char)(i * 3);
+        CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+        CHECK(BECAP.count == 1 && BECAP.idx_written == 1);
+        {
+            const unsigned char *fr = BECAP.frame;
+            CHECK(BECAP.len == 24 + 8 + 8 + 28);
+            CHECK(fr[0] == 0x08 && fr[1] == 0x41 && fr[2] == 0 && fr[3] == 0);                                  /* data, to the AP, protected */
+            CHECK(memcmp(fr + 4, AP_BSSID, 6) == 0 && memcmp(fr + 10, MAC6, 6) == 0 && memcmp(fr + 16, arp, 6) == 0);
+            CHECK(fr[22] == 0x00 && fr[23] == 0x00);                                                              /* sequence 0 */
+            static const unsigned char CCMP1[8] = {1, 0, 0, 0x20, 0, 0, 0, 0};                                    /* packet number 1, key id 0, extended IV */
+            CHECK(memcmp(fr + 24, CCMP1, 8) == 0);
+            static const unsigned char LLC[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x06};
+            CHECK(memcmp(fr + 32, LLC, 8) == 0 && memcmp(fr + 40, arp + 14, 28) == 0);
+            unsigned w[10];
+            memcpy(w, BECAP.desc, 40);
+            CHECK((w[0] & 0xFFFF) == BECAP.len && ((w[0] >> 16) & 0xFF) == 48 && !(w[0] & BIT(24)) && (w[0] & BIT(26)) && !(w[0] & BIT(31)));
+            CHECK((w[1] & 0xFF) == 0 && ((w[1] >> 8) & 0x1F) == 0 && ((w[1] >> 22) & 3) == 3);                   /* queue 0 (best effort), security type AES */
+            CHECK((w[3] & BIT(8)) && (w[3] & BIT(10)) && (w[4] & 0x7F) == 8 && (w[8] & BIT(15)) == 0 && (w[9] >> 12) == 0);
+            unsigned bd0 = BECAP.bd[0] | BECAP.bd[1] << 8, bd1 = BECAP.bd[8] | BECAP.bd[9] << 8;
+            CHECK(bd0 == 48 && bd1 == BECAP.len);
+        }
+        CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+        CHECK(BECAP.count == 2 && BECAP.frame[24] == 2 && BECAP.frame[22] == 0x10 && BECAP.frame[23] == 0x00); /* the next packet number and sequence number */
+        CHECK(NIC_RTL8821CE.send(arp, 13) == -1 && NIC_RTL8821CE.send(0, 42) == -1);                            /* shorter than an Ethernet header */
+
+        /* receive: a helper that builds what the chip hands over after decrypting */
+#define AP_DATA(buf, da, sa, qos, ethertype, payload, plen, pn, protect)                                          \
+    do                                                                                                            \
+    {                                                                                                             \
+        unsigned _h = (qos) ? 26 : 24, _n;                                                                        \
+        memset(buf, 0, sizeof buf);                                                                               \
+        buf[0] = (qos) ? 0x88 : 0x08;                                                                             \
+        buf[1] = (protect) ? 0x42 : 0x02;                                                                         \
+        memcpy(buf + 4, da, 6);                                                                                   \
+        memcpy(buf + 10, AP_BSSID, 6);                                                                            \
+        memcpy(buf + 16, sa, 6);                                                                                  \
+        _n = _h;                                                                                                  \
+        buf[_n++] = (unsigned char)(pn);                                                                          \
+        buf[_n++] = (unsigned char)((pn) >> 8);                                                                   \
+        buf[_n++] = 0;                                                                                            \
+        buf[_n++] = 0x20;                                                                                                                                 \
+        buf[_n++] = 0;                                                                                            \
+        buf[_n++] = 0;                                                                                            \
+        buf[_n++] = 0;                                                                                            \
+        buf[_n++] = 0;                                                                                            \
+        memcpy(buf + _n, "\xAA\xAA\x03\x00\x00\x00", 6);                                                          \
+        _n += 6;                                                                                                  \
+        buf[_n++] = (unsigned char)((ethertype) >> 8);                                                            \
+        buf[_n++] = (unsigned char)(ethertype);                                                                   \
+        memcpy(buf + _n, payload, plen);                                                                          \
+        _n += (plen);                                                                                             \
+        _n += 8 + 4; /* the MIC the chip leaves, and the FCS */                                                   \
+        rxlen = _n;                                                                                               \
+    } while (0)
+        unsigned char rb[200];
+        unsigned rxlen = 0;
+        unsigned char arp_reply[28];
+        for (unsigned i = 0; i < 28; i++)
+            arp_reply[i] = (unsigned char)(0x90 + i);
+        unsigned char got[ETH_MAX];
+        /* 1. an ARP reply to us: unicast, protected, decrypted; the MIC after the 28 bytes is cut off */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 1, 1);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20);
+        for (int i = 0; i < 4; i++)
+            rtl8821ce_host_udelay(1);
+        int n = NIC_RTL8821CE.recv(got, sizeof got);
+        CHECK(n == 14 + 28 && memcmp(got, MAC6, 6) == 0 && memcmp(got + 6, GW, 6) == 0 && got[12] == 0x08 && got[13] == 0x06 && memcmp(got + 14, arp_reply, 28) == 0);
+        CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 0);
+        /* 2. an IPv4 packet in a QoS data frame, broadcast: the IP header says how long it is (28 bytes), the rest is the MIC and padding */
+        unsigned char ip[40];
+        memset(ip, 0, sizeof ip);
+        ip[0] = 0x45;
+        ip[2] = 0;
+        ip[3] = 28;
+        for (unsigned i = 4; i < 28; i++)
+            ip[i] = (unsigned char)(i + 100);
+        unsigned char bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        AP_DATA(rb, bcast, GW, 1, 0x0800, ip, 40, 2, 1);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20);
+        for (int i = 0; i < 4; i++)
+            rtl8821ce_host_udelay(1);
+        n = NIC_RTL8821CE.recv(got, sizeof got);
+        CHECK(n == 14 + 28 && memcmp(got, bcast, 6) == 0 && got[12] == 0x08 && got[13] == 0x00 && memcmp(got + 14, ip, 28) == 0);
+        /* 3. frames that must not get through: replayed number, unprotected, decryption error, not decrypted by the chip, to another station,
+         * from another access point, our own broadcast sent back, a null frame */
+        unsigned char other[6] = {2, 0, 0, 0, 0, 9};
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 1, 1);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20); /* replay: the unicast counter is at 1 */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 9, 0);
+        rxq_add_frame_w0(rb, rxlen, 0); /* unprotected */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 9, 0);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20); /* the protected bit is clear although the descriptor claims decryption: still not taken */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 9, 1);
+        rxq_add_frame_w0(rb, rxlen, 1u << 15); /* ICV error */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 9, 1);
+        rxq_add_frame_w0(rb, rxlen, (4u << 20) | (1u << 27)); /* software decrypt: the chip did not */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 9, 1);
+        rxq_add_frame_w0(rb, rxlen, 0); /* protected bit set but the chip reports no encryption */
+        AP_DATA(rb, other, GW, 0, 0x0806, arp_reply, 28, 9, 1);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20); /* to another station */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 9, 1);
+        rb[10] ^= 1;
+        rxq_add_frame_w0(rb, rxlen, 4u << 20); /* from another access point */
+        AP_DATA(rb, bcast, MAC6, 0, 0x0806, arp_reply, 28, 9, 1);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20); /* our own broadcast, sent back */
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 9, 1);
+        rb[0] = 0x48; /* a null data frame */
+        rxq_add_frame_w0(rb, rxlen, 4u << 20);
+        for (int i = 0; i < 20; i++)
+            rtl8821ce_host_udelay(1);
+        CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 0 && LINK.rx_frames == 2);
+        CHECK(LINK.rx_replay == 1);
+        /* 4. a broadcast with its own counter (the group key's), a higher unicast number works */
+        AP_DATA(rb, bcast, GW, 0, 0x0806, arp_reply, 28, 1, 1); /* group counter starts after 2: number 1 is a replay */
+        rxq_add_frame_w0(rb, rxlen, 4u << 20);
+        AP_DATA(rb, bcast, GW, 0, 0x0806, arp_reply, 28, 3, 1);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20);
+        AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 5, 1);
+        rxq_add_frame_w0(rb, rxlen, 4u << 20);
+        for (int i = 0; i < 10; i++)
+            rtl8821ce_host_udelay(1);
+        CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 42 && NIC_RTL8821CE.recv(got, sizeof got) == 42 && NIC_RTL8821CE.recv(got, sizeof got) == 0);
+        /* 5. the queue of received frames is bounded: what the stack does not take is dropped, nothing is overwritten */
+        for (int k = 0; k < 12; k++)
+        {
+            AP_DATA(rb, MAC6, GW, 0, 0x0806, arp_reply, 28, 10 + k, 1);
+            rxq_add_frame_w0(rb, rxlen, 4u << 20);
+        }
+        for (int i = 0; i < 30; i++)
+            rtl8821ce_host_udelay(1);
+        int taken = 0;
+        while (NIC_RTL8821CE.recv(got, sizeof got) > 0)
+            taken++;
+        CHECK(taken == 7 && LINK.rx_dropped >= 5); /* the 8 slots hold 7 frames */
+#undef AP_DATA
+        /* a deauthentication from the access point: the link is down */
+        CHECK(NIC_RTL8821CE.link_up() == 1);
+        {
+            unsigned char dr[40];
+            memset(dr, 0, sizeof dr);
+            dr[0] = 0xC0;
+            memcpy(dr + 4, MAC6, 6);
+            memcpy(dr + 10, AP_BSSID, 6);
+            memcpy(dr + 16, AP_BSSID, 6);
+            dr[24] = 7;
+            rxq_add_frame_w0(dr, 24 + 2 + 4, 0);
+            for (int i = 0; i < 6; i++)
+                rtl8821ce_host_udelay(1);
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(NIC_RTL8821CE.link_up() == 0 && NIC_RTL8821CE.send(arp, 42) == -1);
+        }
+        ONLINE_ENABLE = 0;
+        TXP_ENABLE = 0;
+        AP_HS = 0;
+        CFG_TEXT = 0;
     }
 
     /* a firmware without extended memory: two parts only */

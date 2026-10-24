@@ -1851,6 +1851,9 @@ static u32 rx_buf_dma(unsigned i) { return D.dma + (u32)(D.mem + Q_COUNT * PAGE 
 static void scan_note(const volatile u8 *f, unsigned len);
 static void conn_note(const volatile u8 *f, unsigned len);
 static void eapol_note(const volatile u8 *f, unsigned len);
+static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0);
+static void link_try(void);
+static int link_is_up(void);
 
 /* one received buffer: classify it. `b` is the buffer, as the chip filled it. */
 static void rx_one(const volatile u8 *b)
@@ -1896,7 +1899,7 @@ static void rx_one(const volatile u8 *b)
             else if (!((w0 >> 27) & 1) && ((w0 >> 20) & 7))
                 RX.decrypted++;
         }
-        if (type == 2)
+        if (type == 2 && !wifi_rx_data(f, len - 4, w0)) /* (once the link is up, the data path takes it) */
             eapol_note(f, len - 4); /* (only kept while the handshake runs) */
     }
 }
@@ -2986,9 +2989,13 @@ static void connect_try(void)
         CONN.assoc_tries = conn_exchange(frame, len, CONN.channel, &CONN.assoc_seen);
         if (CONN.assoc_seen && CONN.assoc_status == 0)
             handshake_run();
-        len = build_deauth(frame, CONN.bssid); /* tidy up: this stage does not do the handshake */
-        if (tx_mgmt(frame, len, CONN.channel) == 0)
-            listen_ms(20);
+        link_try(); /* a handshake that worked and put the keys in the chip: the card stays connected */
+        if (!link_is_up()) /* nothing worked out: tidy up */
+        {
+            len = build_deauth(frame, CONN.bssid);
+            if (tx_mgmt(frame, len, CONN.channel) == 0)
+                listen_ms(20);
+        }
     }
 }
 
@@ -3242,6 +3249,253 @@ static void handshake_run(void)
         ((volatile u8 *)HS.pmk)[i] = 0;
 }
 
+/* ---- stage 7: data ----
+ * With the keys in the chip the card is a network adapter: Ethernet frames of the network stack go out as encrypted 802.11 data frames and
+ * come in again. The conversion, in short:
+ *   out:  802.11 header (data, to the access point: address 1 = the BSSID, 2 = us, 3 = the real destination), then the 8 byte CCMP header (the packet
+ *         number, which the receiver uses against replays, and the key id), then LLC/SNAP (AA AA 03 00 00 00 + the ethertype), then the payload.
+ *         The chip does the AES: the descriptor says "security type 3" and it encrypts everything after the CCMP header and appends the 8 byte MIC.
+ *   in:   the chip decrypts and checks the MIC, and leaves the frame as it was: header, CCMP header, plain LLC/SNAP + payload, MIC, FCS.
+ *         Address 1 is the destination, address 3 the source (the frame comes from the access point). The Ethernet frame is destination, source,
+ *         ethertype, payload. Only frames the chip says it decrypted are taken (an unprotected frame could come from anybody), from our access
+ *         point, to us or to a group address, with a packet number larger than the last one seen (the replay check the chip does not do). */
+#define BEQ_RING_LEN 256
+#define R_TXBD_IDX_BEQ 0x03A8
+#define TX_QSEL_BE 0 /* traffic class 0: the best-effort queue */
+#define RATE_24M 8   /* the fixed rate of data frames: no rate adaptation yet (the firmware's would need more H2C set-up) */
+#define ETH_MAX 1514
+#define RXE_SLOTS 8
+
+typedef struct
+{
+    unsigned len;
+    u8 b[ETH_MAX + 6];
+} EthFrame;
+
+static struct
+{
+    int up;
+    u64 tx_pn;                /* the last packet number we used */
+    u64 rx_pn_pairwise, rx_pn_group; /* the largest we accepted */
+    unsigned seq;             /* 802.11 sequence number */
+    unsigned tx_frames, tx_failed;
+    unsigned rx_frames, rx_dropped, rx_replay;
+    unsigned be_wp;           /* the next free entry of the best-effort ring */
+    unsigned head, tail;      /* the queue of received frames */
+    EthFrame q[RXE_SLOTS];
+} LINK;
+
+static int ONLINE_ENABLE = 1; /* the host tests of the earlier stages switch it off (a link that stays up changes what they look at) */
+
+static const u8 LLC_SNAP[6] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00};
+
+/* one prepared frame (802.11 header + CCMP header + LLC/SNAP + payload, no MIC, no FCS) into the best-effort queue; 0 once the chip fetched it */
+static int tx_be(const u8 *frame, unsigned len, unsigned seq)
+{
+    if (!D.ready || !D.stage || len < 24 + 8 + 8 || len > 24 + 8 + 8 + ETH_MAX)
+        return -1;
+    unsigned rp = (rd32(R_TXBD_IDX_BEQ) >> 16) & 0xFFF;
+    if ((LINK.be_wp + 1) % BEQ_RING_LEN == rp) /* the ring is full */
+        return -1;
+    volatile u8 *s = D.stage;
+    u8 *d = D.stage;
+    zero_bytes(d, TX_DESC_SIZE);
+    for (unsigned i = 0; i < len; i++)
+        s[TX_DESC_SIZE + i] = frame[i];
+    put32(d + 0, len | (TX_DESC_SIZE << 16) | BIT(26));                                              /* size, offset to the frame, last segment */
+    put32(d + 4, (unsigned)TX_QSEL_BE << 8 | (unsigned)TX_RATEID_G << 16 | 3u << 22);                /* MAC id 0, queue, rate id, security type 3 = AES */
+    put32(d + 12, BIT(8) | BIT(10));                                                                 /* the rate of this descriptor, no fallback */
+    put32(d + 16, RATE_24M);
+    put32(d + 36, (seq & 0xFFF) << 12);                                                              /* the sequence number we put in the header */
+    u8 *bd = D.mem + Q_BE * PAGE + LINK.be_wp * 16;
+    zero_bytes(bd, 16);
+    put16(bd + 0, TX_DESC_SIZE);
+    put16(bd + 2, (TX_DESC_SIZE + len - 1) / 128 + 1);
+    put32(bd + 4, D.stage_dma);
+    put16(bd + 8, len);
+    put16(bd + 10, 0);
+    put32(bd + 12, D.stage_dma + TX_DESC_SIZE);
+    fence();
+    unsigned next = (LINK.be_wp + 1) % BEQ_RING_LEN;
+    wr16(R_TXBD_IDX_BEQ, (u16)next);
+    LINK.be_wp = next;
+    for (int i = 0; i < 50000; i++)
+    {
+        if (((rd32(R_TXBD_IDX_BEQ) >> 16) & 0xFFF) == next)
+            return 0;
+        udelay(1);
+    }
+    return -1;
+}
+
+/* an Ethernet frame of the network stack to the access point */
+static int wifi_send(const void *eth, unsigned len)
+{
+    if (!LINK.up || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
+        return -1;
+    const u8 *e = (const u8 *)eth;
+    u8 f[24 + 8 + 8 + ETH_MAX];
+    unsigned n = 0;
+    f[n++] = 0x08; /* data */
+    f[n++] = 0x41; /* to the distribution system, protected */
+    f[n++] = 0;
+    f[n++] = 0;
+    for (int i = 0; i < 6; i++) /* address 1: the receiver, the access point */
+        f[n++] = CONN.bssid[i];
+    for (int i = 0; i < 6; i++) /* address 2: the transmitter, us */
+        f[n++] = EF.mac[i];
+    for (int i = 0; i < 6; i++) /* address 3: the destination of the Ethernet frame */
+        f[n++] = e[i];
+    unsigned seq = LINK.seq++ & 0xFFF;
+    f[n++] = (u8)(seq << 4);
+    f[n++] = (u8)(seq >> 4);
+    u64 pn = ++LINK.tx_pn;
+    f[n++] = (u8)pn; /* the CCMP header: PN0, PN1, reserved, key id (0) with the "extended IV" bit, PN2 .. PN5 */
+    f[n++] = (u8)(pn >> 8);
+    f[n++] = 0;
+    f[n++] = 0x20;
+    f[n++] = (u8)(pn >> 16);
+    f[n++] = (u8)(pn >> 24);
+    f[n++] = (u8)(pn >> 32);
+    f[n++] = (u8)(pn >> 40);
+    for (int i = 0; i < 6; i++) /* LLC / SNAP: then the ethertype */
+        f[n++] = LLC_SNAP[i];
+    f[n++] = e[12];
+    f[n++] = e[13];
+    for (unsigned i = 14; i < len; i++)
+        f[n++] = e[i];
+    if (tx_be(f, n, seq) != 0)
+    {
+        LINK.tx_failed++;
+        return -1;
+    }
+    LINK.tx_frames++;
+    return 0;
+}
+
+static unsigned vget_be16(const volatile u8 *p) { return (unsigned)p[0] << 8 | p[1]; }
+
+/* a data frame from the receive path, without its FCS, with word 0 of its receive descriptor: 1 if it was taken care of (kept or dropped as
+ * not for us), 0 if the link is not up and the handshake code may want it */
+static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
+{
+    if (!LINK.up)
+        return 0;
+    unsigned fc0 = f[0], fc1 = f[1];
+    if ((fc0 & 0x0C) != 0x08 || ((fc0 >> 4) != 0 && (fc0 >> 4) != 8)) /* data or QoS data (not null frames etc.) */
+        return 1;
+    if ((fc1 & 3) != 2 || !mac_is(f + 10, CONN.bssid)) /* from the access point only */
+        return 1;
+    int group = f[4] & 1;
+    if (!group && !mac_is(f + 4, EF.mac))
+        return 1;
+    /* protected, and decrypted by the chip without an error (descriptor word 0: type of encryption bits 22..20, "software decrypt" bit 27, ICV error bit 15) */
+    if (!(fc1 & 0x40) || ((w0 >> 15) & 1) || ((w0 >> 27) & 1) || !((w0 >> 20) & 7))
+    {
+        LINK.rx_dropped++;
+        return 1;
+    }
+    unsigned hdr = 24 + ((fc0 & 0x80) ? 2 : 0) + ((fc1 & 0x80) ? 4 : 0);
+    if (len < hdr + 8 + 8 + 2)
+    {
+        LINK.rx_dropped++;
+        return 1;
+    }
+    const volatile u8 *c = f + hdr; /* the CCMP header */
+    if (!(c[3] & 0x20))
+    {
+        LINK.rx_dropped++;
+        return 1;
+    }
+    u64 pn = (u64)c[0] | (u64)c[1] << 8 | (u64)c[4] << 16 | (u64)c[5] << 24 | (u64)c[6] << 32 | (u64)c[7] << 40;
+    u64 *last = group ? &LINK.rx_pn_group : &LINK.rx_pn_pairwise;
+    if (pn <= *last)
+    {
+        LINK.rx_replay++;
+        return 1;
+    }
+    const volatile u8 *p = f + hdr + 8; /* LLC / SNAP */
+    for (int i = 0; i < 6; i++)
+        if (p[i] != LLC_SNAP[i])
+        {
+            LINK.rx_dropped++;
+            return 1;
+        }
+    unsigned eth_type = vget_be16(p + 6);
+    unsigned avail = len - hdr - 8 - 8; /* the payload, and the 8 byte MIC after it when the chip leaves it */
+    unsigned plen = avail;
+    if (eth_type == 0x0800 && avail >= 20) /* IPv4: the header knows how long the packet is */
+    {
+        unsigned total = vget_be16(p + 8 + 2);
+        if (total >= 20 && total <= avail)
+            plen = total;
+    }
+    else if (eth_type == 0x0806 && avail >= 28) /* ARP: 28 bytes */
+        plen = 28;
+    else if (avail >= 8)
+        plen = avail - 8; /* some other protocol: take the MIC off */
+    if (plen > ETH_MAX - 14)
+        plen = ETH_MAX - 14;
+    if (mac_is(f + 16, EF.mac)) /* our own broadcast, sent back by the access point */
+    {
+        LINK.rx_dropped++;
+        return 1;
+    }
+    if ((LINK.head + 1) % RXE_SLOTS == LINK.tail)
+    {
+        LINK.rx_dropped++; /* the queue is full: the network stack is behind */
+        return 1;
+    }
+    *last = pn;
+    EthFrame *q = &LINK.q[LINK.head];
+    for (int i = 0; i < 6; i++)
+    {
+        q->b[i] = f[4 + i];       /* destination: address 1 */
+        q->b[6 + i] = f[16 + i];  /* source: address 3 */
+    }
+    q->b[12] = p[6];
+    q->b[13] = p[7];
+    for (unsigned i = 0; i < plen; i++)
+        q->b[14 + i] = p[8 + i];
+    q->len = 14 + plen;
+    LINK.head = (LINK.head + 1) % RXE_SLOTS;
+    LINK.rx_frames++;
+    return 1;
+}
+
+static const unsigned char NO_MAC[6];
+static const unsigned char *rtl8821ce_mac_up(void) { return LINK.up ? EF.mac : NO_MAC; }
+static int link_is_up(void) { return LINK.up && !CONN.dropped; }
+
+/* the handshake worked and the keys are in the chip: from now on the card carries the traffic of the network stack */
+static void link_try(void)
+{
+    if (!ONLINE_ENABLE || !HS.state || HS.result != HS_OK || !HS.keys)
+        return;
+    LINK.tx_pn = LINK.rx_pn_pairwise = LINK.rx_pn_group = 0;
+    LINK.seq = 0;
+    LINK.tx_frames = LINK.tx_failed = LINK.rx_frames = LINK.rx_dropped = LINK.rx_replay = 0;
+    LINK.be_wp = 0;
+    LINK.head = LINK.tail = 0;
+    LINK.up = 1;
+}
+
+static int rtl8821ce_recv_up(void *buf, unsigned max)
+{
+    if (!LINK.up)
+        return 0;
+    rx_poll();
+    if (LINK.head == LINK.tail)
+        return 0;
+    EthFrame *q = &LINK.q[LINK.tail];
+    unsigned n = q->len <= max ? q->len : max;
+    u8 *o = (u8 *)buf;
+    for (unsigned i = 0; i < n; i++)
+        o[i] = q->b[i];
+    LINK.tail = (LINK.tail + 1) % RXE_SLOTS;
+    return (int)n;
+}
+
 static int rtl8821ce_claims(const PciDevice *pd)
 {
     return pd->vendor_id == 0x10EC && (pd->device_id == 0xB821 || pd->device_id == 0xC821);
@@ -3303,6 +3557,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     H2.why = 0;
     CHN.state = CH_NOT_TRIED;
     RX.state = RXS_NOT_TRIED;
+    LINK.up = 0;
     CONN.state = 0;
     TARGET.found = 0;
     HS.state = 0;
@@ -3375,6 +3630,8 @@ static int rtl8821ce_probe(const PciDevice *pd)
                 DL.state = DL_FAILED;
                 DL.mcufw = rd16(R_MCUFW_CTRL);
             }
+            if (LINK.up) /* connected: the card stays on, the DMA engines too, and the network stack takes it */
+                return 1;
             /* The DMA engines stay on from mac_init() to here, as in Linux: switching the command register off and on again between the
              * stages made the transmit queues lose their pages (see tx_probe_test()). Only now, before the power-off, they go off. */
             wr8(R_CR, 0);
@@ -3636,6 +3893,19 @@ static void rtl8821ce_status(char *buf, unsigned cap)
 {
     NicText t;
     nic_text_init(&t, buf, cap);
+    if (LINK.up)
+    {
+        nic_puts(&t, "RTL8821CE Wi-Fi: ");
+        nic_puts(&t, CFG.ssid);
+        nic_puts(&t, " ch");
+        nic_putd(&t, CONN.channel);
+        nic_puts(&t, link_is_up() ? ", up" : ", DROPPED");
+        nic_puts(&t, ", tx ");
+        nic_putd(&t, LINK.tx_frames);
+        nic_puts(&t, " rx ");
+        nic_putd(&t, LINK.rx_frames);
+        return;
+    }
     nic_puts(&t, "RTL8821CE (no driver): ");
     if (!W.ok)
     {
@@ -3689,13 +3959,8 @@ static void rtl8821ce_status(char *buf, unsigned cap)
     }
 }
 
-static const unsigned char NO_MAC[6];
-static const unsigned char *rtl8821ce_mac(void) { return NO_MAC; }
-static int rtl8821ce_link_up(void) { return 0; }
-static int rtl8821ce_send(const void *frame, unsigned len) { (void)frame; (void)len; return -1; }
-static int rtl8821ce_recv(void *buf, unsigned max) { (void)buf; (void)max; return 0; }
 
 const NicDriver NIC_RTL8821CE = {
-    "Realtek RTL8821CE (Wi-Fi)", rtl8821ce_claims, rtl8821ce_probe, rtl8821ce_mac, rtl8821ce_link_up, rtl8821ce_send,
-    rtl8821ce_recv, rtl8821ce_status, 0, 0, 0, 0,
+    "Realtek RTL8821CE (Wi-Fi)", rtl8821ce_claims, rtl8821ce_probe, rtl8821ce_mac_up, link_is_up, wifi_send,
+    rtl8821ce_recv_up, rtl8821ce_status, 0, 0, 0, 0,
 };

@@ -453,7 +453,7 @@ int net_self_test(void)
     put_mac(net_mac());
     serial_puts(net_link_up() ? ", link up\n" : ", link down\n");
 
-    if (net_dhcp(2000))
+    if (net_dhcp(6000)) /* (a Wi-Fi link can need a few seconds for the first answer) */
         serial_puts("HARISOS: network: dhcp ok, ip ");
     else
     {
