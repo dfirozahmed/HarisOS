@@ -63,7 +63,8 @@ set(KERNEL_SOURCES
     kernel/memory/paging.c          # page tables on the real CPU (CR3, invlpg): guard pages
     kernel/memory/aspace.c          # user address spaces: one set of page tables per process, shared kernel half
     kernel/memory/cow.c             # copy-on-write: who holds a shared page (host-tested)
-    kernel/memory/heap.c           # kernel heap: kmalloc / kfree on top of the page allocator
+    kernel/memory/mem.c             # memcpy / memmove / memset / memcmp (the compiler calls them; no libc)
+    kernel/memory/heap.c          # kernel heap: kmalloc / kfree on top of the page allocator
     kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
     kernel/core/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
     kernel/core/serial.c            # COM1 output for debugging (boot self test, crash report)

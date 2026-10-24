@@ -36,6 +36,7 @@ try {
         @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),
         @('Display adapter tests', 'tests/run_display_tests.sh'),
         @('Network protocol tests', 'tests/run_netproto_tests.sh'),
+        @('Memory function tests', 'tests/run_mem_tests.sh'),
         @('CPU load tests', 'tests/run_cpuload_tests.sh'),
         @('CPU information tests', 'tests/run_cpuinfo_tests.sh'),
         @('Virtual file system tests', 'tests/run_vfs_tests.sh'),
