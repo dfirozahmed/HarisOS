@@ -369,6 +369,70 @@ int main(void)
             wpa_ptk(pmk, aa, spa, an3, snew, ptk3);
             CHECK(memcmp(w.ptk, ptk3, 48) == 0 && w.state == 1 && memcmp(m2 + 17, snew, 32) == 0);
         }
+
+        /* the group key handshake after the 4-way handshake: the access point sends a new group key (key id 2) wrapped with the KEK */
+        {
+            Wpa4 g;
+            unsigned char gp[24], gw[32], gm[200], gr[EAPOL_MAX], mic[16];
+            unsigned lg = 0;
+            memset(gp, 0, sizeof gp);
+            gp[0] = 0xDD;
+            gp[1] = 22;
+            gp[3] = 0x0F;
+            gp[4] = 0xAC;
+            gp[5] = 1;
+            gp[6] = 2; /* key id 2 */
+            for (unsigned i = 0; i < 16; i++)
+                gp[8 + i] = (unsigned char)(0x90 + i);
+            aes_wrap(ptk + 16, gp, 3, gw);
+            BUILD(gm, 0x1382, 3, an, gw, 32, ptk);
+            wpa4_init(&g, pmk, aa, spa, RSN, 22);
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_ORDER); /* before the 4-way handshake there is no key to check it with */
+            CHECK(wpa4_rx(&g, m1, 99, sn, m2, &l2) == WPA4_SEND_MSG2 && wpa4_rx(&g, m3, l3, sn, m4, &l4) == WPA4_SEND_MSG4);
+            CHECK(wpa4_group_rx(&g, gm, 0, gr, &lg) == WPA4_IGNORED);
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_SEND_GROUP2 && lg == 99);
+            CHECK(g.gtk_id == 2 && g.gtk_len == 16 && memcmp(g.gtk, gp + 8, 16) == 0);
+            /* the answer: version 2, MIC, secure (0x0302), the replay counter of the request, no nonce, no data, signed with the KCK */
+            CHECK(gr[0] == 2 && gr[1] == 3 && gr[3] == 95 && gr[5] == 0x03 && gr[6] == 0x02 && gr[16] == 3 && gr[97] == 0 && gr[98] == 0);
+            CHECK(gr[17] == 0 && memcmp(gr + 17, gr + 18, 31) == 0);
+            wpa_eapol_mic(ptk, gr, lg, mic);
+            CHECK(memcmp(mic, gr + 81, 16) == 0);
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_REPLAY); /* the same request again */
+
+            /* refused, each time with the counter of the request one higher than the last accepted one (and the key not changed) */
+            memset(g.gtk, 0, 16);
+            BUILD(gm, 0x1382, 4, an, gw, 32, ptk);
+            gm[90] ^= 1;
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_MIC);
+            BUILD(gm, 0x138A, 4, an, gw, 32, ptk); /* the pairwise bit: that is no group key message */
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_FORMAT);
+            BUILD(gm, 0x0382, 4, an, gw, 32, ptk); /* key data not encrypted */
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_FORMAT);
+            BUILD(gm, 0x1302, 4, an, gw, 32, ptk); /* not from an access point (no ACK) */
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_FORMAT);
+            BUILD(gm, 0x13C2, 4, an, gw, 32, ptk); /* an install request: only message 3 has that */
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_FORMAT);
+            BUILD(gm, 0x1382, 4, an, gw, 32, ptk);
+            CHECK(wpa4_group_rx(&g, gm, 99 + 20, gr, &lg) == WPA4_E_SHORT);
+            {
+                unsigned char bad[32];
+                memcpy(bad, gw, 32);
+                bad[9] ^= 1; /* damaged ciphertext, signed correctly */
+                BUILD(gm, 0x1382, 4, an, bad, 32, ptk);
+                CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_KEYDATA);
+            }
+            {
+                unsigned char none[24], wn[32];
+                memset(none, 0, sizeof none);
+                none[0] = 0xDD; /* only padding: no group key inside */
+                aes_wrap(ptk + 16, none, 3, wn);
+                BUILD(gm, 0x1382, 5, an, wn, 32, ptk);
+                CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_E_NO_GTK);
+            }
+            CHECK(g.gtk[0] == 0 && g.gtk[15] == 0); /* nothing of that changed the key */
+            BUILD(gm, 0x1382, 6, an, gw, 32, ptk); /* the counter of the failed ones was not taken over, so the right one still works */
+            CHECK(wpa4_group_rx(&g, gm, 99 + 32, gr, &lg) == WPA4_SEND_GROUP2 && g.gtk[0] == 0x90);
+        }
 #undef BUILD
     }
 

@@ -618,3 +618,52 @@ int wpa4_rx(Wpa4 *w, const u8 *f, unsigned len, const u8 fresh_snonce[32], u8 *r
     *reply_len = wpa4_build(w, f[0], (ki & 0x0200) | 0x010A, replay, 0, 0, 0, reply);
     return WPA4_SEND_MSG4;
 }
+
+/* The group key handshake (2-way): the access point changes the group key from time to time (often every hour) and sends the new one to every
+ * station in one EAPOL-Key frame: no pairwise bit, ACK, MIC, secure, key data encrypted (the GTK inside, wrapped with the KEK of the PTK). A
+ * station that does not answer is thrown out of the network. The signature and the replay counter are checked exactly as in message 3; the
+ * answer is the same frame without data and without ACK, signed again. The new key goes into w->gtk / w->gtk_id; the caller installs it. */
+int wpa4_group_rx(Wpa4 *w, const u8 *f, unsigned len, u8 *reply, unsigned *reply_len)
+{
+    if (len < 4 || f[1] != 3)
+        return WPA4_IGNORED;
+    unsigned body = be16(f + 2);
+    if (body < EAPOL_KEY_HDR - 4 || 4 + body > len || 4 + body > EAPOL_MAX)
+        return WPA4_E_SHORT;
+    len = 4 + body;
+    if (f[4] != 2)
+        return WPA4_E_FORMAT;
+    unsigned ki = be16(f + 5);
+    /* version 2, group (no pairwise bit), from the access point (ACK), with a MIC, secure, key data encrypted; never an install request */
+    if ((ki & 7) != 2 || (ki & 0x08) || !(ki & 0x80) || !(ki & 0x100) || !(ki & 0x200) || !(ki & 0x1000) || (ki & 0x40))
+        return WPA4_E_FORMAT;
+    unsigned kd_len = be16(f + 97);
+    if (EAPOL_KEY_HDR + kd_len > len)
+        return WPA4_E_SHORT;
+    if (!w->have_ptk || w->state != 2)
+        return WPA4_E_ORDER;
+    const u8 *replay = f + 9;
+    if (be64(replay) <= w->replay)
+        return WPA4_E_REPLAY;
+    u8 mic[16];
+    wpa_eapol_mic(w->ptk, f, len, mic);
+    unsigned diff = 0;
+    for (unsigned i = 0; i < 16; i++)
+        diff |= (unsigned)(mic[i] ^ f[EAPOL_KEY_MIC_AT + i]);
+    if (diff)
+        return WPA4_E_MIC;
+    w->replay = be64(replay); /* only a signed frame moves the counter */
+    if (kd_len < 24 || kd_len % 8 || kd_len > 8 * 21)
+        return WPA4_E_KEYDATA;
+    u8 plain[8 * 20];
+    if (aes_unwrap(w->ptk + 16, f + EAPOL_KEY_HDR, kd_len / 8 - 1, plain) != 0)
+        return WPA4_E_KEYDATA;
+    int g = wpa4_find_gtk(w, plain, kd_len - 8);
+    zero(plain, sizeof plain);
+    if (g == -2)
+        return WPA4_E_NO_GTK;
+    if (g != 0)
+        return WPA4_E_KEYDATA;
+    *reply_len = wpa4_build(w, f[0], 0x0302, replay, 0, 0, 0, reply); /* version 2, MIC, secure */
+    return WPA4_SEND_GROUP2;
+}

@@ -73,6 +73,7 @@ enum
     WPA4_IGNORED = 0,    /* not an EAPOL-Key frame of the handshake: nothing to do */
     WPA4_SEND_MSG2 = 1,  /* message 1 accepted: reply[0 .. *reply_len) is message 2 */
     WPA4_SEND_MSG4 = 2,  /* message 3 accepted: reply is message 4, and the keys (ptk, gtk) are ready to install */
+    WPA4_SEND_GROUP2 = 3, /* group key message 1 accepted (wpa4_group_rx): reply is message 2, and the new gtk / gtk_id are ready to install */
     WPA4_E_SHORT = -1,   /* the frame is shorter than its own header says, or too long */
     WPA4_E_FORMAT = -2,  /* not the key information / descriptor this driver handles (only version 2, pairwise, RSN) */
     WPA4_E_REPLAY = -3,  /* a replay counter that is not larger than the last one accepted */
@@ -104,6 +105,11 @@ void wpa4_init(Wpa4 *w, const u8 pmk[32], const u8 aa[6], const u8 spa[6], const
 /* One EAPOL-Key frame from the access point, starting at the 802.1X header. fresh_snonce: 32 random bytes the caller supplies for the case that
  * this is message 1 (it is used only then). reply[EAPOL_MAX] receives message 2 or 4. See the WPA4_ codes. */
 int wpa4_rx(Wpa4 *w, const u8 *eapol, unsigned len, const u8 fresh_snonce[32], u8 *reply, unsigned *reply_len);
+
+/* The group key handshake after the 4-way handshake has finished (the access point renews the group key now and then): one EAPOL-Key frame from
+ * the access point that is not part of the pairwise handshake. On WPA4_SEND_GROUP2 reply[0 .. *reply_len) is the answer (it must be sent, or the
+ * access point drops the station) and the new key is in w->gtk (key id w->gtk_id). Other codes: nothing to send, nothing to install. */
+int wpa4_group_rx(Wpa4 *w, const u8 *eapol, unsigned len, u8 *reply, unsigned *reply_len);
 
 /* MIC of an EAPOL-Key frame: HMAC-SHA1 over the frame with its MIC field zeroed, the first 16 bytes. */
 void wpa_eapol_mic(const u8 kck[16], const u8 *frame, unsigned len, u8 mic[16]);

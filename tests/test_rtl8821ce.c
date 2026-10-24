@@ -240,13 +240,16 @@ static RxFrame RXQ[128];
 static int RXQ_N, RXQ_NEXT;
 static void rx_deliver_one1(void);
 static unsigned RX_HW; /* the chip's write index */
+static void rxq_compact(void) { if (RXQ_NEXT >= RXQ_N) RXQ_N = RXQ_NEXT = 0; } /* everything queued was delivered: the table is free again */
 static void rxq_add(unsigned char fc0, unsigned len, int c2h, int crc_err)
 {
+    rxq_compact();
     if (RXQ_N < 128)
         RXQ[RXQ_N++] = (RxFrame){fc0, len, c2h, crc_err, 0, 0};
 }
 static void rxq_add_frame(const unsigned char *data, unsigned len)
 {
+    rxq_compact();
     if (RXQ_N < 128)
         RXQ[RXQ_N++] = (RxFrame){data[0], len, 0, 0, data, 0};
 }
@@ -254,6 +257,7 @@ static void rxq_add_frame(const unsigned char *data, unsigned len)
 static unsigned char RXPOOL[128][256];
 static void rxq_add_frame_w0(const unsigned char *data, unsigned len, unsigned w0_or)
 {
+    rxq_compact();
     if (RXQ_N < 128 && len <= 256)
     {
         memcpy(RXPOOL[RXQ_N], data, len); /* a copy: the caller reuses its buffer */
@@ -362,6 +366,46 @@ static void ap_eapol_frame(unsigned char *f, unsigned info, unsigned replay, con
     memcpy(f + 99, kdata, kdlen);
     if (info & 0x100)
         wpa_eapol_mic(AP_PTK, f, 99 + kdlen, f + 81);
+}
+
+/* the access point's group key renewal (message 1 of the group handshake): the new group key (16 bytes from `keybase` on) with key id `kid`,
+ * wrapped with the KEK of the PTK, signed with the KCK. Returns the length. */
+static unsigned ap_group_msg1(unsigned char *m, unsigned replay, unsigned kid, unsigned keybase)
+{
+    unsigned char plain[24], wrapped[32];
+    memset(plain, 0, sizeof plain);
+    plain[0] = 0xDD;
+    plain[1] = 22;
+    plain[3] = 0x0F;
+    plain[4] = 0xAC;
+    plain[5] = 1;
+    plain[6] = (unsigned char)kid;
+    for (unsigned i = 0; i < 16; i++)
+        plain[8 + i] = (unsigned char)(keybase + i);
+    aes_wrap(AP_PTK + 16, plain, 3, wrapped);
+    ap_eapol_frame(m, 0x1382, replay, wrapped, 32);
+    return 99 + 32;
+}
+
+/* message 3 of the 4-way handshake again (as an access point sends it when it did not get message 4) with a higher replay counter */
+static unsigned ap_msg3_again(unsigned char *m3, unsigned replay)
+{
+    static const unsigned char RSN[22] = {48, 20, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0};
+    unsigned char plain[48], wrapped[56];
+    memset(plain, 0, sizeof plain);
+    memcpy(plain, RSN, 22);
+    plain[22] = 0xDD;
+    plain[23] = 22;
+    plain[25] = 0x0F;
+    plain[26] = 0xAC;
+    plain[27] = 1;
+    plain[28] = 0x05;
+    for (unsigned i = 0; i < 16; i++)
+        plain[30 + i] = (unsigned char)(0x40 + i);
+    plain[46] = 0xDD;
+    aes_wrap(AP_PTK + 16, plain, 6, wrapped);
+    ap_eapol_frame(m3, 0x13CA, replay, wrapped, 56);
+    return 99 + 56;
 }
 
 static void ap_start_handshake(const unsigned char *sta)
@@ -575,14 +619,18 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
 }
 
 /* ---- the pretend chip: when the driver waits, the chip finishes what it was asked to do ---- */
+/* the driver's clock: starts at one second, runs with the delays, and the test can push it forward to play minutes of silence */
+static unsigned long long UDELAY_US, MS_JUMP;
+unsigned long long rtl8821ce_host_ms(void) { return 1000 + UDELAY_US / 1000 + MS_JUMP; }
+
 static int CHIP_COMPLETES = 1;
 static unsigned UDELAYS;
 void rtl8821ce_host_udelay(unsigned us)
 {
-    (void)us;
     if (CAPTURE)
         cap_ev(2, us, 0, 0);
     UDELAYS++;
+    UDELAY_US += us;
     rx_deliver_one();
     if (!KNOB_H2C_STUCK)
         REGS[0x1CC] &= (unsigned char)~1; /* the firmware takes the command */
@@ -2240,23 +2288,186 @@ int main(void)
         while (NIC_RTL8821CE.recv(got, sizeof got) > 0)
             taken++;
         CHECK(taken == 7 && LINK.rx_dropped >= 5); /* the 8 slots hold 7 frames */
-#undef AP_DATA
-        /* a deauthentication from the access point: the link is down */
-        CHECK(NIC_RTL8821CE.link_up() == 1);
+        /* 5b. the group key renewal: answered (encrypted, signed), installed in the chip, never shown to the network stack */
+#define PUMP(n)                                    \
+    do                                             \
+    {                                              \
+        for (int _i = 0; _i < (n); _i++)           \
+            rtl8821ce_host_udelay(1);              \
+    } while (0)
+#define GK_SEND(msg, mlen, pn)                                          \
+    do                                                                  \
+    {                                                                   \
+        AP_DATA(rb2, MAC6, AP_BSSID, 0, 0x888E, msg, mlen, pn, 1);       \
+        rxq_add_frame_w0(rb2, rxlen, 4u << 20);                         \
+        PUMP(10);                                                       \
+        NIC_RTL8821CE.recv(got, sizeof got);                            \
+    } while (0)
         {
-            unsigned char dr[40];
-            memset(dr, 0, sizeof dr);
-            dr[0] = 0xC0;
-            memcpy(dr + 4, MAC6, 6);
-            memcpy(dr + 10, AP_BSSID, 6);
-            memcpy(dr + 16, AP_BSSID, 6);
-            dr[24] = 7;
-            rxq_add_frame_w0(dr, 24 + 2 + 4, 0);
-            for (int i = 0; i < 6; i++)
-                rtl8821ce_host_udelay(1);
-            NIC_RTL8821CE.recv(got, sizeof got);
-            CHECK(NIC_RTL8821CE.link_up() == 0 && NIC_RTL8821CE.send(arp, 42) == -1);
+            unsigned char rb2[260];
+            unsigned char m[99 + 56];
+            unsigned ml = ap_group_msg1(m, 3, 2, 0x70); /* replay counter 3 (the handshake used 1 and 2), key id 2, key 70 71 72 ... */
+            int be0 = BECAP.count;
+            NLOG = 0;
+            GK_SEND(m, ml, 1000);
+            CHECK(LINK.rekeys == 1 && LINK.eapol_bad == 0 && BECAP.count == be0 + 1);
+            CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 0); /* nothing for the network stack */
+            const unsigned char *fr = BECAP.frame;
+            CHECK(fr[1] == 0x41 && memcmp(fr + 4, AP_BSSID, 6) == 0 && fr[38] == 0x88 && fr[39] == 0x8E); /* protected data frame to the access point, EAPOL */
+            const unsigned char *e = fr + 40;
+            CHECK(BECAP.len == 40 + 99 && e[1] == 3 && ((e[5] << 8) | e[6]) == 0x0302 && memcmp(e + 9, m + 9, 8) == 0 && e[97] == 0 && e[98] == 0);
+            unsigned char mic[16];
+            wpa_eapol_mic(AP_PTK, e, 99, mic);
+            CHECK(memcmp(mic, e + 81, 16) == 0);
+            int wrote_key = 0, wrote_cmd = 0;
+            for (int i = 0; i < NLOG; i++)
+            {
+                if (LOG[i].off == 0x674 && LOG[i].value == 0x73727170u) /* the first four key bytes, as one word */
+                    wrote_key = 1;
+                if (LOG[i].off == 0x670 && LOG[i].value == (BIT(16) | BIT(31) | 16u)) /* the command for the first word of entry 2 */
+                    wrote_cmd = 1;
+            }
+            CHECK(wrote_key && wrote_cmd);
+
+            /* traffic under the new key id has its own packet counter (starting again), the old key's counter goes on */
+            unsigned rep0 = LINK.rx_replay;
+            AP_DATA(rb, bcast, GW, 0, 0x0806, arp_reply, 28, 1, 1);
+            rb[24 + 3] = 0x20 | (2 << 6);
+            rxq_add_frame_w0(rb, rxlen, 4u << 20);
+            AP_DATA(rb, bcast, GW, 0, 0x0806, arp_reply, 28, 1, 1); /* the same number again under key id 2: a replay */
+            rb[24 + 3] = 0x20 | (2 << 6);
+            rxq_add_frame_w0(rb, rxlen, 4u << 20);
+            AP_DATA(rb, bcast, GW, 0, 0x0806, arp_reply, 28, 4, 1); /* the old key (id 0): its counter was at 3 */
+            rxq_add_frame_w0(rb, rxlen, 4u << 20);
+            AP_DATA(rb, bcast, GW, 0, 0x0806, arp_reply, 28, 2, 1); /* ... and 2 is old news */
+            rxq_add_frame_w0(rb, rxlen, 4u << 20);
+            PUMP(10);
+            CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 42 && NIC_RTL8821CE.recv(got, sizeof got) == 42 && NIC_RTL8821CE.recv(got, sizeof got) == 0);
+            CHECK(LINK.rx_replay == rep0 + 2);
+
+            /* refused: the counter of the last one again, a damaged signature, a pairwise message 1 (a new PTK is not handled) */
+            unsigned rk0 = LINK.rekeys, bad0 = LINK.eapol_bad;
+            be0 = BECAP.count;
+            NLOG = 0;
+            ml = ap_group_msg1(m, 3, 3, 0x20);
+            GK_SEND(m, ml, 1001);
+            ml = ap_group_msg1(m, 4, 3, 0x20);
+            m[85] ^= 1;
+            GK_SEND(m, ml, 1002);
+            ap_eapol_frame(m, 0x008A, 10, (const unsigned char *)"", 0);
+            GK_SEND(m, 99, 1003);
+            int cam_cmds = 0;
+            for (int i = 0; i < NLOG; i++)
+                if (LOG[i].off == 0x670)
+                    cam_cmds++;
+            CHECK(LINK.rekeys == rk0 && LINK.eapol_bad == bad0 + 2 && BECAP.count == be0 && cam_cmds == 0);
+            /* a damaged frame did not move the replay counter: the right message with counter 4 works, key id 3 */
+            ml = ap_group_msg1(m, 4, 3, 0x20);
+            GK_SEND(m, ml, 1004);
+            CHECK(LINK.rekeys == rk0 + 1 && BECAP.count == be0 + 1);
+
+            /* message 3 of the 4-way handshake again (our message 4 got lost): answered with message 4, the keys are not installed again */
+            be0 = BECAP.count;
+            rk0 = LINK.rekeys;
+            NLOG = 0;
+            ml = ap_msg3_again(m, 9);
+            GK_SEND(m, ml, 1005);
+            CHECK(BECAP.count == be0 + 1 && LINK.rekeys == rk0);
+            e = BECAP.frame + 40;
+            CHECK(BECAP.len == 40 + 99 && ((e[5] << 8) | e[6]) == 0x030A && memcmp(e + 9, m + 9, 8) == 0);
+            wpa_eapol_mic(AP_PTK, e, 99, mic);
+            CHECK(memcmp(mic, e + 81, 16) == 0);
+            cam_cmds = 0;
+            for (int i = 0; i < NLOG; i++)
+                if (LOG[i].off == 0x670)
+                    cam_cmds++;
+            CHECK(cam_cmds == 0);
         }
+#undef GK_SEND
+        /* a deauthentication from the access point, which then stays silent: the link is down, and the card tries again by itself, with growing pauses */
+        CHECK(NIC_RTL8821CE.link_up() == 1);
+        unsigned char dr[40];
+#define DEAUTH(dst)                          \
+    do                                       \
+    {                                        \
+        memset(dr, 0, sizeof dr);            \
+        dr[0] = 0xC0;                        \
+        memcpy(dr + 4, dst, 6);              \
+        memcpy(dr + 10, AP_BSSID, 6);        \
+        memcpy(dr + 16, AP_BSSID, 6);        \
+        dr[24] = 7;                          \
+        rxq_add_frame_w0(dr, 24 + 2 + 4, 0); \
+        PUMP(6);                             \
+    } while (0)
+        {
+            char sl[96];
+            AP_MODE = 1;
+            DEAUTH(MAC6);
+            NIC_RTL8821CE.recv(got, sizeof got); /* the first attempt is at once: nobody answers */
+            CHECK(NIC_RTL8821CE.link_up() == 0 && NIC_RTL8821CE.send(arp, 42) == -1);
+            CHECK(LINK.fails == 1 && LINK.reconnects == 0);
+            NIC_RTL8821CE.status(sl, sizeof sl);
+            CHECK(strstr(sl, "reconnecting") != 0);
+            int tx0 = TXCAP.count;
+            NIC_RTL8821CE.recv(got, sizeof got); /* too early for the next one */
+            CHECK(TXCAP.count == tx0 && LINK.fails == 1);
+            MS_JUMP += 600; /* the pause was 500 ms */
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(TXCAP.count > tx0 && LINK.fails == 2 && LINK.next_try - rtl8821ce_host_ms() > 900 && LINK.next_try - rtl8821ce_host_ms() <= 1000); /* the pause doubled */
+            /* the third attempt scans first (the access point may have moved) and finds it again; it answers now */
+            AP_MODE = 0;
+            rxq_add_frame(beacon, p);
+            MS_JUMP += 1100;
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(NIC_RTL8821CE.link_up() == 1 && LINK.reconnects == 1 && LINK.fails == 0 && AP_GOT_MSG4 == 1 && SC.n >= 1 && TARGET.found);
+            NIC_RTL8821CE.status(sl, sizeof sl);
+            CHECK(strstr(sl, ", up") != 0 && strstr(sl, ", rc 1") != 0 && strstr(sl, ", gk 2") != 0);
+            /* the new keys count from the start; the transmit ring goes on where it was */
+            CHECK(NIC_RTL8821CE.send(arp, 42) == 0 && BECAP.frame[24] == 1 && BECAP.idx_written == LINK.be_wp);
+            /* a frame under the new pairwise key arrives */
+            unsigned char hello[28];
+            memset(hello, 0x5A, sizeof hello);
+            AP_DATA(rb, MAC6, GW, 0, 0x0806, hello, 28, 1, 1);
+            rxq_add_frame_w0(rb, rxlen, 4u << 20);
+            PUMP(6);
+            CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 42 && memcmp(got + 14, hello, 28) == 0);
+        }
+        /* an access point that says goodbye to everybody (a deauthentication to the broadcast address) */
+        {
+            unsigned r0 = LINK.reconnects;
+            DEAUTH(bcast);
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(NIC_RTL8821CE.link_up() == 1 && LINK.reconnects == r0 + 1);
+        }
+        /* silence: heard now and then, nothing at all for 3 s: it is asked (a directed probe request, once a second), after 9 s it is given up */
+        {
+            unsigned r0 = LINK.reconnects;
+            int tx0 = TXCAP.count;
+            MS_JUMP += 2500;
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(TXCAP.count == tx0 && NIC_RTL8821CE.link_up() == 1);
+            rxq_add_frame(beacon, p); /* a beacon: it is there */
+            PUMP(4);
+            NIC_RTL8821CE.recv(got, sizeof got);
+            MS_JUMP += 2500;
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(TXCAP.count == tx0); /* 2.5 s since the beacon: no question yet */
+            MS_JUMP += 1000;
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(TXCAP.count == tx0 + 1);
+            CHECK(TXCAP.frame[0] == 0x40 && memcmp(TXCAP.frame + 4, AP_BSSID, 6) == 0 && memcmp(TXCAP.frame + 10, MAC6, 6) == 0 && memcmp(TXCAP.frame + 16, AP_BSSID, 6) == 0);
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(TXCAP.count == tx0 + 1); /* not twice in a second */
+            MS_JUMP += 1100;
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(TXCAP.count == tx0 + 2 && NIC_RTL8821CE.link_up() == 1 && LINK.reconnects == r0);
+            MS_JUMP += 6000; /* 10 s without a word */
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(NIC_RTL8821CE.link_up() == 1 && LINK.reconnects == r0 + 1);
+        }
+#undef DEAUTH
+#undef PUMP
+#undef AP_DATA
         ONLINE_ENABLE = 0;
         TXP_ENABLE = 0;
         AP_HS = 0;

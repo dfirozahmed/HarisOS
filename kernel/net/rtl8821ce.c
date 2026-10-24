@@ -31,6 +31,7 @@
 #include "pci.h"
 #include "pmm.h"
 #include "rtl8821ce_phytab.h"
+#include "timer.h"
 #include "vfs.h"
 #include "wpa.h"
 
@@ -95,6 +96,16 @@ static void udelay(unsigned us)
     for (unsigned i = 0; i < us; i++)
         io_in8(0x80);
 }
+#endif
+
+#ifdef HARIS_HOST
+/* the host test moves the clock by hand (and with every delay) to play minutes of silence in a moment */
+unsigned long long rtl8821ce_host_ms(void);
+static u64 now_ms(void) { return rtl8821ce_host_ms(); }
+static int clock_ok(void) { return 1; }
+#else
+static u64 now_ms(void) { return timer_ms(); }
+static int clock_ok(void) { return timer_ready(); }
 #endif
 
 #ifdef HARIS_HOST
@@ -1854,6 +1865,7 @@ static void eapol_note(const volatile u8 *f, unsigned len);
 static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0);
 static void link_try(void);
 static int link_is_up(void);
+static void alive_note(const volatile u8 *f, unsigned len);
 
 /* one received buffer: classify it. `b` is the buffer, as the chip filled it. */
 static void rx_one(const volatile u8 *b)
@@ -1874,6 +1886,8 @@ static void rx_one(const volatile u8 *b)
     const volatile u8 *f = b + RX_DESC_SIZE + drv + shift;
     unsigned fc0 = f[0], type = (fc0 >> 2) & 3, subtype = fc0 >> 4;
     RX.frames++;
+    if (type != 1)
+        alive_note(f, len - 4);
     if (type == 0)
     {
         if (subtype == 8)
@@ -2841,9 +2855,12 @@ static unsigned vget16(const volatile u8 *p) { return (unsigned)p[0] | (unsigned
 /* a management frame from the receive path (without FCS): is it an answer from the access point we talk to? */
 static void conn_note(const volatile u8 *f, unsigned len)
 {
-    if (!CONN.state || len < 26 || !mac_is(f + 4, EF.mac) || !mac_is(f + 10, CONN.bssid))
-        return;
     unsigned fc0 = f[0];
+    /* (an access point that goes down says goodbye to everybody: a deauthentication / disassociation may be addressed to a group address) */
+    int to_us = len >= 10 && mac_is(f + 4, EF.mac);
+    int goodbye = len >= 10 && (f[4] & 1) && (fc0 == 0xC0 || fc0 == 0xA0);
+    if (!CONN.state || len < 26 || (!to_us && !goodbye) || !mac_is(f + 10, CONN.bssid))
+        return;
     if (fc0 == 0xB0 && len >= 30 && vget16(f + 24) == 0 && vget16(f + 26) == 2) /* authentication: open system, second message */
     {
         CONN.auth_status = vget16(f + 28);
@@ -2956,6 +2973,7 @@ static unsigned conn_exchange(const u8 *frame, unsigned len, unsigned channel, i
 }
 
 static void handshake_run(void);
+static void connect_exchange(void);
 
 /* the whole attempt: authenticate, associate, leave */
 static int CONN_ENABLE = 1; /* the host tests of the earlier stages switch it off */
@@ -2968,10 +2986,6 @@ static void connect_try(void)
     const ScanAp *ap = &SC.ap[TARGET.index];
     if (rsn_check(ap->rsn, ap->rsn_len) != RSN_OK)
         return;
-    CONN.state = 1;
-    CONN.auth_seen = CONN.assoc_seen = 0;
-    CONN.auth_status = CONN.assoc_status = CONN.aid = CONN.dropped = 0;
-    CONN.auth_tries = CONN.assoc_tries = 0;
     for (int i = 0; i < 6; i++)
         CONN.bssid[i] = ap->bssid[i];
     CONN.channel = ap->channel;
@@ -2980,6 +2994,17 @@ static void connect_try(void)
     rx_restart();
     wr32(R_RCR, RCR_RX_DEFAULT);
     wr8(R_CR, MAC_TRX_ENABLE);
+    connect_exchange();
+}
+
+/* authenticate, associate, 4-way handshake, keys in the chip; the chip is tuned to CONN.channel and CONN.bssid is the access point. The first
+ * connection (connect_try) and every later reconnection (link_service) go through here. A link that did not come up is torn down again. */
+static void connect_exchange(void)
+{
+    CONN.state = 1;
+    CONN.auth_seen = CONN.assoc_seen = 0;
+    CONN.auth_status = CONN.assoc_status = CONN.aid = CONN.dropped = 0;
+    CONN.auth_tries = CONN.assoc_tries = 0;
     u8 frame[160];
     unsigned len = build_auth(frame, CONN.bssid);
     CONN.auth_tries = conn_exchange(frame, len, CONN.channel, &CONN.auth_seen);
@@ -3047,6 +3072,16 @@ static void cam_write(unsigned idx, const u8 *key, unsigned keyidx, int group, c
         }
         wr32(R_SEC_WRITE, content);
         wr32(R_SEC_CMD, BIT(16) | BIT(31) | (base + (u32)i)); /* write enable, poll */
+    }
+}
+
+/* entries 0 .. CAM_PAIRWISE_ENTRY off again (a word 0 without the "valid" bit): before a new association, so that no key of the old one is left */
+static void cam_clear(void)
+{
+    for (unsigned idx = 0; idx <= CAM_PAIRWISE_ENTRY; idx++)
+    {
+        wr32(R_SEC_WRITE, 0);
+        wr32(R_SEC_CMD, BIT(16) | BIT(31) | (idx << 3));
     }
 }
 
@@ -3274,16 +3309,33 @@ typedef struct
 
 static struct
 {
-    int up;
+    int adapter;              /* the card is the network adapter (set by the first connection, then for good: it reconnects by itself) */
+    int up;                   /* associated, keys in the chip: data can flow */
     u64 tx_pn;                /* the last packet number we used */
-    u64 rx_pn_pairwise, rx_pn_group; /* the largest we accepted */
+    u64 rx_pn_pairwise;       /* the largest we accepted */
+    u64 rx_pn_group[4];       /* ... per group key id: a new group key starts counting again, the old one may still be in use for a moment */
     unsigned seq;             /* 802.11 sequence number */
     unsigned tx_frames, tx_failed;
     unsigned rx_frames, rx_dropped, rx_replay;
     unsigned be_wp;           /* the next free entry of the best-effort ring */
     unsigned head, tail;      /* the queue of received frames */
     EthFrame q[RXE_SLOTS];
+    /* keeping the link alive (link_service) */
+    u64 last_rx;              /* when a frame from the access point (beacon, data ...) was last heard */
+    u64 last_probe;           /* when we last asked it whether it is there */
+    u64 next_try;             /* not before this time the next reconnection is tried */
+    unsigned backoff;         /* ms between reconnection attempts: doubles with every failure up to LINK_RETRY_MAX_MS */
+    unsigned fails;           /* attempts since the link was lost that did not work */
+    unsigned reconnects;      /* connections made again */
+    unsigned rekeys;          /* group keys renewed by the access point and installed */
+    unsigned eapol_bad;       /* EAPOL-Key frames of the access point that were refused (bad signature, replay ...) */
 } LINK;
+
+#define LINK_QUIET_MS 3000     /* nothing heard from the access point for this long: ask it */
+#define LINK_DEAD_MS 9000      /* ... and still nothing: it is gone, connect again */
+#define LINK_PROBE_MS 1000     /* between two such questions */
+#define LINK_RETRY_MIN_MS 500
+#define LINK_RETRY_MAX_MS 30000
 
 static int ONLINE_ENABLE = 1; /* the host tests of the earlier stages switch it off (a link that stays up changes what they look at) */
 
@@ -3408,7 +3460,7 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
         return 1;
     }
     u64 pn = (u64)c[0] | (u64)c[1] << 8 | (u64)c[4] << 16 | (u64)c[5] << 24 | (u64)c[6] << 32 | (u64)c[7] << 40;
-    u64 *last = group ? &LINK.rx_pn_group : &LINK.rx_pn_pairwise;
+    u64 *last = group ? &LINK.rx_pn_group[c[3] >> 6] : &LINK.rx_pn_pairwise; /* (the key id: the top two bits of the fourth byte) */
     if (pn <= *last)
     {
         LINK.rx_replay++;
@@ -3422,6 +3474,24 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
             return 1;
         }
     unsigned eth_type = vget_be16(p + 6);
+    if (eth_type == 0x888E) /* EAPOL (a group key renewal): not for the network stack, link_service() answers it. The 802.1X header knows its length. */
+    {
+        unsigned n = len - hdr - 8 - 8;
+        unsigned body = n >= 4 ? vget_be16(p + 8 + 2) : 0;
+        if (n >= 4 && 4 + body <= n)
+            n = 4 + body;
+        if (group || EAPQ.pending || n > EAPOL_MAX)
+        {
+            LINK.rx_dropped++;
+            return 1;
+        }
+        *last = pn;
+        for (unsigned i = 0; i < n; i++)
+            EAPQ.b[i] = p[8 + i];
+        EAPQ.len = n;
+        EAPQ.pending = 1;
+        return 1;
+    }
     unsigned avail = len - hdr - 8 - 8; /* the payload, and the 8 byte MIC after it when the chip leaves it */
     unsigned plen = avail;
     if (eth_type == 0x0800 && avail >= 20) /* IPv4: the header knows how long the packet is */
@@ -3464,7 +3534,7 @@ static int wifi_rx_data(const volatile u8 *f, unsigned len, u32 w0)
 }
 
 static const unsigned char NO_MAC[6];
-static const unsigned char *rtl8821ce_mac_up(void) { return LINK.up ? EF.mac : NO_MAC; }
+static const unsigned char *rtl8821ce_mac_up(void) { return LINK.adapter ? EF.mac : NO_MAC; }
 static int link_is_up(void) { return LINK.up && !CONN.dropped; }
 
 /* the handshake worked and the keys are in the chip: from now on the card carries the traffic of the network stack */
@@ -3472,20 +3542,169 @@ static void link_try(void)
 {
     if (!ONLINE_ENABLE || !HS.state || HS.result != HS_OK || !HS.keys)
         return;
-    LINK.tx_pn = LINK.rx_pn_pairwise = LINK.rx_pn_group = 0;
+    LINK.tx_pn = LINK.rx_pn_pairwise = 0; /* new keys: both sides count packet numbers from the start */
+    for (int i = 0; i < 4; i++)
+        LINK.rx_pn_group[i] = 0;
     LINK.seq = 0;
-    LINK.tx_frames = LINK.tx_failed = LINK.rx_frames = LINK.rx_dropped = LINK.rx_replay = 0;
-    LINK.be_wp = 0;
     LINK.head = LINK.tail = 0;
+    EAPQ.pending = 0;
+    if (!LINK.adapter) /* the first connection; a later one goes on counting, and the transmit ring keeps its place (the chip's read index is where it is) */
+    {
+        LINK.tx_frames = LINK.tx_failed = LINK.rx_frames = LINK.rx_dropped = LINK.rx_replay = 0;
+        LINK.be_wp = 0;
+        LINK.reconnects = LINK.rekeys = LINK.eapol_bad = LINK.fails = 0;
+    }
+    LINK.last_rx = LINK.last_probe = now_ms();
+    LINK.adapter = 1;
     LINK.up = 1;
+}
+
+/* ---- keeping the connection ----
+ * A Wi-Fi link is not a cable: it ends when the access point reboots, when we are out of range for a while, when it changes the channel, or when it
+ * simply decides that we are gone. And it needs care while it lasts: the access point renews the group key (the one for broadcast traffic) about
+ * once an hour and throws out a station that does not take part. link_service(), called from every poll of the network stack, does
+ *   - noticing the end: a deauthentication / disassociation (conn_note), or silence. The access point sends a beacon about every 100 ms, so after
+ *     LINK_QUIET_MS without any frame from it we send it a probe request (it answers those) every LINK_PROBE_MS, and after LINK_DEAD_MS we give up.
+ *   - connecting again: authenticate, associate, 4-way handshake on the old channel; every third failure a new scan first (the access point may be
+ *     on another channel), with the pause between attempts doubling from 0.5 s to 30 s. The network stack notices nothing but a few lost packets.
+ *   - the group key renewal and a repeated message 3 (see keys_service). */
+
+/* a frame the receive path heard (not a control frame, without FCS): is it from our access point? Then it is alive. */
+static void alive_note(const volatile u8 *f, unsigned len)
+{
+    if (!LINK.up || len < 24 || !mac_is(f + 10, CONN.bssid))
+        return;
+    LINK.last_rx = now_ms();
+}
+
+/* a protected EAPOL-Key frame from the access point while the link is up (wifi_rx_data put it in EAPQ) */
+static void keys_service(void)
+{
+    static const u8 BCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    u8 reply[EAPOL_MAX];
+    unsigned rl = 0;
+    unsigned ki = EAPQ.len >= 7 ? (unsigned)EAPQ.b[5] << 8 | EAPQ.b[6] : 0;
+    int r = WPA4_IGNORED;
+    if (!(ki & 0x08)) /* no pairwise bit: the group key renewal */
+    {
+        r = wpa4_group_rx(&W4, EAPQ.b, EAPQ.len, reply, &rl);
+        if (r == WPA4_SEND_GROUP2)
+        {
+            /* the new key goes in before the answer leaves: the access point may use it at once. The group keys sit in the entries 0..3 by key
+             * id, so the old key stays valid next to it until the access point stops using it. */
+            cam_write(W4.gtk_id, W4.gtk, W4.gtk_id, 1, BCAST);
+            LINK.rx_pn_group[W4.gtk_id & 3] = 0;
+            LINK.rekeys++;
+        }
+    }
+    else if (ki & 0x100)
+    {
+        /* message 3 of the 4-way handshake again: our message 4 was lost and the access point asks once more. It is answered, but the keys are NOT
+         * installed a second time: that would start the packet numbers again under the same key, and a packet number must never be used twice.
+         * (A new message 1, which would renew the pairwise key, is not handled; an access point that insists ends the link and we connect again.) */
+        static const u8 NO_NONCE[32];
+        r = wpa4_rx(&W4, EAPQ.b, EAPQ.len, NO_NONCE, reply, &rl);
+    }
+    EAPQ.pending = 0;
+    if (r == WPA4_SEND_GROUP2 || r == WPA4_SEND_MSG4)
+    {
+        u8 e[14 + EAPOL_MAX];
+        for (int i = 0; i < 6; i++)
+        {
+            e[i] = CONN.bssid[i];
+            e[6 + i] = EF.mac[i];
+        }
+        e[12] = 0x88;
+        e[13] = 0x8E;
+        for (unsigned i = 0; i < rl; i++)
+            e[14 + i] = reply[i];
+        wifi_send(e, 14 + rl); /* encrypted with the pairwise key, like everything now */
+    }
+    else if (r < 0)
+        LINK.eapol_bad++;
+}
+
+/* the end of the link: no data until it is made again; the keys are wiped from the chip, the first new attempt is at once */
+static void link_lost(u64 now)
+{
+    LINK.up = 0;
+    LINK.fails = 0;
+    LINK.backoff = LINK_RETRY_MIN_MS;
+    LINK.next_try = now;
+    cam_clear();
+}
+
+static void reconnect_try(void)
+{
+    if (LINK.fails % 3 == 2) /* looked on the old channel twice in vain: where is the access point now? */
+    {
+        scan_run();
+        pick_target();
+        if (TARGET.found)
+        {
+            const ScanAp *ap = &SC.ap[TARGET.index];
+            if (rsn_check(ap->rsn, ap->rsn_len) == RSN_OK)
+            {
+                for (int i = 0; i < 6; i++)
+                    CONN.bssid[i] = ap->bssid[i];
+                CONN.channel = ap->channel;
+            }
+        }
+        tune_for_tx(CONN.channel); /* (the scan left the radio on its last channel) */
+    }
+    cam_clear();
+    connect_exchange();
+    u64 now = now_ms();
+    if (LINK.up)
+    {
+        LINK.fails = 0;
+        LINK.reconnects++;
+        return;
+    }
+    LINK.fails++;
+    LINK.next_try = now + LINK.backoff;
+    LINK.backoff = LINK.backoff * 2 > LINK_RETRY_MAX_MS ? LINK_RETRY_MAX_MS : LINK.backoff * 2;
+}
+
+static void link_service(void)
+{
+    if (!clock_ok())
+        return;
+    u64 now = now_ms();
+    if (LINK.up)
+    {
+        u64 quiet = now - LINK.last_rx;
+        if (CONN.dropped || quiet >= LINK_DEAD_MS)
+            link_lost(now);
+        else if (quiet >= LINK_QUIET_MS && now - LINK.last_probe >= LINK_PROBE_MS)
+        {
+            u8 f[64];
+            unsigned n = build_probe_request(f, EF.mac, CONN.channel);
+            for (int i = 0; i < 6; i++) /* directed: addressed to the access point, which answers it with a probe response */
+            {
+                f[4 + i] = CONN.bssid[i];
+                f[16 + i] = CONN.bssid[i];
+            }
+            tx_mgmt(f, n, CONN.channel);
+            LINK.last_probe = now;
+        }
+    }
+    if (LINK.up)
+    {
+        if (EAPQ.pending)
+            keys_service();
+    }
+    else if (now >= LINK.next_try)
+        reconnect_try();
 }
 
 static int rtl8821ce_recv_up(void *buf, unsigned max)
 {
-    if (!LINK.up)
+    if (!LINK.adapter)
         return 0;
     rx_poll();
-    if (LINK.head == LINK.tail)
+    link_service();
+    if (!LINK.up || LINK.head == LINK.tail)
         return 0;
     EthFrame *q = &LINK.q[LINK.tail];
     unsigned n = q->len <= max ? q->len : max;
@@ -3558,6 +3777,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     CHN.state = CH_NOT_TRIED;
     RX.state = RXS_NOT_TRIED;
     LINK.up = 0;
+    LINK.adapter = 0;
     CONN.state = 0;
     TARGET.found = 0;
     HS.state = 0;
@@ -3893,17 +4113,27 @@ static void rtl8821ce_status(char *buf, unsigned cap)
 {
     NicText t;
     nic_text_init(&t, buf, cap);
-    if (LINK.up)
+    if (LINK.adapter)
     {
         nic_puts(&t, "RTL8821CE Wi-Fi: ");
         nic_puts(&t, CFG.ssid);
         nic_puts(&t, " ch");
         nic_putd(&t, CONN.channel);
-        nic_puts(&t, link_is_up() ? ", up" : ", DROPPED");
+        nic_puts(&t, link_is_up() ? ", up" : ", reconnecting");
         nic_puts(&t, ", tx ");
         nic_putd(&t, LINK.tx_frames);
         nic_puts(&t, " rx ");
         nic_putd(&t, LINK.rx_frames);
+        if (LINK.reconnects) /* (only when it happened: rc = reconnections, gk = group key renewals) */
+        {
+            nic_puts(&t, ", rc ");
+            nic_putd(&t, LINK.reconnects);
+        }
+        if (LINK.rekeys)
+        {
+            nic_puts(&t, ", gk ");
+            nic_putd(&t, LINK.rekeys);
+        }
         return;
     }
     nic_puts(&t, "RTL8821CE (no driver): ");
