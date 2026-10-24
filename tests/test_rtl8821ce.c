@@ -964,6 +964,7 @@ int main(void)
 {
     TXP_ENABLE = 0; /* the probe-request test (stage 5a) has its own section below */
     ONLINE_ENABLE = 0; /* the data path has its own section below */
+    IDLE_ENABLE = 0;   /* a card that did not connect is switched off again, in the earlier stages; stage 11 has its own section */
     /* ---- the claim ---- */
     PciDevice p = WIFI;
     CHECK(NIC_RTL8821CE.claims(&p));
@@ -3344,6 +3345,129 @@ int main(void)
 #undef INJ
 #undef DRAIN
 #undef ALIVE
+        }
+        /* ---- stage 11: choosing a network at run time. No WIFI.CFG: the card stays on as an adapter without a connection; the list, a new scan, and
+         * joining a network with a passphrase typed by the user (the functions behind the Wi-Fi window of the desktop). ---- */
+        {
+            static unsigned char bc2[200], bc3[200];
+            unsigned bl2, bl3;
+            X_HTOP = -1;
+            X_VHTOP_W = -1;
+            X_VHTCAP = 0;
+            X_HTAMPDU = 0;
+            IDLE_ENABLE = 1;
+            bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE); /* TestNet, WPA2, 5 GHz, HT + VHT */
+            bl2 = build_beacon_caps(bc2, 6, 1, 0, 0);      /* the same name on 2.4 GHz would be another access point: make it another network */
+            memcpy(bc2 + 38, "OtherNt", 7);
+            bc2[16 + 5] = 0xB2; /* another BSSID */
+            bc2[10 + 5] = 0xB2;
+            bl3 = build_beacon_caps(bc3, 11, 0, 0, 0); /* an open network: no RSN element, no privacy bit */
+            memcpy(bc3 + 38, "OpenNet", 7);
+            bc3[16 + 5] = 0xB3;
+            bc3[10 + 5] = 0xB3;
+            bc3[34] = 0x21;
+            {
+                unsigned char *rsn = (unsigned char *)find_ie(bc3, bl3 - 4, 36, 48);
+                if (rsn)
+                    rsn[0] = 0xFE; /* an element nobody knows */
+            }
+            CONNECT8(0);
+            rxq_add_frame(bc2, bl2);
+            rxq_add_frame(bc3, bl3);
+            CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && LINK.adapter && !LINK.up && !LINK.want);
+            {
+                char sl[96];
+                NIC_RTL8821CE.status(sl, sizeof sl);
+                CHECK(strcmp(sl, "RTL8821CE Wi-Fi: not connected") == 0);
+                NetWifiStatus ws;
+                rtl8821ce_wifi_status(&ws);
+                CHECK(ws.present == 1 && ws.state == 0 && ws.ssid[0] == 0);
+            }
+            CHECK(NIC_RTL8821CE.link_up() == 0 && NIC_RTL8821CE.recv(got, sizeof got) == 0 && NIC_RTL8821CE.send(arp, 42) == -1);
+            CHECK(rtl8821ce_ap_count() == 3);
+            {
+                NetWifiAp a;
+                int found_test = 0, found_open = 0, found_other = 0;
+                for (int i = 0; i < 3; i++)
+                {
+                    CHECK(rtl8821ce_ap((unsigned)i, &a) == 0);
+                    if (strcmp(a.ssid, "TestNet") == 0)
+                        found_test = a.channel == 149 && a.sec == 3 && a.ht == 1 && a.vht == 1 && a.beacons >= 1 && memcmp(a.bssid, AP_BSSID, 6) == 0;
+                    else if (strcmp(a.ssid, "OpenNet") == 0)
+                        found_open = a.channel == 11 && a.sec == 0 && a.ht == 0;
+                    else if (strcmp(a.ssid, "OtherNt") == 0)
+                        found_other = a.channel == 6 && a.sec == 3 && a.ht == 1 && a.vht == 0;
+                }
+                CHECK(found_test && found_open && found_other);
+                CHECK(rtl8821ce_ap(3, &a) == -1);
+            }
+            /* things that are refused before anything is sent */
+            int tx0 = TXCAP.count;
+            CHECK(rtl8821ce_wifi_connect("TestNet", "short") == NET_WIFI_E_ARGS);
+            CHECK(rtl8821ce_wifi_connect("", "secret-pass-phrase") == NET_WIFI_E_ARGS);
+            CHECK(rtl8821ce_wifi_connect("NoSuchNet", "secret-pass-phrase") == NET_WIFI_E_NOT_FOUND);
+            CHECK(rtl8821ce_wifi_connect("OpenNet", "secret-pass-phrase") == NET_WIFI_E_UNSUPPORTED);
+            CHECK(TXCAP.count == tx0 && !LINK.up);
+
+            /* a wrong passphrase while nothing is joined: the key exchange fails, the card stays an idle adapter, nothing is reconnected */
+            CHECK(rtl8821ce_wifi_connect("TestNet", "not-the-passphrase") == NET_WIFI_E_HANDSHAKE);
+            CHECK(!LINK.up && !LINK.want && LINK.adapter && !RA.on);
+            NIC_RTL8821CE.recv(got, sizeof got);
+            CHECK(!LINK.up);
+            /* an access point that does not answer */
+            AP_MODE = 1;
+            CHECK(rtl8821ce_wifi_connect("TestNet", "secret-pass-phrase") == NET_WIFI_E_NO_ANSWER);
+            AP_MODE = 0;
+            CHECK(!LINK.up && !LINK.want);
+
+            /* the right one */
+            CHECK(rtl8821ce_wifi_connect("TestNet", "secret-pass-phrase") == NET_WIFI_OK);
+            CHECK(LINK.up && LINK.want && HS.result == HS_OK && strcmp(CFG.ssid, "TestNet") == 0 && CONN.channel == 149 && RA.on);
+            {
+                NetWifiStatus ws;
+                rtl8821ce_wifi_status(&ws);
+                CHECK(ws.present == 1 && ws.state == 1 && strcmp(ws.ssid, "TestNet") == 0 && ws.channel == 149 && ws.width == 20);
+                char sl[96];
+                NIC_RTL8821CE.status(sl, sizeof sl);
+                CHECK(strstr(sl, "TestNet ch149, up") != 0);
+            }
+            CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+
+            /* a scan while connected: the radio goes through the channels and comes back; nothing is sent meanwhile, and the link stays */
+            RXQ_N = RXQ_NEXT = 0;
+            rxq_add_frame(bc, bl);
+            rxq_add_frame(bc2, bl2);
+            CHECK(rtl8821ce_wifi_rescan() == 2); /* the open network is not heard this time */
+            CHECK(LINK.up && !LINK.scanning && rtl8821ce_ap_count() == 2);
+            CHECK((reg32(0x2800 + 0x18 * 4) & 0xFF) == 149);
+            CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+
+            /* joining another passphrase for the same network fails: the old connection was left, the old passphrase is the one that is reconnected */
+            int dr0 = 0;
+            for (int i = 0; i < TXLOG_N; i++)
+                if (TXLOG[i].b[0] == 0xC0)
+                    dr0++;
+            int first_new = TXLOG_N;
+            CHECK(rtl8821ce_wifi_connect("TestNet", "another-wrong-one") == NET_WIFI_E_HANDSHAKE);
+            CHECK(TXLOG[first_new].b[0] == 0xC0 && memcmp(TXLOG[first_new].b + 4, AP_BSSID, 6) == 0); /* the very first thing: goodbye to the old network */
+            {
+                int dr1 = 0;
+                for (int i = 0; i < TXLOG_N; i++)
+                    if (TXLOG[i].b[0] == 0xC0)
+                        dr1++;
+                CHECK(dr1 > dr0); /* it said goodbye to the old network (and to the new one after the failure) */
+            }
+            CHECK(!LINK.up && LINK.want && strcmp(CFG.psk, "secret-pass-phrase") == 0 && strcmp(CFG.ssid, "TestNet") == 0);
+            {
+                NetWifiStatus ws;
+                rtl8821ce_wifi_status(&ws);
+                CHECK(ws.state == 2); /* lost, connecting again */
+            }
+            NIC_RTL8821CE.recv(got, sizeof got); /* link_service(): the first attempt is at once */
+            CHECK(LINK.up && NIC_RTL8821CE.link_up() == 1);
+            CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+            IDLE_ENABLE = 0;
+            CFG_TEXT = 0;
         }
         /* an access point without HT: the fixed rate, no QoS */
         bl = build_beacon_caps(bc, 149, 0, 0, 0);

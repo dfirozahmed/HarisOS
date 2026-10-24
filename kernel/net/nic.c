@@ -100,3 +100,34 @@ int net_adapter(unsigned char loc[3], int *working, char *status, unsigned cap)
 const char *net_driver_name(void) { return ACTIVE ? ACTIVE->name : "no adapter"; }
 
 int net_wifi_scan_line(unsigned index, char *buf, unsigned cap) { return rtl8821ce_scan_line(index, buf, cap); }
+
+/* ---- choosing a Wi-Fi network (include/net.h): only the Wi-Fi card does it ---- */
+static int wifi_active(void) { return ACTIVE == &NIC_RTL8821CE; }
+
+void net_wifi_status(NetWifiStatus *st)
+{
+    if (wifi_active())
+        rtl8821ce_wifi_status(st);
+    else
+    {
+        st->present = 0;
+        st->state = 0;
+        st->ssid[0] = 0;
+        st->channel = 0;
+        st->width = 20;
+    }
+}
+
+int net_wifi_ap_count(void) { return wifi_active() ? rtl8821ce_ap_count() : -1; }
+int net_wifi_ap(unsigned index, NetWifiAp *out) { return wifi_active() ? rtl8821ce_ap(index, out) : -1; }
+int net_wifi_rescan(void) { return wifi_active() ? rtl8821ce_wifi_rescan() : NET_WIFI_E_NO_ADAPTER; }
+
+int net_wifi_connect(const char *ssid, const char *passphrase)
+{
+    if (!wifi_active())
+        return NET_WIFI_E_NO_ADAPTER;
+    int r = rtl8821ce_wifi_connect(ssid, passphrase);
+    if (r == NET_WIFI_OK)
+        net_dhcp(6000); /* another network: another address (if it fails, net_ip_source() says so) */
+    return r;
+}

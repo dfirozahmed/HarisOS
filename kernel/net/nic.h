@@ -2,6 +2,7 @@
 #ifndef HARIS_NIC_H
 #define HARIS_NIC_H
 
+#include "net.h"
 #include "pci.h"
 
 typedef struct
@@ -30,6 +31,13 @@ extern const NicDriver NIC_RTL8821CE; /* Wi-Fi: identification only for now, pro
 
 /* The last Wi-Fi scan as text lines (rtl8821ce.c); see net_wifi_scan_line() in net.h. */
 int rtl8821ce_scan_line(unsigned index, char *buf, unsigned cap);
+
+/* Choosing a network at run time (rtl8821ce.c); see net.h: net_wifi_*. */
+void rtl8821ce_wifi_status(NetWifiStatus *st);
+int rtl8821ce_ap_count(void);
+int rtl8821ce_ap(unsigned index, NetWifiAp *out);
+int rtl8821ce_wifi_rescan(void);
+int rtl8821ce_wifi_connect(const char *ssid, const char *psk);
 
 /* Tiny text builder for status lines (no libc here): appends to buf[cap], always NUL-terminated. */
 typedef struct

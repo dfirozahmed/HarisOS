@@ -212,6 +212,8 @@ static UiIcon app_icon(int icon)
         return UI_ICON_DEVMGR;
     case TASKBAR_ICON_NOTEPAD:
         return UI_ICON_NOTEPAD;
+    case TASKBAR_ICON_WIFI:
+        return UI_ICON_WIFI;
     default:
         return UI_ICON_BROWSER;
     }

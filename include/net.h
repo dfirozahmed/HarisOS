@@ -47,6 +47,46 @@ int net_adapter(unsigned char loc[3], int *working, char *status, unsigned cap);
 /* The result of the last Wi-Fi scan as text: line 0 is a summary, lines 1 .. n one network each (channel, security, BSSID, name), then a line
  * with the frames heard per channel. Returns the length of the line, or -1 (no Wi-Fi scan has been done, or no such line). */
 int net_wifi_scan_line(unsigned index, char *buf, unsigned cap);
+
+/* ---- choosing a Wi-Fi network at run time (the Wi-Fi app) ----
+ * Work only while the Wi-Fi card is the network adapter (net_wifi_status().present). The card stays an adapter without a connection when none was
+ * made at boot (no WIFI.CFG, or the network was not there): then the window of the desktop can pick one. A passphrase given here lives in the
+ * driver's memory only; nothing is written to a disk. */
+typedef struct
+{
+    char ssid[33];
+    unsigned char bssid[6];
+    unsigned char channel; /* the primary channel */
+    unsigned char sec;     /* 0 open, 1 WEP, 2 WPA, 3 WPA2 (only WPA2-Personal with CCMP can be joined) */
+    unsigned char ht, vht; /* what the access point offers: HT (802.11n), VHT (802.11ac) */
+    unsigned beacons;      /* beacons heard during the scan: more = nearer / stronger, roughly */
+} NetWifiAp;
+
+typedef struct
+{
+    int present;           /* a Wi-Fi card that can scan and connect */
+    int state;             /* 0 not connected, 1 connected, 2 connection lost, connecting again */
+    char ssid[33];         /* the network of state 1 and 2 */
+    unsigned char channel; /* ... its primary channel */
+    unsigned width;        /* ... the channel width in MHz */
+} NetWifiStatus;
+
+#define NET_WIFI_OK 0
+#define NET_WIFI_E_NO_ADAPTER -1   /* no Wi-Fi card in use */
+#define NET_WIFI_E_ARGS -2         /* name or passphrase of the wrong length (name 1-32, passphrase 8-63 characters) */
+#define NET_WIFI_E_NOT_FOUND -3    /* the network is not in the scan list */
+#define NET_WIFI_E_UNSUPPORTED -4  /* open, WEP, WPA1 or another security than WPA2-Personal with CCMP */
+#define NET_WIFI_E_NO_ANSWER -5    /* the access point did not answer (authentication / association) */
+#define NET_WIFI_E_HANDSHAKE -6    /* it answered, but the key exchange failed: most likely a wrong passphrase */
+
+void net_wifi_status(NetWifiStatus *st);
+int net_wifi_ap_count(void);                       /* networks in the last scan, -1 = no scan has been done */
+int net_wifi_ap(unsigned index, NetWifiAp *out);   /* 0 = ok, -1 = no such entry */
+/* Scan all channels again (about 4 seconds; the connection, if there is one, pauses meanwhile). Returns the number of networks, or a NET_WIFI_E_ code. */
+int net_wifi_rescan(void);
+/* Join a network from the scan list (several seconds, then DHCP). The network the card was connected to before stays the one to reconnect to when
+ * this fails. Returns NET_WIFI_OK or a NET_WIFI_E_ code. */
+int net_wifi_connect(const char *ssid, const char *passphrase);
 int net_irq_init(void);
 int net_irq_active(void);
 int net_irq_take(void);

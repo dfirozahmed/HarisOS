@@ -2990,6 +2990,9 @@ static void cfg_load(void)
     CFG.state = CFG_NONE;
     CFG.why = 0;
     CFG.ssid_len = CFG.psk_len = 0;
+    CFG.rate = CFG_RATE_AUTO; /* (the defaults of the optional lines; also used when no file is there and a network is picked in the Wi-Fi window) */
+    CFG.bw = 2;
+    CFG.ampdu = 1;
     volatile char *wipe = CFG.psk;
     for (unsigned i = 0; i < sizeof CFG.psk; i++)
         wipe[i] = 0;
@@ -3799,6 +3802,8 @@ typedef struct
 static struct
 {
     int adapter;              /* the card is the network adapter (set by the first connection, then for good: it reconnects by itself) */
+    int want;                 /* a connection was made: when it is lost, connect again (not for a card that never connected, or after a refusal) */
+    int scanning;             /* a scan is going on: the radio is on other channels, nothing can be sent */
     int up;                   /* associated, keys in the chip: data can flow */
     u64 tx_pn;                /* the last packet number we used */
     u64 rx_pn_pairwise;       /* the largest we accepted */
@@ -4178,7 +4183,7 @@ static int tx_be(const u8 *frame, unsigned len, unsigned seq, int agg)
 /* an Ethernet frame of the network stack to the access point */
 static int wifi_send(const void *eth, unsigned len)
 {
-    if (!LINK.up || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
+    if (!LINK.up || LINK.scanning || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
         return -1;
     const u8 *e = (const u8 *)eth;
     u8 f[26 + 8 + 8 + ETH_MAX];
@@ -4370,6 +4375,7 @@ static void link_try(void)
     LINK.last_rx = LINK.last_probe = LINK.up_since = now_ms();
     ba_reset();
     LINK.adapter = 1;
+    LINK.want = 1;
     LINK.up = 1;
 }
 
@@ -4515,8 +4521,210 @@ static void link_service(void)
         ba_expire(now);
         ba_tx_service(now);
     }
-    else if (now >= LINK.next_try)
+    else if (LINK.want && now >= LINK.next_try)
         reconnect_try();
+}
+
+/* ---- stage 11: choosing a network at run time ----
+ * The desktop's Wi-Fi window (apps/wifi) lists the networks of the last scan, scans again on request, and joins a network with a passphrase the user
+ * typed. The card has to be the adapter for that (LINK.adapter): it stays one without a connection when the boot did not make one (no WIFI.CFG, the
+ * network was not there, a wrong passphrase), see the end of probe(). The passphrase goes into CFG like the one from the file, in memory only, so
+ * that a lost connection is made again by link_service() with it. When joining fails, the old network (if there was one) is the one to reconnect to. */
+static int IDLE_ENABLE = 1; /* the host tests of the earlier stages switch it off (they expect a card that did not connect to be switched off) */
+
+void rtl8821ce_wifi_status(NetWifiStatus *st)
+{
+    st->present = LINK.adapter;
+    st->state = 0;
+    st->ssid[0] = 0;
+    st->channel = 0;
+    st->width = 20;
+    if (!LINK.adapter)
+        return;
+    if (LINK.up && !CONN.dropped)
+        st->state = 1;
+    else if (LINK.want)
+        st->state = 2;
+    if (st->state)
+    {
+        unsigned i = 0;
+        for (; i < 32 && CFG.ssid[i]; i++)
+            st->ssid[i] = CFG.ssid[i];
+        st->ssid[i] = 0;
+        st->channel = (unsigned char)CONN.channel;
+        st->width = 20u << CONN.cc.bw;
+    }
+}
+
+int rtl8821ce_ap_count(void) { return SC.state ? (int)SC.n : -1; }
+
+int rtl8821ce_ap(unsigned index, NetWifiAp *out)
+{
+    if (!SC.state || index >= SC.n || !out)
+        return -1;
+    const ScanAp *a = &SC.ap[index];
+    unsigned i = 0;
+    for (; i < 32 && a->ssid[i]; i++)
+        out->ssid[i] = a->ssid[i];
+    out->ssid[i] = 0;
+    for (int k = 0; k < 6; k++)
+        out->bssid[k] = a->bssid[k];
+    out->channel = a->channel;
+    out->sec = a->sec;
+    out->ht = a->ht;
+    out->vht = a->vht;
+    out->beacons = a->beacons;
+    return 0;
+}
+
+/* scan every channel again: the radio leaves the channel of the connection for a few seconds (nothing is sent meanwhile) and goes back */
+int rtl8821ce_wifi_rescan(void)
+{
+    if (!LINK.adapter || !D.ready)
+        return NET_WIFI_E_NO_ADAPTER;
+    int was_up = LINK.up;
+    LINK.scanning = 1;
+    scan_run();
+    LINK.scanning = 0;
+    pick_target();
+    if (was_up && LINK.up)
+    {
+        tune_chan(&CONN.cc);
+        LINK.last_rx = LINK.last_probe = now_ms(); /* (nothing could be heard from the access point meanwhile) */
+    }
+    return (int)SC.n;
+}
+
+static int same_name(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+
+static void wipe(volatile char *p, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        p[i] = 0;
+}
+
+int rtl8821ce_wifi_connect(const char *ssid, const char *psk)
+{
+    if (!LINK.adapter || !D.ready || TXP.variant < 0 || !TXP.sent || !SC.state)
+        return NET_WIFI_E_NO_ADAPTER;
+    unsigned sl = 0, pl = 0;
+    while (ssid && ssid[sl])
+        sl++;
+    while (psk && psk[pl])
+        pl++;
+    if (sl < 1 || sl > 32 || pl < 8 || pl > 63)
+        return NET_WIFI_E_ARGS;
+    /* the access point: the nearest (most beacons) of that name; WPA2-Personal with CCMP only */
+    int best = -1, named = 0;
+    for (unsigned i = 0; i < SC.n; i++)
+    {
+        const ScanAp *a = &SC.ap[i];
+        if (!same_name(a->ssid, ssid))
+            continue;
+        named = 1;
+        if (a->sec != 3 || a->rsn_len == 0 || rsn_check(a->rsn, a->rsn_len) != RSN_OK)
+            continue;
+        if (best < 0 || a->beacons > SC.ap[best].beacons)
+            best = (int)i;
+    }
+    if (best < 0)
+        return named ? NET_WIFI_E_UNSUPPORTED : NET_WIFI_E_NOT_FOUND;
+
+    /* what to go back to */
+    char old_ssid[sizeof CFG.ssid], old_psk[sizeof CFG.psk];
+    for (unsigned i = 0; i < sizeof old_ssid; i++)
+        old_ssid[i] = CFG.ssid[i];
+    for (unsigned i = 0; i < sizeof old_psk; i++)
+        old_psk[i] = CFG.psk[i];
+    unsigned old_ssid_len = CFG.ssid_len, old_psk_len = CFG.psk_len;
+    int old_cfg_state = CFG.state, was_want = LINK.want, was_up = LINK.up;
+    static Chan old_cc;
+    static u8 old_bssid[6];
+    unsigned old_channel = CONN.channel;
+    old_cc = CONN.cc;
+    for (int i = 0; i < 6; i++)
+        old_bssid[i] = CONN.bssid[i];
+    ScanAp old_ap; /* the capabilities of the old access point: CONN gets them back through conn_set_caps */
+    old_ap.rates = CONN.rates;
+    old_ap.ht = CONN.ht;
+    old_ap.ht_mcs0 = CONN.ht_mcs0;
+    old_ap.ht_cap = CONN.ht_cap;
+    old_ap.vht = CONN.vht;
+    old_ap.vht_map = CONN.vht_map;
+    old_ap.vht_cap = CONN.vht_cap;
+    old_ap.ht_sec = CONN.ht_sec;
+    old_ap.ht_w40 = CONN.ht_w40;
+    old_ap.vht_w = CONN.vht_w;
+    old_ap.vht_seg0 = CONN.vht_seg0;
+    old_ap.ht_ampdu = CONN.ht_ampdu;
+
+    if (LINK.up) /* leave the old network politely */
+    {
+        u8 f[32];
+        unsigned n = build_deauth(f, CONN.bssid);
+        tx_mgmt(f, n, CONN.channel);
+        LINK.up = 0;
+        ra_stop();
+        ba_reset();
+        cam_clear();
+    }
+    LINK.want = 0; /* (nobody reconnects meanwhile) */
+    for (unsigned i = 0; i < sl; i++)
+        CFG.ssid[i] = ssid[i];
+    CFG.ssid[sl] = 0;
+    CFG.ssid_len = sl;
+    for (unsigned i = 0; i < pl; i++)
+        CFG.psk[i] = psk[i];
+    CFG.psk[pl] = 0;
+    CFG.psk_len = pl;
+    CFG.state = CFG_OK;
+    const ScanAp *ap = &SC.ap[best];
+    for (int i = 0; i < 6; i++)
+        CONN.bssid[i] = ap->bssid[i];
+    CONN.channel = ap->channel;
+    conn_set_caps(ap);
+    tune_chan(&CONN.cc);
+    rx_poll();
+    connect_exchange();
+
+    int result;
+    if (LINK.up)
+    {
+        LINK.fails = 0;
+        result = NET_WIFI_OK;
+        if (was_up || was_want)
+            LINK.reconnects++;
+    }
+    else
+    {
+        result = (CONN.auth_seen && CONN.auth_status == 0 && CONN.assoc_seen && CONN.assoc_status == 0) ? NET_WIFI_E_HANDSHAKE : NET_WIFI_E_NO_ANSWER;
+        /* back to the old network, if there was one: link_service() connects to it again at once */
+        for (unsigned i = 0; i < sizeof CFG.ssid; i++)
+            CFG.ssid[i] = old_ssid[i];
+        for (unsigned i = 0; i < sizeof CFG.psk; i++)
+            CFG.psk[i] = old_psk[i];
+        CFG.ssid_len = old_ssid_len;
+        CFG.psk_len = old_psk_len;
+        CFG.state = old_cfg_state;
+        CONN.channel = old_channel;
+        for (int i = 0; i < 6; i++)
+            CONN.bssid[i] = old_bssid[i];
+        conn_set_caps(&old_ap);
+        CONN.cc = old_cc;
+        LINK.want = was_want || was_up;
+        LINK.fails = 0;
+        LINK.backoff = LINK_RETRY_MIN_MS;
+        LINK.next_try = now_ms();
+        if (LINK.want)
+            tune_chan(&CONN.cc);
+    }
+    wipe(old_psk, sizeof old_psk);
+    return result;
 }
 
 static int rtl8821ce_recv_up(void *buf, unsigned max)
@@ -4599,6 +4807,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     RX.state = RXS_NOT_TRIED;
     LINK.up = 0;
     LINK.adapter = 0;
+    LINK.want = LINK.scanning = 0;
     RA.on = 0;
     CONN.state = 0;
     TARGET.found = 0;
@@ -4674,6 +4883,16 @@ static int rtl8821ce_probe(const PciDevice *pd)
             }
             if (LINK.up) /* connected: the card stays on, the DMA engines too, and the network stack takes it */
                 return 1;
+            if (IDLE_ENABLE && DL.state == DL_OK && MI.state == MI_OK && PH.state == PH_OK && H2.state == H2_OK && CHN.state == CH_OK && SC.state &&
+                TXP.variant >= 0 && TXP.sent)
+            {
+                /* Everything works but no network was joined (no WIFI.CFG, the network was not in range, a wrong passphrase): the card stays on as an
+                 * adapter without a connection, so that the Wi-Fi window of the desktop can pick a network (stage 11). */
+                LINK.adapter = 1;
+                LINK.up = 0;
+                LINK.want = 0;
+                return 1;
+            }
             /* The DMA engines stay on from mac_init() to here, as in Linux: switching the command register off and on again between the
              * stages made the transmit queues lose their pages (see tx_probe_test()). Only now, before the power-off, they go off. */
             wr8(R_CR, 0);
@@ -4938,10 +5157,15 @@ static void rtl8821ce_status(char *buf, unsigned cap)
     if (LINK.adapter)
     {
         nic_puts(&t, "RTL8821CE Wi-Fi: ");
+        if (!LINK.up && !LINK.want) /* a card without a network: nothing of a connection to show */
+        {
+            nic_puts(&t, "not connected");
+            return;
+        }
         nic_puts(&t, CFG.ssid);
         nic_puts(&t, " ch");
         nic_putd(&t, CONN.channel);
-        nic_puts(&t, link_is_up() ? ", up" : ", reconnecting");
+        nic_puts(&t, link_is_up() ? ", up" : LINK.want ? ", reconnecting" : ", not connected");
         if (RA.on) /* the firmware chooses the rates: HT or VHT, at 20 MHz */
             nic_puts(&t, RA.vht ? ", vht" : ", ht");
         if (RA.on && RA.bw) /* ... and the width, when it is more than 20 MHz */

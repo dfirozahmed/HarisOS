@@ -179,6 +179,7 @@ set(KERNEL_SOURCES
     apps/display/display_app.c      # Display Settings app: brightness slider
     apps/taskmgr/taskmgr_app.c      # Task Manager app: processes and performance
     apps/notepad/notepad_app.c      # Notepad app: plain-text editor
+    apps/wifi/wifi_app.c            # Wi-Fi app: pick a wireless network and join it
     apps/console/console_app.c      # Console window: where a program started from the File Explorer prints and reads
     apps/terminal/terminal_app.c    # Terminal app: a console window running the shell; also starts INIT.ELF at boot
     apps/gui/gui_app.c)             # Compositor: windows for the surfaces of user programs (SYS_GUI_*)
