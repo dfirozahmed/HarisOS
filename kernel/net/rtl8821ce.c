@@ -520,6 +520,126 @@ static void init_system_cfg(void)
     }
 }
 
+/* ---- stage 4a: the card's own data in its efuse ----
+ * Every chip carries a small one-time-programmable memory: 512 bytes, "physical map". It holds the data of the board in blocks, each with
+ * a header (rtw88 efuse.c): the 1-byte header is block[3:0] in bits 7..4 and word_en[3:0] in bits 3..0; when the low 5 bits of the first
+ * byte are 0xF it is the 2-byte form, block[2:0] in bits 7..5 of the first byte, block[6:3] in bits 7..4 of the second, word_en in the low 4
+ * bits of the second. word_en has a 0 for each of the four 16-bit words of the 8-byte block that follows in the map. Blocks fill a 512 byte
+ * "logical map"; the header 0xFF ends the list. In the logical map the card's MAC address is at offset 0xD0 (struct rtw8821c_efuse). */
+#define R_EFUSE_CTRL 0x0030
+#define R_LDO_EFUSE_CTRL 0x0034
+#define EFUSE_PHYSICAL 512
+#define EFUSE_PROTECT 96   /* the last bytes of the physical map are protected: no blocks there */
+#define EFUSE_LOGICAL 512
+#define EFUSE_MAC_AT 0xD0
+
+enum { EF_NOT_TRIED, EF_OK, EF_FAILED };
+static struct
+{
+    int state;
+    const char *why;
+    unsigned char mac[6];
+} EF;
+
+/* rtw_dump_logical_efuse_map. 0 = ok, -1 = the blocks do not fit (corrupt map). `log` must be filled with 0xFF by the caller. */
+static int efuse_logical(const u8 *phy, u8 *log)
+{
+    const unsigned limit = EFUSE_PHYSICAL - EFUSE_PROTECT;
+    unsigned idx = 0;
+    while (idx < limit)
+    {
+        u8 hdr1 = phy[idx], hdr2 = phy[idx + 1];
+        if (hdr1 == 0xFF || ((hdr1 & 0x1F) == 0xF && hdr2 == 0xFF)) /* end of the list */
+            break;
+        unsigned blk, word_en;
+        if ((hdr1 & 0x1F) == 0xF) /* 2 byte header */
+        {
+            blk = (((unsigned)hdr2 & 0xF0) >> 1) | (((unsigned)hdr1 >> 5) & 7);
+            word_en = hdr2 & 0xF;
+            idx += 2;
+        }
+        else
+        {
+            blk = ((unsigned)hdr1 & 0xF0) >> 4;
+            word_en = hdr1 & 0xF;
+            idx += 1;
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            if (word_en & BIT(i)) /* this word is not written */
+                continue;
+            unsigned at = (blk << 3) + ((unsigned)i << 1);
+            if (idx + 1 > limit || at + 1 > EFUSE_LOGICAL)
+                return -1;
+            log[at] = phy[idx];
+            log[at + 1] = phy[idx + 1];
+            idx += 2;
+        }
+    }
+    return 0;
+}
+
+/* rtw_dump_physical_efuse_map: read the 512 bytes one by one through EFUSE_CTRL. The chip must be powered on. */
+static int efuse_physical(u8 *map)
+{
+    wr32(R_LDO_EFUSE_CTRL, rd32(R_LDO_EFUSE_CTRL) & ~(BIT(8) | BIT(9))); /* bank 0: the WLAN part */
+    wr8(R_LDO_EFUSE_CTRL + 3, (u8)(rd8(R_LDO_EFUSE_CTRL + 3) & ~BIT(7))); /* the 2.5 V supply for writing is off while reading */
+    u32 ctl = rd32(R_EFUSE_CTRL);
+    for (unsigned addr = 0; addr < EFUSE_PHYSICAL; addr++)
+    {
+        ctl &= ~(0xFFu | (0x3FFu << 8));
+        ctl |= (addr & 0x3FF) << 8;
+        wr32(R_EFUSE_CTRL, ctl & ~BIT(31)); /* ask for this address: BIT_EF_FLAG clear, the chip sets it when the data is there */
+        int got = 0;
+        for (int i = 0; i < 1000000 && !got; i++)
+        {
+            udelay(1);
+            ctl = rd32(R_EFUSE_CTRL);
+            got = (ctl & BIT(31)) != 0;
+        }
+        if (!got)
+            return -1;
+        map[addr] = (u8)(ctl & 0xFF);
+    }
+    return 0;
+}
+
+static int valid_mac(const u8 *m)
+{
+    int zero = 1;
+    for (int i = 0; i < 6; i++)
+        zero &= m[i] == 0;
+    return !zero && !(m[0] & 1);
+}
+
+static void efuse_read_mac(void)
+{
+    u8 phy[EFUSE_PHYSICAL], log[EFUSE_LOGICAL];
+    EF.state = EF_FAILED;
+    EF.why = 0;
+    if (efuse_physical(phy))
+    {
+        EF.why = "read timeout";
+        return;
+    }
+    volatile u8 *l = log;
+    for (int i = 0; i < EFUSE_LOGICAL; i++)
+        l[i] = 0xFF;
+    if (efuse_logical(phy, log))
+    {
+        EF.why = "corrupt map";
+        return;
+    }
+    for (int i = 0; i < 6; i++)
+        EF.mac[i] = log[EFUSE_MAC_AT + i];
+    if (!valid_mac(EF.mac))
+    {
+        EF.why = "no valid MAC";
+        return;
+    }
+    EF.state = EF_OK;
+}
+
 /* the outcome of the firmware download, for the Device Manager line */
 enum { DL_NOT_TRIED, DL_OK, DL_FAILED, DL_SKIPPED };
 static struct
@@ -791,6 +911,8 @@ static int rtl8821ce_probe(const PciDevice *pd)
     /* stage 3 needs the chip to reach RAM: bus mastering on, and the DMA rings set up (Linux does this before the power-on, too) */
     int dma_ok = 0;
     DL.state = DL_NOT_TRIED;
+    EF.state = EF_NOT_TRIED;
+    EF.why = 0;
     DL.why = 0;
     DL.part = 0;
     DL.piece = 0;
@@ -834,6 +956,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
             {
                 DL.state = DL_OK;
                 DL.mcufw = rd16(R_MCUFW_CTRL);
+                efuse_read_mac(); /* the chip is powered on and the firmware runs: read the board's data while we can */
             }
             else
             {
@@ -884,9 +1007,24 @@ static void status_download(NicText *t)
         nic_putd(t, FW.version);
         nic_putc(t, '.');
         nic_putd(t, FW.subversion);
-        nic_puts(t, " loaded and ready (80=");
+        nic_puts(t, " ready (80=");
         nic_puth(t, DL.mcufw, 4);
         nic_putc(t, ')');
+        if (EF.state == EF_OK)
+        {
+            nic_puts(t, ", MAC ");
+            for (int i = 0; i < 6; i++)
+            {
+                nic_puth(t, EF.mac[i], 2);
+                if (i < 5)
+                    nic_putc(t, ':');
+            }
+        }
+        else if (EF.state == EF_FAILED)
+        {
+            nic_puts(t, ", efuse: ");
+            nic_puts(t, EF.why ? EF.why : "?");
+        }
         nic_puts(t, DL.off_after > 0 ? ", off again" : DL.off_after < 0 ? ", power-off FAILED" : "");
     }
     else if (DL.state == DL_FAILED)
@@ -931,7 +1069,8 @@ static void rtl8821ce_status(char *buf, unsigned cap)
     case PWR_FAILED:
         if (DL.state == DL_OK || DL.state == DL_FAILED || DL.state == DL_SKIPPED)
         {
-            nic_puts(&t, ", powered on");
+            if (DL.state != DL_OK)
+                nic_puts(&t, ", powered on");
             status_download(&t);
             break;
         }

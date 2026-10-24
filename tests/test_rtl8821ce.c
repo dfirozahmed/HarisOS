@@ -52,6 +52,23 @@ static unsigned char *dma2host(u32 dma)
     return DMA_HOST + (dma - DMA_FAKE);
 }
 
+/* ---- the efuse the pretend chip holds (physical map, 512 bytes) ---- */
+static unsigned char EFUSE_MAP[512];
+static int KNOB_EFUSE_STUCK;
+
+static void build_efuse(const unsigned char mac[6])
+{
+    memset(EFUSE_MAP, 0xFF, sizeof EFUSE_MAP);
+    unsigned i = 0;
+    /* block 1, 1-byte header: words 0 and 2 are written (word_en bits are 1 for words NOT written: 0b1010) */
+    EFUSE_MAP[i++] = (1 << 4) | 0xA;
+    EFUSE_MAP[i++] = 0xAA; EFUSE_MAP[i++] = 0xBB; EFUSE_MAP[i++] = 0xCC; EFUSE_MAP[i++] = 0xDD;
+    /* block 26 (0xD0 / 8), which needs the 2-byte header: words 0, 1, 2 hold the MAC address */
+    EFUSE_MAP[i++] = ((26 & 7) << 5) | 0x0F;
+    EFUSE_MAP[i++] = ((26 >> 3) << 4) | 0x8;
+    for (int k = 0; k < 6; k++)
+        EFUSE_MAP[i++] = mac[k];
+}
 /* ---- the pretend chip's insides ---- */
 static unsigned char TXFIFO[16384];
 static unsigned char CHIPMEM[0x400000];
@@ -188,6 +205,8 @@ void rtl8821ce_host_log(u32 off, unsigned size, u32 value)
         run_bcn_dma();
         REGS[0x383] &= (unsigned char)~0x10;
     }
+    else if (size == 4 && off == 0x30 && !(value & BIT(31)) && !KNOB_EFUSE_STUCK)
+        set32(0x30, (value & ~0xFFu) | EFUSE_MAP[(value >> 8) & 0x3FF] | BIT(31)); /* the byte at that address, and "done" */
     else if (size == 4 && off == 0x1208 && (value & BIT(31)))
         run_ddma(value);
     else if (size == 1 && (off == 0x03 || off == 0x1D))
@@ -288,7 +307,9 @@ static void chip(unsigned char filler, unsigned char cr, u16 mcufw)
     BCN_PAGE = 0xFFFF;
     memset(CHIPMEM, 0, sizeof CHIPMEM);
     memset(TXFIFO, 0, sizeof TXFIFO);
-    KNOB_NO_BCN_VALID = KNOB_DDMA_STUCK = KNOB_CHKSUM_BAD = KNOB_NO_BOOT = 0;
+    KNOB_NO_BCN_VALID = KNOB_DDMA_STUCK = KNOB_CHKSUM_BAD = KNOB_NO_BOOT = KNOB_EFUSE_STUCK = 0;
+    static const unsigned char TEST_MAC[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+    build_efuse(TEST_MAC);
 }
 
 /* the same, for a download test: nothing set that the real chip does not have (filler 0: DDMA idle, no stale flags) */
@@ -506,7 +527,7 @@ int main(void)
     CHECK(DL.off_after == 1);
     CHECK((DL.mcufw & 0xC078) == 0xC078);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(strstr(st, "powered on") && strstr(st, "fw 24.11 loaded and ready (80=") && strstr(st, "c078") && strstr(st, ", off again") &&
+    CHECK(strstr(st, "fw 24.11 ready (80=c078)") && strstr(st, ", MAC 00:e0:4c:68:12:34") && strstr(st, ", off again") &&
           strlen(st) < sizeof st);
     /* the order of the register sequence, by landmarks */
     static const Wr LANDMARKS[] = {
@@ -575,6 +596,51 @@ int main(void)
     CHECK(strstr(st, "not loaded: no DMA memory below 4 GiB") && strstr(st, "fw 24.11 ok") && strlen(st) < sizeof st);
     DMA_FAIL = 0;
     D.ready = 0;
+
+    /* ---- stage 4a: the efuse map, pure decoding first ---- */
+    {
+        static const unsigned char MAC[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+        unsigned char lg[EFUSE_LOGICAL];
+        memset(lg, 0xFF, sizeof lg);
+        build_efuse(MAC);
+        CHECK(efuse_logical(EFUSE_MAP, lg) == 0);
+        CHECK(lg[8] == 0xAA && lg[9] == 0xBB && lg[12] == 0xCC && lg[13] == 0xDD); /* 1-byte header 0x1A: offset 1, words 0 and 2 */
+        CHECK(lg[10] == 0xFF && lg[11] == 0xFF);                                    /* disabled words stay blank */
+        CHECK(memcmp(lg + EFUSE_MAC_AT, MAC, 6) == 0);                              /* 2-byte header: MAC at 0xD0 */
+        unsigned char bad[512];
+        memset(bad, 0xFF, sizeof bad);
+        bad[0] = 0xEF; /* 2-byte header, block 0x7F: its words would land at logical 1016, past the 512-byte map */
+        bad[1] = 0xF0;
+        CHECK(efuse_logical(bad, lg) == -1);
+    }
+
+    /* the full read through the chip's register: MAC in the status, then failures say why */
+    build_image(1);
+    chip_for_download();
+    file(IMG, IMG_SIZE, IMG_SIZE);
+    NIC_RTL8821CE.probe(&WIFI);
+    CHECK(EF.state == EF_OK && memcmp(EF.mac, "\x00\xE0\x4C\x68\x12\x34", 6) == 0 && MODEL_ERRORS == 0);
+    chip_for_download();
+    file(IMG, IMG_SIZE, IMG_SIZE);
+    KNOB_EFUSE_STUCK = 1;
+    NIC_RTL8821CE.probe(&WIFI);
+    NIC_RTL8821CE.status(st, sizeof st);
+    CHECK(DL.state == DL_OK && EF.state == EF_FAILED && strstr(st, ", efuse: read timeout") && strstr(st, ", off again") && strlen(st) < sizeof st);
+    {
+        static const unsigned char MCAST[6] = {0x01, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+        static const unsigned char ZERO[6] = {0, 0, 0, 0, 0, 0};
+        chip_for_download();
+        build_efuse(MCAST);
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        NIC_RTL8821CE.probe(&WIFI);
+        NIC_RTL8821CE.status(st, sizeof st);
+        CHECK(EF.state == EF_FAILED && strstr(st, ", efuse: no valid MAC") && strlen(st) < sizeof st);
+        chip_for_download();
+        build_efuse(ZERO);
+        file(IMG, IMG_SIZE, IMG_SIZE);
+        NIC_RTL8821CE.probe(&WIFI);
+        CHECK(EF.state == EF_FAILED && strcmp(EF.why, "no valid MAC") == 0);
+    }
 
     /* a firmware without extended memory: two parts only */
     build_image(0);
