@@ -40,6 +40,7 @@ try {
         @('I/O APIC tests', 'tests/run_ioapic_tests.sh'),
         @('Realtek RTL8168 driver tests', 'tests/run_rtl8168_tests.sh'),
         @('Realtek RTL8821CE identification tests', 'tests/run_rtl8821ce_tests.sh'),
+        @('WPA2 crypto and handshake tests', 'tests/run_wpa_tests.sh'),
         @('TCP tests', 'tests/run_tcp_tests.sh'),
         @('CPU load tests', 'tests/run_cpuload_tests.sh'),
         @('CPU information tests', 'tests/run_cpuinfo_tests.sh'),

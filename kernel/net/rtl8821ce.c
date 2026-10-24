@@ -32,6 +32,7 @@
 #include "pmm.h"
 #include "rtl8821ce_phytab.h"
 #include "vfs.h"
+#include "wpa.h"
 
 #ifndef RTL8821CE_POWER_ON
 #define RTL8821CE_POWER_ON 1
@@ -1847,6 +1848,7 @@ static u32 rx_buf_dma(unsigned i) { return D.dma + (u32)(D.mem + Q_COUNT * PAGE 
 
 static void scan_note(const volatile u8 *f, unsigned len);
 static void conn_note(const volatile u8 *f, unsigned len);
+static void eapol_note(const volatile u8 *f, unsigned len);
 
 /* one received buffer: classify it. `b` is the buffer, as the chip filled it. */
 static void rx_one(const volatile u8 *b)
@@ -1883,7 +1885,11 @@ static void rx_one(const volatile u8 *b)
     else if (type == 1)
         RX.ctrl++;
     else
+    {
         RX.data++;
+        if (type == 2)
+            eapol_note(f, len - 4); /* (only kept while the handshake runs) */
+    }
 }
 
 /* take every buffer the chip has finished, re-arm it, tell the chip how far we are */
@@ -2937,6 +2943,8 @@ static unsigned conn_exchange(const u8 *frame, unsigned len, unsigned channel, i
     return sent;
 }
 
+static void handshake_run(void);
+
 /* the whole attempt: authenticate, associate, leave */
 static int CONN_ENABLE = 1; /* the host tests of the earlier stages switch it off */
 
@@ -2967,10 +2975,193 @@ static void connect_try(void)
     {
         len = build_assoc(frame, CONN.bssid, CFG.ssid, CFG.ssid_len, CONN.channel);
         CONN.assoc_tries = conn_exchange(frame, len, CONN.channel, &CONN.assoc_seen);
+        if (CONN.assoc_seen && CONN.assoc_status == 0)
+            handshake_run();
         len = build_deauth(frame, CONN.bssid); /* tidy up: this stage does not do the handshake */
         if (tx_mgmt(frame, len, CONN.channel) == 0)
             listen_ms(20);
     }
+}
+
+/* ---- stage 6c-1: the WPA2 4-way handshake over the air ----
+ * After the association the access point wants proof that we know the passphrase, without anybody sending the passphrase: it sends a random
+ * number (message 1), we answer with ours and a signature that only someone with the same key could make (message 2), it checks, sends the
+ * group key encrypted and signed (message 3), and we confirm (message 4). The messages are EAPOL frames, carried in ordinary data frames:
+ * the 802.11 data header, the 8 byte LLC/SNAP header AA AA 03 00 00 00 + ethertype 88 8E, then the EAPOL packet. The key arithmetic is
+ * in wpa.c; this part moves the frames. The keys are not installed in the chip yet (the next stage): no data can be sent after this one. */
+#define EAPOL_LLC_LEN 8
+
+static int mac_eq(const volatile u8 *a, const u8 *b) { return mac_is(a, b); }
+
+/* the one EAPOL packet waiting to be handled (the access point sends one at a time and repeats it when it is not answered) */
+static struct
+{
+    int pending;
+    unsigned len;
+    u8 b[EAPOL_MAX];
+    unsigned dropped; /* packets that did not fit or arrived while one was waiting */
+} EAPQ;
+
+static int HS_LISTEN; /* the receive path keeps EAPOL packets only while the handshake runs */
+
+/* a data frame from the receive path (without FCS): an EAPOL packet from our access point? */
+static void eapol_note(const volatile u8 *f, unsigned len)
+{
+    if (!HS_LISTEN || len < 24 + EAPOL_LLC_LEN + 4)
+        return;
+    unsigned fc0 = f[0], fc1 = f[1];
+    if ((fc0 & 0x0C) != 0x08 || (fc1 & 3) != 2) /* a data frame, from the distribution system (the access point) */
+        return;
+    if (!mac_eq(f + 4, EF.mac) || !mac_eq(f + 10, CONN.bssid))
+        return;
+    unsigned hdr = 24 + ((fc0 & 0x80) ? 2 : 0); /* the QoS control field of a QoS data frame */
+    if (fc1 & 0x80)
+        hdr += 4; /* an HT control field */
+    static const u8 LLC[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
+    if (len < hdr + EAPOL_LLC_LEN + 4)
+        return;
+    for (int i = 0; i < 8; i++)
+        if (f[hdr + (unsigned)i] != LLC[i])
+            return;
+    unsigned n = len - hdr - EAPOL_LLC_LEN;
+    if (EAPQ.pending || n > EAPOL_MAX)
+    {
+        EAPQ.dropped++;
+        return;
+    }
+    for (unsigned i = 0; i < n; i++)
+        EAPQ.b[i] = f[hdr + EAPOL_LLC_LEN + i];
+    EAPQ.len = n;
+    EAPQ.pending = 1;
+}
+
+/* random bytes for our nonce. On the PC: RDRAND when the processor has it, mixed with the time stamp counter read at many unequal moments; the
+ * result is hashed. (Not a certified random generator: the nonce must only be unpredictable and different every time.) */
+#ifdef HARIS_HOST
+void rtl8821ce_host_random(u8 *out, unsigned n);
+static void wpa_random(u8 *out, unsigned n) { rtl8821ce_host_random(out, n); }
+#else
+static u64 read_tsc(void)
+{
+    unsigned lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (u64)hi << 32 | lo;
+}
+
+static int have_rdrand(void)
+{
+    unsigned a = 1, b, c = 0, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    return (c >> 30) & 1;
+}
+
+static void wpa_random(u8 *out, unsigned n)
+{
+    Sha1 s;
+    u8 digest[20];
+    unsigned counter = 0;
+    int rd = have_rdrand();
+    while (n)
+    {
+        sha1_init(&s);
+        for (int i = 0; i < 16; i++)
+        {
+            u64 v = read_tsc();
+            sha1_update(&s, &v, 8);
+            for (unsigned k = 0; k < (read_tsc() & 0x3F); k++) /* the time of the next read depends on how long this loop ran */
+                io_in8(0x80);
+        }
+        if (rd)
+            for (int i = 0; i < 4; i++)
+            {
+                u64 r = 0;
+                unsigned char ok = 0;
+                for (int tries = 0; tries < 10 && !ok; tries++)
+                    __asm__ volatile("rdrand %0; setc %1" : "=r"(r), "=qm"(ok));
+                sha1_update(&s, &r, 8);
+            }
+        sha1_update(&s, EF.mac, 6);
+        sha1_update(&s, &counter, sizeof counter);
+        sha1_final(&s, digest);
+        counter++;
+        unsigned take = n < 20 ? n : 20;
+        for (unsigned i = 0; i < take; i++)
+            out[i] = digest[i];
+        out += take;
+        n -= take;
+    }
+}
+#endif
+
+/* an EAPOL packet to the access point in a data frame: sent through the management queue (no security, hardware sequence number) */
+static int tx_eapol(const u8 *eapol, unsigned len, unsigned channel)
+{
+    u8 frame[24 + EAPOL_LLC_LEN + EAPOL_MAX];
+    unsigned n = mgmt_header(frame, 0x08, CONN.bssid); /* data, no flags yet */
+    frame[1] = 0x01;                                   /* to the distribution system: it goes to the access point, address 3 is the destination */
+    static const u8 LLC[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
+    for (int i = 0; i < 8; i++)
+        frame[n++] = LLC[i];
+    for (unsigned i = 0; i < len; i++)
+        frame[n++] = eapol[i];
+    return tx_mgmt(frame, n, channel);
+}
+
+enum { HS_NONE = 0, HS_OK = 1 };
+static struct
+{
+    int state;        /* 0 not tried, 1 tried */
+    int result;       /* HS_OK, 0 = nothing came from the access point, else the negative WPA4_E_ code that ended it */
+    unsigned rx_msgs; /* EAPOL packets taken */
+    unsigned tx_msgs;
+    u8 pmk[32];
+} HS;
+static Wpa4 W4;
+#define HS_WAIT_MS 6000
+
+static void handshake_run(void)
+{
+    HS.state = 1;
+    HS.result = 0;
+    HS.rx_msgs = HS.tx_msgs = 0;
+    EAPQ.pending = 0;
+    EAPQ.dropped = 0;
+    wpa_pmk(CFG.psk, CFG.psk_len, CFG.ssid, CFG.ssid_len, HS.pmk);
+    static const u8 RSN[22] = {48, 20, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0}; /* as in the association request */
+    wpa4_init(&W4, HS.pmk, CONN.bssid, EF.mac, RSN, 22);
+    HS_LISTEN = 1;
+    u8 snonce[32], reply[EAPOL_MAX];
+    for (unsigned ms = 0; ms < HS_WAIT_MS; ms++)
+    {
+        udelay(1000);
+        rx_poll();
+        if (!EAPQ.pending)
+            continue;
+        HS.rx_msgs++;
+        wpa_random(snonce, 32);
+        unsigned rl = 0;
+        int r = wpa4_rx(&W4, EAPQ.b, EAPQ.len, snonce, reply, &rl);
+        EAPQ.pending = 0;
+        if (r == WPA4_SEND_MSG2 || r == WPA4_SEND_MSG4)
+        {
+            if (tx_eapol(reply, rl, CONN.channel) == 0)
+                HS.tx_msgs++;
+            if (r == WPA4_SEND_MSG4)
+            {
+                HS.result = HS_OK;
+                break;
+            }
+        }
+        else if (r == WPA4_E_MIC || r == WPA4_E_NONCE || r == WPA4_E_KEYDATA || r == WPA4_E_NO_GTK || r == WPA4_E_FORMAT)
+        {
+            HS.result = r; /* the access point's message 3 does not fit what we derived: no use waiting for more */
+            break;
+        }
+        /* WPA4_IGNORED, a replayed counter, a short frame: wait for the next one */
+    }
+    HS_LISTEN = 0;
+    for (unsigned i = 0; i < sizeof HS.pmk; i++) /* the master key is not kept around */
+        ((volatile u8 *)HS.pmk)[i] = 0;
 }
 
 static int rtl8821ce_claims(const PciDevice *pd)
@@ -3036,6 +3227,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     RX.state = RXS_NOT_TRIED;
     CONN.state = 0;
     TARGET.found = 0;
+    HS.state = 0;
     SC.state = 0;
     SC.n = 0;
     TXP.state = 0;
@@ -3281,7 +3473,24 @@ static void status_download(NicText *t)
                         nic_putd(t, CONN.assoc_status);
                     }
                     else
-                        nic_puts(t, ", auth ok, assoc ok");
+                    {
+                        nic_puts(t, ", assoc ok"); /* (an association needs the authentication to have worked) */
+                        if (HS.state)
+                        {
+                            nic_puts(t, ", 4way ");
+                            if (HS.result == HS_OK)
+                                nic_puts(t, "ok");
+                            else if (HS.result == 0)
+                                nic_puts(t, "none");
+                            else if (HS.result == WPA4_E_MIC)
+                                nic_puts(t, "mic"); /* the signature of message 3 does not fit: the passphrase is wrong */
+                            else
+                            {
+                                nic_putc(t, 'e');
+                                nic_putd(t, (unsigned)(-HS.result));
+                            }
+                        }
+                    }
                 }
             }
             else if (CFG.state == CFG_BAD)

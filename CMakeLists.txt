@@ -101,6 +101,7 @@ set(KERNEL_SOURCES
     kernel/net/nic.c                 # network: picks the card driver, forwards net_send / net_recv ...
     kernel/net/e1000.c               # network: Intel e1000 NIC driver (interrupt or polled), raw Ethernet frames
     kernel/net/rtl8821ce.c           # network: Realtek RTL8821CE Wi-Fi, identification only (stage 1; not a working adapter)
+    kernel/net/wpa.c                 # network: WPA2 crypto (SHA-1, HMAC, PBKDF2, AES, the 4-way handshake; host-tested)
     kernel/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
     kernel/net/sock.c                # network: socket table for the system calls (SYS_SOCKET ...)

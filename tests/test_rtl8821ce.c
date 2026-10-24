@@ -225,6 +225,15 @@ static void cap_ev(unsigned t, unsigned a, unsigned b, unsigned c)
     CAP_N++;
 }
 
+/* the random numbers of the driver: a repeatable pattern */
+static unsigned RND_COUNTER;
+void rtl8821ce_host_random(unsigned char *out, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        out[i] = (unsigned char)(0x80 + RND_COUNTER * 7 + i * 3);
+    RND_COUNTER++;
+}
+
 /* ---- the pretend chip's receiver: frames the test queued are put into the receive ring, one per delay call, once the receiver is on ---- */
 typedef struct { unsigned char fc0; unsigned len; int c2h, crc_err; const unsigned char *data; } RxFrame;
 static RxFrame RXQ[128];
@@ -295,8 +304,120 @@ static int AP_MODE; /* 0 answers everything, 1 silent, 2 refuses authentication 
 static const unsigned char AP_BSSID[6] = {2, 0, 0, 0, 0, 0xA1};
 static unsigned char AP_RESP[8][64];
 static int AP_RESP_N;
+/* the pretend access point's side of the 4-way handshake: sends message 1 after the association, checks message 2, sends message 3, checks
+ * message 4. It derives its keys from AP_PASS, so a station with another passphrase fails. */
+static int AP_HS = 0;                         /* 0 no handshake (the access point sends no EAPOL), 1 the handshake runs */
+static const char *AP_PASS = "secret-pass-phrase";
+static const char *AP_SSID = "TestNet";
+static int AP_BAD_MIC; /* message 3 goes out with a damaged signature */
+static unsigned char AP_PTK[48];
+static int AP_PTK_OK;
+static int AP_GOT_MSG2, AP_GOT_MSG4, AP_MSG3_SENT;
+static unsigned char AP_ANONCE[32];
+static unsigned char HS_RESP[6][256];
+static int HS_RESP_N;
+static unsigned char AP_STA[6]; /* the station that associated */
+
+static void ap_send_eapol(const unsigned char *eapol, unsigned len)
+{
+    unsigned char *r = HS_RESP[HS_RESP_N++ % 6];
+    memset(r, 0, 256);
+    r[0] = 0x08;
+    r[1] = 0x02; /* data, from the distribution system */
+    memcpy(r + 4, AP_STA, 6);
+    memcpy(r + 10, AP_BSSID, 6);
+    memcpy(r + 16, AP_BSSID, 6);
+    static const unsigned char LLC[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
+    memcpy(r + 24, LLC, 8);
+    memcpy(r + 32, eapol, len);
+    rxq_add_frame(r, 32 + len + 4); /* and the FCS */
+}
+
+static void ap_eapol_frame(unsigned char *f, unsigned info, unsigned replay, const unsigned char *kdata, unsigned kdlen)
+{
+    memset(f, 0, 99 + kdlen);
+    f[0] = 2;
+    f[1] = 3;
+    f[2] = (unsigned char)((95 + kdlen) >> 8);
+    f[3] = (unsigned char)(95 + kdlen);
+    f[4] = 2;
+    f[5] = (unsigned char)(info >> 8);
+    f[6] = (unsigned char)info;
+    f[8] = 16;
+    f[16] = (unsigned char)replay;
+    memcpy(f + 17, AP_ANONCE, 32);
+    f[97] = (unsigned char)(kdlen >> 8);
+    f[98] = (unsigned char)kdlen;
+    memcpy(f + 99, kdata, kdlen);
+    if (info & 0x100)
+        wpa_eapol_mic(AP_PTK, f, 99 + kdlen, f + 81);
+}
+
+static void ap_start_handshake(const unsigned char *sta)
+{
+    memcpy(AP_STA, sta, 6);
+    for (unsigned i = 0; i < 32; i++)
+        AP_ANONCE[i] = (unsigned char)(0x11 + i * 5);
+    AP_PTK_OK = 0;
+    AP_GOT_MSG2 = AP_GOT_MSG4 = AP_MSG3_SENT = 0;
+    unsigned char m1[99];
+    ap_eapol_frame(m1, 0x008A, 1, (const unsigned char *)"", 0);
+    ap_send_eapol(m1, 99);
+}
+
+/* a data frame from the station: an EAPOL packet? */
+static void ap_handshake_rx(const unsigned char *fr, unsigned len)
+{
+    static const unsigned char LLC[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
+    if (!AP_HS || len < 32 + 99 || (fr[0] & 0x0C) != 0x08 || memcmp(fr + 4, AP_BSSID, 6) != 0 || memcmp(fr + 24, LLC, 8) != 0)
+        return;
+    const unsigned char *e = fr + 32;
+    unsigned info = (unsigned)e[5] << 8 | e[6];
+    if (info == 0x010A) /* message 2 */
+    {
+        unsigned char pmk[32];
+        wpa_pmk(AP_PASS, (unsigned)strlen(AP_PASS), AP_SSID, (unsigned)strlen(AP_SSID), pmk);
+        wpa_ptk(pmk, AP_BSSID, AP_STA, AP_ANONCE, e + 17, AP_PTK);
+        unsigned char mic[16];
+        wpa_eapol_mic(AP_PTK, e, 99 + (((unsigned)e[97] << 8) | e[98]), mic);
+        if (memcmp(mic, e + 81, 16) != 0)
+            return; /* the station has another passphrase: no message 3 (the real access point would repeat message 1) */
+        AP_PTK_OK = 1;
+        AP_GOT_MSG2++;
+        /* message 3: the RSN element and the group key, wrapped */
+        static const unsigned char RSN[22] = {48, 20, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 2, 0, 0};
+        unsigned char plain[48], wrapped[56], m3[99 + 56];
+        memset(plain, 0, sizeof plain);
+        memcpy(plain, RSN, 22);
+        plain[22] = 0xDD;
+        plain[23] = 22;
+        plain[25] = 0x0F;
+        plain[26] = 0xAC;
+        plain[27] = 1;
+        plain[28] = 0x05;
+        for (unsigned i = 0; i < 16; i++)
+            plain[30 + i] = (unsigned char)(0x40 + i);
+        plain[46] = 0xDD;
+        aes_wrap(AP_PTK + 16, plain, 6, wrapped);
+        ap_eapol_frame(m3, 0x13CA, 2, wrapped, 56);
+        if (AP_BAD_MIC)
+            m3[85] ^= 1;
+        ap_send_eapol(m3, 99 + 56);
+        AP_MSG3_SENT++;
+    }
+    else if (info == 0x030A && AP_PTK_OK) /* message 4 */
+    {
+        unsigned char mic[16];
+        wpa_eapol_mic(AP_PTK, e, 99, mic);
+        if (memcmp(mic, e + 81, 16) == 0)
+            AP_GOT_MSG4++;
+    }
+}
+
 static void ap_answer(const unsigned char *fr, unsigned len)
 {
+    if (AP_MODE != 1)
+        ap_handshake_rx(fr, len);
     if (AP_MODE == 1 || len < 24 || memcmp(fr + 4, AP_BSSID, 6) != 0)
         return;
     unsigned char *r = AP_RESP[AP_RESP_N++ % 8];
@@ -320,6 +441,8 @@ static void ap_answer(const unsigned char *fr, unsigned len)
         r[28] = 5;
         r[29] = 0xC0; /* association id 5, with the two top bits set */
         rxq_add_frame(r, 34);
+        if (AP_HS && AP_MODE == 0)
+            ap_start_handshake(fr + 10);
     }
 }
 
@@ -1667,15 +1790,19 @@ int main(void)
         unsigned char mixed[24] = {1, 0, 0x00, 0x0F, 0xAC, 4, 1, 0, 0x00, 0x0F, 0xAC, 4, 2, 0, 0x00, 0x0F, 0xAC, 8, 0x00, 0x0F, 0xAC, 2, 0x80, 0};
         CHECK(rsn_check(mixed, 24) == RSN_OK);
 
-        static const struct { const unsigned char *rsn; int mode; const char *line; int frames; } CASES[] = {
-            {RSN_OK_, 0, ", net ch149, auth ok, assoc ok, off", 6},   /* 3 probe requests, authentication, association, deauthentication */
-            {RSN_OK_, 1, ", net ch149, auth none, off", 6},           /* the AP stays silent: three authentication attempts, nothing more */
-            {RSN_OK_, 2, ", net ch149, auth s1, off", 4},             /* authentication refused: no association */
-            {RSN_OK_, 3, ", net ch149, auth ok, assoc s17, off", 6},  /* association refused: still says goodbye */
-            {RSN_TKIP, 0, ", net ccmp, off", 3},                      /* a security this driver cannot join: no frame is sent to it */
-            {RSN_SAE, 0, ", net akm, off", 3},
-            {RSN_PMF, 0, ", net pmf, off", 3},
-            {RSN_GTKIP, 0, ", net grp, off", 3},
+        static const struct { const unsigned char *rsn; int mode; const char *line; int frames; int hs; const char *pass; int bad_mic; } CASES[] = {
+            {RSN_OK_, 0, ", net ch149, assoc ok, 4way none, off", 6, 0, 0, 0},   /* 3 probe requests, authentication, association, deauthentication */
+            {RSN_OK_, 1, ", net ch149, auth none, off", 6, 0, 0, 0},           /* the AP stays silent: three authentication attempts, nothing more */
+            {RSN_OK_, 2, ", net ch149, auth s1, off", 4, 0, 0, 0},             /* authentication refused: no association */
+            {RSN_OK_, 3, ", net ch149, auth ok, assoc s17, off", 6, 0, 0, 0},  /* association refused: still says goodbye */
+            {RSN_TKIP, 0, ", net ccmp, off", 3, 0, 0, 0},                      /* a security this driver cannot join: no frame is sent to it */
+            {RSN_SAE, 0, ", net akm, off", 3, 0, 0, 0},
+            {RSN_PMF, 0, ", net pmf, off", 3, 0, 0, 0},
+            {RSN_GTKIP, 0, ", net grp, off", 3, 0, 0, 0},
+            /* the 4-way handshake: 3 probe requests, authentication, association, message 2, message 4, deauthentication */
+            {RSN_OK_, 0, ", net ch149, assoc ok, 4way ok, off", 8, 1, "secret-pass-phrase", 0},
+            {RSN_OK_, 0, ", net ch149, assoc ok, 4way none, off", 7, 1, "another passphrase", 0}, /* the access point has another key: it never sends message 3 */
+            {RSN_OK_, 0, ", net ch149, assoc ok, 4way mic, off", 7, 1, "secret-pass-phrase", 1},  /* message 3 with a damaged signature */
         };
         for (unsigned c = 0; c < sizeof CASES / sizeof CASES[0]; c++)
         {
@@ -1705,6 +1832,9 @@ int main(void)
             TXP_ENABLE = 1;
             TX_ANSWER = 0;
             AP_MODE = CASES[c].mode;
+            AP_HS = CASES[c].hs;
+            AP_PASS = CASES[c].pass ? CASES[c].pass : "secret-pass-phrase";
+            AP_BAD_MIC = CASES[c].bad_mic;
             build_image(1);
             chip_for_download();
             file(IMG, IMG_SIZE, IMG_SIZE);
@@ -1765,10 +1895,76 @@ int main(void)
             }
             if (c == 1)
                 CHECK(CONN.auth_tries == 3 && !CONN.auth_seen && !CONN.assoc_seen);
+            if (c == 8) /* the handshake that works: the frames, and what the access point saw */
+            {
+                CHECK(AP_GOT_MSG2 == 1 && AP_GOT_MSG4 == 1 && HS.result == HS_OK && HS.rx_msgs == 2 && HS.tx_msgs == 2);
+                CHECK(TXLOG[5].len == 32 + 99 + 22 && TXLOG[5].b[0] == 0x08 && TXLOG[5].b[1] == 0x01);                 /* message 2: a data frame to the access point */
+                CHECK(memcmp(TXLOG[5].b + 4, AP_BSSID, 6) == 0 && memcmp(TXLOG[5].b + 16, AP_BSSID, 6) == 0);
+                CHECK(TXLOG[5].b[24] == 0xAA && TXLOG[5].b[30] == 0x88 && TXLOG[5].b[31] == 0x8E && TXLOG[5].b[32 + 5] == 0x01 && TXLOG[5].b[32 + 6] == 0x0A);
+                CHECK(TXLOG[6].len == 32 + 99 && TXLOG[6].b[32 + 5] == 0x03 && TXLOG[6].b[32 + 6] == 0x0A);              /* message 4 */
+                CHECK(TXLOG[7].b[0] == 0xC0);                                                                           /* then the deauthentication */
+                CHECK(W4.state == 2 && W4.gtk_len == 16 && W4.gtk_id == 1 && W4.gtk[0] == 0x40 && W4.gtk[15] == 0x4F);
+                for (unsigned i = 0; i < sizeof HS.pmk; i++)
+                    CHECK(HS.pmk[i] == 0); /* the master key is wiped after use */
+            }
         }
         CFG_TEXT = 0;
         AP_MODE = 0;
         TXP_ENABLE = 0;
+    }
+
+    /* ---- an EAPOL packet is taken only from our access point, to our address, while the handshake runs ---- */
+    {
+        static const unsigned char MACX[6] = {0x00, 0xE0, 0x4C, 0x68, 0x12, 0x34};
+        memcpy(EF.mac, MACX, 6);
+        memcpy(CONN.bssid, AP_BSSID, 6);
+        unsigned char fr[32 + 99 + 4];
+        memset(fr, 0, sizeof fr);
+        fr[0] = 0x08;
+        fr[1] = 0x02;
+        memcpy(fr + 4, MACX, 6);
+        memcpy(fr + 10, AP_BSSID, 6);
+        memcpy(fr + 16, AP_BSSID, 6);
+        static const unsigned char LLC[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
+        memcpy(fr + 24, LLC, 8);
+        fr[32] = 2;
+        fr[33] = 3;
+        HS_LISTEN = 0;
+        EAPQ.pending = 0;
+        eapol_note(fr, 32 + 99);
+        CHECK(!EAPQ.pending); /* not while no handshake runs */
+        HS_LISTEN = 1;
+        fr[10] ^= 1; /* from another station */
+        eapol_note(fr, 32 + 99);
+        CHECK(!EAPQ.pending);
+        fr[10] ^= 1;
+        fr[4] ^= 1; /* to another address */
+        eapol_note(fr, 32 + 99);
+        CHECK(!EAPQ.pending);
+        fr[4] ^= 1;
+        fr[1] = 0x01; /* a frame to the access point, not from it */
+        eapol_note(fr, 32 + 99);
+        CHECK(!EAPQ.pending);
+        fr[1] = 0x02;
+        fr[30] = 0x08; /* another ethertype */
+        eapol_note(fr, 32 + 99);
+        CHECK(!EAPQ.pending);
+        fr[30] = 0x88;
+        eapol_note(fr, 32 + 99);
+        CHECK(EAPQ.pending && EAPQ.len == 99 && EAPQ.b[0] == 2 && EAPQ.b[1] == 3);
+        eapol_note(fr, 32 + 99); /* one is waiting: the next one is counted as dropped */
+        CHECK(EAPQ.dropped == 1);
+        EAPQ.pending = 0;
+        /* a QoS data frame has two more bytes of header */
+        unsigned char q[2 + 32 + 99 + 4];
+        memset(q, 0, sizeof q);
+        memcpy(q, fr, 24);
+        q[0] = 0x88;
+        memcpy(q + 26, fr + 24, 8 + 99);
+        eapol_note(q, 2 + 32 + 99);
+        CHECK(EAPQ.pending && EAPQ.len == 99 && EAPQ.b[1] == 3);
+        EAPQ.pending = 0;
+        HS_LISTEN = 0;
     }
 
     /* a firmware without extended memory: two parts only */
