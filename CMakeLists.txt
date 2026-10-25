@@ -493,11 +493,34 @@ if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
+    # Same machine, with the kernel's serial port (COM1: boot log, self tests, crash report) written to build/serial.log.
+    # Read it while it runs with `tail -f build/serial.log`; it contains escape codes, so grep needs -a.
+    add_custom_target(run-serial
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -smp 4 -accel tcg
+                -drive if=pflash,format=raw,unit=0,readonly=on,file=${FW_CODE}
+                -drive if=pflash,format=raw,unit=1,file=${CMAKE_BINARY_DIR}/ovmf_vars.fd
+                -drive format=raw,file=fat:rw:esp
+                -serial file:${CMAKE_BINARY_DIR}/serial.log
+                -nic user,model=e1000
+                -device qemu-xhci -device usb-mouse -device usb-kbd
+        DEPENDS haris
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        USES_TERMINAL VERBATIM)
 elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
     add_custom_target(run
         COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -smp 4 -accel tcg
                 -bios ${FW_CODE}
                 -drive format=raw,file=fat:rw:esp
+                -nic user,model=e1000
+                -device qemu-xhci -device usb-mouse -device usb-kbd
+        DEPENDS haris
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        USES_TERMINAL VERBATIM)
+    add_custom_target(run-serial
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -smp 4 -accel tcg
+                -bios ${FW_CODE}
+                -drive format=raw,file=fat:rw:esp
+                -serial file:${CMAKE_BINARY_DIR}/serial.log
                 -nic user,model=e1000
                 -device qemu-xhci -device usb-mouse -device usb-kbd
         DEPENDS haris
