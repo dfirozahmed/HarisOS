@@ -198,6 +198,7 @@ void kernel_main(const BootInfo *info)
         serial_init();
 
         /* SMP stage 1: wake the other processors and park them (smp.h). Needs the local APIC (idle_init) and the MADT (acpi_init). */
+        smp_bsp_init();
         int smp_up = smp_start(info->smp_code, info->smp_data);
         serial_puts("HARISOS: SMP: ");
         serial_putd(smp_cpu_total());
@@ -357,6 +358,20 @@ void kernel_main(const BootInfo *info)
                 process_stats(&ns);
                 serial_puts(ns.last_exit == 0 ? "ok\n" : "FAILED\n");
             }
+        }
+        if (ps == 0 && exec_find("GSTEST.ELF") < 0)
+            serial_puts("HARISOS: per-CPU GS across ring 3 skipped (no GSTEST.ELF on any drive)\n");
+        else if (ps == 0)
+        {
+            /* A program that wipes its own GS base, then makes system calls and takes timer interrupts: the SWAPGS pairs must keep
+             * the kernel's per-CPU record reachable (percpu.h). Logged, not fatal. */
+            int err = 0;
+            int id = exec_run("gstest.elf", &err);
+            int waited = -1;
+            for (unsigned long long end = timer_ms() + 10000; id >= 0 && waited != 0 && timer_ms() < end;)
+                waited = process_wait(id);
+            serial_puts("HARISOS: per-CPU GS across ring 3 ");
+            serial_puts(id >= 0 && waited == 0 && smp_bsp_gs_check() == 0 ? "ok\n" : "FAILED\n");
         }
         serial_puts("HARISOS: user mode self test ");
         if (ps == 1)

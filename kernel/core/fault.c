@@ -37,6 +37,10 @@ __asm__(".text\n" FAULT_STUB_NOERR(0) FAULT_STUB_NOERR(1) FAULT_STUB_NOERR(2) FA
         /* push order = reverse of FaultFrame (rax first, r15 last) */
         ".p2align 4\n"
         "fault_common:\n"
+        "    testb $3, 24(%rsp)\n" /* the interrupted code was ring 3: swap in the kernel's GS (percpu.h). An NMI that hits the SYSCALL entry before its */
+        "    jz 1f\n"             /* swapgs sees ring 0 and leaves GS alone, and so does its return: this code never uses GS, only what it calls could */
+        "    swapgs\n"
+        "1:\n"
         "    pushq %rax\n"
         "    pushq %rcx\n"
         "    pushq %rdx\n"
@@ -87,6 +91,10 @@ __asm__(".text\n" FAULT_STUB_NOERR(0) FAULT_STUB_NOERR(1) FAULT_STUB_NOERR(2) FA
         "    popq %rcx\n"
         "    popq %rax\n"
         "    addq $16, %rsp\n" /* the vector and the error code */
+        "    testb $3, 8(%rsp)\n" /* back to ring 3: the user's GS again */
+        "    jz 2f\n"
+        "    swapgs\n"
+        "2:\n"
         "    iretq\n"
         ".data\n"
         ".p2align 3\n"

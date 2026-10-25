@@ -7,8 +7,12 @@
  * "%gs:N" means "field at offset N of MY record". The first field points back to the record itself, which is what lets C code
  * get a normal pointer with one load. The interrupt handlers in idle.c use %gs: directly (the offsets below are fixed).
  *
- * Only the application processors have a GS base for now (smp.c sets it in ap_entry). The boot processor keeps what the firmware
- * left, because ring 3 code and the SYSCALL entry have not been taught to SWAPGS yet: this_cpu() must not be called on it.
+ * Every processor has one (smp.c: smp_bsp_init, ap_entry). Ring 3 code may load a selector into GS and so zero the base, so the kernel
+ * keeps its record in the GS base only while it runs in ring 0: every entry from ring 3 executes SWAPGS (it exchanges GS base with
+ * IA32_KERNEL_GS_BASE) and so does every return to ring 3: SYSCALL entry / SYSRET and the IRETQ exits (syscall.c), the timer and network
+ * interrupt (idle.c), all CPU exceptions (fault.c), and the first entry into a process (process.c). The handlers test the saved CS to
+ * see where the interrupt came from, so an interrupt in ring 0 swaps nothing. Code that can run in the few instructions between SYSCALL
+ * and its SWAPGS (an NMI, which fault.c handles) must not use %gs.
  * ============================================================ */
 #ifndef HARIS_PERCPU_H
 #define HARIS_PERCPU_H

@@ -67,6 +67,7 @@ __asm__(".text\n"
         "    xorl %r13d, %r13d\n"
         "    xorl %r14d, %r14d\n"
         "    xorl %r15d, %r15d\n"
+        "    swapgs\n" /* ring 3 gets its GS back, the kernel's waits in IA32_KERNEL_GS_BASE (percpu.h); interrupts are off here */
         "    iretq\n");
 
 _Static_assert(SEL_USER_DATA == 0x1B && SEL_USER_CODE == 0x23, "process_enter_user pushes these selectors as numbers");

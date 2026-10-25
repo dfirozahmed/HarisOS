@@ -213,6 +213,22 @@ static void wait_us(unsigned us)
         __asm__ volatile("pause");
 }
 
+static void wrmsr(unsigned msr, u64 v)
+{
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"((unsigned)v), "d"((unsigned)(v >> 32)));
+}
+
+#define MSR_KERNEL_GS_BASE 0xC0000102u
+
+void smp_bsp_init(void)
+{
+    CPU[0].pc.index = 0;
+    percpu_set(&CPU[0].pc);
+    wrmsr(MSR_KERNEL_GS_BASE, 0); /* the base ring 3 starts with; SWAPGS exchanges it with the kernel's (idle.c, fault.c, syscall.c, process.c) */
+}
+
+int smp_bsp_gs_check(void) { return this_cpu() == &CPU[0].pc && this_cpu()->index == 0 ? 0 : -1; }
+
 /* The first C code an application processor runs: stack and (kernel) page tables are set, nothing else is. Interrupts stay off. */
 static void ap_entry(u64 index)
 {
@@ -314,6 +330,8 @@ int smp_start(u64 code, u64 data)
     (void)data;
     return 0;
 }
+void smp_bsp_init(void) {}
+int smp_bsp_gs_check(void) { return -1; }
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)

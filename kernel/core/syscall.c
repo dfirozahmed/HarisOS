@@ -2046,6 +2046,7 @@ __asm__(".text\n"
         ".p2align 4\n"
         ".globl syscall_entry\n"
         "syscall_entry:\n"
+        "    swapgs\n" /* SYSCALL leaves GS alone: swap in the kernel's per-CPU base (percpu.h); the user's waits in IA32_KERNEL_GS_BASE */
         "    movq %rsp, syscall_user_rsp(%rip)\n"
         "    movq syscall_kstack(%rip), %rsp\n"
         "    pushq syscall_user_rsp(%rip)\n"
@@ -2094,6 +2095,7 @@ __asm__(".text\n"
         "    popq %rcx\n"
         "    popq %r11\n"
         "    popq %rsp\n" /* the user's stack again */
+        "    swapgs\n"
         "    sysretq\n"
         "2:  movq $-1, %rcx\n"
         "    subq $32, %rsp\n"
@@ -2117,6 +2119,7 @@ __asm__(".text\n"
         "    pushq syscall_iret_rflags(%rip)\n"
         "    pushq $0x23\n" /* CS */
         "    pushq syscall_iret_rip(%rip)\n"
+        "    swapgs\n"
         "    iretq\n");
 
 void syscall_entry(void);

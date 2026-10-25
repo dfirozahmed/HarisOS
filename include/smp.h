@@ -57,6 +57,11 @@ void smp_patch_image(unsigned char *img, unsigned code_phys, unsigned data_phys,
 void smp_build_tables(unsigned long long *pml4, unsigned long long *pdpt, unsigned long long *pd, unsigned long long pdpt_phys,
                       unsigned long long pd_phys);
 
+/* The boot processor's own per-CPU record (percpu.h): GS base set, so this_cpu() works on it. Before smp_start, long before the first
+ * user program. smp_bsp_gs_check: 0 when this_cpu() still finds that record (after ring 3 code has run), else -1. */
+void smp_bsp_init(void);
+int smp_bsp_gs_check(void);
+
 int smp_install(unsigned long long code, unsigned long long data);
 int smp_start(unsigned long long code, unsigned long long data);
 int smp_cpu_total(void);
