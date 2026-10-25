@@ -319,16 +319,13 @@ static void task_main(void)
     task_exit();
 }
 
-/* A new chunk of TASK_CHUNK free slots, if the table may still grow. The heap is not safe against the timer interrupt, so the block is
- * taken with preemption off, and the table itself is only changed with interrupts off (DIR first, then CAP). 1 = there are more slots
+/* A new chunk of TASK_CHUNK free slots, if the table may still grow. The heap locks itself (heap.c); the table itself is only changed with interrupts off (DIR first, then CAP). 1 = there are more slots
  * now (possibly made by someone else meanwhile), 0 = at TASK_LIMIT or out of memory. */
 static int add_chunk(void)
 {
     if (CAP >= TASK_LIMIT)
         return 0;
-    preempt_disable();
-    TaskChunk *c = kmalloc(sizeof(TaskChunk));
-    preempt_enable();
+    TaskChunk *c = kmalloc(sizeof(TaskChunk)); /* the heap has a lock of its own (heap.c) */
     if (!c)
         return 0;
     fill_zero(c, sizeof(*c)); /* every slot TASK_UNUSED, nothing held */
@@ -348,9 +345,7 @@ static int add_chunk(void)
     irq_restore(irq);
     if (taken) /* another create was faster: give ours back */
     {
-        preempt_disable();
         kfree(c);
-        preempt_enable();
     }
     return 1;
 }
@@ -503,10 +498,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
 {
     if (!fn)
         return -1;
-    /* The page allocator has no lock of its own: keep the timer from switching to a thread that uses it too. */
-    preempt_disable();
-    unsigned char *stack = (unsigned char *)pmm_alloc_contiguous_tag(STACK_BLOCK_PAGES, PMM_TAG_SYSTEM);
-    preempt_enable();
+    unsigned char *stack = (unsigned char *)pmm_alloc_contiguous_tag(STACK_BLOCK_PAGES, PMM_TAG_SYSTEM); /* (the page allocator locks itself) */
     if (!stack)
         return -1;
     CANARY_AT(stack) = STACK_CANARY;
@@ -529,9 +521,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
         irq_restore(irq);
         if (!add_chunk()) /* every slot is in use: make room, or give up */
         {
-            preempt_disable();
             pmm_free_contiguous((unsigned long long)stack, STACK_BLOCK_PAGES);
-            preempt_enable();
             return -1;
         }
     }

@@ -3,7 +3,6 @@
 #include "cow.h"
 #include "irq.h"
 #include "pmm.h"
-#include "preempt.h"
 #include "uaccess.h"
 
 #if defined(__x86_64__)
@@ -17,13 +16,10 @@ typedef unsigned long long u64;
 static AddressSpace *KERNEL; /* the tables in CR3 when aspace_init ran */
 static int READY;
 
-/* The page allocator has no lock of its own: no thread switch while it is in use. Written through volatile, no memset
- * in a freestanding build. */
+/* The page allocator locks itself (pmm.c). Written through volatile, no memset in a freestanding build. */
 static u64 *alloc_page(void)
 {
-    preempt_disable();
     u64 p = pmm_alloc_page_tag(PMM_TAG_SYSTEM);
-    preempt_enable();
     if (!p)
         return 0;
     volatile u64 *t = (volatile u64 *)p;
@@ -34,9 +30,7 @@ static u64 *alloc_page(void)
 
 static void free_page(u64 phys)
 {
-    preempt_disable();
     pmm_free_page(phys);
-    preempt_enable();
 }
 
 /* What destroying a space calls for every page and table it owns: a page that other spaces share (copy-on-write) is only counted down. */

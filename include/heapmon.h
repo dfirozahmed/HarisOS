@@ -10,7 +10,7 @@
  * message on the serial port says the heap is the problem.
  *
  * It is the first real user of a preemptible thread (task.h): it only uses the heap, which locks itself with
- * preempt_disable(), so the check always sees the heap between two operations, never in the middle of one.
+ * a spinlock (heap.c), so the check always sees the heap between two operations, never in the middle of one.
  * ============================================================ */
 #ifndef HARIS_HEAPMON_H
 #define HARIS_HEAPMON_H
