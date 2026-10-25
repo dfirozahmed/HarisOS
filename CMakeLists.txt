@@ -264,21 +264,26 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan)
+set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone
-    -O2 -Wall -Wextra -std=gnu11)
-# The user C library (user/libc.c) is compiled once and linked into every program.
-set(LIBC_OBJ ${CMAKE_BINARY_DIR}/user/libc.obj)
-add_custom_command(
-    OUTPUT  ${LIBC_OBJ}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
-    COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/libc.c -o ${LIBC_OBJ}
-    DEPENDS ${CMAKE_SOURCE_DIR}/user/libc.c ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/sys.h
-    COMMENT "Compiling user/libc.c"
-    VERBATIM
-)
+    -O2 -Wall -Wextra -std=gnu11 -I${CMAKE_SOURCE_DIR}/user/include)
+# The user C library (user/libc.c, posix.c, libm.c) is compiled once and linked into every program.
+set(LIBC_OBJ "")
+foreach(LIBSRC libc posix libm numconv)
+    set(LIBSRC_OBJ ${CMAKE_BINARY_DIR}/user/${LIBSRC}.obj)
+    add_custom_command(
+        OUTPUT  ${LIBSRC_OBJ}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+        COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${LIBSRC}.c -o ${LIBSRC_OBJ}
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${LIBSRC}.c ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/sys.h
+                ${CMAKE_SOURCE_DIR}/user/include/math.h ${CMAKE_SOURCE_DIR}/user/include/setjmp.h
+        COMMENT "Compiling user/${LIBSRC}.c"
+        VERBATIM
+    )
+    list(APPEND LIBC_OBJ ${LIBSRC_OBJ})
+endforeach()
 set(USER_ELFS "")
 set(USER_ESP_FILES "")
 foreach(PROG ${USER_PROGRAMS})
@@ -321,6 +326,71 @@ foreach(PROG ${USER_PROGRAMS})
     list(APPEND USER_ELFS ${PROG_ELF})
     list(APPEND USER_ESP_FILES ${PROG_ESP})
 endforeach()
+
+# ------------------------------------------------------------
+# Ported programs: ISO C / POSIX software built from its own sources (third_party/NAME/*.c) against the headers in user/include and the
+# C library above, started by user/start.c (they define main, not _start). Result: NAME.ELF on the boot disk like the programs above.
+#   lua  - the Lua 5.4 interpreter (third_party/lua): lua.ELF script.lua, or no arguments for the interactive prompt
+# The sources are compiled as they are, as an ordinary C program on a POSIX-like system: -U_WIN32 because this target's compiler
+# defines it (Lua would then reach for <windows.h>), and -w because the warnings of somebody else's code are not ours to fix.
+# ------------------------------------------------------------
+set(START_OBJ ${CMAKE_BINARY_DIR}/user/start.obj)
+add_custom_command(
+    OUTPUT  ${START_OBJ}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+    COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/start.c -o ${START_OBJ}
+    DEPENDS ${CMAKE_SOURCE_DIR}/user/start.c ${CMAKE_SOURCE_DIR}/user/libc.h
+    COMMENT "Compiling user/start.c"
+    VERBATIM
+)
+set(PORT_CFLAGS
+    --target=x86_64-pc-win32-coff
+    -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone
+    -O2 -w -std=gnu11 -U_WIN32 -U_WIN64 -I${CMAKE_SOURCE_DIR}/user/include)
+set(LUA_SOURCES
+    lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio
+    lauxlib lbaselib lcorolib ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit lua)
+set(LUA_OBJS "")
+foreach(SRC ${LUA_SOURCES})
+    set(SRC_OBJ ${CMAKE_BINARY_DIR}/third_party/lua/${SRC}.obj)
+    add_custom_command(
+        OUTPUT  ${SRC_OBJ}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/third_party/lua
+        COMMAND ${CLANG_CC} ${PORT_CFLAGS} -I${CMAKE_SOURCE_DIR}/third_party/lua -c ${CMAKE_SOURCE_DIR}/third_party/lua/${SRC}.c -o ${SRC_OBJ}
+        DEPENDS ${CMAKE_SOURCE_DIR}/third_party/lua/${SRC}.c ${CMAKE_SOURCE_DIR}/user/libc.h
+        COMMENT "Compiling third_party/lua/${SRC}.c"
+        VERBATIM
+    )
+    list(APPEND LUA_OBJS ${SRC_OBJ})
+endforeach()
+set(LUA_PE  ${CMAKE_BINARY_DIR}/user/lua.exe)
+set(LUA_ELF ${CMAKE_BINARY_DIR}/user/lua.elf)
+set(LUA_ESP ${CMAKE_BINARY_DIR}/esp/LUA.ELF)
+add_custom_command(
+    OUTPUT  ${LUA_PE}
+    COMMAND ${LLD_LINK} -subsystem:native -entry:_start -nodefaultlib -base:0x400000000000 -fixed -dynamicbase:no
+            -driver -align:4096 -filealign:4096 -out:${LUA_PE} ${LUA_OBJS} ${START_OBJ} ${LIBC_OBJ}
+    DEPENDS ${LUA_OBJS} ${START_OBJ} ${LIBC_OBJ}
+    COMMENT "Linking lua.exe"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT  ${LUA_ELF}
+    COMMAND ${MKELF_EXE} ${LUA_PE} ${LUA_ELF}
+    DEPENDS ${MKELF_EXE} ${LUA_PE}
+    COMMENT "Making lua.elf"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT  ${LUA_ESP}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/esp
+    COMMAND ${CMAKE_COMMAND} -E copy ${LUA_ELF} ${LUA_ESP}
+    DEPENDS ${LUA_ELF}
+    COMMENT "Copying to esp/LUA.ELF"
+    VERBATIM
+)
+list(APPEND USER_ELFS ${LUA_ELF})
+list(APPEND USER_ESP_FILES ${LUA_ESP})
 
 # ------------------------------------------------------------
 # Bootable disk image for a USB stick / virtual machine: build/haris.img

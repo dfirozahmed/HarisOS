@@ -113,7 +113,19 @@ typedef struct FILE
 
 extern FILE *stdin, *stdout, *stderr;
 
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+FILE *freopen(const char *path, const char *mode, FILE *f);
+int setvbuf(FILE *f, char *buf, int mode, usize size);
+void setbuf(FILE *f, char *buf);
+FILE *tmpfile(void);                              /* not supported yet: NULL, errno ENOSYS */
+char *tmpnam(char *s);                            /* not supported yet: NULL */
+int system(const char *cmd);                      /* no command processor: system(NULL) is 0, any command fails */
+int sprintf(char *buf, const char *fmt, ...);     /* no size limit: as unsafe as the standard one */
+int vsprintf(char *buf, const char *fmt, va_list ap);
 FILE *fopen(const char *path, const char *mode);
+
 int fclose(FILE *f);
 int fflush(FILE *f); /* f == NULL: every open stream */
 usize fread(void *ptr, usize size, usize count, FILE *f);
@@ -144,10 +156,105 @@ int rename(const char *from, const char *to);
  * copies hold the same kernel object. A pthread_mutex_t / pthread_cond_t is used in place (PTHREAD_*_INITIALIZER or _init); the kernel
  * object is made on first use under a private name that is removed at once, so it lives while a descriptor is open (destroy closes it).
  * At most 16 mutexes + condition variables per system. Return values are 0 or an errno number. */
+/* ---- errno (posix.c): one global, a process has one thread of control for the C library ---- */
+extern int errno;
 #define EPERM 1
+#define ENOENT 2
+#define EIO 5
+#define EBADF 9
+#define ECHILD 10
 #define EAGAIN 11
+#define ENOMEM 12
+#define EACCES 13
+#define EFAULT 14
 #define EBUSY 16
+#define EEXIST 17
+#define ENOTDIR 20
+#define EISDIR 21
 #define EINVAL 22
+#define EMFILE 24
+#define ENOSPC 28
+#define ESPIPE 29
+#define EDOM 33
+#define ERANGE 34
+#define ENOSYS 38
+const char *strerror(int e);
+
+/* ---- ISO C / POSIX odds and ends (posix.c) ---- */
+typedef usize size_t;
+typedef long long ssize_t;
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
+#define RAND_MAX 0x7FFFFFFF
+void exit(int code) __attribute__((noreturn)); /* runs atexit functions, flushes every stream, ends the process */
+void _exit(int code) __attribute__((noreturn));
+void abort(void) __attribute__((noreturn));
+int atexit(void (*fn)(void));
+void __assert_fail(const char *expr, const char *file, int line) __attribute__((noreturn));
+char *getenv(const char *name); /* always NULL: no environment yet */
+int strcoll(const char *a, const char *b);
+usize strspn(const char *s, const char *accept);
+usize strcspn(const char *s, const char *reject);
+char *strpbrk(const char *s, const char *accept);
+usize strnlen(const char *s, usize max);
+int strcasecmp(const char *a, const char *b);
+int strncasecmp(const char *a, const char *b, usize n);
+int isxdigit(int c);
+int iscntrl(int c);
+int ispunct(int c);
+int isgraph(int c);
+long labs(long x);
+void *bsearch(const void *key, const void *base, usize count, usize size, int (*cmp)(const void *, const void *));
+long strtol(const char *s, char **end, int base);
+unsigned long strtoul(const char *s, char **end, int base);
+double strtod(const char *s, char **end); /* decimal, hexadecimal, inf, nan */
+double atof(const char *s);
+#define LC_ALL 6
+#define LC_CTYPE 0
+#define LC_NUMERIC 1
+#define LC_TIME 2
+#define LC_COLLATE 3
+#define LC_MONETARY 4
+#define LC_MESSAGES 5
+#define L_tmpnam 32
+#define FILENAME_MAX 260
+struct lconv
+{
+    char *decimal_point, *thousands_sep, *grouping, *int_curr_symbol, *currency_symbol, *mon_decimal_point, *mon_thousands_sep, *mon_grouping,
+        *positive_sign, *negative_sign;
+};
+char *setlocale(int category, const char *name);
+struct lconv *localeconv(void);
+typedef int sig_atomic_t;
+#define SIGABRT 6
+#define SIGFPE 8
+#define SIGSEGV 11
+int raise(int sig);
+
+/* ---- time (posix.c) ---- */
+typedef long long time_t;
+typedef long long clock_t;
+#define CLOCKS_PER_SEC 1000
+struct tm
+{
+    int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst;
+};
+time_t time(time_t *out);   /* Unix time from the real-time clock (UTC); -1 if there is none */
+clock_t clock(void);        /* milliseconds since the kernel started: wall time, not CPU time of this process */
+double difftime(time_t a, time_t b);
+struct tm *gmtime(const time_t *t);
+struct tm *gmtime_r(const time_t *t, struct tm *out);
+struct tm *localtime(const time_t *t); /* the zone is UTC */
+time_t mktime(struct tm *tm);          /* tm taken as UTC */
+time_t timegm(struct tm *tm);
+usize strftime(char *buf, usize size, const char *fmt, const struct tm *tm);
+
+#define SIG_DFL ((sighandler_t)0)
+
+#define SIG_IGN ((sighandler_t)1)
+/* digits behind printf's %e %f %g: v finite and >= 0, conv 'e' 'f' or 'g', prec < 0 means 6; body has no sign or padding. */
+#define FLOAT_BODY_MAX 1024
+int __fmt_double(char *out, double v, int conv, int prec, int alt);
 typedef struct
 {
     int fd; /* -1 until first use */

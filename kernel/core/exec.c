@@ -693,7 +693,25 @@ int exec_selftest(void)
             return -782 - (s14.last_exit > 0 && s14.last_exit < 55 ? s14.last_exit : 0); /* -783 ... -836 */
     }
 
-    /* shared memory and message queues: IPCTEST.ELF with IPCCHILD.ELF (optional); exits with 51; nothing may be left behind */
+    /* the ported Lua interpreter: LUATEST.ELF runs LUA.ELF on small scripts (optional, needs both files); exits with 56 */
+    if (exec_find("LUATEST.ELF") >= 0 && exec_find("LUA.ELF") >= 0)
+    {
+        id = exec_run("LUATEST.ELF", &err);
+        if (id < 0)
+            return -840;
+        int waited = -1;
+        for (int k = 0; k < 60 && waited != 0; k++) /* about twenty Lua processes, each starts a whole interpreter: one process_wait is not long enough */
+            waited = process_wait(id);
+        if (waited != 0)
+            return -841;
+        ProcessStats s15;
+        process_stats(&s15);
+        if (s15.last_exit != 56)
+            return -842 - (s15.last_exit > 0 && s15.last_exit < 56 ? s15.last_exit : 0); /* -843 ... -897: the number of the first script that failed */
+    }
+
+    /* shared memory and message queues: IPCTEST.ELF with IPCCHILD.ELF
+ (optional); exits with 51; nothing may be left behind */
     if (exec_find("IPCTEST.ELF") >= 0 && exec_find("IPCCHILD.ELF") >= 0)
     {
         id = exec_run("IPCTEST.ELF", &err);

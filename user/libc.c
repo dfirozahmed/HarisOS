@@ -1,5 +1,6 @@
 /* HarisOS user C library, part 1 (see libc.h). */
 #include "libc.h"
+#include <math.h>
 
 /* ---- memory -------------------------------------------------------------------------------------------------------- */
 void *memcpy(void *dst, const void *src, usize n)
@@ -316,6 +317,40 @@ static void put_padded(Sink *s, const char *body, int len, const char *prefix, i
             sink_put(s, ' ');
 }
 
+/* One floating point conversion (%e %f %g and capitals): sign, digits from __fmt_double (posix.c), padding. Kept apart from format() so
+ * that its big buffer is only on the stack when a float is printed. */
+static __attribute__((noinline)) void put_float(Sink *s, double v, int conv, int prec, int width, int left, int zero, int plus, int space, int alt)
+{
+    char body[FLOAT_BODY_MAX];
+    int upper = conv >= 'A' && conv <= 'Z';
+    int lc = upper ? conv + ('a' - 'A') : conv;
+    const char *prefix = "";
+    int neg = __signbit(v);
+    if (neg)
+        prefix = "-";
+    else if (plus)
+        prefix = "+";
+    else if (space)
+        prefix = " ";
+    int n;
+    if (__isnan(v) || __isinf(v))
+    {
+        const char *w = __isnan(v) ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
+        for (n = 0; w[n]; n++)
+            body[n] = w[n];
+        zero = 0; /* "000inf" is not a thing */
+    }
+    else
+    {
+        n = __fmt_double(body, neg ? -v : v, lc, prec, alt);
+        if (upper)
+            for (int i = 0; i < n; i++)
+                if (body[i] == 'e')
+                    body[i] = 'E';
+    }
+    put_padded(s, body, n, prefix, width, left, zero);
+}
+
 static void format(Sink *s, const char *fmt, va_list ap)
 {
     for (; *fmt; fmt++)
@@ -326,34 +361,66 @@ static void format(Sink *s, const char *fmt, va_list ap)
             continue;
         }
         fmt++;
-        int left = 0, zero = 0, width = 0;
-        int size = 0; /* -2 hh, -1 h, 0 int, 1 long (32 bit here), 2 long long, 3 size_t */
+        int left = 0, zero = 0, plus = 0, space = 0, alt = 0, width = 0, prec = -1;
+        int size = 0; /* -2 hh, -1 h, 0 int, 1 long (32 bit here), 2 long long, 3 size_t / intmax_t / ptrdiff_t */
         for (;; fmt++)
         {
             if (*fmt == '-')
                 left = 1;
             else if (*fmt == '0')
                 zero = 1;
+            else if (*fmt == '+')
+                plus = 1;
+            else if (*fmt == ' ')
+                space = 1;
+            else if (*fmt == '#')
+                alt = 1;
             else
                 break;
         }
-        while (isdigit(*fmt))
-            width = width * 10 + (*fmt++ - '0');
+        if (*fmt == '*')
+        {
+            width = va_arg(ap, int);
+            if (width < 0)
+            {
+                left = 1;
+                width = -width;
+            }
+            fmt++;
+        }
+        else
+            while (isdigit(*fmt))
+                width = width * 10 + (*fmt++ - '0');
+        if (*fmt == '.')
+        {
+            fmt++;
+            prec = 0;
+            if (*fmt == '*')
+            {
+                prec = va_arg(ap, int); /* a negative precision means none */
+                fmt++;
+            }
+            else
+                while (isdigit(*fmt))
+                    prec = prec * 10 + (*fmt++ - '0');
+        }
         for (;; fmt++)
         {
             if (*fmt == 'l')
                 size = size == 1 ? 2 : 1;
             else if (*fmt == 'h')
                 size = size == -1 ? -2 : -1;
-            else if (*fmt == 'z')
+            else if (*fmt == 'z' || *fmt == 'j' || *fmt == 't')
                 size = 3;
+            else if (*fmt == 'L')
+                size = 2; /* long double is a plain double on this target */
             else
                 break;
         }
         char c = *fmt;
         if (c == 0)
             break; /* a lone % at the end */
-        char tmp[24];
+        char tmp[80];
         int n = 0;
         const char *prefix = "";
         if (c == 'd' || c == 'i')
@@ -366,14 +433,22 @@ static void format(Sink *s, const char *fmt, va_list ap)
             unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
             if (v < 0)
                 prefix = "-";
+            else if (plus)
+                prefix = "+";
+            else if (space)
+                prefix = " ";
             char rev[24];
             int r = 0;
             do
                 rev[r++] = (char)('0' + u % 10);
             while ((u /= 10) != 0);
+            if (prec == 0 && v == 0)
+                r = 0; /* "%.0d" of zero prints nothing */
+            for (int z = r; z < prec && n < 60; z++) /* the precision is the least number of digits */
+                tmp[n++] = '0';
             while (r)
                 tmp[n++] = rev[--r];
-            put_padded(s, tmp, n, prefix, width, left, zero);
+            put_padded(s, tmp, n, prefix, width, left, zero && prec < 0);
         }
         else if (c == 'u' || c == 'x' || c == 'X' || c == 'o' || c == 'p')
         {
@@ -397,15 +472,27 @@ static void format(Sink *s, const char *fmt, va_list ap)
             }
             unsigned base = c == 'u' ? 10 : c == 'o' ? 8 : 16;
             const char *dig = c == 'X' ? "0123456789ABCDEF" : "0123456789abcdef";
+            if (alt && u != 0 && c == 'x')
+                prefix = "0x";
+            else if (alt && u != 0 && c == 'X')
+                prefix = "0X";
             char rev[24];
             int r = 0;
             do
                 rev[r++] = dig[u % base];
             while ((u /= base) != 0);
+            if (prec == 0 && u == 0 && r == 1 && rev[0] == '0')
+                r = 0;
+            for (int z = r; z < prec && n < 60; z++)
+                tmp[n++] = '0';
+            if (alt && c == 'o' && (n == 0 ? (r == 0 || rev[r - 1] != '0') : 0))
+                tmp[n++] = '0'; /* %#o: the number always starts with a 0 */
             while (r)
                 tmp[n++] = rev[--r];
-            put_padded(s, tmp, n, prefix, width, left, zero);
+            put_padded(s, tmp, n, prefix, width, left, zero && prec < 0);
         }
+        else if (c == 'e' || c == 'E' || c == 'f' || c == 'F' || c == 'g' || c == 'G')
+            put_float(s, va_arg(ap, double), c == 'F' ? 'f' : c, prec, width, left, zero, plus, space, alt);
         else if (c == 'c')
         {
             tmp[0] = (char)va_arg(ap, int);
@@ -416,7 +503,10 @@ static void format(Sink *s, const char *fmt, va_list ap)
             const char *str = va_arg(ap, const char *);
             if (!str)
                 str = "(null)";
-            put_padded(s, str, (int)strlen(str), "", width, left, 0);
+            int len = 0;
+            while (str[len] && (prec < 0 || len < prec))
+                len++;
+            put_padded(s, str, len, "", width, left, 0);
         }
         else if (c == '%')
             sink_put(s, '%');
@@ -454,8 +544,20 @@ static int vfdprintf(int fd, const char *fmt, va_list ap)
     return (int)s.total;
 }
 
+int vsprintf(char *buf, const char *fmt, va_list ap) { return vsnprintf(buf, (usize)0x7FFFFFFF, fmt, ap); }
+
+int sprintf(char *buf, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsprintf(buf, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
 int printf(const char *fmt, ...)
 {
+
     va_list ap;
     va_start(ap, fmt);
     int n = vfdprintf(1, fmt, ap);
@@ -835,11 +937,15 @@ FILE *fopen(const char *path, const char *mode)
         return 0;
     FILE *f = malloc(sizeof(FILE));
     if (!f)
+    {
+        errno = ENOMEM;
         return 0;
+    }
     long long fd = sys_open_flags(path, oflags);
     if (fd < 0)
     {
         free(f);
+        errno = (sflags & F_READ) ? ENOENT : EACCES; /* the kernel only says -1: a missing file is the likely reason for reading */
         return 0;
     }
     f->fd = (int)fd;
@@ -849,8 +955,73 @@ FILE *fopen(const char *path, const char *mode)
     return f;
 }
 
+/* reopen f on another file (or the same name with another mode): the old descriptor is closed first, then the stream starts fresh */
+FILE *freopen(const char *path, const char *mode, FILE *f)
+{
+    if (!f || !path || (mode[0] != 'r' && mode[0] != 'w' && mode[0] != 'a'))
+        return 0;
+    for (int i = 1; mode[i]; i++)
+        if (mode[i] == '+')
+            return 0;
+    fflush(f);
+    unsigned oflags = mode[0] == 'r' ? 0 : mode[0] == 'w' ? (SYS_O_WRITE | SYS_O_CREATE | SYS_O_TRUNC) : (SYS_O_WRITE | SYS_O_CREATE | SYS_O_APPEND);
+    long long fd = sys_open_flags(path, oflags);
+    if (fd < 0)
+    {
+        errno = mode[0] == 'r' ? ENOENT : EACCES;
+        fclose(f);
+        return 0;
+    }
+    if (f->fd > 2)
+        sys_close(f->fd);
+    f->fd = (int)fd;
+    f->flags = (f->flags & (F_HEAP | F_UNBUF)) | (mode[0] == 'r' ? F_READ : F_WRITE);
+    f->rpos = f->rlen = f->wlen = 0;
+    return f;
+}
+
+/* only "unbuffered or buffered" matters here: _IONBF writes through, the others keep the stream's own BUFSIZ buffer */
+int setvbuf(FILE *f, char *buf, int mode, usize size)
+{
+    (void)buf;
+    (void)size;
+    if (mode == _IONBF)
+    {
+        fflush(f);
+        f->flags |= F_UNBUF;
+    }
+    else if (mode == _IOFBF || mode == _IOLBF)
+        f->flags &= ~F_UNBUF;
+    else
+        return -1;
+    return 0;
+}
+
+void setbuf(FILE *f, char *buf) { setvbuf(f, buf, buf ? _IOFBF : _IONBF, BUFSIZ); }
+
+FILE *tmpfile(void)
+{
+    errno = ENOSYS; /* no place that deletes itself yet */
+    return 0;
+}
+
+char *tmpnam(char *s)
+{
+    (void)s;
+    return 0;
+}
+
+int system(const char *cmd)
+{
+    if (!cmd)
+        return 0; /* no command processor */
+    errno = ENOSYS;
+    return -1;
+}
+
 int fclose(FILE *f)
 {
+
     if (!f)
         return EOF;
     int rc = fflush(f);

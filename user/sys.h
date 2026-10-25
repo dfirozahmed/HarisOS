@@ -67,6 +67,8 @@
 #define SYS_LISTEN 58
 #define SYS_ACCEPT 59
 #define SYS_WIFISCAN 60
+#define SYS_CLOCK 61
+#define SYS_TIME 62
 #define SYS_SOCK_STREAM 1
 #define SYS_GUI_DESTROY 0
 #define SYS_GUI_SET_TITLE 1
@@ -215,6 +217,10 @@ static inline long long sys_listen(int fd, int backlog) { return syscall3(SYS_LI
 /* wait for a client: a NEW descriptor for the connection (read / write / close it), or -1. addr may be NULL. */
 static inline long long sys_accept(int fd, SockAddr *addr) { return syscall3(SYS_ACCEPT, fd, (long long)(usize)addr, 0); }
 /* line `index` of the last Wi-Fi scan into buf[cap] (cap 2 .. 256): its length, or -1 (no scan, no such line) */
+/* milliseconds since the kernel started */
+static inline long long sys_clock(void) { return syscall3(SYS_CLOCK, 0, 0, 0); }
+/* Unix time in seconds (the real-time clock read as UTC), or -1 */
+static inline long long sys_time(void) { return syscall3(SYS_TIME, 0, 0, 0); }
 static inline long long sys_wifiscan(unsigned index, char *buf, usize cap) { return syscall3(SYS_WIFISCAN, index, (long long)(usize)buf, (long long)cap); }
 /* ---- GUI windows (gui.h, SYS_GUI_* in include/syscall.h) ---- */
 #define GUI_EV_KEY 1        /* key, ch, pressed, mods (KEY_* values of keyboard.h: KEY_ESC is 256) */
@@ -266,6 +272,7 @@ __attribute__((noreturn)) static inline void sys_exit(int code)
         ;
 }
 
+#ifndef HARIS_STD_HEADERS /* the ISO C headers of user/include leave these helpers out: a ported program may use such names itself */
 static inline usize str_len(const char *s)
 {
     usize n = 0;
@@ -299,5 +306,7 @@ static inline void print_number(long long v)
     format_number(s, v);
     print(s);
 }
+
+#endif /* HARIS_STD_HEADERS */
 
 #endif

@@ -748,7 +748,21 @@ int sock_recv(int id, void *buf, unsigned max)
     FS_IN_POS += n;
     return n; /* 0 once everything is read: the server closed */
 }
-/* the Wi-Fi scan result the kernel would hold: a summary and two networks */
+/* the clocks SYS_CLOCK and SYS_TIME read */
+#include "rtc.h"
+static unsigned long long TIMER_MS = 1234;
+unsigned long long timer_ms(void) { return TIMER_MS; }
+static RtcTime RTC = {2026, 10, 25, 15, 40, 7};
+static int RTC_OK = 1;
+int rtc_read(RtcTime *out)
+{
+    if (!RTC_OK)
+        return -1;
+    *out = RTC;
+    return 0;
+}
+/* the Wi-Fi scan result the kernel would hold
+: a summary and two networks */
 static int WIFI_SCAN = 1;
 int net_wifi_scan_line(unsigned index, char *buf, unsigned cap)
 {
@@ -2347,7 +2361,31 @@ int main(void)
         CHECK(call(SYS_RESOLVE, U(longname), 0, 0) == -1);                              /* does not fit the 256 byte buffer */
     }
 
+    /* ================= SYS_CLOCK / SYS_TIME ================= */
+    reset();
+    {
+        CHECK(call(SYS_CLOCK, 0, 0, 0) == 1234);
+        TIMER_MS = 5000000000ULL; /* more than 32 bits of milliseconds */
+        CHECK(call(SYS_CLOCK, 0, 0, 0) == 5000000000LL);
+        CHECK(call(SYS_TIME, 0, 0, 0) == 1792942807LL);
+        RTC = (RtcTime){2000, 2, 29, 23, 59, 59}; /* a leap day */
+        CHECK(call(SYS_TIME, 0, 0, 0) == 951868799LL);
+        RTC = (RtcTime){2000, 3, 1, 0, 0, 0};
+        CHECK(call(SYS_TIME, 0, 0, 0) == 951868800LL);
+        RTC = (RtcTime){1970, 1, 1, 0, 0, 0};
+        CHECK(call(SYS_TIME, 0, 0, 0) == 0);
+        RTC = (RtcTime){2024, 12, 31, 12, 0, 0};
+        CHECK(call(SYS_TIME, 0, 0, 0) == 1735646400LL);
+        RTC = (RtcTime){2026, 13, 1, 0, 0, 0}; /* nonsense from the chip */
+        CHECK(call(SYS_TIME, 0, 0, 0) == -1);
+        RTC = (RtcTime){2026, 10, 25, 15, 40, 7};
+        RTC_OK = 0;
+        CHECK(call(SYS_TIME, 0, 0, 0) == -1);
+        RTC_OK = 1;
+    }
+
     /* ================= SYS_WIFISCAN ================= */
+
     reset();
     {
         char line[256];

@@ -161,6 +161,9 @@
  *   SYS_WIFISCAN (60) rdi = line number, rsi = pointer to a buffer, rdx = its size (2 .. 256): the result of the last Wi-Fi scan as one line of
  *                  text (NUL-terminated; see net_wifi_scan_line in net.h): line 0 is a summary, lines 1 .. n one network each, the last a
  *                  count of frames per channel. Returns the length of the line, or -1 (no Wi-Fi adapter or no scan, no such line, bad buffer).
+ *   SYS_CLOCK (61) no arguments: the milliseconds since the kernel started (it keeps counting; 0 if the timer is not running).
+ *   SYS_TIME (62)  no arguments: the wall clock as Unix time, seconds since 1970-01-01 00:00:00, from the real-time clock (read as UTC).
+ *                  -1 if there is no clock.
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
  *
  * Ctrl+C: the console window sends SIGINT to every process that writes to that window.
@@ -248,6 +251,8 @@
 #define SYS_LISTEN 58
 #define SYS_ACCEPT 59
 #define SYS_WIFISCAN 60
+#define SYS_CLOCK 61
+#define SYS_TIME 62
 
 /* SYS_SOCKET types */
 #define SYS_SOCK_STREAM 1 /* TCP */

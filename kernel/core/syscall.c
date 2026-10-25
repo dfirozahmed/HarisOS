@@ -12,8 +12,10 @@
 #include "sem.h"
 #include "shm.h"
 #include "process.h"
+#include "rtc.h"
 #include "serial.h"
 #include "task.h"
+#include "timer.h"
 #include "uaccess.h"
 #include "usersig.h"
 #include "vfs.h"
@@ -1349,7 +1351,34 @@ static long long sys_wifiscan(const SyscallFrame *f)
     return n;
 }
 
-/* SYS_BIND: rdi = socket descriptor, rsi = local address (0 = any; nothing else is accepted: there is one address), rdx = port 1 .. 65535.
+/* SYS_CLOCK: no arguments. The milliseconds since the kernel started (timer_ms), 0 if the timer is not running. */
+static long long sys_clock(const SyscallFrame *f)
+{
+    (void)f;
+    return (long long)timer_ms();
+}
+
+/* SYS_TIME: no arguments. The wall clock as Unix time (seconds since 1970-01-01), taken from the real-time clock, which is read as UTC.
+ * -1 if there is no clock. The calendar date becomes a day count with the usual "days from civil" arithmetic (years from March, so the
+ * leap day is the last day of a year). */
+static long long sys_time(const SyscallFrame *f)
+{
+    (void)f;
+    RtcTime t;
+    if (rtc_read(&t) != 0 || t.month < 1 || t.month > 12 || t.day < 1 || t.day > 31 || t.year < 1970)
+        return -1;
+    long long y = t.year - (t.month <= 2);
+    long long era = y / 400;
+    long long yoe = y - era * 400;
+    long long mp = (t.month + 9) % 12; /* March = 0 */
+    long long doy = (153 * mp + 2) / 5 + t.day - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long long days = era * 146097 + doe - 719468;
+    return days * 86400 + t.hour * 3600LL + t.minute * 60LL + t.second;
+}
+
+/* SYS_BIND: rdi = socket descriptor
+, rsi = local address (0 = any; nothing else is accepted: there is one address), rdx = port 1 .. 65535.
  * Claims the port for this socket. 0, or -1 (not a new socket, port in use, bad port). */
 static long long sys_bind(const SyscallFrame *f)
 {
@@ -1947,6 +1976,10 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_accept(f);
     case SYS_WIFISCAN:
         return sys_wifiscan(f);
+    case SYS_CLOCK:
+        return sys_clock(f);
+    case SYS_TIME:
+        return sys_time(f);
     case SYS_SIGACTION:
         return sys_sigaction(f);
     case SYS_SIGRETURN:
