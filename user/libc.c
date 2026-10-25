@@ -124,7 +124,35 @@ char *strstr(const char *hay, const char *needle)
     return 0;
 }
 
+char *strcat(char *dst, const char *src)
+{
+    strcpy(dst + strlen(dst), src);
+    return dst;
+}
+
+char *strncat(char *dst, const char *src, usize n)
+{
+    char *d = dst + strlen(dst);
+    while (n-- && *src)
+        *d++ = *src++;
+    *d = 0;
+    return dst;
+}
+
+void *memchr(const void *p, int c, usize n)
+{
+    const unsigned char *s = p;
+    for (; n; n--, s++)
+        if (*s == (unsigned char)c)
+            return (void *)s;
+    return 0;
+}
+
 /* ---- characters and numbers ---------------------------------------------------------------------------------------- */
+int isupper(int c) { return c >= 'A' && c <= 'Z'; }
+int islower(int c) { return c >= 'a' && c <= 'z'; }
+int isalnum(int c) { return isalpha(c) || isdigit(c); }
+int isprint(int c) { return c >= 32 && c < 127; }
 int isdigit(int c) { return c >= '0' && c <= '9'; }
 int isalpha(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 int isspace(int c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
@@ -164,6 +192,72 @@ long long strtoll(const char *s, char **end, int base)
     if (end)
         *end = (char *)(p == digits ? s : p);
     return neg ? (long long)(0ULL - v) : (long long)v;
+}
+
+unsigned long long strtoull(const char *s, char **end, int base)
+{
+    const char *p = s;
+    while (isspace(*p))
+        p++;
+    if (*p == '-') /* no negative unsigned numbers: nothing is parsed */
+    {
+        if (end)
+            *end = (char *)s;
+        return 0;
+    }
+    return (unsigned long long)strtoll(s, end, base); /* the same wrapping arithmetic, so the full 64-bit range works */
+}
+
+int abs(int x) { return x < 0 ? -x : x; }
+long long llabs(long long x) { return x < 0 ? -x : x; }
+
+static unsigned rand_state = 1;
+void srand(unsigned seed) { rand_state = seed; }
+int rand(void)
+{
+    rand_state = rand_state * 1103515245u + 12345u;
+    return (int)((rand_state >> 1) & 0x7FFFFFFF); /* the low bit of an LCG is weak: drop it */
+}
+
+/* heapsort: in place, O(n log n) worst case, no recursion and no allocation (a program may have no heap yet) */
+static void swap_bytes(char *a, char *b, usize n)
+{
+    while (n--)
+    {
+        char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
+
+static void sift_down(char *base, usize size, usize root, usize n, int (*cmp)(const void *, const void *))
+{
+    for (;;)
+    {
+        usize child = 2 * root + 1;
+        if (child >= n)
+            return;
+        if (child + 1 < n && cmp(base + child * size, base + (child + 1) * size) < 0)
+            child++;
+        if (cmp(base + root * size, base + child * size) >= 0)
+            return;
+        swap_bytes(base + root * size, base + child * size, size);
+        root = child;
+    }
+}
+
+void qsort(void *base, usize count, usize size, int (*cmp)(const void *, const void *))
+{
+    if (count < 2 || size == 0)
+        return;
+    char *b = base;
+    for (usize i = count / 2; i-- > 0;)
+        sift_down(b, size, i, count, cmp);
+    for (usize end = count - 1; end > 0; end--)
+    {
+        swap_bytes(b, b + end * size, size);
+        sift_down(b, size, 0, end, cmp);
+    }
 }
 
 int atoi(const char *s) { return (int)strtoll(s, 0, 10); }
@@ -638,3 +732,465 @@ __asm__(".text\n"
         "    popq %r11\n"
         "    popq %r10\n"
         "    ret\n");
+
+char *strdup(const char *s)
+{
+    usize n = strlen(s) + 1;
+    char *p = malloc(n);
+    if (p)
+        memcpy(p, s, n);
+    return p;
+}
+
+/* ---- stdio ----------------------------------------------------------------------------------------------------------------- */
+/* A FILE is either a read stream (buf[rpos .. rlen) holds bytes read ahead) or a write stream (buf[0 .. wlen) holds bytes not yet
+ * written). The kernel has no read+write open, so the two never mix and a seek just drops or flushes the buffer. */
+#define F_READ 1
+#define F_WRITE 2
+#define F_EOF 4
+#define F_ERR 8
+#define F_UNBUF 16
+#define F_HEAP 32 /* made by fopen: fclose frees it */
+#define OPEN_STREAMS_MAX 32
+#define SYS_WRITE_MAX 4096 /* one SYS_WRITE call sends at most this much (include/syscall.h) */
+
+static FILE stdin_file = {0, F_READ, 0, 0, 0, {0}};
+static FILE stdout_file = {1, F_WRITE | F_UNBUF, 0, 0, 0, {0}};
+static FILE stderr_file = {2, F_WRITE | F_UNBUF, 0, 0, 0, {0}};
+FILE *stdin = &stdin_file;
+FILE *stdout = &stdout_file;
+FILE *stderr = &stderr_file;
+
+static FILE *open_streams[OPEN_STREAMS_MAX]; /* for fflush(NULL) */
+
+/* write all n bytes (a call takes at most SYS_WRITE_MAX and a drive may take fewer): 0, or -1 */
+static int write_all(int fd, const char *p, usize n)
+{
+    while (n)
+    {
+        long long r = sys_write(fd, p, n < SYS_WRITE_MAX ? n : SYS_WRITE_MAX);
+        if (r <= 0)
+            return -1;
+        p += r;
+        n -= (usize)r;
+    }
+    return 0;
+}
+
+int fflush(FILE *f)
+{
+    if (!f)
+    {
+        int rc = 0;
+        for (int i = 0; i < OPEN_STREAMS_MAX; i++)
+            if (open_streams[i] && fflush(open_streams[i]) != 0)
+                rc = EOF;
+        return rc;
+    }
+    if ((f->flags & F_WRITE) && f->wlen)
+    {
+        int bad = write_all(f->fd, f->buf, (usize)f->wlen);
+        f->wlen = 0;
+        if (bad)
+        {
+            f->flags |= F_ERR;
+            return EOF;
+        }
+    }
+    return 0;
+}
+
+FILE *fopen(const char *path, const char *mode)
+{
+    unsigned oflags;
+    int sflags;
+    if (mode[0] == 'r')
+    {
+        oflags = 0;
+        sflags = F_READ;
+    }
+    else if (mode[0] == 'w')
+    {
+        oflags = SYS_O_WRITE | SYS_O_CREATE | SYS_O_TRUNC;
+        sflags = F_WRITE;
+    }
+    else if (mode[0] == 'a')
+    {
+        oflags = SYS_O_WRITE | SYS_O_CREATE | SYS_O_APPEND;
+        sflags = F_WRITE;
+    }
+    else
+        return 0;
+    for (int i = 1; mode[i]; i++)
+        if (mode[i] == '+')
+            return 0; /* update modes need a read+write open the kernel does not have */
+    int slot = -1;
+    for (int i = 0; i < OPEN_STREAMS_MAX; i++)
+        if (!open_streams[i])
+        {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return 0;
+    FILE *f = malloc(sizeof(FILE));
+    if (!f)
+        return 0;
+    long long fd = sys_open_flags(path, oflags);
+    if (fd < 0)
+    {
+        free(f);
+        return 0;
+    }
+    f->fd = (int)fd;
+    f->flags = sflags | F_HEAP;
+    f->rpos = f->rlen = f->wlen = 0;
+    open_streams[slot] = f;
+    return f;
+}
+
+int fclose(FILE *f)
+{
+    if (!f)
+        return EOF;
+    int rc = fflush(f);
+    if (f->fd > 2 && sys_close(f->fd) < 0)
+        rc = EOF;
+    for (int i = 0; i < OPEN_STREAMS_MAX; i++)
+        if (open_streams[i] == f)
+            open_streams[i] = 0;
+    if (f->flags & F_HEAP)
+        free(f);
+    return rc;
+}
+
+/* refill the read buffer: 1 = got bytes, 0 = end or error (flag set) */
+static int fill(FILE *f)
+{
+    long long r = sys_read(f->fd, f->buf, BUFSIZ);
+    f->rpos = f->rlen = 0;
+    if (r > 0)
+    {
+        f->rlen = (int)r;
+        return 1;
+    }
+    f->flags |= r == 0 ? F_EOF : F_ERR;
+    return 0;
+}
+
+int fgetc(FILE *f)
+{
+    if (!(f->flags & F_READ))
+    {
+        f->flags |= F_ERR;
+        return EOF;
+    }
+    if (f->rpos >= f->rlen && !fill(f))
+        return EOF;
+    return (unsigned char)f->buf[f->rpos++];
+}
+
+int getc(FILE *f) { return fgetc(f); }
+int getchar(void) { return fgetc(stdin); }
+
+int ungetc(int c, FILE *f)
+{
+    if (c == EOF || !(f->flags & F_READ))
+        return EOF;
+    if (f->rpos == 0) /* nothing consumed from this buffer yet: make room in front */
+    {
+        if (f->rlen >= BUFSIZ)
+            return EOF;
+        memmove(f->buf + 1, f->buf, (usize)f->rlen);
+        f->rlen++;
+        f->rpos = 1;
+    }
+    f->buf[--f->rpos] = (char)c;
+    f->flags &= ~F_EOF;
+    return (unsigned char)c;
+}
+
+usize fread(void *ptr, usize size, usize count, FILE *f)
+{
+    if (!size || !count)
+        return 0;
+    if (!(f->flags & F_READ) || count > ((usize)1 << 40) / size)
+    {
+        f->flags |= F_ERR;
+        return 0;
+    }
+    char *d = ptr;
+    usize want = size * count, got = 0;
+    while (got < want)
+    {
+        if (f->rpos < f->rlen)
+        {
+            usize n = (usize)(f->rlen - f->rpos);
+            if (n > want - got)
+                n = want - got;
+            memcpy(d + got, f->buf + f->rpos, n);
+            f->rpos += (int)n;
+            got += n;
+        }
+        else if (want - got >= BUFSIZ) /* big request: straight into the caller's memory */
+        {
+            long long r = sys_read(f->fd, d + got, want - got);
+            if (r <= 0)
+            {
+                f->flags |= r == 0 ? F_EOF : F_ERR;
+                break;
+            }
+            got += (usize)r;
+        }
+        else if (!fill(f))
+            break;
+    }
+    return got / size; /* whole items only, as the standard says */
+}
+
+usize fwrite(const void *ptr, usize size, usize count, FILE *f)
+{
+    if (!size || !count)
+        return 0;
+    if (!(f->flags & F_WRITE) || count > ((usize)1 << 40) / size)
+    {
+        f->flags |= F_ERR;
+        return 0;
+    }
+    const char *p = ptr;
+    usize n = size * count;
+    if (f->flags & F_UNBUF)
+    {
+        if (write_all(f->fd, p, n))
+        {
+            f->flags |= F_ERR;
+            return 0;
+        }
+        return count;
+    }
+    if (n >= BUFSIZ) /* too big to be worth copying: flush what is queued, then write it in one go */
+    {
+        if (fflush(f) || write_all(f->fd, p, n))
+        {
+            f->flags |= F_ERR;
+            return 0;
+        }
+        return count;
+    }
+    if (f->wlen + n > BUFSIZ && fflush(f))
+        return 0;
+    memcpy(f->buf + f->wlen, p, n);
+    f->wlen += (int)n;
+    return count;
+}
+
+int fputc(int c, FILE *f)
+{
+    char ch = (char)c;
+    return fwrite(&ch, 1, 1, f) == 1 ? (unsigned char)ch : EOF;
+}
+
+int putc(int c, FILE *f) { return fputc(c, f); }
+
+int fputs(const char *s, FILE *f)
+{
+    usize n = strlen(s);
+    return n == 0 || fwrite(s, 1, n, f) == n ? 0 : EOF;
+}
+
+char *fgets(char *s, int size, FILE *f)
+{
+    if (size <= 0)
+        return 0;
+    int i = 0;
+    while (i < size - 1)
+    {
+        int c = fgetc(f);
+        if (c == EOF)
+            break;
+        s[i++] = (char)c;
+        if (c == '\n')
+            break;
+    }
+    if (i == 0)
+        return 0; /* end of file (or an error) with nothing read */
+    s[i] = 0;
+    return s;
+}
+
+int fseek(FILE *f, long long offset, int whence)
+{
+    if (fflush(f))
+        return -1;
+    if (whence == SEEK_CUR)
+        offset -= f->rlen - f->rpos; /* the kernel's position is after the read-ahead */
+    f->rpos = f->rlen = 0;
+    f->flags &= ~F_EOF;
+    return sys_seek(f->fd, offset, whence) < 0 ? -1 : 0;
+}
+
+long long ftell(FILE *f)
+{
+    long long pos = sys_seek(f->fd, 0, SEEK_CUR);
+    if (pos < 0)
+        return -1;
+    return pos - (f->rlen - f->rpos) + f->wlen;
+}
+
+void rewind(FILE *f)
+{
+    fseek(f, 0, SEEK_SET);
+    f->flags &= ~F_ERR;
+}
+
+int feof(FILE *f) { return (f->flags & F_EOF) != 0; }
+int ferror(FILE *f) { return (f->flags & F_ERR) != 0; }
+void clearerr(FILE *f) { f->flags &= ~(F_EOF | F_ERR); }
+int fileno(FILE *f) { return f->fd; }
+
+int vfprintf(FILE *f, const char *fmt, va_list ap)
+{
+    char small[256];
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(small, sizeof(small), fmt, ap);
+    int rc = n;
+    if (n >= (int)sizeof(small)) /* did not fit: format again into a block of the exact size */
+    {
+        char *big = malloc((usize)n + 1);
+        if (!big)
+            rc = -1;
+        else
+        {
+            vsnprintf(big, (usize)n + 1, fmt, ap2);
+            if (fwrite(big, 1, (usize)n, f) != (usize)n)
+                rc = -1;
+            free(big);
+        }
+    }
+    else if (n && fwrite(small, 1, (usize)n, f) != (usize)n)
+        rc = -1;
+    va_end(ap2);
+    return rc;
+}
+
+int fprintf(FILE *f, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vfprintf(f, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+int remove(const char *path) { return sys_unlink(path) == 0 || sys_rmdir(path) == 0 ? 0 : -1; }
+int rename(const char *from, const char *to) { return (int)sys_rename(from, to); }
+
+/* ---- pthread mutexes and condition variables ----------------------------------------------------------------------------------- */
+/* The kernel objects are named: a name made from the pid and a counter creates one, and is unlinked at once (the object stays while the
+ * descriptor is open, see SYS_SYNC_UNLINK). */
+static unsigned sync_counter;
+
+static void sync_name(char *buf, char kind) { snprintf(buf, 32, "pt%c%d_%u", kind, getpid(), sync_counter++); }
+
+static int mutex_fd(pthread_mutex_t *m)
+{
+    if (m->fd >= 0)
+        return m->fd;
+    char name[32];
+    sync_name(name, 'm');
+    long long fd = sys_mutex_open(name, SYS_CREATE | SYS_EXCL);
+    if (fd < 0)
+        return -1;
+    sys_mutex_unlink(name);
+    m->fd = (int)fd;
+    return m->fd;
+}
+
+static int cond_fd(pthread_cond_t *c)
+{
+    if (c->fd >= 0)
+        return c->fd;
+    char name[32];
+    sync_name(name, 'c');
+    long long fd = sys_cond_open(name, SYS_CREATE | SYS_EXCL);
+    if (fd < 0)
+        return -1;
+    sys_cond_unlink(name);
+    c->fd = (int)fd;
+    return c->fd;
+}
+
+int pthread_mutex_init(pthread_mutex_t *m, const void *attr_unused)
+{
+    (void)attr_unused;
+    m->fd = -1;
+    return mutex_fd(m) < 0 ? EAGAIN : 0;
+}
+
+int pthread_mutex_lock(pthread_mutex_t *m)
+{
+    int fd = mutex_fd(m);
+    if (fd < 0)
+        return EAGAIN;
+    return sys_mutex_lock(fd) == 0 ? 0 : EINVAL; /* -1 also covers "already held by the caller": waiting would deadlock */
+}
+
+int pthread_mutex_trylock(pthread_mutex_t *m)
+{
+    int fd = mutex_fd(m);
+    if (fd < 0)
+        return EAGAIN;
+    long long r = sys_mutex_try_lock(fd);
+    return r == 0 ? 0 : r == 1 ? EBUSY : EINVAL;
+}
+
+int pthread_mutex_unlock(pthread_mutex_t *m)
+{
+    if (m->fd < 0)
+        return EPERM;
+    return sys_mutex_unlock(m->fd) == 0 ? 0 : EPERM;
+}
+
+int pthread_mutex_destroy(pthread_mutex_t *m)
+{
+    if (m->fd >= 0)
+        sys_close(m->fd);
+    m->fd = -1;
+    return 0;
+}
+
+int pthread_cond_init(pthread_cond_t *c, const void *attr_unused)
+{
+    (void)attr_unused;
+    c->fd = -1;
+    return cond_fd(c) < 0 ? EAGAIN : 0;
+}
+
+int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m)
+{
+    int cf = cond_fd(c);
+    if (cf < 0 || m->fd < 0)
+        return EINVAL;
+    return sys_cond_wait(cf, m->fd) == 0 ? 0 : EINVAL;
+}
+
+int pthread_cond_signal(pthread_cond_t *c)
+{
+    int cf = cond_fd(c);
+    return cf >= 0 && sys_cond_signal(cf) == 0 ? 0 : EINVAL;
+}
+
+int pthread_cond_broadcast(pthread_cond_t *c)
+{
+    int cf = cond_fd(c);
+    return cf >= 0 && sys_cond_broadcast(cf) == 0 ? 0 : EINVAL;
+}
+
+int pthread_cond_destroy(pthread_cond_t *c)
+{
+    if (c->fd >= 0)
+        sys_close(c->fd);
+    c->fd = -1;
+    return 0;
+}

@@ -9,6 +9,8 @@
             fail = (n);       \
     } while (0)
 
+static int cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+
 __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
 {
     int fail = 0;
@@ -67,6 +69,57 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
 
     /* printf itself: the return value is what was written (the text shows on the console) */
     CHECK(31, printf("libctest: printf %d %s\n", 7, "ok") == 22);
+
+    /* strings, numbers, qsort */
+    char cat[16] = "ab";
+    strcat(cat, "cd");
+    strncat(cat, "efgh", 2);
+    CHECK(32, strcmp(cat, "abcdef") == 0 && ((char *)memchr("hello", 'l', 5))[1] == 'l' && memchr("hello", 'z', 5) == 0);
+    char *dup = strdup("copy");
+    CHECK(33, dup && dup != 0 && strcmp(dup, "copy") == 0);
+    free(dup);
+    CHECK(34, isupper('A') && !isupper('a') && islower('a') && isalnum('7') && isalnum('x') && !isalnum('-') && isprint(' ') && !isprint(10));
+    CHECK(35, strtoull("18446744073709551615", 0, 10) == 18446744073709551615ULL && strtoull("-5", &end, 10) == 0 && abs(-3) == 3 && llabs(-5000000000LL) == 5000000000LL);
+    int nums[] = {5, 3, 9, 1, 7, 3, 0, 8};
+    qsort(nums, 8, sizeof(int), cmp_int);
+    CHECK(36, nums[0] == 0 && nums[1] == 1 && nums[2] == 3 && nums[3] == 3 && nums[4] == 5 && nums[5] == 7 && nums[6] == 8 && nums[7] == 9);
+    srand(1);
+    int r1 = rand();
+    srand(1);
+    CHECK(37, rand() == r1 && r1 >= 0);
+
+    /* stdio on a real file (RAM Disk) */
+    FILE *f = fopen("/RAM Disk/libctest.tmp", "w");
+    CHECK(38, f != 0);
+    if (f)
+    {
+        CHECK(39, fprintf(f, "line %d\n", 1) == 7 && fputs("second\n", f) >= 0 && fputc('Z', f) == 'Z');
+        CHECK(40, fwrite("0123456789", 1, 10, f) == 10);
+        CHECK(41, fclose(f) == 0);
+        f = fopen("/RAM Disk/libctest.tmp", "r");
+        CHECK(42, f != 0);
+        if (f)
+        {
+            char line[32];
+            CHECK(43, fgets(line, sizeof(line), f) && strcmp(line, "line 1\n") == 0);
+            CHECK(44, fgets(line, sizeof(line), f) && strcmp(line, "second\n") == 0 && ftell(f) == 14);
+            int c = fgetc(f);
+            CHECK(45, c == 'Z' && ungetc(c, f) == 'Z' && fgetc(f) == 'Z');
+            CHECK(46, fseek(f, -4, SEEK_END) == 0 && fread(line, 1, 4, f) == 4 && memcmp(line, "6789", 4) == 0 && fgetc(f) == EOF && feof(f));
+            rewind(f);
+            CHECK(47, !feof(f) && fgetc(f) == 'l' && fseek(f, 1, SEEK_CUR) == 0 && fgetc(f) == 'n');
+            fclose(f);
+        }
+        CHECK(48, remove("/RAM Disk/libctest.tmp") == 0 && fopen("/RAM Disk/libctest.tmp", "r") == 0);
+    }
+    CHECK(49, fopen("/RAM Disk/x", "r+") == 0 && fprintf(stdout, "libctest: stdout %s\n", "ok") == 20);
+
+    /* pthread mutex / condition variable (single process: lock, trylock, unlock) */
+    pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cv;
+    CHECK(50, pthread_mutex_lock(&mu) == 0 && pthread_mutex_trylock(&mu) != 0 && pthread_mutex_unlock(&mu) == 0 && pthread_mutex_trylock(&mu) == 0);
+    CHECK(51, pthread_mutex_unlock(&mu) == 0 && pthread_mutex_unlock(&mu) == EPERM && pthread_mutex_destroy(&mu) == 0);
+    CHECK(52, pthread_cond_init(&cv, 0) == 0 && pthread_cond_signal(&cv) == 0 && pthread_cond_broadcast(&cv) == 0 && pthread_cond_destroy(&cv) == 0);
 
     if (fail == 0)
         puts("libctest: all checks passed");
