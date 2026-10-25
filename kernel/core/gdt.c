@@ -35,8 +35,14 @@ void gdt_init(void)
     u64 tss[2];
     fault_tss_descriptor(tss);
     gdt_build(GDT, tss);
+    gdt_load(GDT);
+}
 
-    DescPtr p = {sizeof(GDT) - 1, (u64)GDT};
+/* Load a built GDT on the calling processor: segment registers, then the task register (an application processor does this
+ * with a GDT and TSS of its own, see smp.c). */
+void gdt_load(u64 gdt[GDT_ENTRIES])
+{
+    DescPtr p = {GDT_ENTRIES * 8 - 1, (u64)gdt};
     __asm__ volatile("lgdt %0\n\t"
                      "pushq %1\n\t" /* a far return reloads CS: the only way to change it in 64-bit mode */
                      "leaq 1f(%%rip), %%rax\n\t"

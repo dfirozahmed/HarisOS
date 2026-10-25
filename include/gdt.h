@@ -23,6 +23,7 @@
 void gdt_build(unsigned long long gdt[GDT_ENTRIES], const unsigned long long tss[2]);
 
 void gdt_init(void);
+void gdt_load(unsigned long long gdt[GDT_ENTRIES]); /* lgdt + segment registers + ltr on the calling processor (smp.c) */
 void gdt_set_kernel_stack(unsigned long long rsp0);
 int gdt_check(void);
 

@@ -1,6 +1,7 @@
 /* UEFI-specific entry point. Firmware interfaces stop at this boundary. */
 #include "uefi.h"
 #include "bootinfo.h"
+#include "smp.h"
 
 static EFI_GUID GopGuid = {0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
 
@@ -46,6 +47,22 @@ static unsigned long long find_rsdp(EFI_SYSTEM_TABLE *st)
             v1 = (unsigned long long)(UINTN)t[i].VendorTable;
     }
     return v1;
+}
+
+/* Memory for the SMP start-up code (smp.h): a processor woken by a SIPI starts in real mode, so its code must be below 1 MiB.
+ * Allocated and filled now, while the firmware still hands out memory. The code page is EfiLoaderCode, because some firmware
+ * maps data as non-executable. Below 640 KiB, which no PC uses for anything else. */
+static void prepare_smp(EFI_BOOT_SERVICES *bs, BootInfo *out)
+{
+    UINT64 code = 0x9FFFF, data = 0x9FFFF;
+    if (EFI_ERROR(bs->AllocatePages(EFI_ALLOCATE_MAX_ADDRESS, EFI_LOADER_CODE, 1, &code)))
+        return;
+    if (EFI_ERROR(bs->AllocatePages(EFI_ALLOCATE_MAX_ADDRESS, EFI_LOADER_DATA, SMP_DATA_PAGES, &data)))
+        return;
+    if (smp_install(code, data) != 0)
+        return;
+    out->smp_code = code;
+    out->smp_data = data;
 }
 
 /* Leave UEFI Boot Services. After this returns EFI_SUCCESS the firmware no longer
@@ -141,6 +158,7 @@ EFI_STATUS EFIAPI efi_kernel_entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sys
     g_system_table = SystemTable;
     boot_info.reset_system = efi_reset;
     boot_info.acpi_rsdp = find_rsdp(SystemTable);
+    prepare_smp(SystemTable->BootServices, &boot_info);
 
     status = leave_boot_services(ImageHandle, SystemTable, &boot_info);
     if (EFI_ERROR(status))

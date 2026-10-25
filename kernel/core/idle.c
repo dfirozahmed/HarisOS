@@ -258,6 +258,29 @@ int idle_ready(void) { return READY; }
 
 unsigned idle_lapic_id(void) { return READY ? lapic_read(0x20) >> 24 : 0; }
 
+int idle_send_ipi(unsigned apic_id, unsigned icr_low)
+{
+    if (!READY)
+        return -1;
+    /* bit 12 of the low half: delivery status, 1 while the previous IPI is still being sent */
+    for (int i = 0; lapic_read(0x300) & (1u << 12); i++)
+        if (i > 1000000)
+            return -1;
+    lapic_write(0x310, apic_id << 24);
+    lapic_write(0x300, icr_low); /* writing the low half sends it */
+    for (int i = 0; lapic_read(0x300) & (1u << 12); i++)
+        if (i > 1000000)
+            return -1;
+    return 0;
+}
+
+void idle_ap_init(void)
+{
+    idt_load();
+    lapic_write(LAPIC_TPR, 0);
+    lapic_write(LAPIC_SVR, 0x100 | VEC_SPURIOUS);
+}
+
 void idle_send_self_nmi(void)
 {
     if (!READY)
@@ -284,6 +307,13 @@ void idle_wait(void)
 int idle_init(void) { return -1; }
 int idle_ready(void) { return 0; }
 unsigned idle_lapic_id(void) { return 0; }
+int idle_send_ipi(unsigned apic_id, unsigned icr_low)
+{
+    (void)apic_id;
+    (void)icr_low;
+    return -1;
+}
+void idle_ap_init(void) {}
 void idle_wait(void) {}
 void idle_send_self_nmi(void) {}
 

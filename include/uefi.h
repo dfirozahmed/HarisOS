@@ -93,7 +93,7 @@ typedef struct
     EFI_TABLE_HEADER Hdr;
     void *RaiseTPL;
     void *RestoreTPL;
-    void *AllocatePages;
+    EFI_STATUS(EFIAPI *AllocatePages)(UINT32 Type, UINT32 MemoryType, UINTN Pages, UINT64 *Memory);
     void *FreePages;
     EFI_STATUS(EFIAPI *GetMemoryMap)(UINTN *MemoryMapSize, EFI_MEMORY_DESCRIPTOR *MemoryMap,
                                      UINTN *MapKey, UINTN *DescriptorSize, UINT32 *DescriptorVersion);
@@ -240,7 +240,9 @@ typedef struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
 } EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
 
 #define EFI_FILE_MODE_READ 0x0000000000000001ULL
+#define EFI_LOADER_CODE 1
 #define EFI_LOADER_DATA 2
+#define EFI_ALLOCATE_MAX_ADDRESS 1 /* AllocatePages: any pages that end at or below *Memory */
 
 /* ------------------------------------------------------------
  * Colors: attribute = text color | (background color << 4)

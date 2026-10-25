@@ -32,6 +32,7 @@
 #include "power.h"
 #include "rtc.h"
 #include "serial.h"
+#include "smp.h"
 #include "process.h"
 #include "protect.h"
 #include "storage.h"
@@ -195,6 +196,22 @@ void kernel_main(const BootInfo *info)
     if (pmm_ok)
     {
         serial_init();
+
+        /* SMP stage 1: wake the other processors and park them (smp.h). Needs the local APIC (idle_init) and the MADT (acpi_init). */
+        int smp_up = smp_start(info->smp_code, info->smp_data);
+        serial_puts("HARISOS: SMP: ");
+        serial_putd(smp_cpu_total());
+        serial_puts(" processor(s) listed, ");
+        serial_putd(smp_up + 1);
+        serial_puts(" running\n");
+        for (int c = 0; c < smp_cpu_total(); c++)
+        {
+            serial_puts("HARISOS: SMP: CPU ");
+            serial_putd(c);
+            serial_puts(" (APIC id ");
+            serial_putd(smp_cpu_apic_id(c));
+            serial_puts(smp_cpu_online(c) ? ") online\n" : ") did not start\n");
+        }
 
         splash_progress(74, "Starting the network");
         net_init(); /* Intel e1000 on PCI, if any; the self test needs the serial port and the timer */

@@ -53,6 +53,11 @@ typedef struct
 
     /* Physical address of the ACPI RSDP, 0 if the firmware did not give one. */
     unsigned long long acpi_rsdp;
+
+    /* SMP start-up code (smp.h): the physical address of a page below 1 MiB that holds it, and of the 4 pages of parameters and
+     * page tables it uses. 0 when the firmware had no memory down there (the other processors then stay asleep). */
+    unsigned long long smp_code;
+    unsigned long long smp_data;
 } BootInfo;
 
 #endif

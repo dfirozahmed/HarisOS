@@ -103,6 +103,7 @@ set(KERNEL_SOURCES
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
     kernel/core/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
+    kernel/core/smp.c               # SMP stage 1: INIT-SIPI start of the other processors, real mode -> 64-bit trampoline, parked in hlt
     kernel/core/ioapic.c            # I/O APIC: device interrupt lines to processor interrupts (used by the network card)
     kernel/core/pci.c                # PCI device enumeration (Device Manager)
     kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
@@ -483,7 +484,7 @@ endif()
 
 if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
     add_custom_target(run
-        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -accel tcg
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -smp 4 -accel tcg
                 -drive if=pflash,format=raw,unit=0,readonly=on,file=${FW_CODE}
                 -drive if=pflash,format=raw,unit=1,file=${CMAKE_BINARY_DIR}/ovmf_vars.fd
                 -drive format=raw,file=fat:rw:esp
@@ -494,7 +495,7 @@ if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
         USES_TERMINAL VERBATIM)
 elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
     add_custom_target(run
-        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -accel tcg
+        COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -smp 4 -accel tcg
                 -bios ${FW_CODE}
                 -drive format=raw,file=fat:rw:esp
                 -nic user,model=e1000
