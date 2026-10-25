@@ -169,6 +169,7 @@ set(KERNEL_SOURCES
     kernel/desktop/desktop_clock.c
     kernel/desktop/desktop_windows.c
     kernel/desktop/desktop_power.c  # shut down / restart screen
+    kernel/desktop/bootsplash.c     # "Welcome to HarisOS" screen with a progress bar while the kernel starts
     kernel/desktop/appmenu.c        # taskbar app right-click menu
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c

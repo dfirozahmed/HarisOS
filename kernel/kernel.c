@@ -1,6 +1,7 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
 #include "blk.h"
 #include "bootinfo.h"
+#include "bootsplash.h"
 #include "console.h"
 #include "cpuinfo.h"
 #include "cpuload.h"
@@ -84,11 +85,14 @@ void kernel_main(const BootInfo *info)
     fault_init(info->framebuffer, info->width, info->height, info->pitch, info->red_mask_mode); /* crash screen */
     gfx_init(info->framebuffer, info->width, info->height,
              info->pitch, info->red_mask_mode);
+    splash_show(); /* "Welcome to HarisOS" with a progress bar until the desktop's first frame (bootsplash.h) */
 
     power_init(info); /* shut down / restart, used by the start menu */
 
+    splash_progress(8, "Reading system tables");
     acpi_init(info->acpi_rsdp); /* device tables: where the I2C touchpad is described */
 
+    splash_progress(15, "Setting up memory");
     int pmm_ok = (pmm_init(info) == 0);
 
     /* Page tables of our own, before the allocator gives out memory that gets used: the firmware's tables can be
@@ -98,6 +102,7 @@ void kernel_main(const BootInfo *info)
 
     /* Double buffering: needs a contiguous block of RAM, so it comes after pmm_init.
      * If no block is found we simply keep drawing directly to the screen. */
+    splash_progress(25, "Preparing graphics");
     int double_buffered = 0;
     if (pmm_ok && gfx_ready())
     {
@@ -150,6 +155,7 @@ void kernel_main(const BootInfo *info)
     desktop_set_double_buffered(double_buffered);
 
     /* keyboard: initialised before the mouse; if it does not answer we still poll it */
+    splash_progress(40, "Starting keyboard and pointer");
     int kbd_ok = (keyboard_init() == 0);
 
     /* mouse: if there is none, the desktop simply stays non-interactive */
@@ -157,6 +163,7 @@ void kernel_main(const BootInfo *info)
     desktop_set_mouse(have_mouse);
 
     /* Device Manager list: PCI scan + what the input drivers found (after mouse_init). */
+    splash_progress(55, "Scanning devices and disks");
     pci_scan();
     display_init((unsigned long long)info->framebuffer, 0); /* GPUs on PCI; which one shows the framebuffer */
     if (pmm_ok)
@@ -165,6 +172,7 @@ void kernel_main(const BootInfo *info)
     vfs_init(); /* the RAM Disk for the File Explorer */
     if (pmm_ok)
     {
+        splash_progress(62, "Mounting drives");
         fat_set_clock(fat_clock); /* timestamps of files made or changed on a drive */
         exfat_set_clock(fat_clock);
         ntfs_set_clock(nt_clock);
@@ -174,6 +182,7 @@ void kernel_main(const BootInfo *info)
 
     unsigned blk_seen = blk_generation(); /* USB drives plugged in (or out) later change it: see volume_sync() */
 
+    splash_progress(68, "Starting timers");
     timer_init(); /* needed for double-click */
     idle_init();  /* 1 ms LAPIC tick so the loop can sleep (hlt) when idle; see idle.h */
     ioapic_init(); /* the I/O APICs, every line masked until a driver asks for one (the network card does, below) */
@@ -187,6 +196,7 @@ void kernel_main(const BootInfo *info)
     {
         serial_init();
 
+        splash_progress(74, "Starting the network");
         net_init(); /* Intel e1000 on PCI, if any; the self test needs the serial port and the timer */
         wifi_boot = net_wifi_boot_begin(); /* claims the Wi-Fi card for the thread started before the main loop; nothing uses it until then */
 #if HARIS_BOOT_SELFTEST
@@ -197,6 +207,7 @@ void kernel_main(const BootInfo *info)
 #endif
 
         /* SMEP / SMAP before anything touches user memory (the address space test below does). */
+        splash_progress(82, "Checking the system");
         protect_init();
         fpu_init(); /* x87 / SSE usable, and a clean state to give every new process (see fpu.h) */
         serial_puts("HARISOS: protections: SMEP ");
@@ -352,8 +363,10 @@ void kernel_main(const BootInfo *info)
 
     /* The Wi-Fi card's first scan and connection take several seconds: a thread of its own, the desktop does not wait (rtl8821ce.c,
      * "starting in the background"). Without a thread the network stack does the same work in small steps. */
+    splash_progress(95, wifi_boot ? "Starting the desktop (Wi-Fi connects in the background)" : "Starting the desktop");
     if (wifi_boot && task_create_flags("WIFIBOOT", wifi_boot_thread, 0, TASK_PREEMPTIBLE) < 0)
         net_wifi_boot_abort();
+    splash_progress(100, "Welcome");
 
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
