@@ -188,7 +188,9 @@ typedef struct
 
 static ApCpu CPU[SMP_MAX_CPUS];
 static u8 AP_STACK[SMP_MAX_CPUS][SMP_STACK_SIZE] __attribute__((aligned(16)));
-static u8 AP_IST[SMP_MAX_CPUS][4096] __attribute__((aligned(16))); /* one stack for IST1..3: nothing else runs on an AP in stage 1 */
+/* IST1 (double fault), IST2 (page fault on a stack overflow) and IST3 (NMI) each get a stack of their own, like the boot processor's (fault.c): an NMI
+ * that arrives while a page fault is being reported must not land on the page fault's stack. */
+static u8 AP_IST[SMP_MAX_CPUS][3][4096] __attribute__((aligned(16)));
 static int TOTAL = 1;
 
 int smp_install(u64 code, u64 data)
@@ -255,7 +257,7 @@ static void ap_entry(u64 index)
     /* Own TSS (a TSS is "busy" once loaded and cannot be loaded by two processors) inside an own copy of the GDT. */
     c->tss.rsp[0] = (u64)(AP_STACK[index] + SMP_STACK_SIZE);
     for (int i = 0; i < 3; i++)
-        c->tss.ist[i] = (u64)(AP_IST[index] + sizeof(AP_IST[index]));
+        c->tss.ist[i] = (u64)(AP_IST[index][i] + sizeof(AP_IST[index][i]));
     c->tss.iomap_base = sizeof(ApTss);
     u64 base = (u64)&c->tss, limit = sizeof(ApTss) - 1, desc[2];
     desc[0] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ULL << 40) | (((limit >> 16) & 0xF) << 48) |
