@@ -10,6 +10,7 @@
 #define IDT_COUNT 256
 #define VEC_TIMER 0x40
 #define VEC_NET IDLE_VEC_NET
+#define VEC_TIMER_AP IDLE_VEC_TIMER_AP
 #define VEC_SPURIOUS 0xFF
 
 #define MSR_APIC_BASE 0x1B
@@ -47,6 +48,7 @@ static IdtEntry IDT[IDT_COUNT];
 
 static volatile unsigned *LAPIC;
 static int READY;
+static unsigned PER_MS; /* LAPIC timer counts per millisecond, measured on the boot processor and reused by the others (same bus clock) */
 
 /* The interrupt handlers are assembly: they run between any two instructions of the kernel, so they save every
  * register that the code they call (or they themselves) may change.
@@ -61,6 +63,7 @@ void idle_isr_timer(void);
 void idle_isr_net(void);
 void idle_isr_other(void);
 void idle_isr_spurious(void);
+void idle_isr_timer_ap(void);
 
 /* Stack alignment in idle_isr_timer: the CPU aligns RSP to 16 and pushes 5 qwords (40 bytes) -> RSP is 8 mod 16;
  * 7 pushes (56) -> 0 mod 16; then 128 bytes = 32 shadow space for the call + 96 for xmm0-5, still 0 mod 16. */
@@ -150,6 +153,16 @@ __asm__(".text\n"
         ".p2align 4\n"
         ".globl idle_isr_spurious\n"
         "idle_isr_spurious:\n"
+        "    iretq\n"
+        ".p2align 4\n"
+        ".globl idle_isr_timer_ap\n"
+        "idle_isr_timer_ap:\n" /* an application processor's tick: count it in its own per-CPU record (percpu.h, gs:8) and acknowledge. No C call,
+                                * so only RAX is touched. It must never call task_tick: the scheduler is not safe for a second processor yet. */
+        "    pushq %rax\n"
+        "    incq %gs:8\n"
+        "    movq idle_lapic_eoi(%rip), %rax\n"
+        "    movl $0, (%rax)\n"
+        "    popq %rax\n"
         "    iretq\n");
 
 static unsigned long long rdmsr(unsigned msr)
@@ -224,6 +237,7 @@ int idle_init(void)
     for (int i = 0; i < IDT_COUNT; i++)
         idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
     idt_set(VEC_TIMER, idle_isr_timer);
+    idt_set(VEC_TIMER_AP, idle_isr_timer_ap);
     idt_set(VEC_NET, idle_isr_net); /* quiet until a driver routes an I/O APIC line to it (ioapic.h) */
     IDT[8].ist = 1;  /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
     IDT[2].ist = 3;  /* an NMI runs on IST3, never on the user's stack (the SYSCALL entry has a window where RSP is the user's) */
@@ -250,6 +264,7 @@ int idle_init(void)
 
     lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VEC_TIMER); /* a tick every millisecond */
     lapic_write(LAPIC_TIMER_INIT, per_ms);
+    PER_MS = per_ms;
     READY = 1;
     return 0;
 }
@@ -279,6 +294,11 @@ void idle_ap_init(void)
     idt_load();
     lapic_write(LAPIC_TPR, 0);
     lapic_write(LAPIC_SVR, 0x100 | VEC_SPURIOUS);
+
+    /* The timer is part of each processor's own local APIC: it has to be programmed by the processor itself. */
+    lapic_write(LAPIC_TIMER_DIV, 0x3); /* divide by 16, like the boot processor */
+    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VEC_TIMER_AP);
+    lapic_write(LAPIC_TIMER_INIT, PER_MS);
 }
 
 void idle_send_self_nmi(void)

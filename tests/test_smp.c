@@ -57,7 +57,7 @@ int main(void)
 
     /* without the hardware: one processor, the boot one */
     CHECK(smp_cpu_total() == 1 && smp_cpu_online(0) && !smp_cpu_online(1));
-    CHECK(smp_start(0, 0) == 0 && smp_install(0, 0) == -1);
+    CHECK(smp_start(0, 0) == 0 && smp_install(0, 0) == -1 && smp_cpu_ticks(1) == 0);
 
     if (fails == 0)
         printf("smp tests passed\n");

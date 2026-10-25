@@ -210,7 +210,13 @@ void kernel_main(const BootInfo *info)
             serial_putd(c);
             serial_puts(" (APIC id ");
             serial_putd(smp_cpu_apic_id(c));
-            serial_puts(smp_cpu_online(c) ? ") online\n" : ") did not start\n");
+            serial_puts(smp_cpu_online(c) ? ") online" : ") did not start");
+            if (c > 0 && smp_cpu_online(c))
+            {
+                serial_puts(", timer ticks ");
+                serial_putd((long long)smp_cpu_ticks(c));
+            }
+            serial_puts("\n");
         }
 
         splash_progress(74, "Starting the network");
@@ -384,6 +390,15 @@ void kernel_main(const BootInfo *info)
     if (wifi_boot && task_create_flags("WIFIBOOT", wifi_boot_thread, 0, TASK_PREEMPTIBLE) < 0)
         net_wifi_boot_abort();
     splash_progress(100, "Welcome");
+
+    for (int c = 1; c < smp_cpu_total(); c++) /* seconds after smp_start: the application processors must still be ticking */
+    {
+        serial_puts("HARISOS: SMP: CPU ");
+        serial_putd(c);
+        serial_puts(" timer ticks now ");
+        serial_putd((long long)smp_cpu_ticks(c));
+        serial_puts("\n");
+    }
 
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */

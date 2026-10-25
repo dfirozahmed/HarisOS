@@ -12,8 +12,9 @@
  * (so the code must be below 1 MiB and 4 KiB aligned). The code is a short "trampoline" that climbs to 64-bit mode on the way:
  *   real mode -> protected mode (own small GDT) -> long mode (own identity page tables for the first 2 MiB, so paging can be switched
  *   on while the code still runs below 1 MiB) -> the kernel's page tables (CR3 of the BSP) -> ap_entry() on a stack of its own.
- * ap_entry loads the processor's own GDT + TSS, the shared IDT, enables its local APIC, announces itself and halts. Stage 1 does
- * not schedule anything on it: no timer tick, no interrupts, so the BSP behaves exactly as it did on one processor.
+ * ap_entry loads the processor's own GDT + TSS, sets its GS base to its per-CPU record (percpu.h), loads the shared IDT, enables its
+ * local APIC with its own 1 ms timer, announces itself and sleeps in hlt. Its timer handler (idle.c) only counts ticks in the
+ * record: no scheduling happens on it yet, and it never calls task_tick, so the BSP behaves exactly as on one processor.
  *
  * Memory the loader gives (efi_entry.c): `code` = 1 page (EfiLoaderCode: executable even when the firmware maps data as NX), and
  * `data` = 4 pages (EfiLoaderData): the parameter block (page 0) and the three page tables of the trampoline (pages 1..3).
@@ -61,5 +62,6 @@ int smp_start(unsigned long long code, unsigned long long data);
 int smp_cpu_total(void);
 int smp_cpu_online(int i);
 unsigned smp_cpu_apic_id(int i);
+unsigned long long smp_cpu_ticks(int i); /* timer interrupts processor i (an application processor) has taken, 0 for the boot processor */
 
 #endif

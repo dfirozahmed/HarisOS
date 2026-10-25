@@ -82,6 +82,7 @@ void smp_build_tables(u64 *pml4, u64 *pdpt, u64 *pd, u64 pdpt_phys, u64 pd_phys)
 #include "acpi.h"
 #include "gdt.h"
 #include "idle.h"
+#include "percpu.h"
 #include "timer.h"
 
 /* ---- the trampoline: three pieces of code in three modes, in one block that is copied to a page below 1 MiB ----
@@ -168,11 +169,11 @@ typedef struct
 
 typedef struct
 {
+    PerCpu pc;               /* first: gs base of this processor (percpu.h); pc.apic_id is what the MADT says */
     u64 gdt[GDT_ENTRIES];
     ApTss tss;
     unsigned lapic_id;       /* read by the processor itself once it runs */
     volatile unsigned online;
-    unsigned apic_id;        /* what the MADT says */
 } ApCpu;
 
 static ApCpu CPU[SMP_MAX_CPUS];
@@ -229,11 +230,15 @@ static void ap_entry(u64 index)
     gdt_build(c->gdt, desc);
     gdt_load(c->gdt);
 
-    idle_ap_init(); /* the shared IDT, local APIC on, no timer */
+    /* After the GDT: loading a segment register can reset the GS base (a null selector does on some processors). */
+    c->pc.index = (unsigned)index;
+    percpu_set(&c->pc);
+
+    idle_ap_init(); /* the shared IDT, local APIC on, its own 1 ms timer (a handler that only counts, see idle.c) */
     c->lapic_id = idle_lapic_id();
     __atomic_store_n(&c->online, 1, __ATOMIC_RELEASE);
     for (;;)
-        __asm__ volatile("cli; hlt");
+        __asm__ volatile("sti; hlt"); /* sleep until the next tick; the handler counts it in gs:8 */
 }
 
 int smp_start(u64 code, u64 data)
@@ -248,7 +253,7 @@ int smp_start(u64 code, u64 data)
     unsigned bsp = idle_lapic_id();
     int count = smp_pick_aps(ids, n, bsp, aps, SMP_MAX_CPUS - 1);
 
-    CPU[0].apic_id = bsp;
+    CPU[0].pc.apic_id = bsp;
     CPU[0].lapic_id = bsp;
     CPU[0].online = 1;
     TOTAL = 1;
@@ -263,7 +268,7 @@ int smp_start(u64 code, u64 data)
     int up = 0;
     for (int k = 1; k <= count; k++)
     {
-        CPU[k].apic_id = aps[k - 1];
+        CPU[k].pc.apic_id = aps[k - 1];
         CPU[k].online = 0;
         TOTAL = k + 1;
         p->stack = (u64)(AP_STACK[k] + SMP_STACK_SIZE);
@@ -285,12 +290,15 @@ int smp_start(u64 code, u64 data)
         if (CPU[k].online)
             up++;
     }
+    if (up)
+        wait_us(20000); /* long enough for the first timer ticks of the processors started last (smp_cpu_ticks) */
     return up;
 }
 
 int smp_cpu_total(void) { return TOTAL; }
 int smp_cpu_online(int i) { return i >= 0 && i < TOTAL && CPU[i].online; }
-unsigned smp_cpu_apic_id(int i) { return (i >= 0 && i < TOTAL) ? CPU[i].apic_id : 0; }
+unsigned smp_cpu_apic_id(int i) { return (i >= 0 && i < TOTAL) ? CPU[i].pc.apic_id : 0; }
+u64 smp_cpu_ticks(int i) { return (i > 0 && i < TOTAL) ? CPU[i].pc.ticks : 0; }
 
 #else
 
@@ -309,6 +317,11 @@ int smp_start(u64 code, u64 data)
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)
+{
+    (void)i;
+    return 0;
+}
+u64 smp_cpu_ticks(int i)
 {
     (void)i;
     return 0;
