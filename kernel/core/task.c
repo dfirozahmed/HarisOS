@@ -1,6 +1,7 @@
 /* HarisOS kernel threads (cooperative): see include/task.h. */
 #include "task.h"
 #include "aspace.h"
+#include "bkl.h"
 #include "idle.h"
 #include "fpu.h"
 #include "heap.h"
@@ -423,7 +424,7 @@ void *task_user_data(void) { return tk(CUR)->data; }
 
 void *task_data_of(int id)
 {
-    return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD ? tk(id)->data : 0;
+    return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD && !tk(id)->kill_pending ? tk(id)->data : 0;
 }
 
 void task_exec_replace(AddressSpace *as, const char *name)
@@ -494,7 +495,7 @@ void task_wake(int id)
 
 AddressSpace *task_space_of(int id)
 {
-    return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD ? tk(id)->as : 0;
+    return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD && !tk(id)->kill_pending ? tk(id)->as : 0;
 }
 
 static int create(const char *name, TaskFn fn, void *arg, unsigned flags, AddressSpace *as, void *data,
@@ -583,6 +584,7 @@ void task_yield(void)
 {
     unsigned long long irq = irq_save();
     schedule();
+    bkl_yield(); /* code that waits by yielding in a loop must not keep the other processors out of the kernel (bkl.h) */
     irq_restore(irq);
 }
 
@@ -723,7 +725,12 @@ int task_count(void)
 }
 
 /* The idle contexts of the application processors are not threads to the outside: they do not show up in the lists. */
-TaskState task_state(int id) { return id >= 0 && id < CAP && !tk(id)->idle_cpu ? tk(id)->state : TASK_UNUSED; }
+TaskState task_state(int id)
+{
+    if (id < 0 || id >= CAP || tk(id)->idle_cpu)
+        return TASK_UNUSED;
+    return tk(id)->kill_pending ? TASK_DEAD : tk(id)->state; /* a thread task_kill found running on another processor is already gone to the outside */
+}
 
 const char *task_name(int id)
 {

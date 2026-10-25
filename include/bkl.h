@@ -22,11 +22,14 @@
 #define HARIS_BKL_H
 
 /* ---- for assembly (string literals to paste into an __asm__ block; they use the local labels 5 to 9, and no register) ---- */
-#define BKL_ASM_LOCK                \
-    "8:  lock btsl $0, bkl_word(%rip)\n" \
-    "    jnc 9f\n"                  \
-    "    pause\n"                   \
-    "    jmp 8b\n"                  \
+#define BKL_ASM_LOCK                            \
+    "    lock btsl $0, bkl_word(%rip)\n"        \
+    "    jnc 9f\n"                              \
+    "    lock incl bkl_waiters(%rip)\n"         \
+    "8:  pause\n"                               \
+    "    lock btsl $0, bkl_word(%rip)\n"        \
+    "    jc 8b\n"                               \
+    "    lock decl bkl_waiters(%rip)\n"         \
     "9:\n"
 #define BKL_ASM_UNLOCK "    movl $0, bkl_word(%rip)\n"
 
@@ -58,16 +61,40 @@
 
 /* ---- for C ---- */
 #if defined(__x86_64__) && !defined(HARIS_HOST)
-extern volatile unsigned bkl_word; /* fault.c */
+extern volatile unsigned bkl_word;    /* fault.c: 1 while a processor is in the kernel */
+extern volatile unsigned bkl_waiters; /* fault.c: processors waiting for the lock */
 
 static inline void bkl_lock(void)
 {
-    while (__atomic_exchange_n(&bkl_word, 1, __ATOMIC_ACQUIRE))
+    if (!__atomic_exchange_n(&bkl_word, 1, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_fetch_add(&bkl_waiters, 1, __ATOMIC_RELAXED);
+    for (;;)
+    {
         while (bkl_word)
             __asm__ volatile("pause");
+        if (!__atomic_exchange_n(&bkl_word, 1, __ATOMIC_ACQUIRE))
+            break;
+    }
+    __atomic_fetch_sub(&bkl_waiters, 1, __ATOMIC_RELAXED);
 }
 
 static inline void bkl_unlock(void) { __atomic_store_n(&bkl_word, 0, __ATOMIC_RELEASE); }
+
+/* A yield point for kernel code that waits by looping (the main loop, task_yield in a loop): the lock is not fair, and a processor that
+ * never leaves the kernel would keep the others out for ever. If somebody waits, let go until one of them has taken it. In the kernel,
+ * interrupts off. */
+static inline void bkl_yield(void)
+{
+    if (!bkl_waiters)
+        return;
+    bkl_unlock();
+    for (int i = 0; i < 200000 && !bkl_word; i++)
+        __asm__ volatile("pause");
+    bkl_lock();
+}
+#else
+static inline void bkl_yield(void) {}
 #endif
 
 #endif

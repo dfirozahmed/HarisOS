@@ -10,6 +10,7 @@
 /* The big kernel lock (bkl.h); here because the exception entry code is the one piece of assembly every build of the kernel (and
  * the host fault test) links. 1 = a processor is in the kernel. The boot processor starts out inside it. */
 volatile unsigned bkl_word;
+volatile unsigned bkl_waiters; /* how many processors spin for it: bkl_yield lets go only when this is not 0 */
 
 /* ---- stubs ---------------------------------------------------
  * One tiny stub per vector, all joining fault_common. Interrupt gates clear IF, so nothing interrupts a stub.

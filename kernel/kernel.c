@@ -81,6 +81,111 @@ static void wifi_boot_thread(void *arg)
     net_wifi_boot_run();
 }
 
+#if HARIS_BOOT_SELFTEST
+/* SMP stress (slow, so only with HARIS_BOOT_SELFTEST): the user test programs, each of which exits with a known code when every one of its
+ * checks holds. First one after the other, then several at once, so that their threads (and the children they start) are spread over all
+ * processors. A fault in the big kernel lock scheme shows up as a wrong code, a program that does not finish, or a hang. */
+typedef struct
+{
+    const char *file;
+    int ok_code;
+} StressProgram;
+
+static const StressProgram STRESS[] = {
+    {"HEAPTEST.ELF", 45}, {"PROCTEST.ELF", 46}, {"PIPETEST.ELF", 48}, {"SIGTEST.ELF", 49}, {"FORKTEST.ELF", 50},
+    {"IPCTEST.ELF", 51},  {"SEMTEST.ELF", 52},  {"SIGHAND.ELF", 53},  {"MUXTEST.ELF", 54},  {"STKTEST.ELF", 55},
+};
+
+static int stress_finish(int id)
+{
+    int waited = -1;
+    for (unsigned long long end = timer_ms() + 25000; id >= 0 && waited != 0 && timer_ms() < end;)
+        waited = process_wait(id);
+    if (waited != 0) /* it did not finish: say what every thread is doing */
+    {
+        serial_puts("HARISOS: SMP: stress: threads at the timeout (id name state cpus):\n");
+        for (int t = 0; t < task_slots(); t++)
+            if (task_state(t) != TASK_UNUSED)
+            {
+                serial_putd(t);
+                serial_puts(" ");
+                serial_puts(task_name(t));
+                serial_puts(" st=");
+                serial_putd((long long)task_state(t));
+                serial_puts(" cpus=");
+                serial_putd(task_cpu_mask(t));
+                serial_puts("\n");
+            }
+    }
+    return waited == 0 ? task_exit_code(id) : -1000; /* read right away: the slot is free to be used again */
+}
+
+static void smp_stress_programs(void)
+{
+    int n = (int)(sizeof(STRESS) / sizeof(STRESS[0])), failed = 0;
+    unsigned mask = 0;
+    for (int i = 0; i < n; i++) /* one after the other */
+    {
+        int err = 0, id = exec_find(STRESS[i].file) >= 0 ? exec_run(STRESS[i].file, &err) : -1;
+        if (id < 0)
+        {
+            serial_puts("HARISOS: SMP: stress: ");
+            serial_puts(STRESS[i].file);
+            serial_puts(" skipped\n");
+            continue;
+        }
+        int code = stress_finish(id);
+        mask |= task_cpu_mask(id);
+        if (code != STRESS[i].ok_code)
+        {
+            failed++;
+            serial_puts("HARISOS: SMP: stress: ");
+            serial_puts(STRESS[i].file);
+            serial_puts(" FAILED, exit code ");
+            serial_putd(code);
+            serial_puts("\n");
+        }
+    }
+    for (int round = 0; round < 3; round++) /* then two independent ones at once */
+    {
+        static const int GROUP[] = {0, 9}; /* heaptest, stktest: the others start, signal and count each other's processes, so they cannot run at once */
+        int ids[2];
+        for (int g = 0; g < 2; g++)
+        {
+            int err = 0;
+            ids[g] = exec_find(STRESS[GROUP[g]].file) >= 0 ? exec_run(STRESS[GROUP[g]].file, &err) : -1;
+        }
+        for (int g = 0; g < 2; g++)
+        {
+            if (ids[g] < 0)
+                continue;
+            int code = stress_finish(ids[g]);
+            mask |= task_cpu_mask(ids[g]);
+            if (code != STRESS[GROUP[g]].ok_code)
+            {
+                failed++;
+                serial_puts("HARISOS: SMP: stress: ");
+                serial_puts(STRESS[GROUP[g]].file);
+                serial_puts(" FAILED in a group, exit code ");
+                serial_putd(code);
+                serial_puts("\n");
+            }
+        }
+    }
+    serial_puts("HARISOS: SMP: stress ");
+    serial_puts(failed ? "FAILED (" : "ok (");
+    serial_putd(failed);
+    serial_puts(" failures), programs ran on CPUs");
+    for (int c = 0; c < smp_cpu_total(); c++)
+        if (mask & (1u << c))
+        {
+            serial_puts(" ");
+            serial_putd(c);
+        }
+    serial_puts("\n");
+}
+#endif
+
 void kernel_main(const BootInfo *info)
 {
     fault_init(info->framebuffer, info->width, info->height, info->pitch, info->red_mask_mode); /* crash screen */
@@ -433,6 +538,9 @@ void kernel_main(const BootInfo *info)
                 }
             serial_puts(bad ? "FAILED (a program did not finish)\n" : (mask & ~1u) ? "ok\n" : "FAILED (only the boot processor)\n");
         }
+#if HARIS_BOOT_SELFTEST /* slow: runs a dozen test programs while the other processors take their share of the threads */
+        smp_stress_programs();
+#endif
     }
 
     {

@@ -14,6 +14,7 @@
 #include "process.h"
 #include "rtc.h"
 #include "serial.h"
+#include "smp.h"
 #include "task.h"
 #include "timer.h"
 #include "uaccess.h"
@@ -1867,6 +1868,13 @@ static long long dispatch_call(SyscallFrame *f)
         process_exit((int)f->rdi); /* does not return */
     case SYS_YIELD:
         task_yield();
+#if defined(__x86_64__) && !defined(HARIS_HOST)
+        /* With one processor a yield hands the processor to the other threads, which then run for a whole slice. With several, the others
+         * already run on their own processors and a yield returns at once, so a program that yields to "give the others time" (a parent
+         * waiting for its child to get going) would not give them any. One tick of sleep restores that meaning. */
+        if (smp_cpu_total() > 1)
+            task_sleep_ms(1);
+#endif
         return 0;
     case SYS_READ:
         return sys_read(f);
