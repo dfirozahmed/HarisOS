@@ -2007,6 +2007,8 @@ long long syscall_dispatch(SyscallFrame *f)
 
 #if defined(__x86_64__) && !defined(HARIS_HOST)
 
+#include "percpu.h"
+
 typedef unsigned long long u64;
 
 #define MSR_EFER 0xC0000080
@@ -2018,20 +2020,17 @@ typedef unsigned long long u64;
 /* RFLAGS bits cleared on entry: IF (no interrupts until we are back), TF, DF (the C code expects it clear), NT, AC. */
 #define SYSCALL_FLAG_MASK 0x44700ULL
 
-/* One CPU, interrupts off from SYSCALL to SYSRET: plain variables do instead of per-CPU data. */
-u64 syscall_user_rsp;
-u64 syscall_kstack;
+/* The state of a system call in progress (the user's RSP, the kernel stack to switch to, the exit-through-IRETQ request) is kept in the
+ * per-CPU record of the processor that runs it (percpu.h, reached through GS), because two processors can be in a system call at once. */
 
 /* A return from a signal handler that came in at a timer tick must restore rcx and r11 too, which SYSRET cannot: the exit then goes
  * through IRETQ (signal.c asks with syscall_request_iret; the exit code below looks at the flag). */
-u64 syscall_use_iret;
-u64 syscall_iret_rip, syscall_iret_rflags;
-
 void syscall_request_iret(u64 rip, u64 rflags)
 {
-    syscall_iret_rip = rip;
-    syscall_iret_rflags = rflags;
-    syscall_use_iret = 1;
+    PerCpu *c = this_cpu();
+    c->iret_rip = rip;
+    c->iret_rflags = rflags;
+    c->use_iret = 1;
 }
 
 /* The code the CPU jumps to on SYSCALL. At this point RSP is still the user's. Frame layout = SyscallFrame.
@@ -2047,9 +2046,9 @@ __asm__(".text\n"
         ".globl syscall_entry\n"
         "syscall_entry:\n"
         "    swapgs\n" /* SYSCALL leaves GS alone: swap in the kernel's per-CPU base (percpu.h); the user's waits in IA32_KERNEL_GS_BASE */
-        "    movq %rsp, syscall_user_rsp(%rip)\n"
-        "    movq syscall_kstack(%rip), %rsp\n"
-        "    pushq syscall_user_rsp(%rip)\n"
+        "    movq %rsp, %gs:32\n" /* per-CPU (percpu.h): another processor may be in its own SYSCALL at the same time */
+        "    movq %gs:24, %rsp\n"
+        "    pushq %gs:32\n"
         "    pushq %r11\n"
         "    pushq %rcx\n"
         "    pushq %rax\n"
@@ -2077,7 +2076,7 @@ __asm__(".text\n"
         "    movups 112(%rsp), %xmm5\n"
         "    addq $128, %rsp\n"
         "    movq %rax, 48(%rsp)\n" /* the result goes into the saved rax */
-        "    cmpq $0, syscall_use_iret(%rip)\n"
+        "    cmpq $0, %gs:40\n"
         "    jne 4f\n"
         "    movq 56(%rsp), %rcx\n"
         "    movq %rcx, %rdx\n"
@@ -2104,7 +2103,7 @@ __asm__(".text\n"
         "    jmp 3b\n"
         /* the return from a signal handler that interrupted the program at a timer tick: every register from the frame (rcx and r11 as the
          * program had them), then IRETQ with the address and flags signal.c chose (it checked that rip is in the user half) */
-        "4:  movq $0, syscall_use_iret(%rip)\n"
+        "4:  movq $0, %gs:40\n"
         "    popq %r9\n"
         "    popq %r8\n"
         "    popq %r10\n"
@@ -2116,9 +2115,9 @@ __asm__(".text\n"
         "    popq %r11\n"
         "    pushq $0x1B\n" /* SS: the user's stack segment ... */
         "    pushq 8(%rsp)\n" /* ... RSP: the saved user stack pointer is where the pops stopped */
-        "    pushq syscall_iret_rflags(%rip)\n"
+        "    pushq %gs:56\n" /* RFLAGS */
         "    pushq $0x23\n" /* CS */
-        "    pushq syscall_iret_rip(%rip)\n"
+        "    pushq %gs:48\n" /* RIP */
         "    swapgs\n"
         "    iretq\n");
 
@@ -2152,7 +2151,7 @@ void syscall_init(void)
 
 void syscall_set_kernel_stack(u64 top)
 {
-    syscall_kstack = top;
+    this_cpu()->kstack = top;
     gdt_set_kernel_stack(top); /* the same stack for interrupts that arrive while ring 3 code runs */
 }
 

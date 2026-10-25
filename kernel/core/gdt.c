@@ -20,6 +20,8 @@ void gdt_build(u64 gdt[GDT_ENTRIES], const u64 tss[2])
 #if defined(__x86_64__) && !defined(HARIS_HOST)
 
 #include "fault.h"
+#include "percpu.h"
+#include "smp.h"
 
 typedef struct
 {
@@ -60,7 +62,14 @@ void gdt_load(u64 gdt[GDT_ENTRIES])
                      : "rax", "memory");
 }
 
-void gdt_set_kernel_stack(u64 rsp0) { fault_tss_set_rsp0(rsp0); }
+/* Every processor has its own TSS: the boot processor's is in fault.c, an application processor's in smp.c. */
+void gdt_set_kernel_stack(u64 rsp0)
+{
+    if (percpu_index() == 0)
+        fault_tss_set_rsp0(rsp0);
+    else
+        smp_set_kernel_stack(rsp0);
+}
 
 /* Ask the CPU what it thinks of our selectors. LAR (load access rights) sets ZF only if the selector is usable from
  * the current privilege level and its descriptor is valid; the result has the descriptor's DPL in bits 13-14 and

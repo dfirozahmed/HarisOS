@@ -197,28 +197,7 @@ void kernel_main(const BootInfo *info)
     {
         serial_init();
 
-        /* SMP stage 1: wake the other processors and park them (smp.h). Needs the local APIC (idle_init) and the MADT (acpi_init). */
-        smp_bsp_init();
-        int smp_up = smp_start(info->smp_code, info->smp_data);
-        serial_puts("HARISOS: SMP: ");
-        serial_putd(smp_cpu_total());
-        serial_puts(" processor(s) listed, ");
-        serial_putd(smp_up + 1);
-        serial_puts(" running\n");
-        for (int c = 0; c < smp_cpu_total(); c++)
-        {
-            serial_puts("HARISOS: SMP: CPU ");
-            serial_putd(c);
-            serial_puts(" (APIC id ");
-            serial_putd(smp_cpu_apic_id(c));
-            serial_puts(smp_cpu_online(c) ? ") online" : ") did not start");
-            if (c > 0 && smp_cpu_online(c))
-            {
-                serial_puts(", timer ticks ");
-                serial_putd((long long)smp_cpu_ticks(c));
-            }
-            serial_puts("\n");
-        }
+        smp_bsp_init(); /* this processor's per-CPU record (GS base): before the scheduler and the system call code need it */
 
         splash_progress(74, "Starting the network");
         net_init(); /* Intel e1000 on PCI, if any; the self test needs the serial port and the timer */
@@ -385,6 +364,42 @@ void kernel_main(const BootInfo *info)
             serial_puts("\n");
         }
         heapmon_start(); /* background thread: kernel heap integrity check once a second (shown in Task Manager) */
+
+        /* SMP: wake the other processors (smp.h). Late on purpose: they copy this processor's CR0 / CR4 / PAT, which protect_init,
+         * fpu_init and the frame buffer setup have changed by now, and turn on SYSCALL themselves. Needs the local APIC (idle_init)
+         * and the MADT (acpi_init). */
+        int smp_up = smp_start(info->smp_code, info->smp_data);
+        serial_puts("HARISOS: SMP: ");
+        serial_putd(smp_cpu_total());
+        serial_puts(" processor(s) listed, ");
+        serial_putd(smp_up + 1);
+        serial_puts(" running\n");
+        for (int c = 0; c < smp_cpu_total(); c++)
+        {
+            serial_puts("HARISOS: SMP: CPU ");
+            serial_putd(c);
+            serial_puts(" (APIC id ");
+            serial_putd(smp_cpu_apic_id(c));
+            serial_puts(smp_cpu_online(c) ? ") online" : ") did not start");
+            if (c > 0 && smp_cpu_online(c))
+            {
+                serial_puts(", timer ticks ");
+                serial_putd((long long)smp_cpu_ticks(c));
+            }
+            serial_puts("\n");
+        }
+        int spin = smp_selftest_spinlock(); /* every processor increments one counter under one lock */
+        serial_puts("HARISOS: SMP: spinlock self test ");
+        if (spin == 1)
+            serial_puts("skipped (no other processor)\n");
+        else if (spin == 0)
+            serial_puts("ok\n");
+        else
+        {
+            serial_puts("FAILED ");
+            serial_putd(spin);
+            serial_puts("\n");
+        }
     }
 
     {

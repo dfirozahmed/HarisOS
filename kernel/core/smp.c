@@ -83,7 +83,11 @@ void smp_build_tables(u64 *pml4, u64 *pdpt, u64 *pd, u64 pdpt_phys, u64 pd_phys)
 #include "gdt.h"
 #include "idle.h"
 #include "percpu.h"
+#include "spinlock.h"
+#include "syscall.h"
 #include "timer.h"
+
+volatile int percpu_ready; /* percpu.h: set once the boot processor has a GS base */
 
 /* ---- the trampoline: three pieces of code in three modes, in one block that is copied to a page below 1 MiB ----
  * The assembler does not know where it will run, so nothing in it refers to a label: the real mode code works relative to CS, the
@@ -174,6 +178,8 @@ typedef struct
     ApTss tss;
     unsigned lapic_id;       /* read by the processor itself once it runs */
     volatile unsigned online;
+    void (*volatile job)(void); /* set by smp_run_on, picked up by the processor within one timer tick */
+    volatile int job_done;
 } ApCpu;
 
 static ApCpu CPU[SMP_MAX_CPUS];
@@ -224,10 +230,17 @@ void smp_bsp_init(void)
 {
     CPU[0].pc.index = 0;
     percpu_set(&CPU[0].pc);
+    percpu_ready = 1;
     wrmsr(MSR_KERNEL_GS_BASE, 0); /* the base ring 3 starts with; SWAPGS exchanges it with the kernel's (idle.c, fault.c, syscall.c, process.c) */
 }
 
 int smp_bsp_gs_check(void) { return this_cpu() == &CPU[0].pc && this_cpu()->index == 0 ? 0 : -1; }
+
+void smp_set_kernel_stack(u64 rsp0) { ((ApCpu *)this_cpu())->tss.rsp[0] = rsp0; } /* PerCpu is the first member of ApCpu */
+
+static const volatile SmpParams *PARAMS; /* the BSP's settings, copied by every processor that starts */
+
+#define MSR_PAT 0x277u
 
 /* The first C code an application processor runs: stack and (kernel) page tables are set, nothing else is. Interrupts stay off. */
 static void ap_entry(u64 index)
@@ -250,11 +263,81 @@ static void ap_entry(u64 index)
     c->pc.index = (unsigned)index;
     percpu_set(&c->pc);
 
+    /* The control registers and the page attribute table are per processor. Take the boot processor's values (SMEP / SMAP, global
+     * pages, SSE enable, write-combining entry), and turn on SYSCALL here too: a user thread may run on this processor one day. */
+    __asm__ volatile("mov %0, %%cr0" : : "r"(PARAMS->cr0) : "memory");
+    __asm__ volatile("mov %0, %%cr4" : : "r"(PARAMS->cr4) : "memory");
+    wrmsr(MSR_PAT, PARAMS->pat);
+    syscall_init();
+
     idle_ap_init(); /* the shared IDT, local APIC on, its own 1 ms timer (a handler that only counts, see idle.c) */
     c->lapic_id = idle_lapic_id();
     __atomic_store_n(&c->online, 1, __ATOMIC_RELEASE);
     for (;;)
-        __asm__ volatile("sti; hlt"); /* sleep until the next tick; the handler counts it in gs:8 */
+    {
+        void (*job)(void) = __atomic_load_n(&c->job, __ATOMIC_ACQUIRE);
+        if (job)
+        {
+            c->job = 0;
+            job();
+            __atomic_store_n(&c->job_done, 1, __ATOMIC_RELEASE);
+        }
+        __asm__ volatile("sti; hlt"); /* sleep until the next tick (the handler counts it in gs:8), then look for a job again */
+    }
+}
+
+int smp_run_on(int cpu, void (*fn)(void))
+{
+    if (cpu < 1 || cpu >= TOTAL || !CPU[cpu].online || !fn)
+        return -1;
+    CPU[cpu].job_done = 0;
+    __atomic_store_n(&CPU[cpu].job, fn, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int smp_job_done(int cpu) { return cpu >= 1 && cpu < TOTAL && __atomic_load_n(&CPU[cpu].job_done, __ATOMIC_ACQUIRE); }
+
+/* ---- spinlock self test: all processors fight for one lock ---- */
+#define SPIN_TEST_ROUNDS 100000
+
+static Spinlock TEST_LOCK = SPINLOCK_INIT;
+static volatile u64 TEST_COUNT;
+static volatile int TEST_INSIDE, TEST_OVERLAP;
+
+static void spin_test_job(void)
+{
+    for (int i = 0; i < SPIN_TEST_ROUNDS; i++)
+    {
+        u64 f = spin_lock_irqsave(&TEST_LOCK);
+        if (TEST_INSIDE)
+            TEST_OVERLAP++; /* two processors inside at once: the lock does not exclude */
+        TEST_INSIDE = 1;
+        u64 v = TEST_COUNT; /* a read and a later write: updates are lost without the lock */
+        TEST_COUNT = v + 1;
+        TEST_INSIDE = 0;
+        spin_unlock_irqrestore(&TEST_LOCK, f);
+    }
+}
+
+int smp_selftest_spinlock(void)
+{
+    int n = 0;
+    for (int k = 1; k < TOTAL; k++)
+        if (smp_run_on(k, spin_test_job) == 0)
+            n++;
+    if (!n)
+        return 1;
+    spin_test_job(); /* the boot processor takes part */
+    u64 t0 = timer_us();
+    for (int k = 1; k < TOTAL; k++)
+        while (CPU[k].online && !smp_job_done(k))
+            if (timer_us() - t0 > 20000000)
+                return -2;
+            else
+                __asm__ volatile("pause");
+    if (TEST_OVERLAP)
+        return -3;
+    return TEST_COUNT == (u64)(n + 1) * SPIN_TEST_ROUNDS ? 0 : -1;
 }
 
 int smp_start(u64 code, u64 data)
@@ -280,6 +363,13 @@ int smp_start(u64 code, u64 data)
     p->entry = (u64)ap_entry;
     p->cr3 = cr3;
     p->efer = rdmsr(MSR_EFER) & ~EFER_LMA;
+    u64 cr0, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    p->cr0 = cr0 & ~((1ULL << 30) | (1ULL << 29)); /* never CD / NW: caches off */
+    p->cr4 = cr4;
+    p->pat = rdmsr(MSR_PAT);
+    PARAMS = p;
 
     int up = 0;
     for (int k = 1; k <= count; k++)
@@ -332,6 +422,19 @@ int smp_start(u64 code, u64 data)
 }
 void smp_bsp_init(void) {}
 int smp_bsp_gs_check(void) { return -1; }
+void smp_set_kernel_stack(u64 rsp0) { (void)rsp0; }
+int smp_run_on(int cpu, void (*fn)(void))
+{
+    (void)cpu;
+    (void)fn;
+    return -1;
+}
+int smp_job_done(int cpu)
+{
+    (void)cpu;
+    return 0;
+}
+int smp_selftest_spinlock(void) { return 1; }
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)

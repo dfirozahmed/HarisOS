@@ -43,6 +43,9 @@ typedef struct
     unsigned long long entry; /* ap_entry */
     unsigned long long cr3;   /* the BSP's page tables */
     unsigned long long efer;  /* the BSP's EFER (NXE, SCE ...) without the read-only LMA bit */
+    unsigned long long cr0;   /* the BSP's CR0, CR4 and PAT as they are when the processors start: protect_init, fpu_init and fbwc have */
+    unsigned long long cr4;   /* run by then, so an application processor gets the same SMEP / SMAP / SSE / page attribute setup */
+    unsigned long long pat;
 } SmpParams;
 
 /* ---- pure functions (host-tested) ---- */
@@ -61,6 +64,15 @@ void smp_build_tables(unsigned long long *pml4, unsigned long long *pdpt, unsign
  * user program. smp_bsp_gs_check: 0 when this_cpu() still finds that record (after ring 3 code has run), else -1. */
 void smp_bsp_init(void);
 int smp_bsp_gs_check(void);
+
+/* Set the rsp0 of the calling application processor's TSS: the stack the CPU switches to when ring 3 code is interrupted (gdt.h). */
+void smp_set_kernel_stack(unsigned long long rsp0);
+/* Run fn on application processor `cpu` (1 ..), which picks it up within a millisecond; smp_job_done tells when it has returned. */
+int smp_run_on(int cpu, void (*fn)(void));
+int smp_job_done(int cpu);
+/* Boot self test of the spinlock: every online processor, the boot one included, increments one counter many times under the same
+ * lock. 0 = the count is exact, 1 = skipped (no application processor), negative = failed. */
+int smp_selftest_spinlock(void);
 
 int smp_install(unsigned long long code, unsigned long long data);
 int smp_start(unsigned long long code, unsigned long long data);
