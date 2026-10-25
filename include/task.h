@@ -122,7 +122,15 @@ int task_others_ready(void);
 void task_sleep_ms(unsigned ms);
 __attribute__((noreturn)) void task_exit(void);
 
-int task_current(void); /* id of the running thread */
+/* SMP (smp.h). One scheduler serves all processors under the big kernel lock (bkl.h). The boot processor runs everything, the main loop
+ * included; an application processor runs only user threads. The idle loop of an application processor calls task_register_idle() once
+ * (it makes the idle loop a context the scheduler can switch to and from) and then task_cpu_idle() whenever it wakes: that runs any user
+ * thread that is ready and returns when the processor has nothing left to run. Both need the big kernel lock held and interrupts off. */
+int task_register_idle(void);
+void task_cpu_idle(void);
+unsigned task_cpu_mask(int id); /* bit n set: thread id has run on processor n (kept until the slot is used again) */
+
+int task_current(void); /* id of the running thread of the calling processor */
 int task_count(void);   /* threads that are not finished */
 int task_slots(void);   /* how many thread slots the table has now (it grows as threads are created, never shrinks): ids 0 .. task_slots()-1 are valid */
 TaskState task_state(int id);

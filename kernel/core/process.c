@@ -1,6 +1,7 @@
 /* HarisOS user processes: see include/process.h. */
 #include "process.h"
 #include "aspace.h"
+#include "bkl.h"
 #include "console.h"
 #include "elf.h"
 #include "gui.h"
@@ -67,6 +68,7 @@ __asm__(".text\n"
         "    xorl %r13d, %r13d\n"
         "    xorl %r14d, %r14d\n"
         "    xorl %r15d, %r15d\n"
+        BKL_ASM_UNLOCK /* the processor leaves the kernel (bkl.h) */
         "    swapgs\n" /* ring 3 gets its GS back, the kernel's waits in IA32_KERNEL_GS_BASE (percpu.h); interrupts are off here */
         "    iretq\n");
 

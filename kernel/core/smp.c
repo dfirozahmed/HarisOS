@@ -82,9 +82,11 @@ void smp_build_tables(u64 *pml4, u64 *pdpt, u64 *pd, u64 pdpt_phys, u64 pd_phys)
 #include "acpi.h"
 #include "gdt.h"
 #include "idle.h"
+#include "bkl.h"
 #include "percpu.h"
 #include "spinlock.h"
 #include "syscall.h"
+#include "task.h"
 #include "timer.h"
 
 volatile int percpu_ready; /* percpu.h: set once the boot processor has a GS base */
@@ -231,6 +233,7 @@ void smp_bsp_init(void)
     CPU[0].pc.index = 0;
     percpu_set(&CPU[0].pc);
     percpu_ready = 1;
+    bkl_word = 1; /* the boot processor is in the kernel: it holds the big kernel lock (bkl.h) */
     wrmsr(MSR_KERNEL_GS_BASE, 0); /* the base ring 3 starts with; SWAPGS exchanges it with the kernel's (idle.c, fault.c, syscall.c, process.c) */
 }
 
@@ -272,7 +275,14 @@ static void ap_entry(u64 index)
 
     idle_ap_init(); /* the shared IDT, local APIC on, its own 1 ms timer (a handler that only counts, see idle.c) */
     c->lapic_id = idle_lapic_id();
+    c->pc.idle = 1; /* this processor is not in the kernel (bkl.h): the first interrupt takes the lock for it */
     __atomic_store_n(&c->online, 1, __ATOMIC_RELEASE);
+
+    /* The idle loop. Every round starts and ends in the IDLE state with interrupts off. Order matters: a job (smp_run_on) runs first,
+     * outside the big kernel lock, because the processor that posted it may be waiting for it while it holds the lock. Then the
+     * processor takes the lock to look for a user thread (task_cpu_idle runs it and returns when there is none), lets go and sleeps. */
+    int idle_registered = 0;
+    __asm__ volatile("cli");
     for (;;)
     {
         void (*job)(void) = __atomic_load_n(&c->job, __ATOMIC_ACQUIRE);
@@ -282,7 +292,23 @@ static void ap_entry(u64 index)
             job();
             __atomic_store_n(&c->job_done, 1, __ATOMIC_RELEASE);
         }
-        __asm__ volatile("sti; hlt"); /* sleep until the next tick (the handler counts it in gs:8), then look for a job again */
+
+        bkl_lock();
+        c->pc.idle = 0;
+        if (!idle_registered && task_register_idle() == 0)
+            idle_registered = 1;
+        task_cpu_idle();
+        c->pc.idle = 1;
+        bkl_unlock();
+
+        /* Sleep until the next tick. The interrupt that wakes us finds `idle` set, takes the lock and clears it (idle.c): we are in the
+         * kernel again, so give the lock back the same way as above. */
+        __asm__ volatile("sti; hlt; cli" : : : "memory");
+        if (!c->pc.idle)
+        {
+            c->pc.idle = 1;
+            bkl_unlock();
+        }
     }
 }
 
@@ -329,12 +355,20 @@ int smp_selftest_spinlock(void)
         return 1;
     spin_test_job(); /* the boot processor takes part */
     u64 t0 = timer_us();
-    for (int k = 1; k < TOTAL; k++)
+    int timeout = 0;
+    bkl_unlock(); /* the others must be able to enter the kernel while we wait (interrupts are off here, nothing needs the kernel) */
+    for (int k = 1; k < TOTAL && !timeout; k++)
         while (CPU[k].online && !smp_job_done(k))
             if (timer_us() - t0 > 20000000)
-                return -2;
+            {
+                timeout = 1;
+                break;
+            }
             else
                 __asm__ volatile("pause");
+    bkl_lock();
+    if (timeout)
+        return -2;
     if (TEST_OVERLAP)
         return -3;
     return TEST_COUNT == (u64)(n + 1) * SPIN_TEST_ROUNDS ? 0 : -1;

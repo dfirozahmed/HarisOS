@@ -4,13 +4,14 @@
 #include "gdt.h"
 #include "io.h"
 #include "timer.h"
+#include "bkl.h"
+#include "percpu.h"
 
 #if defined(__x86_64__)
 
 #define IDT_COUNT 256
 #define VEC_TIMER 0x40
 #define VEC_NET IDLE_VEC_NET
-#define VEC_TIMER_AP IDLE_VEC_TIMER_AP
 #define VEC_SPURIOUS 0xFF
 
 #define MSR_APIC_BASE 0x1B
@@ -63,7 +64,6 @@ void idle_isr_timer(void);
 void idle_isr_net(void);
 void idle_isr_other(void);
 void idle_isr_spurious(void);
-void idle_isr_timer_ap(void);
 
 /* Stack alignment in idle_isr_timer: the CPU aligns RSP to 16 and pushes 5 qwords (40 bytes) -> RSP is 8 mod 16;
  * 7 pushes (56) -> 0 mod 16; then 128 bytes = 32 shadow space for the call + 96 for xmm0-5, still 0 mod 16. */
@@ -71,10 +71,9 @@ __asm__(".text\n"
         ".p2align 4\n"
         ".globl idle_isr_timer\n"
         "idle_isr_timer:\n"
-        "    testb $3, 8(%rsp)\n" /* from ring 3? then the user's GS is active: swap in the kernel's (percpu.h) */
-        "    jz 1f\n"
-        "    swapgs\n"
-        "1:\n"
+        /* From ring 3: the user's GS is active, swap in the kernel's (percpu.h) and take the big kernel lock. From a processor that was
+         * waiting in HLT: take the lock and stay in the kernel (bkl.h). */
+        BKL_ISR_ENTER_IRQ("8")
         "    pushq %rax\n"
         "    pushq %rcx\n"
         "    pushq %rdx\n"
@@ -89,6 +88,10 @@ __asm__(".text\n"
         "    movups %xmm3, 80(%rsp)\n"
         "    movups %xmm4, 96(%rsp)\n"
         "    movups %xmm5, 112(%rsp)\n"
+        "    cmpl $0, percpu_ready(%rip)\n" /* count the tick in this processor's record (percpu.h, gs:8) */
+        "    je 3f\n"
+        "    incq %gs:8\n"
+        "3:\n"
         "    movq idle_lapic_eoi(%rip), %rax\n" /* EOI first: task_tick may not come back for a long time */
         "    movl $0, (%rax)\n"
         "    cld\n"
@@ -109,18 +112,12 @@ __asm__(".text\n"
         "    popq %rdx\n"
         "    popq %rcx\n"
         "    popq %rax\n"
-        "    testb $3, 8(%rsp)\n" /* back to ring 3: the user's GS again */
-        "    jz 2f\n"
-        "    swapgs\n"
-        "2:\n"
+        BKL_ISR_EXIT("8") /* back to ring 3: let go of the lock, the user's GS again */
         "    iretq\n"
         ".p2align 4\n"
         ".globl idle_isr_net\n"
         "idle_isr_net:\n" /* the network card: net_irq_handler() (e1000.c) clears the card's cause, then the EOI. Same frame as the timer. */
-        "    testb $3, 8(%rsp)\n"
-        "    jz 1f\n"
-        "    swapgs\n"
-        "1:\n"
+        BKL_ISR_ENTER_IRQ("8")
         "    pushq %rax\n"
         "    pushq %rcx\n"
         "    pushq %rdx\n"
@@ -153,10 +150,7 @@ __asm__(".text\n"
         "    popq %rdx\n"
         "    popq %rcx\n"
         "    popq %rax\n"
-        "    testb $3, 8(%rsp)\n"
-        "    jz 2f\n"
-        "    swapgs\n"
-        "2:\n"
+        BKL_ISR_EXIT("8")
         "    iretq\n"
         ".p2align 4\n"
         ".globl idle_isr_other\n"
@@ -169,16 +163,6 @@ __asm__(".text\n"
         ".p2align 4\n"
         ".globl idle_isr_spurious\n"
         "idle_isr_spurious:\n"
-        "    iretq\n"
-        ".p2align 4\n"
-        ".globl idle_isr_timer_ap\n"
-        "idle_isr_timer_ap:\n" /* an application processor's tick: count it in its own per-CPU record (percpu.h, gs:8) and acknowledge. No C call,
-                                * so only RAX is touched. It must never call task_tick: the scheduler is not safe for a second processor yet. */
-        "    pushq %rax\n"
-        "    incq %gs:8\n"
-        "    movq idle_lapic_eoi(%rip), %rax\n"
-        "    movl $0, (%rax)\n"
-        "    popq %rax\n"
         "    iretq\n");
 
 static unsigned long long rdmsr(unsigned msr)
@@ -253,7 +237,6 @@ int idle_init(void)
     for (int i = 0; i < IDT_COUNT; i++)
         idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
     idt_set(VEC_TIMER, idle_isr_timer);
-    idt_set(VEC_TIMER_AP, idle_isr_timer_ap);
     idt_set(VEC_NET, idle_isr_net); /* quiet until a driver routes an I/O APIC line to it (ioapic.h) */
     IDT[8].ist = 1;  /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
     IDT[2].ist = 3;  /* an NMI runs on IST3, never on the user's stack (the SYSCALL entry has a window where RSP is the user's) */
@@ -313,7 +296,7 @@ void idle_ap_init(void)
 
     /* The timer is part of each processor's own local APIC: it has to be programmed by the processor itself. */
     lapic_write(LAPIC_TIMER_DIV, 0x3); /* divide by 16, like the boot processor */
-    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VEC_TIMER_AP);
+    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VEC_TIMER); /* the same handler as the boot processor's: it runs the scheduler tick */
     lapic_write(LAPIC_TIMER_INIT, PER_MS);
 }
 
@@ -334,8 +317,24 @@ void idle_wait(void)
         __asm__ volatile("pause");
         return;
     }
-    /* "sti" takes effect after the next instruction, so a tick cannot slip in between sti and hlt and be missed. */
+    if (!percpu_ready)
+    {
+        /* "sti" takes effect after the next instruction, so a tick cannot slip in between sti and hlt and be missed. */
+        __asm__ volatile("sti; hlt; cli" : : : "memory");
+        return;
+    }
+    /* With the big kernel lock (bkl.h): a processor that sleeps must not hold it, or the others could not enter the kernel. Interrupts
+     * are off here. The interrupt that wakes us takes the lock again in its entry code (BKL_ISR_ENTER_IRQ), clears `idle` and leaves
+     * the lock taken, because we go on in the kernel. Only a wake-up without an interrupt (an NMI, an SMI) leaves `idle` set. */
+    PerCpu *c = this_cpu();
+    c->idle = 1;
+    bkl_unlock();
     __asm__ volatile("sti; hlt; cli" : : : "memory");
+    if (c->idle)
+    {
+        bkl_lock();
+        c->idle = 0;
+    }
 }
 
 #else

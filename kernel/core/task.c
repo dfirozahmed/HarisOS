@@ -9,6 +9,8 @@
 #include "pmm.h"
 #include "preempt.h"
 #include "syscall.h"
+#include "percpu.h"
+#include "smp.h"
 #include "timer.h"
 
 /* A stack is a run of whole pages from the page allocator: one guard page at the bottom, then TASK_STACK_SIZE bytes.
@@ -37,6 +39,9 @@ typedef struct
     TaskFn fn;
     void *arg;
     char name[TASK_NAME_MAX];
+    unsigned cpus_ran;      /* bit n: this thread has been switched in on processor n (task_cpu_mask) */
+    int idle_cpu;           /* the idle context of application processor n-1 (an entry of task_register_idle), 0 = an ordinary thread */
+    int kill_pending;       /* task_kill found it running on another processor: it ends at that processor's next timer tick */
     /* The floating point / SSE registers of a process thread while it is not running (see fpu.h). Only process threads use
      * it; kernel threads leave it alone. FXSAVE needs 16-byte alignment, which the attribute gives every Task. */
     unsigned char fpu[FPU_STATE_SIZE] __attribute__((aligned(16)));
@@ -65,11 +70,23 @@ static TaskChunk *DIR[TASK_LIMIT / TASK_CHUNK];
 static int CAP;
 
 static inline Task *tk(int id) { return &DIR[id / TASK_CHUNK]->t[id % TASK_CHUNK]; } /* id < CAP */
-static int CUR;
+/* Processors (smp.h). All of this is kernel code under the big kernel lock (bkl.h), so one scheduler with one table serves every processor;
+ * what belongs to a processor is kept per processor: the running thread, its slice, the address space loaded in its CR3 and whether its
+ * floating point unit holds a process's registers. CUR & co. below are those, for the processor this code runs on. A thread can move to
+ * another processor whenever it is switched out, so these must be read again after task_ctx_switch returns (the macros do, being
+ * re-evaluated at every use). Processor 0 is the boot processor and runs the main loop (thread 0). An application processor runs only
+ * user threads and, when there is none, its own idle context (task_register_idle). */
+static int CURS[SMP_MAX_CPUS];
+static unsigned SLICES[SMP_MAX_CPUS];
+static AddressSpace *ACTIVE[SMP_MAX_CPUS];
+static int FPU_HOLDS[SMP_MAX_CPUS];
+static int IDLE_ID[SMP_MAX_CPUS]; /* the idle context of application processor n, 0 = none yet */
+#define CUR (CURS[percpu_index()])
+#define SLICE_LEFT (SLICES[percpu_index()])
+#define ACTIVE_AS (ACTIVE[percpu_index()])
+#define FPU_HOLDS_PROCESS (FPU_HOLDS[percpu_index()])
 static unsigned long long SWITCHES;
 static unsigned long long TICKS; /* timer interrupts seen by task_tick, for the boot log */
-static AddressSpace *ACTIVE_AS;  /* the address space loaded in CR3 (NULL = the kernel's own tables) */
-static unsigned SLICE_LEFT = TASK_SLICE_TICKS;
 volatile int preempt_count; /* see preempt.h */
 
 /* The priority the scheduler ranks thread k by: its own or the one it borrowed (the higher), plus one level per TASK_AGE_PASSES
@@ -96,6 +113,28 @@ unsigned task_slice_for(int prio)
     return n ? n : 1;
 }
 
+/* May processor `cpu` run thread k? The boot processor runs everything but the idle contexts of the others; an application processor only
+ * user threads (their ring 3 code is what runs in parallel: kernel threads drive hardware and the GUI, which belong to the boot
+ * processor), and never the main loop. The idle context of a processor is never a candidate: it is what runs when there is none. */
+static int eligible(int k, int cpu)
+{
+    const Task *t = tk(k);
+    if (t->idle_cpu)
+        return 0;
+    return cpu == 0 || t->as != 0;
+}
+
+/* 1 if thread k is the running thread of some processor. */
+static int running_somewhere(int k)
+{
+    if (k == 0)
+        return 1; /* the main thread runs on the boot processor for ever */
+    for (int c = 1; c < SMP_MAX_CPUS; c++)
+        if (CURS[c] == k && IDLE_ID[c] != 0) /* (an unused entry of CURS is 0 and means nothing) */
+            return 1;
+    return CURS[0] == k;
+}
+
 /* The slice the running thread (or the one that is about to run) gets, by the priority it runs at (borrowed one included). */
 static unsigned slice_of(int k)
 {
@@ -109,9 +148,10 @@ static int better_waiting(void)
 {
     unsigned long long now = timer_us();
     int mine = rank_of(CUR);
+    int me = (int)percpu_index();
     for (int i = 0; i < CAP; i++)
     {
-        if (i == CUR)
+        if (i == CUR || !eligible(i, me))
             continue;
         const Task *t = tk(i);
         if ((t->state == TASK_READY || (t->state == TASK_SLEEPING && (long long)(now - t->wake_us) >= 0)) && rank_of(i) > mine)
@@ -137,8 +177,8 @@ static void fill_zero(void *p, unsigned long long bytes)
 }
 
 /* True while the x87 unit and MXCSR hold the registers of a process. Then a kernel thread that gets the CPU must first put
- * them back to the normal values (the kernel's own SSE code expects the default rounding mode and masked exceptions). */
-static int FPU_HOLDS_PROCESS;
+ * them back to the normal values (the kernel's own SSE code expects the default rounding mode and masked exceptions). Per processor:
+ * FPU_HOLDS_PROCESS is a macro near the top of the file. */
 
 /* The running thread `t` has just got the CPU: give it the floating point state it expects.
  *   process thread  -> its own saved registers (or the clean state, for a new one): all of FXSAVE, i.e. x87, MXCSR, xmm.
@@ -166,7 +206,7 @@ static void reap(void)
     for (int i = 0; i < CAP; i++)
     {
         Task *t = tk(i);
-        if (t->state == TASK_DEAD && i != CUR)
+        if (t->state == TASK_DEAD && !running_somewhere(i))
         {
             if (t->as) /* the process's pages and tables. Its space is not loaded: schedule() switched to another one. */
             {
@@ -202,11 +242,12 @@ static void schedule(void)
 
     /* Highest effective priority wins. The scan starts after the current thread and only a strictly better one replaces the
      * candidate, so equal threads keep their round robin order (and the current thread, last in the scan, loses ties). */
+    int me = (int)percpu_index();
     int next = -1, best = 0;
     for (int i = 1; i <= CAP; i++) /* i == CAP comes back to the current thread */
     {
         int k = (CUR + i) % CAP;
-        if (tk(k)->state == TASK_READY)
+        if (tk(k)->state == TASK_READY && eligible(k, me))
         {
             int eff = rank_of(k);
             if (next < 0 || eff > best)
@@ -216,6 +257,8 @@ static void schedule(void)
             }
         }
     }
+    if (next < 0 && me > 0 && IDLE_ID[me])
+        next = IDLE_ID[me]; /* an application processor with nothing to run: its idle context (the caller of task_cpu_idle) */
     if (next < 0)
         __builtin_trap(); /* cannot happen: task 0 never sleeps or ends, so it is always ready or running */
 
@@ -254,6 +297,7 @@ static void schedule(void)
         fpu_save(old->fpu);
 
     tk(next)->state = TASK_RUNNING;
+    tk(next)->cpus_ran |= 1u << me;
     CUR = next;
     SWITCHES++;
     SLICE_LEFT = slice_of(next); /* the thread that comes in gets a whole slice */
@@ -329,6 +373,17 @@ int task_init(void)
         tk(i)->held = 0;
         tk(i)->blocked = 0;
         tk(i)->exit_code = 0;
+        tk(i)->cpus_ran = 0;
+        tk(i)->idle_cpu = 0;
+        tk(i)->kill_pending = 0;
+    }
+    for (int c = 0; c < SMP_MAX_CPUS; c++)
+    {
+        CURS[c] = 0;
+        IDLE_ID[c] = 0;
+        ACTIVE[c] = 0;
+        FPU_HOLDS[c] = 0;
+        SLICES[c] = TASK_SLICE_TICKS;
     }
     ACTIVE_AS = 0;
     FPU_HOLDS_PROCESS = 0;
@@ -389,13 +444,21 @@ void task_exec_replace(AddressSpace *as, const char *name)
 
 int task_kill(int id)
 {
-    if (id <= 0 || id >= CAP || id == CUR)
+    if (id <= 0 || id >= CAP || id == CUR || tk(id)->idle_cpu)
         return -1;
     unsigned long long irq = irq_save();
     if (tk(id)->state == TASK_UNUSED || tk(id)->state == TASK_DEAD)
     {
         irq_restore(irq);
         return -1;
+    }
+    if (tk(id)->state == TASK_RUNNING)
+    {
+        /* Running on another processor, so it is in ring 3 (we hold the big kernel lock: nobody else is in the kernel). It cannot be
+         * stopped from here; its processor ends it at its next timer tick (task_tick), when it is in the kernel again. */
+        tk(id)->kill_pending = 1;
+        irq_restore(irq);
+        return 0;
     }
     tk(id)->state = TASK_DEAD; /* reap() (run by the next thread that runs) frees it */
     irq_restore(irq);
@@ -504,6 +567,9 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     t->held = 0; /* a new thread holds no mutex and sleeps on none, whatever the thread of this slot before it left behind */
     t->blocked = 0;
     t->exit_code = 0;
+    t->cpus_ran = 0;
+    t->idle_cpu = 0;
+    t->kill_pending = 0;
     int n = 0;
     for (; name && name[n] && n < TASK_NAME_MAX - 1; n++)
         t->name[n] = name[n];
@@ -592,6 +658,15 @@ void task_tick(void)
 {
     TICKS++;
     Task *t = tk(CUR);
+    if (t->kill_pending && CUR != 0)
+    {
+        /* task_kill found this thread running on this processor. It was in ring 3 then, so it holds nothing: end it here. The interrupt
+         * frame on its stack is thrown away with the rest of the thread. */
+        t->kill_pending = 0;
+        t->state = TASK_DEAD;
+        schedule(); /* never comes back: a dead thread is never chosen */
+        return;
+    }
     if (!(t->flags & TASK_PREEMPTIBLE) || t->state != TASK_RUNNING || preempt_count > 0)
         return;
     /* A thread that matters more became ready (task_wake, a sleep that ended, a priority that was raised): it takes the CPU now, not
@@ -609,9 +684,10 @@ int task_others_ready(void)
     unsigned long long irq = irq_save();
     unsigned long long now = timer_us();
     int found = 0;
+    int me = (int)percpu_index();
     for (int i = 0; i < CAP && !found; i++)
     {
-        if (i == CUR)
+        if (i == CUR || !eligible(i, me))
             continue;
         if (tk(i)->state == TASK_READY ||
             (tk(i)->state == TASK_SLEEPING && (long long)(now - tk(i)->wake_us) >= 0))
@@ -641,16 +717,77 @@ int task_count(void)
 {
     int n = 0;
     for (int i = 0; i < CAP; i++)
-        if (tk(i)->state != TASK_UNUSED && tk(i)->state != TASK_DEAD)
+        if (tk(i)->state != TASK_UNUSED && tk(i)->state != TASK_DEAD && !tk(i)->idle_cpu)
             n++;
     return n;
 }
 
-TaskState task_state(int id) { return id >= 0 && id < CAP ? tk(id)->state : TASK_UNUSED; }
+/* The idle contexts of the application processors are not threads to the outside: they do not show up in the lists. */
+TaskState task_state(int id) { return id >= 0 && id < CAP && !tk(id)->idle_cpu ? tk(id)->state : TASK_UNUSED; }
 
 const char *task_name(int id)
 {
-    return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED ? tk(id)->name : 0;
+    return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && !tk(id)->idle_cpu ? tk(id)->name : 0;
+}
+
+unsigned task_cpu_mask(int id) { return id >= 0 && id < CAP ? tk(id)->cpus_ran : 0; }
+
+/* The calling application processor (its idle loop in smp.c, in the kernel with the big kernel lock, interrupts off) becomes a context the
+ * scheduler can switch to and from: a slot of its own that is never a candidate for the others. 0, or -1 (not an application processor,
+ * already done, no slot). */
+int task_register_idle(void)
+{
+    int cpu = (int)percpu_index();
+    if (cpu < 1 || cpu >= SMP_MAX_CPUS || IDLE_ID[cpu])
+        return -1;
+    for (;;)
+    {
+        unsigned long long irq = irq_save();
+        for (int i = 1; i < CAP; i++)
+            if (tk(i)->state == TASK_UNUSED)
+            {
+                Task *t = tk(i);
+                t->stack = 0;
+                t->guarded = 0;
+                t->as = 0;
+                t->data = 0;
+                t->free_data = 0;
+                t->flags = 0;
+                t->prio = TASK_PRIO_DEFAULT;
+                t->inherit = -1;
+                t->waited = 0;
+                t->held = 0;
+                t->blocked = 0;
+                t->exit_code = 0;
+                t->cpus_ran = 1u << cpu;
+                t->kill_pending = 0;
+                t->idle_cpu = cpu;
+                t->name[0] = 'I';
+                t->name[1] = 'D';
+                t->name[2] = 'L';
+                t->name[3] = 'E';
+                t->name[4] = (char)('0' + cpu % 10);
+                t->name[5] = 0;
+                t->state = TASK_RUNNING; /* the calling processor is running it right now */
+                IDLE_ID[cpu] = i;
+                CURS[cpu] = i;
+                irq_restore(irq);
+                return 0;
+            }
+        irq_restore(irq);
+        if (!add_chunk())
+            return -1;
+    }
+}
+
+/* The idle loop of an application processor asks: is there a user thread for me? It runs it (schedule() switches away and comes back
+ * here, in the idle context, when the processor has nothing to run again). Kernel, big kernel lock held, interrupts off. */
+void task_cpu_idle(void)
+{
+    int cpu = (int)percpu_index();
+    if (cpu < 1 || !IDLE_ID[cpu])
+        return;
+    schedule();
 }
 
 unsigned long long task_switches(void) { return SWITCHES; }

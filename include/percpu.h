@@ -38,6 +38,7 @@ typedef struct PerCpu
     unsigned long long use_iret;     /* 40: leave through IRETQ instead of SYSRETQ (signal return from a timer-tick frame) */
     unsigned long long iret_rip;     /* 48 */
     unsigned long long iret_rflags;  /* 56 */
+    volatile unsigned long long idle; /* 64: 1 while the processor waits in HLT without the big kernel lock (bkl.h) */
 } PerCpu;
 
 _Static_assert(__builtin_offsetof(PerCpu, self) == PERCPU_OFF_SELF, "idle.c reads gs:0");
@@ -48,6 +49,7 @@ _Static_assert(__builtin_offsetof(PerCpu, user_rsp) == PERCPU_OFF_USER_RSP, "sys
 _Static_assert(__builtin_offsetof(PerCpu, use_iret) == PERCPU_OFF_USE_IRET, "syscall_entry uses gs:40");
 _Static_assert(__builtin_offsetof(PerCpu, iret_rip) == PERCPU_OFF_IRET_RIP, "syscall_entry uses gs:48");
 _Static_assert(__builtin_offsetof(PerCpu, iret_rflags) == PERCPU_OFF_IRET_RFLAGS, "syscall_entry uses gs:56");
+_Static_assert(__builtin_offsetof(PerCpu, idle) == 64, "bkl.h reads gs:64");
 
 #if defined(HARIS_HOST)
 static inline unsigned percpu_index(void) { return 0; } /* host tests run on "processor 0" */

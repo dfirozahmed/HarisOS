@@ -2007,6 +2007,7 @@ long long syscall_dispatch(SyscallFrame *f)
 
 #if defined(__x86_64__) && !defined(HARIS_HOST)
 
+#include "bkl.h"
 #include "percpu.h"
 
 typedef unsigned long long u64;
@@ -2046,6 +2047,7 @@ __asm__(".text\n"
         ".globl syscall_entry\n"
         "syscall_entry:\n"
         "    swapgs\n" /* SYSCALL leaves GS alone: swap in the kernel's per-CPU base (percpu.h); the user's waits in IA32_KERNEL_GS_BASE */
+        BKL_ASM_LOCK /* from here on this processor is the one in the kernel (bkl.h); no register is touched: rax, rcx and r11 are live */
         "    movq %rsp, %gs:32\n" /* per-CPU (percpu.h): another processor may be in its own SYSCALL at the same time */
         "    movq %gs:24, %rsp\n"
         "    pushq %gs:32\n"
@@ -2094,6 +2096,7 @@ __asm__(".text\n"
         "    popq %rcx\n"
         "    popq %r11\n"
         "    popq %rsp\n" /* the user's stack again */
+        BKL_ASM_UNLOCK
         "    swapgs\n"
         "    sysretq\n"
         "2:  movq $-1, %rcx\n"
@@ -2118,6 +2121,7 @@ __asm__(".text\n"
         "    pushq %gs:56\n" /* RFLAGS */
         "    pushq $0x23\n" /* CS */
         "    pushq %gs:48\n" /* RIP */
+        BKL_ASM_UNLOCK
         "    swapgs\n"
         "    iretq\n");
 

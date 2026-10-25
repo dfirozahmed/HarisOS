@@ -400,6 +400,39 @@ void kernel_main(const BootInfo *info)
             serial_putd(spin);
             serial_puts("\n");
         }
+
+        /* User programs on the other processors: start three CPU-bound programs at once. The boot processor runs one of them, the
+         * application processors pick up the others (they only run user threads, under the big kernel lock: bkl.h). task_cpu_mask says
+         * where each one has been. Logged, not fatal. */
+        if (smp_cpu_total() > 1 && exec_find("GSTEST.ELF") >= 0)
+        {
+            int ids[3];
+            for (int i = 0; i < 3; i++)
+            {
+                int err = 0;
+                ids[i] = exec_run("gstest.elf", &err);
+            }
+            unsigned mask = 0;
+            int bad = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                int waited = -1;
+                for (unsigned long long end = timer_ms() + 20000; ids[i] >= 0 && waited != 0 && timer_ms() < end;)
+                    waited = process_wait(ids[i]);
+                if (ids[i] < 0 || waited != 0)
+                    bad = 1;
+                else
+                    mask |= task_cpu_mask(ids[i]);
+            }
+            serial_puts("HARISOS: SMP: user programs ran on CPUs ");
+            for (int c = 0; c < smp_cpu_total(); c++)
+                if (mask & (1u << c))
+                {
+                    serial_putd(c);
+                    serial_puts(" ");
+                }
+            serial_puts(bad ? "FAILED (a program did not finish)\n" : (mask & ~1u) ? "ok\n" : "FAILED (only the boot processor)\n");
+        }
     }
 
     {

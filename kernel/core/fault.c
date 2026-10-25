@@ -1,10 +1,15 @@
 /* HarisOS CPU exception handling: see include/fault.h. */
 #include "fault.h"
+#include "bkl.h"
 #include "process.h"
 #include "serial.h"
 #include "task.h"
 
 #if defined(__x86_64__)
+
+/* The big kernel lock (bkl.h); here because the exception entry code is the one piece of assembly every build of the kernel (and
+ * the host fault test) links. 1 = a processor is in the kernel. The boot processor starts out inside it. */
+volatile unsigned bkl_word;
 
 /* ---- stubs ---------------------------------------------------
  * One tiny stub per vector, all joining fault_common. Interrupt gates clear IF, so nothing interrupts a stub.
@@ -37,10 +42,10 @@ __asm__(".text\n" FAULT_STUB_NOERR(0) FAULT_STUB_NOERR(1) FAULT_STUB_NOERR(2) FA
         /* push order = reverse of FaultFrame (rax first, r15 last) */
         ".p2align 4\n"
         "fault_common:\n"
-        "    testb $3, 24(%rsp)\n" /* the interrupted code was ring 3: swap in the kernel's GS (percpu.h). An NMI that hits the SYSCALL entry before its */
-        "    jz 1f\n"             /* swapgs sees ring 0 and leaves GS alone, and so does its return: this code never uses GS, only what it calls could */
-        "    swapgs\n"
-        "1:\n"
+        /* The interrupted code was ring 3: swap in the kernel's GS (percpu.h) and take the big kernel lock (bkl.h). An NMI that hits the
+         * SYSCALL entry before its swapgs sees ring 0 and leaves GS and the lock alone, and so does its return: this code never uses GS,
+         * only what it calls could. */
+        BKL_ISR_ENTER_FAULT("24")
         "    pushq %rax\n"
         "    pushq %rcx\n"
         "    pushq %rdx\n"
@@ -91,10 +96,7 @@ __asm__(".text\n" FAULT_STUB_NOERR(0) FAULT_STUB_NOERR(1) FAULT_STUB_NOERR(2) FA
         "    popq %rcx\n"
         "    popq %rax\n"
         "    addq $16, %rsp\n" /* the vector and the error code */
-        "    testb $3, 8(%rsp)\n" /* back to ring 3: the user's GS again */
-        "    jz 2f\n"
-        "    swapgs\n"
-        "2:\n"
+        BKL_ISR_EXIT("8") /* back to ring 3: let go of the lock, the user's GS again */
         "    iretq\n"
         ".data\n"
         ".p2align 3\n"
