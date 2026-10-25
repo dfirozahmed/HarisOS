@@ -73,6 +73,9 @@ int smp_job_done(int cpu);
 /* Boot self test of the spinlock: every online processor, the boot one included, increments one counter many times under the same
  * lock. 0 = the count is exact, 1 = skipped (no application processor), negative = failed. */
 int smp_selftest_spinlock(void);
+/* The same for the heap and the page allocator (kmalloc / kfree / pmm_alloc_page on every processor at once, outside the big kernel lock;
+ * blocks are filled with a pattern and checked before they are freed). 0 = ok, 1 = skipped, negative = failed. */
+int smp_selftest_alloc(void);
 
 int smp_install(unsigned long long code, unsigned long long data);
 int smp_start(unsigned long long code, unsigned long long data);

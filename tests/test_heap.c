@@ -9,6 +9,7 @@
 
 /* the heap brackets its calls with preempt_disable / preempt_enable; the counter lives in task.c in the kernel */
 volatile int preempt_count;
+volatile int host_if = 1; /* irq.h under HARIS_HOST: the interrupt flag that the spinlock in heap.c switches */
 
 /* ---- the page allocator, on the host ---- */
 typedef struct

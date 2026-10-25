@@ -506,6 +506,19 @@ void kernel_main(const BootInfo *info)
             serial_puts("\n");
         }
 
+        int alloc = smp_selftest_alloc(); /* heap and page allocator on every processor at once, without the big kernel lock */
+        serial_puts("HARISOS: SMP: allocator self test ");
+        if (alloc == 1)
+            serial_puts("skipped (no other processor)\n");
+        else if (alloc == 0)
+            serial_puts("ok\n");
+        else
+        {
+            serial_puts("FAILED ");
+            serial_putd(alloc);
+            serial_puts("\n");
+        }
+
         /* User programs on the other processors: start three CPU-bound programs at once. The boot processor runs one of them, the
          * application processors pick up the others (they only run user threads, under the big kernel lock: bkl.h). task_cpu_mask says
          * where each one has been. Logged, not fatal. */

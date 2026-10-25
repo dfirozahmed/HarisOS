@@ -83,7 +83,9 @@ void smp_build_tables(u64 *pml4, u64 *pdpt, u64 *pd, u64 pdpt_phys, u64 pd_phys)
 #include "gdt.h"
 #include "idle.h"
 #include "bkl.h"
+#include "heap.h"
 #include "percpu.h"
+#include "pmm.h"
 #include "spinlock.h"
 #include "syscall.h"
 #include "task.h"
@@ -345,6 +347,104 @@ static void spin_test_job(void)
     }
 }
 
+/* ---- allocator self test: heap and page allocator used by all processors at once, WITHOUT the big kernel lock ---- */
+#define ALLOC_TEST_ROUNDS 20000
+static volatile u64 ALLOC_BAD;
+
+static void alloc_test_job(void)
+{
+    unsigned me = percpu_index();
+    u64 seed = 0x9E3779B97F4A7C15ULL * (me + 1);
+    unsigned char *blk[16] = {0};
+    unsigned size[16] = {0};
+    for (int r = 0; r < ALLOC_TEST_ROUNDS; r++)
+    {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        unsigned s = (unsigned)(seed & 15);
+        unsigned char tag = (unsigned char)(me * 16 + s + 1);
+        if (blk[s])
+        {
+            for (unsigned i = 0; i < size[s]; i++)
+                if (blk[s][i] != tag)
+                {
+                    ALLOC_BAD++; /* somebody else wrote into our block: the allocator handed it out twice */
+                    break;
+                }
+            kfree(blk[s]);
+            blk[s] = 0;
+        }
+        else
+        {
+            size[s] = 16 + (unsigned)((seed >> 8) % 2000);
+            blk[s] = kmalloc(size[s]);
+            if (!blk[s])
+            {
+                ALLOC_BAD++;
+                continue;
+            }
+            for (unsigned i = 0; i < size[s]; i++)
+                blk[s][i] = tag;
+        }
+        if ((r & 31) == 0) /* and whole pages from the page allocator */
+        {
+            u64 pg = pmm_alloc_page();
+            if (!pg)
+            {
+                ALLOC_BAD++;
+                continue;
+            }
+            volatile u64 *w = (volatile u64 *)pg;
+            w[0] = (u64)me + 1;
+            w[511] = ~(u64)me;
+            for (volatile int spin = 0; spin < 20; spin++)
+                ;
+            if (w[0] != (u64)me + 1 || w[511] != ~(u64)me)
+                ALLOC_BAD++; /* the same page was given to two processors */
+            pmm_free_page(pg);
+        }
+    }
+    for (int s = 0; s < 16; s++)
+        if (blk[s])
+            kfree(blk[s]);
+}
+
+int smp_selftest_alloc(void)
+{
+    int n = 0;
+    HeapStats before, after;
+    heap_stats(&before);
+    ALLOC_BAD = 0;
+    for (int k = 1; k < TOTAL; k++)
+        if (smp_run_on(k, alloc_test_job) == 0)
+            n++;
+    if (!n)
+        return 1;
+    alloc_test_job();
+    u64 t0 = timer_us();
+    int timeout = 0;
+    bkl_unlock(); /* as in the spinlock test: the others run outside the lock anyway, but they must be able to get back in afterwards */
+    for (int k = 1; k < TOTAL && !timeout; k++)
+        while (CPU[k].online && !smp_job_done(k))
+            if (timer_us() - t0 > 60000000)
+            {
+                timeout = 1;
+                break;
+            }
+            else
+                __asm__ volatile("pause");
+    bkl_lock();
+    if (timeout)
+        return -2;
+    heap_stats(&after);
+    if (ALLOC_BAD)
+        return -1;
+    if (heap_check() != 0)
+        return -3;
+    return after.used_bytes == before.used_bytes && after.used_blocks == before.used_blocks ? 0 : -4;
+}
+
 int smp_selftest_spinlock(void)
 {
     int n = 0;
@@ -469,6 +569,7 @@ int smp_job_done(int cpu)
     return 0;
 }
 int smp_selftest_spinlock(void) { return 1; }
+int smp_selftest_alloc(void) { return 1; }
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)

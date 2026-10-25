@@ -7,6 +7,11 @@
  * compiler could turn a plain fill loop into a call to memset(), which does
  * not exist in this freestanding build. */
 #include "pmm.h"
+#include "spinlock.h"
+
+/* Every public allocation and free runs under PMM_LOCK (a spinlock that also keeps interrupts off): the bitmap, the counters and the tag table
+ * are shared by all processors. It is a leaf lock: nothing is called under it. The functions marked _nl do the work without taking it. */
+static Spinlock PMM_LOCK = SPINLOCK_INIT;
 
 #define LOW_LIMIT 0x100000ULL /* keep the first 1 MiB reserved */
 
@@ -158,7 +163,7 @@ unsigned long long pmm_alloc_page(void)
     return pmm_alloc_page_tag(PMM_TAG_OTHER);
 }
 
-unsigned long long pmm_alloc_page_tag(PmmTag tag)
+static unsigned long long alloc_page_tag_nl(PmmTag tag)
 {
     unsigned long long words = (page_count + 63) / 64;
     if (!bitmap)
@@ -180,7 +185,7 @@ unsigned long long pmm_alloc_page_tag(PmmTag tag)
     return 0;
 }
 
-void pmm_free_page(unsigned long long phys)
+static void free_page_nl(unsigned long long phys)
 {
     if (!bitmap || (phys % PMM_PAGE_SIZE) || phys < LOW_LIMIT)
         return;
@@ -201,7 +206,7 @@ unsigned long long pmm_alloc_contiguous(unsigned long long count)
     return pmm_alloc_contiguous_tag(count, PMM_TAG_OTHER);
 }
 
-unsigned long long pmm_alloc_contiguous_tag(unsigned long long count, PmmTag tag)
+static unsigned long long alloc_contiguous_tag_nl(unsigned long long count, PmmTag tag)
 {
     if (!bitmap || count == 0)
         return 0;
@@ -234,12 +239,38 @@ unsigned long long pmm_alloc_contiguous_tag(unsigned long long count, PmmTag tag
     return 0;
 }
 
-void pmm_free_contiguous(unsigned long long phys, unsigned long long count)
+unsigned long long pmm_alloc_page_tag(PmmTag tag)
 {
-    for (unsigned long long k = 0; k < count; k++)
-        pmm_free_page(phys + k * PMM_PAGE_SIZE);
+    unsigned long long f = spin_lock_irqsave(&PMM_LOCK);
+    unsigned long long r = alloc_page_tag_nl(tag);
+    spin_unlock_irqrestore(&PMM_LOCK, f);
+    return r;
 }
 
+void pmm_free_page(unsigned long long phys)
+{
+    unsigned long long f = spin_lock_irqsave(&PMM_LOCK);
+    free_page_nl(phys);
+    spin_unlock_irqrestore(&PMM_LOCK, f);
+}
+
+unsigned long long pmm_alloc_contiguous_tag(unsigned long long count, PmmTag tag)
+{
+    unsigned long long f = spin_lock_irqsave(&PMM_LOCK);
+    unsigned long long r = alloc_contiguous_tag_nl(count, tag);
+    spin_unlock_irqrestore(&PMM_LOCK, f);
+    return r;
+}
+
+void pmm_free_contiguous(unsigned long long phys, unsigned long long count)
+{
+    unsigned long long f = spin_lock_irqsave(&PMM_LOCK);
+    for (unsigned long long k = 0; k < count; k++)
+        free_page_nl(phys + k * PMM_PAGE_SIZE);
+    spin_unlock_irqrestore(&PMM_LOCK, f);
+}
+
+/* (a single aligned 64-bit read: no lock needed for these figures) */
 unsigned long long pmm_total_pages(void) { return usable_pages; }
 unsigned long long pmm_free_pages(void) { return free_count; }
 unsigned long long pmm_tag_pages(PmmTag tag) { return tag < PMM_TAG_COUNT ? tag_pages[tag] : 0; }

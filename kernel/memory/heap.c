@@ -16,13 +16,17 @@
  * No libc: copying and zeroing go word by word through volatile pointers (a plain loop could be turned by the
  * compiler into a call to memcpy / memset, which this freestanding build does not have).
  *
- * Threads: a preemptible thread can be stopped by the timer anywhere, so every public call (at the end of this file)
- * runs inside preempt_disable() / preempt_enable() (include/preempt.h). The *_nl ("no lock") functions do the work. */
+
+ * Threads and processors: a thread can be stopped by the timer anywhere and another processor can call in at any time, so every public
+ * call (at the end of this file) runs under HEAP_LOCK, a spinlock that also keeps interrupts off (spinlock.h). The *_nl ("no lock")
+ * functions do the work and never call a public one: the lock is not recursive. Lock order: HEAP_LOCK, then the page allocator's. */
 #include "heap.h"
 #include "pmm.h"
-#include "preempt.h"
+#include "spinlock.h"
 
 typedef unsigned long long u64;
+
+static Spinlock HEAP_LOCK = SPINLOCK_INIT;
 
 typedef struct Block
 {
@@ -285,7 +289,7 @@ static void kfree_nl(void *p)
 static void *krealloc_nl(void *p, u64 size)
 {
     if (!p)
-        return kmalloc(size);
+        return kmalloc_nl(size);
     Block *b = used_block(p);
     if (!b)
     {
@@ -294,7 +298,7 @@ static void *krealloc_nl(void *p, u64 size)
     }
     if (size == 0)
     {
-        kfree(p);
+        kfree_nl(p);
         return 0;
     }
     if (size > MAX_REQUEST)
@@ -315,11 +319,11 @@ static void *krealloc_nl(void *p, u64 size)
         take(b, need); /* gives back what is more than needed */
         return p;
     }
-    void *q = kmalloc(size); /* move: the old block stays valid if this fails */
+    void *q = kmalloc_nl(size); /* move: the old block stays valid if this fails */
     if (!q)
         return 0;
     copy_words(q, p, cur - HDR);
-    kfree(p);
+    kfree_nl(p);
     return q;
 }
 
@@ -407,46 +411,46 @@ static int heap_check_nl(void)
 /* ---- public entry points: the work above, with the timer interrupt not allowed to switch threads meanwhile ---- */
 int heap_init(void)
 {
-    preempt_disable();
+    u64 f = spin_lock_irqsave(&HEAP_LOCK);
     int r = heap_init_nl();
-    preempt_enable();
+    spin_unlock_irqrestore(&HEAP_LOCK, f);
     return r;
 }
 
 void *kmalloc(u64 size)
 {
-    preempt_disable();
+    u64 f = spin_lock_irqsave(&HEAP_LOCK);
     void *p = kmalloc_nl(size);
-    preempt_enable();
+    spin_unlock_irqrestore(&HEAP_LOCK, f);
     return p;
 }
 
 void kfree(void *p)
 {
-    preempt_disable();
+    u64 f = spin_lock_irqsave(&HEAP_LOCK);
     kfree_nl(p);
-    preempt_enable();
+    spin_unlock_irqrestore(&HEAP_LOCK, f);
 }
 
 void *krealloc(void *p, u64 size)
 {
-    preempt_disable();
+    u64 f = spin_lock_irqsave(&HEAP_LOCK);
     void *q = krealloc_nl(p, size);
-    preempt_enable();
+    spin_unlock_irqrestore(&HEAP_LOCK, f);
     return q;
 }
 
 void heap_stats(HeapStats *out)
 {
-    preempt_disable();
+    u64 f = spin_lock_irqsave(&HEAP_LOCK);
     heap_stats_nl(out);
-    preempt_enable();
+    spin_unlock_irqrestore(&HEAP_LOCK, f);
 }
 
 int heap_check(void)
 {
-    preempt_disable();
+    u64 f = spin_lock_irqsave(&HEAP_LOCK);
     int r = heap_check_nl();
-    preempt_enable();
+    spin_unlock_irqrestore(&HEAP_LOCK, f);
     return r;
 }
