@@ -40,6 +40,8 @@ typedef struct
     TaskFn fn;
     void *arg;
     char name[TASK_NAME_MAX];
+    unsigned long long run_ticks; /* timer ticks that found this thread running (task_run_ticks) */
+    int last_cpu;           /* the processor it was last switched in on (task_last_cpu), -1 = never */
     unsigned cpus_ran;      /* bit n: this thread has been switched in on processor n (task_cpu_mask) */
     int idle_cpu;           /* the idle context of application processor n-1 (an entry of task_register_idle), 0 = an ordinary thread */
     int kill_pending;       /* task_kill found it running on another processor: it ends at that processor's next timer tick */
@@ -300,6 +302,7 @@ static void schedule(void)
 
     tk(next)->state = TASK_RUNNING;
     tk(next)->cpus_ran |= 1u << me;
+    tk(next)->last_cpu = me;
     CUR = next;
     SWITCHES++;
     SLICE_LEFT = slice_of(next); /* the thread that comes in gets a whole slice */
@@ -371,6 +374,8 @@ int task_init(void)
         tk(i)->blocked = 0;
         tk(i)->exit_code = 0;
         tk(i)->cpus_ran = 0;
+        tk(i)->run_ticks = 0;
+        tk(i)->last_cpu = i == 0 ? 0 : -1;
         tk(i)->idle_cpu = 0;
         tk(i)->kill_pending = 0;
     }
@@ -561,6 +566,8 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     t->exit_code = 0;
     t->cpus_ran = 0;
     t->idle_cpu = 0;
+    t->run_ticks = 0;
+    t->last_cpu = -1;
     t->kill_pending = 0;
     int n = 0;
     for (; name && name[n] && n < TASK_NAME_MAX - 1; n++)
@@ -653,6 +660,8 @@ void task_tick(void)
     Task *t = tk(CUR);
     int cpu = (int)percpu_index();
     CPU_TICKS_ALL[cpu]++;
+    if (!t->idle_cpu)
+        t->run_ticks++; /* (thread 0 also counts the ticks that end its sleep in HLT: the Task Manager shows the main loop's own figure for it) */
     if (cpu > 0 && !t->idle_cpu) /* an application processor that runs a user thread; its idle context is the rest */
         CPU_TICKS_BUSY[cpu]++;
     if (t->kill_pending && CUR != 0)
@@ -739,6 +748,10 @@ void task_cpu_ticks(int cpu, unsigned long long *busy, unsigned long long *all)
     *all = ok ? CPU_TICKS_ALL[cpu] : 0;
 }
 
+unsigned long long task_run_ticks(int id) { return id >= 0 && id < CAP && !tk(id)->idle_cpu ? tk(id)->run_ticks : 0; }
+
+int task_last_cpu(int id) { return id >= 0 && id < CAP && !tk(id)->idle_cpu ? tk(id)->last_cpu : -1; }
+
 unsigned task_cpu_mask(int id) { return id >= 0 && id < CAP ? tk(id)->cpus_ran : 0; }
 
 /* The calling application processor (its idle loop in smp.c, in the kernel with the big kernel lock, interrupts off) becomes a context the
@@ -769,6 +782,8 @@ int task_register_idle(void)
                 t->blocked = 0;
                 t->exit_code = 0;
                 t->cpus_ran = 1u << cpu;
+                t->run_ticks = 0;
+                t->last_cpu = cpu;
                 t->kill_pending = 0;
                 t->idle_cpu = cpu;
                 t->name[0] = 'I';

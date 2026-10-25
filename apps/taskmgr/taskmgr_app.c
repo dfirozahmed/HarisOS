@@ -74,6 +74,10 @@ static int PREV_CAP;
 static void revalidate(void); /* (defined below) */
 static int SEL_ID = -1; /* id of the selected window (survives list refreshes), -1 = none */
 static unsigned long long LAST_MS;
+#define TM_THREADS 256 /* threads whose CPU figure is kept (the lowest ids) */
+static unsigned long long T_PREV[TM_THREADS]; /* task_run_ticks at the last sample */
+static unsigned long long T_ALL_PREV[CPULOAD_MAX_CPUS]; /* each processor's tick count at the last sample */
+static int T_PCT[TM_THREADS];                 /* percent of the processor it runs on, in the last interval */
 
 static void put_dec(char *s, int *n, unsigned v)
 {
@@ -213,10 +217,14 @@ static void draw_threads(UiRect body)
     const UiTheme *t = ui_theme();
     UiRect list = list_rect(body);
     int hy = list.y - HEAD_H;
-    ui_text_in_color(ui_rect(list.x + 8, hy, list.w - STATUS_W - PID_W - 16, HEAD_H), "Name", UI_TEXT_SMALL,
-                     UI_ALIGN_LEFT, t->text_dim);
-    ui_text_in_color(ui_rect(list.x + list.w - STATUS_W - PID_W - 8, hy, STATUS_W, HEAD_H), "State", UI_TEXT_SMALL,
-                     UI_ALIGN_LEFT, t->text_dim);
+    /* columns from the right: ID, the processor it last ran on, its CPU share, the state, then the name */
+    const int CPU_W = 48, CORE_W = 52;
+    const int x_core = list.x + list.w - PID_W - 4 - CORE_W, x_cpu = x_core - CPU_W, x_state = x_cpu - STATUS_W;
+    ui_text_in_color(ui_rect(list.x + 8, hy, x_state - list.x - 16, HEAD_H), "Name", UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                     t->text_dim);
+    ui_text_in_color(ui_rect(x_state, hy, STATUS_W, HEAD_H), "State", UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
+    ui_text_in_color(ui_rect(x_cpu, hy, CPU_W, HEAD_H), "CPU", UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
+    ui_text_in_color(ui_rect(x_core, hy, CORE_W, HEAD_H), "Core", UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
     ui_text_in_color(ui_rect(list.x + list.w - PID_W - 4, hy, PID_W, HEAD_H), "ID", UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                      t->text_dim);
     ui_separator(list.x, list.y - 2, list.w);
@@ -233,13 +241,34 @@ static void draw_threads(UiRect body)
             continue; /* no room: still counted below */
         UiRect r = ui_rect(list.x, list.y + row * ROW_H, list.w, ROW_H);
         row++;
-        ui_text_in(ui_rect(r.x + 8, r.y, r.w - STATUS_W - PID_W - 16, r.h), name, UI_TEXT_BODY, UI_ALIGN_LEFT);
+        ui_text_in(ui_rect(r.x + 8, r.y, x_state - list.x - 16, r.h), name, UI_TEXT_BODY, UI_ALIGN_LEFT);
         const char *label = st == TASK_RUNNING    ? "Running"
                             : st == TASK_SLEEPING ? "Sleeping"
                             : st == TASK_BLOCKED  ? "Waiting"
                                                   : "Ready";
-        ui_text_in_color(ui_rect(r.x + r.w - STATUS_W - PID_W - 8, r.y, STATUS_W, r.h), label, UI_TEXT_SMALL,
-                         UI_ALIGN_LEFT, st == TASK_RUNNING ? t->success : t->text_dim);
+        ui_text_in_color(ui_rect(x_state, r.y, STATUS_W, r.h), label, UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                         st == TASK_RUNNING ? t->success : t->text_dim);
+        char cols[12];
+        int cn = 0;
+        if (id < TM_THREADS)
+        {
+            put_dec(cols, &cn, (unsigned)T_PCT[id]);
+            put_str(cols, &cn, "%");
+        }
+        else
+            put_str(cols, &cn, "-");
+        ui_text_in_color(ui_rect(x_cpu, r.y, CPU_W, r.h), cols, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
+                         T_PCT[id < TM_THREADS ? id : 0] > 0 && id < TM_THREADS ? t->text : t->text_dim);
+        cn = 0;
+        cols[0] = 0;
+        if (task_last_cpu(id) >= 0)
+        {
+            put_str(cols, &cn, "CPU ");
+            put_dec(cols, &cn, (unsigned)task_last_cpu(id));
+        }
+        else
+            put_str(cols, &cn, "-");
+        ui_text_in_color(ui_rect(x_core, r.y, CORE_W, r.h), cols, UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
         char id_s[8];
         int n = 0;
         put_dec(id_s, &n, (unsigned)id);
@@ -340,10 +369,40 @@ static void disk_sample(unsigned long long dt_ms)
 }
 
 /* dt_ms = time since the previous sample, 0 for the first one */
+/* Per thread: the ticks it was found running in the last interval, as a share of ALL the ticks the processor it last ran on took in that
+ * interval (the tick rate is not exactly 1000 per second, so milliseconds would be the wrong yardstick). A thread runs on one processor at a
+ * time, so 100 is the most. Thread 0 is the main loop, which sleeps in HLT: it shows its own busy share instead. The first call (dt_ms = 0)
+ * only takes the starting figures. */
+static void thread_samples(unsigned long long dt_ms)
+{
+    unsigned long long all_delta[CPULOAD_MAX_CPUS] = {0};
+    int ncpu = smp_cpu_total() < CPULOAD_MAX_CPUS ? smp_cpu_total() : CPULOAD_MAX_CPUS;
+    for (int c = 0; c < ncpu; c++)
+    {
+        unsigned long long busy, all;
+        task_cpu_ticks(c, &busy, &all);
+        all_delta[c] = all >= T_ALL_PREV[c] ? all - T_ALL_PREV[c] : 0;
+        T_ALL_PREV[c] = all;
+    }
+    int n = task_slots() < TM_THREADS ? task_slots() : TM_THREADS;
+    for (int id = 0; id < n; id++)
+    {
+        unsigned long long ticks = task_run_ticks(id);
+        unsigned long long delta = ticks >= T_PREV[id] ? ticks - T_PREV[id] : ticks; /* a slot used by a new thread starts again at 0 */
+        int cpu = task_last_cpu(id);
+        unsigned long long all = cpu >= 0 && cpu < ncpu ? all_delta[cpu] : 0;
+        unsigned long long p = dt_ms && all ? delta * 100 / all : 0;
+        T_PCT[id] = p > 100 ? 100 : (int)p;
+        T_PREV[id] = ticks;
+    }
+    T_PCT[0] = cpuload_percent();
+}
+
 static void take_samples(unsigned long long dt_ms)
 {
     hist_push(MEM_HIST, &MEM_HIST_N, mem_used_percent());
     hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)cpuload_percent());
+    thread_samples(dt_ms);
     disk_sample(dt_ms);
 }
 
