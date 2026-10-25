@@ -87,6 +87,7 @@ static int IDLE_ID[SMP_MAX_CPUS]; /* the idle context of application processor n
 #define ACTIVE_AS (ACTIVE[percpu_index()])
 #define FPU_HOLDS_PROCESS (FPU_HOLDS[percpu_index()])
 static unsigned long long SWITCHES;
+static unsigned long long CPU_TICKS_ALL[SMP_MAX_CPUS], CPU_TICKS_BUSY[SMP_MAX_CPUS]; /* per processor, for task_cpu_ticks */
 static unsigned long long TICKS; /* timer interrupts seen by task_tick, for the boot log */
 volatile int preempt_count; /* see preempt.h */
 
@@ -650,6 +651,10 @@ void task_tick(void)
 {
     TICKS++;
     Task *t = tk(CUR);
+    int cpu = (int)percpu_index();
+    CPU_TICKS_ALL[cpu]++;
+    if (cpu > 0 && !t->idle_cpu) /* an application processor that runs a user thread; its idle context is the rest */
+        CPU_TICKS_BUSY[cpu]++;
     if (t->kill_pending && CUR != 0)
     {
         /* task_kill found this thread running on this processor. It was in ring 3 then, so it holds nothing: end it here. The interrupt
@@ -725,6 +730,13 @@ TaskState task_state(int id)
 const char *task_name(int id)
 {
     return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && !tk(id)->idle_cpu ? tk(id)->name : 0;
+}
+
+void task_cpu_ticks(int cpu, unsigned long long *busy, unsigned long long *all)
+{
+    int ok = cpu >= 0 && cpu < SMP_MAX_CPUS;
+    *busy = ok ? CPU_TICKS_BUSY[cpu] : 0;
+    *all = ok ? CPU_TICKS_ALL[cpu] : 0;
 }
 
 unsigned task_cpu_mask(int id) { return id >= 0 && id < CAP ? tk(id)->cpus_ran : 0; }

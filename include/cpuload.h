@@ -16,6 +16,17 @@
 
 #define CPULOAD_WINDOW_US 1000000ULL
 
+/* Per processor (SMP, smp.h). The boot processor's load is the main loop's busy share above. An application processor has no loop to measure:
+ * its timer tick counts, in task.c, how many ticks it took (all) and how many of them found it running a user thread (busy). The totals
+ * only grow; this module turns them into the share of the last window of CPULOAD_CPU_WINDOW_TICKS ticks (about a second).
+ *
+ *   cpuload_cpu_poll(cpu, busy_total, all_total);   now and then (the main loop does it every pass)
+ *   cpuload_cpu_percent(cpu);                        0..100 of the last finished window, 0 before the first */
+#define CPULOAD_MAX_CPUS 16
+#define CPULOAD_CPU_WINDOW_TICKS 1000ULL
+void cpuload_cpu_poll(int cpu, unsigned long long busy_total, unsigned long long all_total);
+int cpuload_cpu_percent(int cpu);
+
 void cpuload_add_busy(unsigned long long us);
 void cpuload_poll(unsigned long long now_us);
 int cpuload_percent(void);

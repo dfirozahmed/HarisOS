@@ -676,6 +676,12 @@ void kernel_main(const BootInfo *info)
         unsigned long long pass_end = timer_us();
         cpuload_add_busy(pass_end - pass_start); /* everything except the sleep below is CPU time (see cpuload.h) */
         cpuload_poll(pass_end);
+        for (int c = 1; c < smp_cpu_total(); c++) /* the application processors: their busy ticks (see cpuload.h) */
+        {
+            unsigned long long busy, all;
+            task_cpu_ticks(c, &busy, &all);
+            cpuload_cpu_poll(c, busy, all);
+        }
         if (!worked && !others)
             idle_wait(); /* nothing to do: halt until the next 1 ms tick */
     }

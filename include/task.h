@@ -128,6 +128,9 @@ __attribute__((noreturn)) void task_exit(void);
  * thread that is ready and returns when the processor has nothing left to run. Both need the big kernel lock held and interrupts off. */
 int task_register_idle(void);
 void task_cpu_idle(void);
+/* Timer ticks processor `cpu` has taken (all) and how many of them found it running a user thread (busy), for the CPU load (cpuload.h).
+ * Only application processors count busy ticks: the boot processor's load is measured in the main loop. */
+void task_cpu_ticks(int cpu, unsigned long long *busy, unsigned long long *all);
 unsigned task_cpu_mask(int id); /* bit n set: thread id has run on processor n (kept until the slot is used again) */
 
 int task_current(void); /* id of the running thread of the calling processor */

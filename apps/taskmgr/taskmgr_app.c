@@ -11,6 +11,7 @@
 #include "gfx.h"
 #include "heap.h"
 #include "pmm.h"
+#include "smp.h"
 #include "task.h"
 #include "taskbar.h"
 #include "timer.h"
@@ -506,6 +507,36 @@ static void draw_cpu(UiRect pane)
         ui_text_color(pane.x, y, label[i], UI_TEXT_BODY, t->text_dim);
         ui_text(vx, y, line, UI_TEXT_BODY);
         y += 24;
+    }
+
+    /* One bar for every processor the kernel started (smp.h): the boot processor's is the main loop's busy share, the others' the share
+     * of their timer ticks that found them running a user thread (cpuload.h). Rows that do not fit in the pane are left out. */
+    int ncpu = smp_cpu_total();
+    if (ncpu > 1)
+    {
+        ui_text_color(pane.x, y, "Per processor", UI_TEXT_BODY, t->text_dim);
+        y += 22;
+        for (int i = 0; i < ncpu && y + 18 <= pane.y + pane.h; i++)
+        {
+            int pct = i == 0 ? cpuload_percent() : cpuload_cpu_percent(i);
+            n = 0;
+            line[0] = 0;
+            put_str(line, &n, "CPU ");
+            put_dec(line, &n, (unsigned)i);
+            ui_text_color(pane.x, y, line, UI_TEXT_SMALL, smp_cpu_online(i) ? t->text : t->text_dim);
+            n = 0;
+            line[0] = 0;
+            if (smp_cpu_online(i))
+            {
+                put_dec(line, &n, (unsigned)pct);
+                put_str(line, &n, "%");
+            }
+            else
+                put_str(line, &n, "off");
+            ui_text_in(ui_rect(pane.x + pane.w - 50, y, 50, 16), line, UI_TEXT_SMALL, UI_ALIGN_RIGHT);
+            ui_progress(ui_rect(pane.x + 60, y + 2, pane.w - 120, 12), smp_cpu_online(i) ? pct : 0);
+            y += 18;
+        }
     }
 }
 
