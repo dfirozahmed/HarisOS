@@ -965,6 +965,7 @@ int main(void)
     TXP_ENABLE = 0; /* the probe-request test (stage 5a) has its own section below */
     ONLINE_ENABLE = 0; /* the data path has its own section below */
     IDLE_ENABLE = 0;   /* a card that did not connect is switched off again, in the earlier stages; stage 11 has its own section */
+    DEFER_ENABLE = 0;  /* probe() does the scan and the connection itself, as the earlier stages expect; the deferred start has its own section */
     /* ---- the claim ---- */
     PciDevice p = WIFI;
     CHECK(NIC_RTL8821CE.claims(&p));
@@ -3495,6 +3496,53 @@ int main(void)
             CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
             IDLE_ENABLE = 0;
             CFG_TEXT = 0;
+        }
+        /* ---- the start in the background: probe() only brings the hardware up and returns at once (no scan, nothing on the air); the first scan,
+         * the first frames and the connection follow from link_service() in steps, and end with the same connection probe() would have made ---- */
+        {
+            DEFER_ENABLE = 1;
+            bl = build_beacon_caps(bc, 149, 1, 1, 0xFFFE);
+            CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+            CHECK(NIC_RTL8821CE.probe(&WIFI) == 1);
+            CHECK(BOOT.pending && LINK.adapter && !LINK.up && !LINK.want && !SC.state && TXLOG_N == 0);
+            CHECK(rtl8821ce_wifi_connect("TestNet", "secret-pass-phrase") == NET_WIFI_E_BUSY); /* the first scan is still to come */
+            CHECK(NIC_RTL8821CE.link_up() == 0 && NIC_RTL8821CE.send(arp, 42) == -1);
+            RXQ_N = RXQ_NEXT = 0;
+            rxq_add_frame(bc, bl);
+            int steps = 0;
+            while (BOOT.pending && steps < 60)
+            {
+                MS_JUMP += 310; /* one channel's dwell time (300 ms) */
+                NIC_RTL8821CE.recv(got, sizeof got);
+                rtl8821ce_host_udelay(1);
+                steps++;
+            }
+            CHECK(!BOOT.pending && steps >= 10 && steps <= 14);
+            CHECK(TXP.sent && LINK.up && LINK.want && HS.result == HS_OK && CONN.channel == 149 && strcmp(CFG.ssid, "TestNet") == 0);
+            CHECK(NIC_RTL8821CE.link_up() == 1 && NIC_RTL8821CE.send(arp, 42) == 0);
+
+            /* the same in a thread of its own: begin() claims the card (nobody else receives, sends or scans), run() is the thread's work and
+             * ends with the same connection; abort() gives the card back so that link_service() does it in steps */
+            CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+            CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && BOOT.pending && !BOOT.busy);
+            CHECK(rtl8821ce_boot_begin() == 1 && BOOT.busy && rtl8821ce_boot_begin() == 0);
+            RXQ_N = RXQ_NEXT = 0;
+            rxq_add_frame(bc, bl);
+            MS_JUMP += 310;
+            CHECK(NIC_RTL8821CE.recv(got, sizeof got) == 0 && !SCN.active && !SC.state); /* the main loop's poll does nothing meanwhile */
+            CHECK(rtl8821ce_wifi_scan_start() == NET_WIFI_E_BUSY && rtl8821ce_wifi_connect("TestNet", "secret-pass-phrase") == NET_WIFI_E_BUSY);
+            CHECK(NIC_RTL8821CE.send(arp, 42) == -1);
+            rtl8821ce_boot_run();
+            CHECK(!BOOT.busy && !BOOT.pending && TXP.sent && LINK.up && HS.result == HS_OK && CONN.channel == 149 && rtl8821ce_ap_count() >= 1);
+            CHECK(NIC_RTL8821CE.link_up() == 1 && NIC_RTL8821CE.send(arp, 42) == 0);
+            /* no thread could be made: the card is given back and the steps of link_service() do the work */
+            CONNECT8("ssid=TestNet\npsk=secret-pass-phrase\n");
+            CHECK(NIC_RTL8821CE.probe(&WIFI) == 1 && rtl8821ce_boot_begin() == 1);
+            rtl8821ce_boot_abort();
+            CHECK(!BOOT.busy && BOOT.pending);
+            rtl8821ce_boot_run(); /* (nothing: it was not claimed) */
+            CHECK(BOOT.pending && !SC.state);
+            DEFER_ENABLE = 0;
         }
         /* an access point without HT: the fixed rate, no QoS */
         bl = build_beacon_caps(bc, 149, 0, 0, 0);

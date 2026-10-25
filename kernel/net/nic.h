@@ -41,6 +41,11 @@ int rtl8821ce_wifi_scan_start(void);
 int rtl8821ce_wifi_scan_progress(void);
 int rtl8821ce_wifi_connect(const char *ssid, const char *psk);
 
+/* The first scan and connection in a thread of its own (rtl8821ce.c, "starting in the background"); see net.h: net_wifi_boot_*. */
+int rtl8821ce_boot_begin(void);
+void rtl8821ce_boot_run(void);
+void rtl8821ce_boot_abort(void);
+
 /* Tiny text builder for status lines (no libc here): appends to buf[cap], always NUL-terminated. */
 typedef struct
 {

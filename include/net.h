@@ -42,6 +42,7 @@ int net_resolve(const char *name, unsigned char ip[4], unsigned timeout_ms);
 void net_set_yield(void (*fn)(void)); /* what net_yield() calls while a caller waits for the network; the kernel passes task_yield */
 int net_poll(void);
 int net_ping(const unsigned char ip[4], unsigned seq, unsigned timeout_ms);
+void net_configure(void);   /* the machine's address: DHCP, else the QEMU user-network one (what net_self_test starts with) */
 int net_self_test(void);
 int net_adapter(unsigned char loc[3], int *working, char *status, unsigned cap);
 /* The result of the last Wi-Fi scan as text: line 0 is a summary, lines 1 .. n one network each (channel, security, BSSID, name), then a line
@@ -89,6 +90,12 @@ int net_wifi_rescan(void);
  * how far it is in percent, -1 when none is going on (then net_wifi_ap_count() / net_wifi_ap() show the new list). */
 int net_wifi_scan_start(void);
 int net_wifi_scan_progress(void);
+/* The Wi-Fi card finishes its start (first scan, connection to the network of WIFI.CFG) after the boot, because it takes seconds. _begin() claims the card (1 = there
+ * is something to do; nobody else uses the card until the work is over), then a thread calls _run(); if no thread can be made, _abort() lets the network stack do it
+ * in small steps instead. */
+int net_wifi_boot_begin(void);
+void net_wifi_boot_run(void);
+void net_wifi_boot_abort(void);
 /* Join a network from the scan list (several seconds, then DHCP). The network the card was connected to before stays the one to reconnect to when
  * this fails. Returns NET_WIFI_OK or a NET_WIFI_E_ code. */
 int net_wifi_connect(const char *ssid, const char *passphrase);

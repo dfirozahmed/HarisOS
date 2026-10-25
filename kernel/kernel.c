@@ -73,6 +73,12 @@ static unsigned long long nt_clock(void)
     return (unsigned long long)(secs + 11644473600LL) * 10000000ULL;
 }
 
+static void wifi_boot_thread(void *arg)
+{
+    (void)arg;
+    net_wifi_boot_run();
+}
+
 void kernel_main(const BootInfo *info)
 {
     fault_init(info->framebuffer, info->width, info->height, info->pitch, info->red_mask_mode); /* crash screen */
@@ -172,6 +178,8 @@ void kernel_main(const BootInfo *info)
     idle_init();  /* 1 ms LAPIC tick so the loop can sleep (hlt) when idle; see idle.h */
     ioapic_init(); /* the I/O APICs, every line masked until a driver asks for one (the network card does, below) */
 
+    int wifi_boot = 0; /* the Wi-Fi card still has its first scan and connection to do: a thread does it (see below) */
+
     /* Kernel threads: this loop becomes task 0. The boot self test switches between test threads and checks that the
      * timer interrupt can take the CPU from one that never yields. A broken context switch or interrupt handler would
      * corrupt memory later in confusing ways, so stop now (the crash screen shows #UD). The result goes to COM1. */
@@ -180,7 +188,13 @@ void kernel_main(const BootInfo *info)
         serial_init();
 
         net_init(); /* Intel e1000 on PCI, if any; the self test needs the serial port and the timer */
-        net_self_test();
+        wifi_boot = net_wifi_boot_begin(); /* claims the Wi-Fi card for the thread started before the main loop; nothing uses it until then */
+#if HARIS_BOOT_SELFTEST
+        net_self_test(); /* (starts with net_configure) */
+#else
+        if (net_present() && net_link_up()) /* a wired card has its link now; Wi-Fi gets its address from the main loop, once connected */
+            net_configure();
+#endif
 
         /* SMEP / SMAP before anything touches user memory (the address space test below does). */
         protect_init();
@@ -272,6 +286,7 @@ void kernel_main(const BootInfo *info)
         syscall_init();
         console_set_interrupt_hook(process_interrupt_console); /* Ctrl+C in a console window ends the programs that write to it */
         int ps = (as_init == 0 && gd == 0) ? process_selftest() : 1;
+#if HARIS_BOOT_SELFTEST /* slow (~6 s on real hardware) and only logged to serial: see CMakeLists.txt */
         if (ps == 0)
         {
             /* A program that is a real file: HELLO.ELF on one of the drives (if the boot disk has one; the volumes were
@@ -289,6 +304,7 @@ void kernel_main(const BootInfo *info)
                 serial_puts("\n");
             }
         }
+#endif
         if (ps == 0 && net_present() && exec_find("NETTEST.ELF") >= 0)
         {
             /* the socket system calls from ring 3 (its own lines go to the serial port); logged, not fatal */
@@ -334,6 +350,11 @@ void kernel_main(const BootInfo *info)
     if (rtc_read(&now) == 0)
         taskbar_set_time(now.hour, now.minute, now.day, now.month, now.year);
 
+    /* The Wi-Fi card's first scan and connection take several seconds: a thread of its own, the desktop does not wait (rtl8821ce.c,
+     * "starting in the background"). Without a thread the network stack does the same work in small steps. */
+    if (wifi_boot && task_create_flags("WIFIBOOT", wifi_boot_thread, 0, TASK_PREEMPTIBLE) < 0)
+        net_wifi_boot_abort();
+
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
 
@@ -359,6 +380,7 @@ void kernel_main(const BootInfo *info)
     unsigned long long wheel_last = 0;
     enum { NET_POLL_US = 10000 };
     unsigned long long net_last_poll = 0;
+    unsigned long long net_cfg_next = 0; /* not before this time (ms): the next try to get an address */
 
     for (;;)
     {
@@ -408,6 +430,14 @@ void kernel_main(const BootInfo *info)
             net_last_poll = pass_start;
             if (net_poll() > 0)
                 worked = 1; /* frames arrived: look again at once, more may be behind them */
+        }
+        /* The Wi-Fi card connects in the background after boot (see "starting in the background" in rtl8821ce.c): once the link is up
+         * and there is no address yet, ask for one. net_configure() falls back to a fixed address, so this runs once per boot. */
+        if (pmm_ok && net_present() && net_ip_source() == 0 && net_link_up() && timer_ms() >= net_cfg_next)
+        {
+            net_cfg_next = timer_ms() + 30000;
+            net_configure();
+            worked = 1;
         }
         if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
             worked = 1;

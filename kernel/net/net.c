@@ -440,13 +440,9 @@ static void http_test(const unsigned char *ip)
     tcp_close(s);
 }
 
-int net_self_test(void)
+/* The address of the machine: from DHCP, else the one QEMU's user network would have given. Not a test: without it there is no IP. */
+void net_configure(void)
 {
-    if (!net_present())
-    {
-        serial_puts("HARISOS: network: no supported adapter\n");
-        return 0;
-    }
     serial_puts("HARISOS: network: ");
     serial_puts(net_driver_name());
     serial_puts(" mac ");
@@ -473,6 +469,16 @@ int net_self_test(void)
     serial_puts(", mask ");
     put_ip(NETMASK);
     serial_puts("\n");
+}
+
+int net_self_test(void)
+{
+    if (!net_present())
+    {
+        serial_puts("HARISOS: network: no supported adapter\n");
+        return 0;
+    }
+    net_configure();
 
     /* the first ARP answer can take a second in QEMU (its TCG main loop is slow to deliver), so wait generously */
     int ok = 0;

@@ -31,6 +31,14 @@ set(EFI_CFLAGS
     -I${CMAKE_SOURCE_DIR}/include
     -O2 -Wall -Wextra -std=gnu11)
 
+# Slow boot self tests (the ELF program tests, ~6 s, and the network self test, ~1 s on real hardware). Their result only
+# goes to the serial port and a failure is not fatal, so a normal build skips them.
+#   cmake -S . -B build -DHARIS_BOOT_SELFTEST=ON
+option(HARIS_BOOT_SELFTEST "Run the slow self tests at boot (results go to the serial port)" OFF)
+if(HARIS_BOOT_SELFTEST)
+    list(APPEND EFI_CFLAGS -DHARIS_BOOT_SELFTEST=1)
+endif()
+
 # helper: haris_efi_program
 function(haris_efi_program NAME SRC ENTRY OUTNAME)
     set(OBJ ${CMAKE_BINARY_DIR}/${NAME}.obj)

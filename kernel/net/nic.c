@@ -124,6 +124,18 @@ int net_wifi_rescan(void) { return wifi_active() ? rtl8821ce_wifi_rescan() : NET
 int net_wifi_scan_start(void) { return wifi_active() ? rtl8821ce_wifi_scan_start() : NET_WIFI_E_NO_ADAPTER; }
 int net_wifi_scan_progress(void) { return wifi_active() ? rtl8821ce_wifi_scan_progress() : -1; }
 
+int net_wifi_boot_begin(void) { return wifi_active() ? rtl8821ce_boot_begin() : 0; }
+void net_wifi_boot_run(void)
+{
+    if (wifi_active())
+        rtl8821ce_boot_run();
+}
+void net_wifi_boot_abort(void)
+{
+    if (wifi_active())
+        rtl8821ce_boot_abort();
+}
+
 int net_wifi_connect(const char *ssid, const char *passphrase)
 {
     if (!wifi_active())

@@ -4200,9 +4200,17 @@ static int tx_be(const u8 *frame, unsigned len, unsigned seq, int agg)
 }
 
 /* an Ethernet frame of the network stack to the access point */
+/* The first scan and connection (see "starting in the background" below). pending: still to be done. busy: a thread is doing it (rtl8821ce_boot_run);
+ * the chip belongs to that thread meanwhile, nobody else sends, receives or starts a scan. */
+static struct
+{
+    int pending;
+    int busy;
+} BOOT;
+
 static int wifi_send(const void *eth, unsigned len)
 {
-    if (!LINK.up || LINK.scanning || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
+    if (BOOT.busy || !LINK.up || LINK.scanning || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
         return -1;
     const u8 *e = (const u8 *)eth;
     u8 f[26 + 8 + 8 + ETH_MAX];
@@ -4510,12 +4518,55 @@ static void reconnect_try(void)
 
 static void scan_service(u64 now);
 static int scan_active(void);
+int rtl8821ce_wifi_scan_start(void);
+
+/* ---- starting in the background ----
+ * The first scan listens on every channel for about 0.3 s each (5 s in all) and the connection after it takes a while too. Done inside probe() they hold
+ * up the whole boot, with a black screen. With DEFER_ENABLE probe() only brings the hardware up (power, firmware, MAC, baseband, radio) and returns the
+ * card as an adapter without a connection; the first scan, the first frames on the air (tx_probe_test) and the connection to the network of WIFI.CFG
+ * follow from link_service(), in the steps of the stage 11 scan, once the clock runs. Nothing is lost: it is the same sequence as before. */
+static int DEFER_ENABLE = 1; /* the host tests of the earlier stages switch it off (they look at the result of probe()) */
+
+/* the end of the first scan: the rest of what probe() does when it is not deferred */
+static void boot_finish(void)
+{
+    BOOT.pending = 0;
+    if (TXP_ENABLE && SC.state && SC.channels_ok)
+        tx_probe_test(149); /* stage 5a: the first frames on the air: probe requests on channel 149 */
+    pick_target();
+    connect_try();
+}
+
+/* The same work in a thread of its own (the kernel starts one, kernel.c): the whole first scan and the connection take several seconds, and the
+ * desktop must not stand still for them. The thread does it blocking, the way probe() does without DEFER_ENABLE. begin() is called early (it claims the
+ * chip, so that nothing else touches it before the thread runs), run() is the thread, abort() gives the chip back if no thread could be made, and then
+ * link_service() does the work in steps. */
+int rtl8821ce_boot_begin(void)
+{
+    if (!BOOT.pending || BOOT.busy || !LINK.adapter || !D.ready || !clock_ok())
+        return 0;
+    BOOT.busy = 1;
+    return 1;
+}
+
+void rtl8821ce_boot_run(void)
+{
+    if (!BOOT.busy)
+        return;
+    scan_run(); /* stage 4c-2/3: listen on every channel, note the networks */
+    boot_finish();
+    BOOT.busy = 0;
+}
+
+void rtl8821ce_boot_abort(void) { BOOT.busy = 0; }
 
 static void link_service(void)
 {
     if (!clock_ok())
         return;
     u64 now = now_ms();
+    if (BOOT.pending && !scan_active())
+        rtl8821ce_wifi_scan_start(); /* (the first scan; boot_finish() runs at its end) */
     scan_service(now); /* (a scan in steps goes on from here) */
     if (LINK.up && !scan_active()) /* (while the radio is away on other channels nothing is heard from the access point) */
     {
@@ -4633,6 +4684,8 @@ static void scan_next(u64 now)
     }
     LINK.scanning = 0;
     SCN.active = 0;
+    if (BOOT.pending)
+        boot_finish();
 }
 
 static void scan_service(u64 now)
@@ -4650,6 +4703,8 @@ int rtl8821ce_wifi_scan_start(void)
 {
     if (!LINK.adapter || !D.ready || !clock_ok())
         return NET_WIFI_E_NO_ADAPTER;
+    if (BOOT.busy)
+        return NET_WIFI_E_BUSY;
     if (SCN.active)
         return NET_WIFI_OK; /* already going on */
     scan_start_state();
@@ -4694,6 +4749,8 @@ static void wipe(volatile char *p, unsigned n)
 
 int rtl8821ce_wifi_connect(const char *ssid, const char *psk)
 {
+    if (BOOT.pending || BOOT.busy)
+        return NET_WIFI_E_BUSY; /* the first scan is still to come */
     if (!LINK.adapter || !D.ready || TXP.variant < 0 || !TXP.sent || !SC.state)
         return NET_WIFI_E_NO_ADAPTER;
     if (SCN.active)
@@ -4815,7 +4872,7 @@ int rtl8821ce_wifi_connect(const char *ssid, const char *psk)
 
 static int rtl8821ce_recv_up(void *buf, unsigned max)
 {
-    if (!LINK.adapter)
+    if (!LINK.adapter || BOOT.busy)
         return 0;
     rx_poll();
     link_service();
@@ -4893,6 +4950,7 @@ static int rtl8821ce_probe(const PciDevice *pd)
     RX.state = RXS_NOT_TRIED;
     LINK.up = 0;
     LINK.adapter = 0;
+    BOOT.pending = 0;
     LINK.want = LINK.scanning = 0;
     SCN.active = 0;
     RA.on = 0;
@@ -4956,6 +5014,15 @@ static int rtl8821ce_probe(const PciDevice *pd)
                     h2c_probe(); /* stage 4b-3: does the firmware read a command? */
                 if (PH.state == PH_OK && !phy_rf_suspect() && H2.state == H2_OK)
                     channel_probe(6); /* stage 4c-1: antenna to Wi-Fi, channel 6 */
+                if (CHN.state == CH_OK && DEFER_ENABLE)
+                {
+                    /* the scan and the connection come later, from link_service(); until then the card is an adapter without a connection */
+                    BOOT.pending = 1;
+                    LINK.adapter = 1;
+                    LINK.up = 0;
+                    LINK.want = 0;
+                    return 1;
+                }
                 if (CHN.state == CH_OK)
                     scan_run(); /* stage 4c-2/3: listen on every channel, note the networks */
                 if (TXP_ENABLE && SC.state && SC.channels_ok)
