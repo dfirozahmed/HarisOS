@@ -8,6 +8,7 @@
 /* Host-side tests for window resizing (kernel/window): edges, corners, minimum size, screen limits. */
 static unsigned long long NOW; /* the test moves the clock */
 unsigned long long timer_ms(void){return NOW;}
+unsigned long long timer_us(void){return NOW * 1000;}
 int timer_ready(void){return 0;}
 void timer_init(void){}
 #include <stdlib.h>

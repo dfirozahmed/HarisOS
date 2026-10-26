@@ -176,10 +176,13 @@ static void draw_processes(UiRect body)
     const UiTheme *t = ui_theme();
     UiRect list = list_rect(body);
     int hy = list.y - HEAD_H;
-    ui_text_in_color(ui_rect(list.x + 8, hy, list.w - STATUS_W - PID_W - 16, HEAD_H), "Name", UI_TEXT_SMALL,
-                     UI_ALIGN_LEFT, t->text_dim);
-    ui_text_in_color(ui_rect(list.x + list.w - STATUS_W - PID_W - 8, hy, STATUS_W, HEAD_H), "Status", UI_TEXT_SMALL,
-                     UI_ALIGN_LEFT, t->text_dim);
+    /* columns from the right: ID, the app's CPU share, the status, then the name */
+    const int CPU_W = 48;
+    const int x_cpu = list.x + list.w - PID_W - 4 - CPU_W, x_state = x_cpu - STATUS_W;
+    ui_text_in_color(ui_rect(list.x + 8, hy, x_state - list.x - 16, HEAD_H), "Name", UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                     t->text_dim);
+    ui_text_in_color(ui_rect(x_state, hy, STATUS_W, HEAD_H), "Status", UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
+    ui_text_in_color(ui_rect(x_cpu, hy, CPU_W, HEAD_H), "CPU", UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
     ui_text_in_color(ui_rect(list.x + list.w - PID_W - 4, hy, PID_W, HEAD_H), "ID", UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                      t->text_dim);
     ui_separator(list.x, list.y - 2, list.w);
@@ -192,10 +195,16 @@ static void draw_processes(UiRect body)
         UiRect r = ui_rect(list.x, list.y + i * ROW_H, list.w, ROW_H);
         if (p->id == SEL_ID)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 40);
-        ui_text_in(ui_rect(r.x + 8, r.y, r.w - STATUS_W - PID_W - 16, r.h), p->title, UI_TEXT_BODY, UI_ALIGN_LEFT);
+        ui_text_in(ui_rect(r.x + 8, r.y, x_state - list.x - 16, r.h), p->title, UI_TEXT_BODY, UI_ALIGN_LEFT);
         const char *st = p->minimized ? "Minimized" : (p == top ? "Active" : "Running");
-        ui_text_in_color(ui_rect(r.x + r.w - STATUS_W - PID_W - 8, r.y, STATUS_W, r.h), st, UI_TEXT_SMALL,
-                         UI_ALIGN_LEFT, p == top ? t->success : t->text_dim);
+        ui_text_in_color(ui_rect(x_state, r.y, STATUS_W, r.h), st, UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                         p == top ? t->success : t->text_dim);
+        char pct[8];
+        int pn = 0;
+        put_dec(pct, &pn, (unsigned)p->cpu_pct);
+        put_str(pct, &pn, "%");
+        ui_text_in_color(ui_rect(x_cpu, r.y, CPU_W, r.h), pct, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
+                         p->cpu_pct > 0 ? t->text : t->text_dim);
         char id[8];
         int n = 0;
         put_dec(id, &n, (unsigned)p->id);
@@ -203,10 +212,32 @@ static void draw_processes(UiRect body)
                          t->text_dim);
     }
 
-    char line[32];
+    /* The apps' figures count only their own code (drawing, input, timers). Everything else the main loop does, the desktop, the taskbar, the
+     * window frames, the drivers, has no window: it is one more row, so that the column adds up to the processor's load (the CPU page).
+     * The two figures come from slightly different one-second windows, so the rest is clamped at 0. */
+    int apps_sum = 0;
+    for (int i = 0; i < NPROCS; i++)
+        apps_sum += PROCS[i]->cpu_pct;
+    int total = cpuload_percent();
+    int rest = total > apps_sum ? total - apps_sum : 0;
+    if (NPROCS < vis)
+    {
+        UiRect r = ui_rect(list.x, list.y + NPROCS * ROW_H, list.w, ROW_H);
+        ui_text_in_color(ui_rect(r.x + 8, r.y, x_state - list.x - 16, r.h), "Desktop and system", UI_TEXT_BODY, UI_ALIGN_LEFT,
+                         t->text_dim);
+        char pct[8];
+        int pn = 0;
+        put_dec(pct, &pn, (unsigned)rest);
+        put_str(pct, &pn, "%");
+        ui_text_in_color(ui_rect(x_cpu, r.y, CPU_W, r.h), pct, UI_TEXT_SMALL, UI_ALIGN_RIGHT, rest > 0 ? t->text : t->text_dim);
+    }
+
+    char line[64];
     int n = 0;
     put_dec(line, &n, (unsigned)NPROCS);
-    put_str(line, &n, NPROCS == 1 ? " app running" : " apps running");
+    put_str(line, &n, NPROCS == 1 ? " app running, " : " apps running, ");
+    put_dec(line, &n, (unsigned)total);
+    put_str(line, &n, "% of the processor");
     ui_text_color(body.x + PAD, body.y + body.h - FOOT_H + 18, line, UI_TEXT_SMALL, t->text_dim);
 }
 
@@ -369,6 +400,23 @@ static void disk_sample(unsigned long long dt_ms)
 }
 
 /* dt_ms = time since the previous sample, 0 for the first one */
+/* Per app (window): the microseconds its own callbacks took in the last interval (Window.cpu_us, counted by the window manager) as a share of
+ * the interval. This is the time spent in the app's code (drawing, input, timers); the desktop, the taskbar and the window frames are not
+ * included. The first call (dt_ms = 0) only takes the starting figures. */
+static void app_samples(unsigned long long dt_ms)
+{
+    Window *all[128];
+    int n = wm_list(all, 128);
+    for (int i = 0; i < n; i++)
+    {
+        Window *w = all[i];
+        unsigned long long delta = w->cpu_us >= w->cpu_prev_us ? w->cpu_us - w->cpu_prev_us : 0;
+        unsigned long long p = dt_ms ? delta * 100 / (dt_ms * 1000) : 0;
+        w->cpu_pct = p > 100 ? 100 : (int)p;
+        w->cpu_prev_us = w->cpu_us;
+    }
+}
+
 /* Per thread: the ticks it was found running in the last interval, as a share of ALL the ticks the processor it last ran on took in that
  * interval (the tick rate is not exactly 1000 per second, so milliseconds would be the wrong yardstick). A thread runs on one processor at a
  * time, so 100 is the most. Thread 0 is the main loop, which sleeps in HLT: it shows its own busy share instead. The first call (dt_ms = 0)
@@ -403,6 +451,7 @@ static void take_samples(unsigned long long dt_ms)
     hist_push(MEM_HIST, &MEM_HIST_N, mem_used_percent());
     hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)cpuload_percent());
     thread_samples(dt_ms);
+    app_samples(dt_ms);
     disk_sample(dt_ms);
 }
 

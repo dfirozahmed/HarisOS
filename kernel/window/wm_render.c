@@ -32,7 +32,11 @@ static void draw_window(Window *w, int i, int top)
     wm_layout_internal(w);
     gfx_clip_intersect(body.x, body.y, body.w, body.h); /* nothing can spill out of the window */
     if (w->on_draw)
+    {
+        unsigned long long t0 = wm_now_us();
         w->on_draw(w, body);
+        wm_charge(w, t0);
+    }
     ui_buttons_draw(&w->set);
     gfx_restore_clip(saved);
     if (!w->dialog && !w->maximized && !w->fixed_size)

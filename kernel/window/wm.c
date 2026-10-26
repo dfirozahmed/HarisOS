@@ -423,3 +423,12 @@ Window *wm_top(void)
 }
 
 
+
+unsigned long long wm_now_us(void) { return timer_us(); }
+
+void wm_charge(Window *w, unsigned long long start_us)
+{
+    unsigned long long now = timer_us();
+    if (w && now >= start_us)
+        w->cpu_us += now - start_us;
+}

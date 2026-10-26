@@ -14,6 +14,12 @@ extern int WM_HAS_DMG;
 Window *wm_moving_window_internal(void); /* the window being dragged by its title bar once it has really moved, or 0 */
 void wm_damage_internal(int x0, int y0, int x1, int y1);
 void wm_damage_window_internal(const Window *w);
+
+/* CPU accounting per window (Window.cpu_us): run a handler of the window and add the time it took. `call` is an expression; its value is the
+ * value of the macro. A handler may close its window; the slot is only cleared, never freed meanwhile (wm_tick reclaims chunks). */
+unsigned long long wm_now_us(void);
+void wm_charge(Window *w, unsigned long long start_us);
+#define WM_TIMED(w, call) ({ unsigned long long t0_ = wm_now_us(); __typeof__(call) r_ = (call); wm_charge((w), t0_); r_; })
 int wm_top_index_internal(void);
 int wm_z_index_internal(const Window *w);
 Window *wm_blocker_internal(const Window *w);
