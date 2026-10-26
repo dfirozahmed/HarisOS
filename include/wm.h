@@ -67,7 +67,7 @@ typedef struct Window
     int btn_anchor[WM_MAX_BUTTONS]; /* WM_ANCHOR_* flags */
     int btn_count;
     /* CPU time of the app (Task Manager): the microseconds spent in its own callbacks (drawing, input, timers), counted by the window manager
-     * in wm_charge; cpu_prev_us and cpu_pct are the Task Manager's sample (share of one second, 0..100). */
+     * in wm_charge; cpu_prev_us and cpu_pct are the Task Manager's sample (tenths of a percent of the capacity of all processors, 0..1000). */
     unsigned long long cpu_us;
     unsigned long long cpu_prev_us;
     int cpu_pct;

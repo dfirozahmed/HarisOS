@@ -77,7 +77,7 @@ static unsigned long long LAST_MS;
 #define TM_THREADS 256 /* threads whose CPU figure is kept (the lowest ids) */
 static unsigned long long T_PREV[TM_THREADS]; /* task_run_ticks at the last sample */
 static unsigned long long T_ALL_PREV[CPULOAD_MAX_CPUS]; /* each processor's tick count at the last sample */
-static int T_PCT[TM_THREADS];                 /* percent of the processor it runs on, in the last interval */
+static int T_PCT[TM_THREADS];                 /* tenths of a percent of the capacity of all processors, in the last interval */
 
 static void put_dec(char *s, int *n, unsigned v)
 {
@@ -171,6 +171,43 @@ static void draw_tabs(UiRect body)
     }
 }
 
+/* ---- CPU figures as Windows shows them: a share of the capacity of ALL processors (one processor fully busy of four = 25%) ---- */
+
+/* processors that run (the boot processor and the application processors that came up), at least 1 */
+static int ncpus(void)
+{
+    int n = 0;
+    for (int i = 0; i < smp_cpu_total(); i++)
+        if (smp_cpu_online(i))
+            n++;
+    return n ? n : 1;
+}
+
+/* the average load of the running processors in percent: the boot processor's is the main loop's busy share, the others' the share of ticks
+ * that found them running a user thread (cpuload.h) */
+static int total_cpu_percent(void)
+{
+    int sum = cpuload_percent();
+    for (int i = 1; i < smp_cpu_total(); i++)
+        if (smp_cpu_online(i))
+            sum += cpuload_cpu_percent(i);
+    return sum / ncpus();
+}
+
+/* tenths of a percent: "0.3%", "7.5%", "42%" (one decimal only below 10%, where whole numbers would hide small apps) */
+static void put_pct10(char *s, int *n, unsigned tenths)
+{
+    if (tenths >= 100)
+        put_dec(s, n, (tenths + 5) / 10);
+    else
+    {
+        put_dec(s, n, tenths / 10);
+        put_str(s, n, ".");
+        put_dec(s, n, tenths % 10);
+    }
+    put_str(s, n, "%");
+}
+
 static void draw_processes(UiRect body)
 {
     const UiTheme *t = ui_theme();
@@ -201,8 +238,7 @@ static void draw_processes(UiRect body)
                          p == top ? t->success : t->text_dim);
         char pct[8];
         int pn = 0;
-        put_dec(pct, &pn, (unsigned)p->cpu_pct);
-        put_str(pct, &pn, "%");
+        put_pct10(pct, &pn, (unsigned)p->cpu_pct);
         ui_text_in_color(ui_rect(x_cpu, r.y, CPU_W, r.h), pct, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                          p->cpu_pct > 0 ? t->text : t->text_dim);
         char id[8];
@@ -218,8 +254,9 @@ static void draw_processes(UiRect body)
     int apps_sum = 0;
     for (int i = 0; i < NPROCS; i++)
         apps_sum += PROCS[i]->cpu_pct;
-    int total = cpuload_percent();
-    int rest = total > apps_sum ? total - apps_sum : 0;
+    int main_loop = cpuload_percent() * 10 / ncpus(); /* the main loop's busy share, as a share of all processors, in tenths */
+    int total = total_cpu_percent();
+    int rest = main_loop > apps_sum ? main_loop - apps_sum : 0;
     if (NPROCS < vis)
     {
         UiRect r = ui_rect(list.x, list.y + NPROCS * ROW_H, list.w, ROW_H);
@@ -227,8 +264,7 @@ static void draw_processes(UiRect body)
                          t->text_dim);
         char pct[8];
         int pn = 0;
-        put_dec(pct, &pn, (unsigned)rest);
-        put_str(pct, &pn, "%");
+        put_pct10(pct, &pn, (unsigned)rest);
         ui_text_in_color(ui_rect(x_cpu, r.y, CPU_W, r.h), pct, UI_TEXT_SMALL, UI_ALIGN_RIGHT, rest > 0 ? t->text : t->text_dim);
     }
 
@@ -237,7 +273,7 @@ static void draw_processes(UiRect body)
     put_dec(line, &n, (unsigned)NPROCS);
     put_str(line, &n, NPROCS == 1 ? " app running, " : " apps running, ");
     put_dec(line, &n, (unsigned)total);
-    put_str(line, &n, "% of the processor");
+    put_str(line, &n, "% of all processors");
     ui_text_color(body.x + PAD, body.y + body.h - FOOT_H + 18, line, UI_TEXT_SMALL, t->text_dim);
 }
 
@@ -283,8 +319,7 @@ static void draw_threads(UiRect body)
         int cn = 0;
         if (id < TM_THREADS)
         {
-            put_dec(cols, &cn, (unsigned)T_PCT[id]);
-            put_str(cols, &cn, "%");
+            put_pct10(cols, &cn, (unsigned)T_PCT[id]);
         }
         else
             put_str(cols, &cn, "-");
@@ -411,8 +446,8 @@ static void app_samples(unsigned long long dt_ms)
     {
         Window *w = all[i];
         unsigned long long delta = w->cpu_us >= w->cpu_prev_us ? w->cpu_us - w->cpu_prev_us : 0;
-        unsigned long long p = dt_ms ? delta * 100 / (dt_ms * 1000) : 0;
-        w->cpu_pct = p > 100 ? 100 : (int)p;
+        unsigned long long p = dt_ms ? delta * 1000 / (dt_ms * 1000 * (unsigned long long)ncpus()) : 0; /* tenths of a percent of all processors */
+        w->cpu_pct = p > 1000 ? 1000 : (int)p;
         w->cpu_prev_us = w->cpu_us;
     }
 }
@@ -439,17 +474,17 @@ static void thread_samples(unsigned long long dt_ms)
         unsigned long long delta = ticks >= T_PREV[id] ? ticks - T_PREV[id] : ticks; /* a slot used by a new thread starts again at 0 */
         int cpu = task_last_cpu(id);
         unsigned long long all = cpu >= 0 && cpu < ncpu ? all_delta[cpu] : 0;
-        unsigned long long p = dt_ms && all ? delta * 100 / all : 0;
-        T_PCT[id] = p > 100 ? 100 : (int)p;
+        unsigned long long p = dt_ms && all ? delta * 1000 / (all * (unsigned long long)ncpus()) : 0; /* tenths of a percent of all processors */
+        T_PCT[id] = p > 1000 ? 1000 : (int)p;
         T_PREV[id] = ticks;
     }
-    T_PCT[0] = cpuload_percent();
+    T_PCT[0] = cpuload_percent() * 10 / ncpus();
 }
 
 static void take_samples(unsigned long long dt_ms)
 {
     hist_push(MEM_HIST, &MEM_HIST_N, mem_used_percent());
-    hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)cpuload_percent());
+    hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)total_cpu_percent());
     thread_samples(dt_ms);
     app_samples(dt_ms);
     disk_sample(dt_ms);
@@ -564,14 +599,14 @@ static void draw_cpu(UiRect pane)
     int n = 0;
 
     ui_text(pane.x, pane.y, "CPU", UI_TEXT_TITLE);
-    put_dec(line, &n, (unsigned)cpuload_percent());
+    put_dec(line, &n, (unsigned)total_cpu_percent());
     put_str(line, &n, "%");
     ui_text_in(ui_rect(pane.x + pane.w - 80, pane.y, 80, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
 
     UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 80);
     draw_graph(g, CPU_HIST, CPU_HIST_N);
-    ui_progress(ui_rect(pane.x, g.y + g.h + 10, pane.w, 12), cpuload_percent());
-    ui_text_color(pane.x, g.y + g.h + 28, "Load = busy share of the main loop (input and redraws)", UI_TEXT_SMALL,
+    ui_progress(ui_rect(pane.x, g.y + g.h + 10, pane.w, 12), total_cpu_percent());
+    ui_text_color(pane.x, g.y + g.h + 28, "Load = average of the processors (main loop on CPU 0, user programs on the others)", UI_TEXT_SMALL,
                   t->text_dim);
 
     const CpuInfo *c = cpuinfo_get();
