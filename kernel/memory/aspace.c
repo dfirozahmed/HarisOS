@@ -3,6 +3,7 @@
 #include "cow.h"
 #include "irq.h"
 #include "pmm.h"
+#include "smp.h"
 #include "uaccess.h"
 
 #if defined(__x86_64__)
@@ -89,7 +90,10 @@ int aspace_cow_fault(AddressSpace *as, u64 va)
     u64 page = va & ~4095ULL;
     int r = paging_cow_resolve(as->entry, page, alloc_page);
     if (r == 1)
+    {
         __asm__ volatile("invlpg (%0)" : : "r"(page) : "memory"); /* (this is the space in use) */
+        smp_tlb_flush_others(); /* a thread of the same space on another processor may still cache the read-only entry */
+    }
     return r;
 }
 
@@ -105,9 +109,11 @@ AddressSpace *aspace_clone(const AddressSpace *src)
     {
         aspace_destroy(as); /* gives back whatever was shared or copied so far */
         flush_tlb();
+        smp_tlb_flush_others();
         return 0;
     }
     flush_tlb();
+    smp_tlb_flush_others(); /* the parent's pages lost their write permission: other threads of the parent must not write through old entries */
     return as;
 }
 
@@ -122,6 +128,7 @@ int aspace_unmap_shared(AddressSpace *as, u64 va)
     if (paging_unmap_page(as->entry, va, &phys) != 0)
         return -1;
     __asm__ volatile("invlpg (%0)" : : "r"(va) : "memory"); /* (this is the space in use: a system call of the process that owns it) */
+    smp_tlb_flush_others(); /* the page may go back to its owner: no processor may keep reaching it through this space */
     return 0;
 }
 
