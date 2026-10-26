@@ -84,6 +84,9 @@ int smp_selftest_alloc(void);
  * flushes at once; one that waits for the lock flushes as soon as interrupts come back on, before it returns to ring 3. */
 void smp_tlb_flush_others(void);
 extern volatile unsigned long long smp_tlb_acks; /* flush requests answered so far, all processors together */
+/* A fatal error (fault.c): send a non-maskable interrupt to every other online processor; fault.c's NMI handler halts it. Uses no lock and
+ * no per-CPU data, and works while interrupts are off. Returns how many were sent. */
+int smp_stop_others(void);
 /* Boot self test: one request, every application processor must answer it. 0 = ok, 1 = skipped (no application processor), negative = failed. */
 int smp_selftest_tlb(void);
 

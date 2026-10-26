@@ -460,6 +460,16 @@ void smp_tlb_flush_others(void)
     }
 }
 
+int smp_stop_others(void)
+{
+    int sent = 0;
+    unsigned me = idle_lapic_id();
+    for (int k = 0; k < TOTAL; k++)
+        if (CPU[k].pc.apic_id != me && CPU[k].online && idle_send_ipi(CPU[k].pc.apic_id, 0x4400) == 0) /* delivery mode NMI, level assert */
+            sent++;
+    return sent;
+}
+
 int smp_selftest_tlb(void)
 {
     int n = 0;
@@ -605,6 +615,7 @@ int smp_selftest_spinlock(void) { return 1; }
 int smp_selftest_alloc(void) { return 1; }
 int smp_selftest_tlb(void) { return 1; }
 void smp_tlb_flush_others(void) {}
+int smp_stop_others(void) { return 0; }
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)

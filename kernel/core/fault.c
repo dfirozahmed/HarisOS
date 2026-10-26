@@ -1,8 +1,10 @@
 /* HarisOS CPU exception handling: see include/fault.h. */
 #include "fault.h"
 #include "bkl.h"
+#include "idle.h"
 #include "process.h"
 #include "serial.h"
+#include "smp.h"
 #include "task.h"
 
 #if defined(__x86_64__)
@@ -326,6 +328,10 @@ int fault_probe_exec(unsigned long long addr, FaultProbe *info)
 static volatile unsigned NMI_COUNT;
 static volatile int NMI_OWN_STACK;
 
+/* The processor that reports a fatal error sets its LAPIC id here and sends an NMI to the others, which then halt (see below). */
+static volatile unsigned fault_stop_owner = 0xFFFFFFFFu;
+static volatile unsigned fault_stopped; /* how many processors answered */
+
 unsigned fault_nmi_count(void) { return NMI_COUNT; }
 int fault_nmi_on_own_stack(void) { return NMI_OWN_STACK; }
 
@@ -366,6 +372,14 @@ void fault_dispatch(FaultFrame *f)
      * or a debugger's poke): count it, say so the first few times, and return. It runs on its own stack (IST3). */
     if (f->vector == 2)
     {
+        /* The NMI of a fatal error on another processor (smp_stop_others): stop for good. Nothing here uses GS (this NMI may have hit the
+         * SYSCALL entry before its swapgs); the local APIC id comes from the APIC itself. */
+        if (fault_stop_owner != 0xFFFFFFFFu && idle_lapic_id() != fault_stop_owner)
+        {
+            __atomic_fetch_add(&fault_stopped, 1, __ATOMIC_RELEASE);
+            for (;;)
+                __asm__ volatile("cli; hlt");
+        }
         NMI_COUNT++;
         unsigned long long sp = (unsigned long long)f;
         NMI_OWN_STACK = sp >= (unsigned long long)NMI_STACK && sp < (unsigned long long)(NMI_STACK + sizeof(NMI_STACK));
@@ -378,6 +392,16 @@ void fault_dispatch(FaultFrame *f)
         for (;;)
             __asm__ volatile("cli; hlt");
     IN_FAULT = 1;
+
+    /* Stop the other processors before anything is printed: they would go on running user threads (or fault as well) and mix their output
+     * into the report. An NMI, because a processor that waits for the big kernel lock (which this one holds) has interrupts off. One that
+     * is in ring 3 and takes the lock in its exception entry never gets that far: it spins there, which stops it just as well, so the
+     * wait for answers is short and bounded. */
+    fault_stop_owner = idle_lapic_id();
+    int others = smp_stop_others();
+    for (long spin = 0; spin < 2000000 && (int)__atomic_load_n(&fault_stopped, __ATOMIC_ACQUIRE) < others; spin++)
+        __asm__ volatile("pause");
+    unsigned long long stopped = fault_stopped;
 
     unsigned long long cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
@@ -427,6 +451,14 @@ void fault_dispatch(FaultFrame *f)
 
     serial_init();
     serial_puts(text); /* first: the serial port is the most robust output */
+    if (others > 0)
+    {
+        serial_puts("HARISOS: other processors stopped: ");
+        serial_putd((long long)stopped);
+        serial_puts(" of ");
+        serial_putd(others);
+        serial_puts("\n");
+    }
     if (FB)
         screen_text(text);
 
