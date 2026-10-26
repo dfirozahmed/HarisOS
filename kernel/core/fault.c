@@ -332,6 +332,15 @@ static volatile int NMI_OWN_STACK;
 static volatile unsigned fault_stop_owner = 0xFFFFFFFFu;
 static volatile unsigned fault_stopped; /* how many processors answered */
 
+int fault_stop_others(void)
+{
+    fault_stop_owner = idle_lapic_id();
+    int others = smp_stop_others();
+    for (long spin = 0; spin < 2000000 && (int)__atomic_load_n(&fault_stopped, __ATOMIC_ACQUIRE) < others; spin++)
+        __asm__ volatile("pause");
+    return others;
+}
+
 unsigned fault_nmi_count(void) { return NMI_COUNT; }
 int fault_nmi_on_own_stack(void) { return NMI_OWN_STACK; }
 
@@ -397,10 +406,7 @@ void fault_dispatch(FaultFrame *f)
      * into the report. An NMI, because a processor that waits for the big kernel lock (which this one holds) has interrupts off. One that
      * is in ring 3 and takes the lock in its exception entry never gets that far: it spins there, which stops it just as well, so the
      * wait for answers is short and bounded. */
-    fault_stop_owner = idle_lapic_id();
-    int others = smp_stop_others();
-    for (long spin = 0; spin < 2000000 && (int)__atomic_load_n(&fault_stopped, __ATOMIC_ACQUIRE) < others; spin++)
-        __asm__ volatile("pause");
+    int others = fault_stop_others();
     unsigned long long stopped = fault_stopped;
 
     unsigned long long cr2;

@@ -13,7 +13,14 @@ void power_init(const BootInfo *info)
 #ifdef HARIS_HOST_TEST /* the unit test runs as a normal program: no privileged instructions */
 static void no_interrupts(void) {}
 #else
-static void no_interrupts(void) { __asm__ volatile("cli"); }
+#include "fault.h"
+/* Interrupts off, and the other processors stopped (fault.h): they must not keep running user threads, or writing to the disk, while the
+ * firmware or the chipset takes the machine down. */
+static void no_interrupts(void)
+{
+    __asm__ volatile("cli");
+    fault_stop_others();
+}
 #endif
 #else
 static void no_interrupts(void) {}

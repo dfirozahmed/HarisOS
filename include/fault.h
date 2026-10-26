@@ -59,6 +59,10 @@ void fault_dispatch(FaultFrame *f);
 unsigned fault_nmi_count(void);
 int fault_nmi_on_own_stack(void);
 
+/* SMP: halt every other processor with an NMI and wait (a short, bounded time) until they have answered. Returns how many were asked.
+ * For the end of the system: a fatal error (fault_dispatch) and power_shutdown / power_restart. Not for the host build. */
+int fault_stop_others(void);
+
 /* Page faults that are expected: for self tests of protections (SMEP, SMAP). One try, no side effects.
  *   fault_probe_read: read one byte at addr;  fault_probe_exec: call the code at addr (it must just return).
  * 1 = it worked, 0 = it caused a ring 0 page fault; then info (if not NULL) holds CR2 and the error code of the fault. */
