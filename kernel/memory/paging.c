@@ -2,6 +2,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "smp.h"
+#include "spinlock.h"
 
 #if defined(__x86_64__)
 
@@ -13,6 +14,7 @@ typedef unsigned long long u64;
 #define CR4_LA57 (1ULL << 12)
 
 static int OWN;        /* the tables in CR3 are ours (writable) */
+static Spinlock KERNEL_TABLES = SPINLOCK_INIT;
 static unsigned NTABLES;
 
 /* New tables come from the page allocator; the firmware maps all RAM 1:1, so a page's address is a pointer. Written
@@ -73,8 +75,12 @@ int paging_set_present(u64 virt, int present)
 {
     if (!OWN)
         return -1; /* never write the firmware's tables: they may be read-only */
+    /* Two processors changing the kernel's tables at once (a thread created on one while another reaps one) could both split the same big page, or
+     * both add the same table: one lock for the kernel's tables. It is held for the edit only; the flush requests go out after it. */
+    unsigned long long f = spin_lock_irqsave(&KERNEL_TABLES);
     int r = paging_set_present_in((u64 *)(read_cr(3) & ADDR_MASK), virt & ~4095ULL, present, alloc_table);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory"); /* this CPU may have the old translation cached */
+    spin_unlock_irqrestore(&KERNEL_TABLES, f);
     smp_tlb_flush_others(); /* kernel mappings are shared: so may the other processors (a guard page is not a guard where it is still cached) */
     return r;
 }

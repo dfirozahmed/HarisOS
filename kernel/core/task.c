@@ -93,6 +93,45 @@ static unsigned long long CPU_TICKS_ALL[SMP_MAX_CPUS], CPU_TICKS_BUSY[SMP_MAX_CP
 static unsigned long long TICKS; /* timer interrupts seen by task_tick, for the boot log */
 volatile int preempt_count; /* see preempt.h */
 
+/* The scheduler lock. It protects the table of threads (every field the scheduler or a waker reads or writes: state, priorities, wake time,
+ * address space, the slot allocation, CAP / DIR), CURS, IDLE_ID and the counters, so that code that runs OUTSIDE the big kernel lock can
+ * wake a thread, change a priority, create or kill one while the processor that holds the big kernel lock is in the scheduler.
+ *
+ *   - Interrupts are off whenever it is held (every path into it already runs with them off), so an interrupt handler of the same processor
+ *     never finds it taken by the code it interrupted. A processor that finds it taken by itself traps, like the spinlock.
+ *   - It is held ACROSS the context switch: schedule_locked() takes it before it looks at the table and the thread that comes out of
+ *     task_ctx_switch (a resumed one, in schedule_locked, or a new one, in task_main) lets go. Until then the thread that left has not yet saved its
+ *     stack pointer, and nobody else may pick it. The lock belongs to the processor, like the big kernel lock (bkl.h).
+ *   - Nothing that can call back into the task functions runs under it: the thread's free_data, aspace_destroy and the like run in reap()
+ *     after the slot has been detached.
+ *   - Order of locks: big kernel lock, then this one, then the page allocator's and the heap's. This one is never held while waiting for the
+ *     big kernel lock.
+ *   - Only the code that does not switch threads may run without the big kernel lock: task_wake, task_set_priority, task_set_inherited,
+ *     task_kill, task_create and the like. schedule() and everything that ends in it (block, sleep, yield, exit, the tick) still need it:
+ *     the thread that comes in expects to be in the kernel with the big kernel lock held. */
+static volatile int SCHED_LOCKED;
+static volatile unsigned SCHED_OWNER; /* processor number + 1 of the holder, 0 when free */
+
+static inline void sched_lock(void)
+{
+    unsigned me = percpu_index() + 1;
+    while (__atomic_exchange_n(&SCHED_LOCKED, 1, __ATOMIC_ACQUIRE))
+    {
+        if (SCHED_OWNER == me)
+            __builtin_trap(); /* this processor holds it already: waiting would be for ever */
+#if defined(__x86_64__)
+        __asm__ volatile("pause");
+#endif
+    }
+    SCHED_OWNER = me;
+}
+
+static inline void sched_unlock(void)
+{
+    SCHED_OWNER = 0;
+    __atomic_store_n(&SCHED_LOCKED, 0, __ATOMIC_RELEASE);
+}
+
 /* The priority the scheduler ranks thread k by: its own or the one it borrowed (the higher), plus one level per TASK_AGE_PASSES
  * passes it waited. */
 /* How many passes a READY thread may be passed over before it gets a boost: TASK_AGE_PASSES, or the number of threads if that is more, so
@@ -204,36 +243,58 @@ static void fpu_enter(const Task *t)
 }
 
 /* Frees the stacks of finished threads. Only safe from another thread's stack, never from the dying one: the
- * current thread is skipped (it cannot be DEAD here anyway). Interrupts must be off. */
+ * current thread is skipped (it cannot be DEAD here anyway). Interrupts must be off, the scheduler lock not held.
+ * Each dead thread is detached under the lock (its resources copied out, its slot made free), and the resources are given back after
+ * the lock is let go: free_data and aspace_destroy may call any task function. The slot can be reused at once; nothing in it is left. */
 static void reap(void)
 {
-    for (int i = 0; i < CAP; i++)
+    for (;;)
     {
-        Task *t = tk(i);
-        if (t->state == TASK_DEAD && !running_somewhere(i))
+        AddressSpace *as = 0;
+        void *data = 0;
+        TaskFreeFn free_data = 0;
+        unsigned char *stack = 0;
+        int guarded = 0, found = 0;
+
+        sched_lock();
+        for (int i = 0; i < CAP && !found; i++)
         {
-            if (t->as) /* the process's pages and tables. Its space is not loaded: schedule() switched to another one. */
+            Task *t = tk(i);
+            if (t->state == TASK_DEAD && !running_somewhere(i))
             {
-                aspace_destroy(t->as);
+                found = 1;
+                as = t->as; /* the process's pages and tables. Its space is not loaded: schedule() switched to another one. */
+                data = t->data;
+                free_data = t->free_data;
+                stack = t->stack;
+                guarded = t->guarded;
                 t->as = 0;
+                t->data = 0;
+                t->free_data = 0;
+                t->stack = 0;
+                t->guarded = 0;
+                t->state = TASK_UNUSED;
             }
-            if (t->data && t->free_data)
-                t->free_data(t->data);
-            t->data = 0;
-            t->free_data = 0;
-            if (t->guarded)
-                paging_set_present((unsigned long long)t->stack, 1); /* the page goes back to the allocator: map it again */
-            pmm_free_contiguous((unsigned long long)t->stack, STACK_BLOCK_PAGES);
-            t->stack = 0;
-            t->guarded = 0;
-            t->state = TASK_UNUSED;
         }
+        sched_unlock();
+        if (!found)
+            return;
+
+        if (as)
+            aspace_destroy(as);
+        if (data && free_data)
+            free_data(data);
+        if (guarded)
+            paging_set_present((unsigned long long)stack, 1); /* the page goes back to the allocator: map it again */
+        if (stack)
+            pmm_free_contiguous((unsigned long long)stack, STACK_BLOCK_PAGES);
     }
 }
 
 /* Choose the next ready thread after the current one (round robin) and switch to it. Returns when the calling
- * thread is chosen again. Interrupts must be off. */
-static void schedule(void)
+ * thread is chosen again. Interrupts must be off, the big kernel lock held (see SCHED_LOCKED above), the scheduler lock held on entry: it
+ * is let go before this returns (by whichever thread comes out of the switch: see the lock's comment) and is NOT held on return. */
+static void schedule_locked(void)
 {
     Task *old = tk(CUR);
     unsigned long long now = timer_us();
@@ -275,6 +336,7 @@ static void schedule(void)
     if (next == CUR)
     {
         old->state = TASK_RUNNING;
+        sched_unlock();
         reap(); /* nobody else to run, but a thread that just ended can be cleaned up */
         return;
     }
@@ -307,14 +369,22 @@ static void schedule(void)
     SWITCHES++;
     SLICE_LEFT = slice_of(next); /* the thread that comes in gets a whole slice */
     task_ctx_switch(&old->rsp, tk(next)->rsp);
+    sched_unlock(); /* the switch is complete: the thread that left has saved its stack pointer. (Taken by the processor we run on now.) */
     fpu_enter(tk(CUR)); /* we are the thread that was chosen to continue: its floating point state now */
     reap();
 }
 
+static void schedule(void)
+{
+    sched_lock();
+    schedule_locked();
+}
+
 /* The first code of every new thread: task_ctx_switch "returns" here, with interrupts off (the switch ran inside
- * schedule()). */
+ * schedule()) and the scheduler lock held by the processor that switched to us. */
 static void task_main(void)
 {
+    sched_unlock();
     fpu_enter(tk(CUR)); /* a new thread never returns from schedule(), so it takes its floating point state here */
     reap(); /* a thread that came here instead of returning from schedule() must free dead threads too */
     if (tk(CUR)->flags & TASK_PREEMPTIBLE)
@@ -339,13 +409,15 @@ static int add_chunk(void)
         c->t[i].inherit = -1;
     }
     unsigned long long irq = irq_save();
+    sched_lock();
     int idx = CAP / TASK_CHUNK;
     int taken = DIR[idx] != 0;
     if (!taken)
     {
         DIR[idx] = c;
-        CAP += TASK_CHUNK;
+        __atomic_store_n(&CAP, CAP + TASK_CHUNK, __ATOMIC_RELEASE); /* after DIR: whoever reads CAP may use the new slots */
     }
+    sched_unlock();
     irq_restore(irq);
     if (taken) /* another create was faster: give ours back */
     {
@@ -432,7 +504,11 @@ void task_exec_replace(AddressSpace *as, const char *name)
 {
     Task *t = tk(CUR);
     AddressSpace *old = t->as;
+    unsigned long long irq = irq_save();
+    sched_lock(); /* `as` decides which processors may run this thread (eligible) */
     t->as = as;
+    sched_unlock();
+    irq_restore(irq);
     aspace_switch(as); /* the kernel half is the same in both: this code and its stack stay valid */
     ACTIVE_AS = as;
     aspace_destroy(old); /* no longer loaded */
@@ -449,8 +525,10 @@ int task_kill(int id)
     if (id <= 0 || id >= CAP || id == CUR || tk(id)->idle_cpu)
         return -1;
     unsigned long long irq = irq_save();
+    sched_lock();
     if (tk(id)->state == TASK_UNUSED || tk(id)->state == TASK_DEAD)
     {
+        sched_unlock();
         irq_restore(irq);
         return -1;
     }
@@ -459,10 +537,12 @@ int task_kill(int id)
         /* Running on another processor, so it is in ring 3 (we hold the big kernel lock: nobody else is in the kernel). It cannot be
          * stopped from here; its processor ends it at its next timer tick (task_tick), when it is in the kernel again. */
         tk(id)->kill_pending = 1;
+        sched_unlock();
         irq_restore(irq);
         return 0;
     }
     tk(id)->state = TASK_DEAD; /* reap() (run by the next thread that runs) frees it */
+    sched_unlock();
     irq_restore(irq);
     return 0;
 }
@@ -479,8 +559,9 @@ void task_block(void)
         return;
     }
     unsigned long long irq = irq_save();
-    tk(CUR)->state = TASK_BLOCKED;
-    schedule();
+    sched_lock();
+    tk(CUR)->state = TASK_BLOCKED; /* under the lock: a waker never sees us READY before we have left */
+    schedule_locked();
     irq_restore(irq);
 }
 
@@ -497,11 +578,13 @@ void task_wake(int id)
     if (id < 0 || id >= CAP)
         return;
     unsigned long long irq = irq_save();
-    if (tk(id)->state == TASK_BLOCKED)
-    {
+    sched_lock();
+    int woke = tk(id)->state == TASK_BLOCKED;
+    if (woke)
         tk(id)->state = TASK_READY;
+    sched_unlock();
+    if (woke)
         kick_idle_cpus();
-    }
     irq_restore(irq);
 }
 
@@ -526,6 +609,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     {
         irq = irq_save(); /* the slot search and the fill below must not be interleaved with another create */
         reap();
+        sched_lock(); /* (held to the end: nobody else can take the slot we found) */
         id = -1;
         for (int i = 1; i < CAP; i++) /* slot 0 is the main thread */
             if (tk(i)->state == TASK_UNUSED)
@@ -535,6 +619,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
             }
         if (id >= 0)
             break; /* (interrupts stay off from here to the end) */
+        sched_unlock();
         irq_restore(irq);
         if (!add_chunk()) /* every slot is in use: make room, or give up */
         {
@@ -585,6 +670,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
         t->name[n] = name[n];
     t->name[n] = 0;
     t->state = TASK_READY; /* last: from now on the scheduler may pick it */
+    sched_unlock();
     kick_idle_cpus();
     irq_restore(irq);
     return id;
@@ -603,20 +689,30 @@ int task_set_priority(int id, int prio)
     if (id < 0 || id >= CAP || prio < TASK_PRIO_MIN || prio > TASK_PRIO_MAX)
         return -1;
     unsigned long long irq = irq_save();
+    sched_lock();
     if (tk(id)->state == TASK_UNUSED || tk(id)->state == TASK_DEAD)
     {
+        sched_unlock();
         irq_restore(irq);
         return -1;
     }
     tk(id)->prio = prio;
     tk(id)->waited = 0; /* an old boost belonged to the old level */
+    sched_unlock();
     irq_restore(irq);
     return 0;
 }
 
 int task_priority(int id)
 {
-    return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD ? tk(id)->prio : -1;
+    if (id < 0 || id >= CAP)
+        return -1;
+    unsigned long long irq = irq_save();
+    sched_lock();
+    int p = tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD ? tk(id)->prio : -1;
+    sched_unlock();
+    irq_restore(irq);
+    return p;
 }
 
 int task_set_inherited(int id, int prio)
@@ -624,21 +720,31 @@ int task_set_inherited(int id, int prio)
     if (id < 0 || id >= CAP || prio < -1 || prio > TASK_PRIO_MAX)
         return -1;
     unsigned long long irq = irq_save();
+    sched_lock();
     if (tk(id)->state == TASK_UNUSED || tk(id)->state == TASK_DEAD)
     {
+        sched_unlock();
         irq_restore(irq);
         return -1;
     }
     tk(id)->inherit = prio;
+    sched_unlock();
     irq_restore(irq);
     return 0;
 }
 
 int task_effective_priority(int id)
 {
-    if (id < 0 || id >= CAP || tk(id)->state == TASK_UNUSED || tk(id)->state == TASK_DEAD)
+    if (id < 0 || id >= CAP)
         return -1;
-    return tk(id)->inherit > tk(id)->prio ? tk(id)->inherit : tk(id)->prio;
+    unsigned long long irq = irq_save();
+    sched_lock();
+    int p = -1;
+    if (tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD)
+        p = tk(id)->inherit > tk(id)->prio ? tk(id)->inherit : tk(id)->prio;
+    sched_unlock();
+    irq_restore(irq);
+    return p;
 }
 
 void task_sleep_ms(unsigned ms)
@@ -649,9 +755,10 @@ void task_sleep_ms(unsigned ms)
         return;
     }
     unsigned long long irq = irq_save();
+    sched_lock();
     tk(CUR)->wake_us = timer_us() + (unsigned long long)ms * 1000;
     tk(CUR)->state = TASK_SLEEPING;
-    schedule();
+    schedule_locked();
     irq_restore(irq);
 }
 
@@ -660,14 +767,16 @@ __attribute__((noreturn)) void task_exit(void)
     if (CUR == 0)
         __builtin_trap(); /* ending the main loop would leave nothing to run */
     irq_save(); /* never restored: this thread does not continue */
+    sched_lock();
     tk(CUR)->state = TASK_DEAD;
-    schedule(); /* never comes back: a dead thread is never chosen */
+    schedule_locked(); /* never comes back: a dead thread is never chosen */
     for (;;)
         __builtin_trap();
 }
 
 void task_tick(void)
 {
+    sched_lock();
     TICKS++;
     Task *t = tk(CUR);
     int cpu = (int)percpu_index();
@@ -684,24 +793,31 @@ void task_tick(void)
          * frame on its stack is thrown away with the rest of the thread. */
         t->kill_pending = 0;
         t->state = TASK_DEAD;
-        schedule(); /* never comes back: a dead thread is never chosen */
+        schedule_locked(); /* never comes back: a dead thread is never chosen */
         return;
     }
     if (!(t->flags & TASK_PREEMPTIBLE) || t->state != TASK_RUNNING || preempt_count > 0)
+    {
+        sched_unlock();
         return;
+    }
     /* A thread that matters more became ready (task_wake, a sleep that ended, a priority that was raised): it takes the CPU now, not
      * when the slice ends. This is the only safe place for it: task_wake can be called from code that must not be switched away from
      * (it holds interrupts off, a pipe, the console), so it only makes the thread READY and this tick, at most one millisecond later,
      * does the switch. A running thread that is not preemptible never gets here (the return above). */
     if (!better_waiting() && --SLICE_LEFT > 0)
+    {
+        sched_unlock();
         return;
+    }
     SLICE_LEFT = slice_of(CUR);
-    schedule(); /* we are in the interrupt: interrupts are off */
+    schedule_locked(); /* we are in the interrupt: interrupts are off */
 }
 
 int task_others_ready(void)
 {
     unsigned long long irq = irq_save();
+    sched_lock();
     unsigned long long now = timer_us();
     int found = 0;
     int me = (int)percpu_index();
@@ -713,6 +829,7 @@ int task_others_ready(void)
             (tk(i)->state == TASK_SLEEPING && (long long)(now - tk(i)->wake_us) >= 0))
             found = 1;
     }
+    sched_unlock();
     irq_restore(irq);
     return found;
 }
@@ -779,6 +896,7 @@ int task_register_idle(void)
     for (;;)
     {
         unsigned long long irq = irq_save();
+        sched_lock();
         for (int i = 1; i < CAP; i++)
             if (tk(i)->state == TASK_UNUSED)
             {
@@ -809,9 +927,11 @@ int task_register_idle(void)
                 t->state = TASK_RUNNING; /* the calling processor is running it right now */
                 IDLE_ID[cpu] = i;
                 CURS[cpu] = i;
+                sched_unlock();
                 irq_restore(irq);
                 return 0;
             }
+        sched_unlock();
         irq_restore(irq);
         if (!add_chunk())
             return -1;

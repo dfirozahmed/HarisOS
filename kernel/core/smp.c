@@ -512,6 +512,86 @@ int smp_selftest_tlb(void)
     return __atomic_load_n(&smp_tlb_acks, __ATOMIC_ACQUIRE) - before == (u64)n ? 0 : -1;
 }
 
+/* ---- scheduler lock self test: threads created and re-prioritised by all processors at once, WITHOUT the big kernel lock ---- */
+#define SCHED_TEST_ROUNDS 24
+static volatile u64 SCHED_SEEN[4096 / 64]; /* bit n: slot n was handed out in this test */
+static volatile int SCHED_BAD;
+static int SCHED_IDS[SMP_MAX_CPUS][SCHED_TEST_ROUNDS];
+
+static void sched_test_thread(void *arg) { (void)arg; } /* never runs: nothing schedules while the test is on */
+
+static void sched_test_job(void)
+{
+    unsigned me = percpu_index();
+    for (int r = 0; r < SCHED_TEST_ROUNDS; r++)
+    {
+        int id = task_create("SCHEDTEST", sched_test_thread, 0);
+        SCHED_IDS[me][r] = id;
+        if (id < 0)
+        {
+            __atomic_fetch_add(&SCHED_BAD, 1, __ATOMIC_RELAXED);
+            continue;
+        }
+        u64 bit = 1ULL << (id % 64);
+        if (__atomic_fetch_or(&SCHED_SEEN[id / 64], bit, __ATOMIC_ACQ_REL) & bit)
+            __atomic_fetch_add(&SCHED_BAD, 1, __ATOMIC_RELAXED); /* the same slot was given to two creators */
+        if (task_set_priority(id, 1) != 0 || task_priority(id) != 1)
+            __atomic_fetch_add(&SCHED_BAD, 1, __ATOMIC_RELAXED);
+        task_wake(id); /* not blocked: must change nothing */
+        if (task_state(id) != TASK_READY)
+            __atomic_fetch_add(&SCHED_BAD, 1, __ATOMIC_RELAXED);
+    }
+}
+
+int smp_selftest_sched(void)
+{
+    int n = 0, before = task_count();
+    SCHED_BAD = 0;
+    for (int w = 0; w < 4096 / 64; w++)
+        SCHED_SEEN[w] = 0;
+    for (int k = 1; k < TOTAL; k++)
+    {
+        for (int r = 0; r < SCHED_TEST_ROUNDS; r++)
+            SCHED_IDS[k][r] = -1;
+        if (smp_run_on(k, sched_test_job) == 0)
+            n++;
+    }
+    if (!n)
+        return 1;
+    for (int r = 0; r < SCHED_TEST_ROUNDS; r++)
+        SCHED_IDS[0][r] = -1;
+    sched_test_job();
+    u64 t0 = timer_us();
+    int timeout = 0;
+    bkl_unlock(); /* the others work outside the big kernel lock; they must be able to get back in afterwards */
+    for (int k = 1; k < TOTAL && !timeout; k++)
+        while (CPU[k].online && !smp_job_done(k))
+            if (timer_us() - t0 > 20000000)
+            {
+                timeout = 1;
+                break;
+            }
+            else
+                __asm__ volatile("pause");
+    bkl_lock();
+    if (timeout)
+        return -2;
+    int created = 0;
+    for (int k = 0; k < TOTAL; k++)
+        for (int r = 0; r < SCHED_TEST_ROUNDS; r++)
+            if (SCHED_IDS[k][r] >= 0)
+            {
+                created++;
+                task_kill(SCHED_IDS[k][r]); /* not started yet: dead at once, and the next switch frees it */
+            }
+    task_yield();
+    if (SCHED_BAD)
+        return -1;
+    if (task_count() != before)
+        return -3; /* a thread was lost or is still there */
+    return created == TOTAL * SCHED_TEST_ROUNDS ? 0 : -4;
+}
+
 int smp_selftest_spinlock(void)
 {
     int n = 0;
@@ -638,6 +718,7 @@ int smp_job_done(int cpu)
 int smp_selftest_spinlock(void) { return 1; }
 int smp_selftest_alloc(void) { return 1; }
 int smp_selftest_tlb(void) { return 1; }
+int smp_selftest_sched(void) { return 1; }
 void smp_tlb_flush_others(void) {}
 int smp_stop_others(void) { return 0; }
 void smp_wake_idle(void) {}

@@ -96,6 +96,9 @@ void smp_wake_idle(void);
 /* A fatal error (fault.c): send a non-maskable interrupt to every other online processor; fault.c's NMI handler halts it. Uses no lock and
  * no per-CPU data, and works while interrupts are off. Returns how many were sent. */
 int smp_stop_others(void);
+/* Boot self test of the scheduler lock (task.c): every processor creates threads, sets and reads their priority and wakes them, all at once
+ * and outside the big kernel lock; no slot may be handed out twice, no thread lost. 0 = ok, 1 = skipped, negative = failed. */
+int smp_selftest_sched(void);
 /* Boot self test: one request, every application processor must answer it. 0 = ok, 1 = skipped (no application processor), negative = failed. */
 int smp_selftest_tlb(void);
 
