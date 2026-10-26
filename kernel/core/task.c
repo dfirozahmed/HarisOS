@@ -876,7 +876,13 @@ void task_cpu_ticks(int cpu, unsigned long long *busy, unsigned long long *all)
 {
     int ok = cpu >= 0 && cpu < SMP_MAX_CPUS;
     *busy = ok ? CPU_TICKS_BUSY[cpu] : 0;
-    *all = ok ? CPU_TICKS_ALL[cpu] : 0;
+    /* An application processor that sleeps answers its timer ticks without calling task_tick (idle.c), so its own count of interrupts is the
+     * total; the ticks that found it busy all went through task_tick. */
+    *all = !ok ? 0 : CPU_TICKS_ALL[cpu];
+#ifndef HARIS_HOST
+    if (ok && cpu > 0)
+        *all = smp_cpu_ticks(cpu);
+#endif
 }
 
 unsigned long long task_run_ticks(int id) { return id >= 0 && id < CAP && !tk(id)->idle_cpu ? tk(id)->run_ticks : 0; }
@@ -936,6 +942,32 @@ int task_register_idle(void)
         if (!add_chunk())
             return -1;
     }
+}
+
+/* 1 if an application processor's idle loop should go into the kernel (take the big kernel lock, task_cpu_idle): a user thread it may run is
+ * READY, or asleep with its time come. It looks with the scheduler lock alone, interrupts off, so a processor with nothing to do never
+ * touches the big kernel lock. A processor that has not registered its idle context yet always says yes. A wrong "yes" costs one visit to
+ * the kernel; a wrong "no" cannot happen for a thread that was READY before the call (the lock orders it after the wake-up), and one that
+ * becomes READY later sends smp_wake_idle to every processor that sleeps. */
+int task_cpu_has_work(void)
+{
+    int cpu = (int)percpu_index();
+    if (cpu < 1 || !IDLE_ID[cpu])
+        return 1;
+    unsigned long long irq = irq_save();
+    sched_lock();
+    unsigned long long now = timer_us();
+    int found = 0;
+    for (int i = 0; i < CAP && !found; i++)
+    {
+        if (!eligible(i, cpu))
+            continue;
+        if (tk(i)->state == TASK_READY || (tk(i)->state == TASK_SLEEPING && (long long)(now - tk(i)->wake_us) >= 0))
+            found = 1;
+    }
+    sched_unlock();
+    irq_restore(irq);
+    return found;
 }
 
 /* The idle loop of an application processor asks: is there a user thread for me? It runs it (schedule() switches away and comes back

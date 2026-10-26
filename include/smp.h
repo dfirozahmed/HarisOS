@@ -108,5 +108,6 @@ int smp_cpu_total(void);
 int smp_cpu_online(int i);
 unsigned smp_cpu_apic_id(int i);
 unsigned long long smp_cpu_ticks(int i); /* timer interrupts processor i (an application processor) has taken, 0 for the boot processor */
+unsigned long long smp_cpu_lazy_ticks(int i); /* of those, the ticks it answered asleep without taking the big kernel lock (idle.c) */
 
 #endif

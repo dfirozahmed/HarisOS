@@ -87,6 +87,29 @@ __asm__(".text\n"
         ".p2align 4\n"
         ".globl idle_isr_timer\n"
         "idle_isr_timer:\n"
+        /* An application processor that sleeps in its idle loop (ring 0, idle flag set, no big kernel lock) only counts the tick and goes back
+         * to sleep: it does not take the lock. Its idle loop (smp.c) looks for work with the scheduler lock alone, and only a processor that
+         * finds some takes the big kernel lock. The flag stays set; the loop knows what that means. (The boot processor does not do this: its
+         * main loop polls the devices after every wake-up, which needs the lock anyway.) */
+        "    testb $3, 8(%rsp)\n"
+        "    jnz 20f\n"
+        "    cmpl $0, percpu_ready(%rip)\n"
+        "    je 20f\n"
+        "    cmpl $0, %gs:16\n"
+        "    je 20f\n"
+        "    cmpq $0, %gs:64\n"
+        "    je 20f\n"
+        "    pushq %rax\n"
+        "    pushq %rcx\n"
+        "    pushq %rdx\n"
+        "    incq %gs:8\n"
+        "    incq %gs:80\n"
+        IDLE_ASM_EOI
+        "    popq %rdx\n"
+        "    popq %rcx\n"
+        "    popq %rax\n"
+        "    iretq\n"
+        "20:\n"
         /* From ring 3: the user's GS is active, swap in the kernel's (percpu.h) and take the big kernel lock. From a processor that was
          * waiting in HLT: take the lock and stay in the kernel (bkl.h). */
         BKL_ISR_ENTER_IRQ("8")

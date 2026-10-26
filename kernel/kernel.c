@@ -612,6 +612,8 @@ void kernel_main(const BootInfo *info)
         serial_putd(c);
         serial_puts(" timer ticks now ");
         serial_putd((long long)smp_cpu_ticks(c));
+        serial_puts(", of which asleep without the big kernel lock ");
+        serial_putd((long long)smp_cpu_lazy_ticks(c));
         serial_puts("\n");
     }
 

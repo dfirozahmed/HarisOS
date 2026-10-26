@@ -297,16 +297,23 @@ static void ap_entry(u64 index)
             __atomic_store_n(&c->job_done, 1, __ATOMIC_RELEASE);
         }
 
-        bkl_lock();
-        c->pc.idle = 0;
-        if (!idle_registered && task_register_idle() == 0)
-            idle_registered = 1;
-        task_cpu_idle();
-        c->pc.idle = 1;
-        bkl_unlock();
+        /* Only a processor that has something to run takes the big kernel lock: the question is answered with the scheduler lock alone
+         * (task_cpu_has_work), so idle processors do not queue up for the kernel once a millisecond. The first round always goes in: it
+         * registers the idle context. */
+        if (!idle_registered || task_cpu_has_work())
+        {
+            bkl_lock();
+            c->pc.idle = 0;
+            if (!idle_registered && task_register_idle() == 0)
+                idle_registered = 1;
+            task_cpu_idle();
+            c->pc.idle = 1;
+            bkl_unlock();
+        }
 
-        /* Sleep until the next tick. The interrupt that wakes us finds `idle` set, takes the lock and clears it (idle.c): we are in the
-         * kernel again, so give the lock back the same way as above. */
+        /* Sleep until the next tick or until somebody wakes us (smp_wake_idle). The timer tick of a sleeping processor only counts itself
+         * and leaves `idle` set (idle.c). Any other interrupt that needs the kernel (the network card) finds `idle` set, takes the lock and
+         * clears it: we are in the kernel again, so give the lock back the same way as above. */
         __asm__ volatile("sti; hlt; cli" : : : "memory");
         if (!c->pc.idle)
         {
@@ -686,6 +693,7 @@ int smp_cpu_total(void) { return TOTAL; }
 int smp_cpu_online(int i) { return i >= 0 && i < TOTAL && CPU[i].online; }
 unsigned smp_cpu_apic_id(int i) { return (i >= 0 && i < TOTAL) ? CPU[i].pc.apic_id : 0; }
 u64 smp_cpu_ticks(int i) { return (i > 0 && i < TOTAL) ? CPU[i].pc.ticks : 0; }
+u64 smp_cpu_lazy_ticks(int i) { return (i > 0 && i < TOTAL) ? CPU[i].pc.lazy_ticks : 0; }
 
 #else
 
@@ -726,6 +734,11 @@ unsigned smp_irq_target(void) { return 0; }
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)
+{
+    (void)i;
+    return 0;
+}
+u64 smp_cpu_lazy_ticks(int i)
 {
     (void)i;
     return 0;
