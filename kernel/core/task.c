@@ -484,13 +484,24 @@ void task_block(void)
     irq_restore(irq);
 }
 
+/* A thread became READY: a processor asleep in HLT should look for it now (smp.h), not at its next timer tick. */
+static void kick_idle_cpus(void)
+{
+#ifndef HARIS_HOST
+    smp_wake_idle();
+#endif
+}
+
 void task_wake(int id)
 {
     if (id < 0 || id >= CAP)
         return;
     unsigned long long irq = irq_save();
     if (tk(id)->state == TASK_BLOCKED)
+    {
         tk(id)->state = TASK_READY;
+        kick_idle_cpus();
+    }
     irq_restore(irq);
 }
 
@@ -574,6 +585,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
         t->name[n] = name[n];
     t->name[n] = 0;
     t->state = TASK_READY; /* last: from now on the scheduler may pick it */
+    kick_idle_cpus();
     irq_restore(irq);
     return id;
 }

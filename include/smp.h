@@ -84,6 +84,10 @@ int smp_selftest_alloc(void);
  * flushes at once; one that waits for the lock flushes as soon as interrupts come back on, before it returns to ring 3. */
 void smp_tlb_flush_others(void);
 extern volatile unsigned long long smp_tlb_acks; /* flush requests answered so far, all processors together */
+/* A thread has become ready (task.c): wake every other processor that sleeps in HLT, so it looks for work now and not at its next 1 ms timer
+ * tick. The interrupt only ends the HLT (IDLE_VEC_WAKE); the idle loop then takes the big kernel lock and asks the scheduler. A processor
+ * that runs something, or has interrupts off on its way to sleep (sti; hlt wakes at once), is left alone. Kernel, any state of IF. */
+void smp_wake_idle(void);
 /* A fatal error (fault.c): send a non-maskable interrupt to every other online processor; fault.c's NMI handler halts it. Uses no lock and
  * no per-CPU data, and works while interrupts are off. Returns how many were sent. */
 int smp_stop_others(void);

@@ -22,6 +22,7 @@ int idle_ready(void);
 unsigned idle_lapic_id(void); /* the id of this processor's local APIC: where an I/O APIC line is sent */
 #define IDLE_VEC_NET 0x41 /* the interrupt vector of the network card (e1000.c); 0x40 is the timer */
 #define IDLE_VEC_TLB 0x42 /* SMP: "flush your TLB" inter-processor interrupt (smp.h: smp_tlb_flush_others) */
+#define IDLE_VEC_WAKE 0x44 /* SMP: wake a processor from HLT; no handler of its own, the IDT's default one only acknowledges (smp_wake_idle) */
 void idle_wait(void);
 /* SMP (smp.h): send an inter-processor interrupt, `icr_low` = the low half of the interrupt command register (delivery mode, level ...)
  * to the processor with that local APIC id. 0, or -1 when the APIC is unusable or does not finish sending. */

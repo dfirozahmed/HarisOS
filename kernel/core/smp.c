@@ -460,6 +460,14 @@ void smp_tlb_flush_others(void)
     }
 }
 
+void smp_wake_idle(void)
+{
+    unsigned me = idle_lapic_id();
+    for (int k = 0; k < TOTAL; k++)
+        if (CPU[k].pc.apic_id != me && __atomic_load_n(&CPU[k].online, __ATOMIC_ACQUIRE) && CPU[k].pc.idle)
+            idle_send_ipi(CPU[k].pc.apic_id, 0x4000 | IDLE_VEC_WAKE);
+}
+
 int smp_stop_others(void)
 {
     int sent = 0;
@@ -616,6 +624,7 @@ int smp_selftest_alloc(void) { return 1; }
 int smp_selftest_tlb(void) { return 1; }
 void smp_tlb_flush_others(void) {}
 int smp_stop_others(void) { return 0; }
+void smp_wake_idle(void) {}
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)
