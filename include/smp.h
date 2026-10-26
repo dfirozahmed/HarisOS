@@ -77,6 +77,16 @@ int smp_selftest_spinlock(void);
  * blocks are filled with a pattern and checked before they are freed). 0 = ok, 1 = skipped, negative = failed. */
 int smp_selftest_alloc(void);
 
+/* TLB shootdown. A processor keeps translations of its own; when the kernel changes a page table entry that other processors may have
+ * cached, it calls this (after the change, and after its own invlpg): every other online processor gets IDLE_VEC_TLB and reloads CR3
+ * and toggles CR4.PGE (all translations, global ones too). It does not wait for them: the sender holds the big kernel lock and a
+ * processor that waits for the lock has interrupts off, so waiting for an answer could deadlock. A processor in ring 3 or in HLT
+ * flushes at once; one that waits for the lock flushes as soon as interrupts come back on, before it returns to ring 3. */
+void smp_tlb_flush_others(void);
+extern volatile unsigned long long smp_tlb_acks; /* flush requests answered so far, all processors together */
+/* Boot self test: one request, every application processor must answer it. 0 = ok, 1 = skipped (no application processor), negative = failed. */
+int smp_selftest_tlb(void);
+
 int smp_install(unsigned long long code, unsigned long long data);
 int smp_start(unsigned long long code, unsigned long long data);
 int smp_cpu_total(void);

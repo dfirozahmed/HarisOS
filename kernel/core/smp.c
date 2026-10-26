@@ -447,6 +447,37 @@ int smp_selftest_alloc(void)
     return after.used_bytes == before.used_bytes && after.used_blocks == before.used_blocks ? 0 : -4;
 }
 
+/* ---- TLB shootdown (smp.h) ---- */
+volatile u64 smp_tlb_acks; /* incremented by idle_isr_tlb (idle.c) */
+
+void smp_tlb_flush_others(void)
+{
+    for (int k = 0; k < TOTAL; k++)
+    {
+        if (k == (int)percpu_index() || !__atomic_load_n(&CPU[k].online, __ATOMIC_ACQUIRE))
+            continue;
+        idle_send_ipi(CPU[k].pc.apic_id, 0x4000 | IDLE_VEC_TLB); /* fixed delivery, level assert */
+    }
+}
+
+int smp_selftest_tlb(void)
+{
+    int n = 0;
+    for (int k = 1; k < TOTAL; k++)
+        if (CPU[k].online)
+            n++;
+    if (!n)
+        return 1;
+    u64 before = __atomic_load_n(&smp_tlb_acks, __ATOMIC_ACQUIRE);
+    smp_tlb_flush_others();
+    u64 t0 = timer_us();
+    bkl_unlock(); /* a processor that waits for the lock has interrupts off and could not answer; let them in while we wait */
+    while (__atomic_load_n(&smp_tlb_acks, __ATOMIC_ACQUIRE) - before < (u64)n && timer_us() - t0 < 1000000)
+        __asm__ volatile("pause");
+    bkl_lock();
+    return __atomic_load_n(&smp_tlb_acks, __ATOMIC_ACQUIRE) - before == (u64)n ? 0 : -1;
+}
+
 int smp_selftest_spinlock(void)
 {
     int n = 0;
@@ -572,6 +603,8 @@ int smp_job_done(int cpu)
 }
 int smp_selftest_spinlock(void) { return 1; }
 int smp_selftest_alloc(void) { return 1; }
+int smp_selftest_tlb(void) { return 1; }
+void smp_tlb_flush_others(void) {}
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)

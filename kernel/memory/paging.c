@@ -1,6 +1,7 @@
 /* HarisOS page table access on the real CPU: see include/paging.h. */
 #include "paging.h"
 #include "pmm.h"
+#include "smp.h"
 
 #if defined(__x86_64__)
 
@@ -74,6 +75,7 @@ int paging_set_present(u64 virt, int present)
         return -1; /* never write the firmware's tables: they may be read-only */
     int r = paging_set_present_in((u64 *)(read_cr(3) & ADDR_MASK), virt & ~4095ULL, present, alloc_table);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory"); /* this CPU may have the old translation cached */
+    smp_tlb_flush_others(); /* kernel mappings are shared: so may the other processors (a guard page is not a guard where it is still cached) */
     return r;
 }
 

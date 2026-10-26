@@ -62,6 +62,7 @@ static unsigned PER_MS; /* LAPIC timer counts per millisecond, measured on the b
 unsigned long long idle_lapic_eoi; /* address of the LAPIC EOI register, read by the handlers */
 void idle_isr_timer(void);
 void idle_isr_net(void);
+void idle_isr_tlb(void);
 void idle_isr_other(void);
 void idle_isr_spurious(void);
 
@@ -153,6 +154,25 @@ __asm__(".text\n"
         BKL_ISR_EXIT("8")
         "    iretq\n"
         ".p2align 4\n"
+        ".globl idle_isr_tlb\n"
+        "idle_isr_tlb:\n" /* TLB flush request from another processor (smp.c). Deliberately NO big kernel lock and NO swapgs/%gs: the sender
+                           * holds the lock, and this must run on a processor that sits in ring 3 (user GS active) or in HLT. */
+        "    pushq %rax\n"
+        "    pushq %rcx\n"
+        "    movq %cr3, %rax\n"
+        "    movq %rax, %cr3\n" /* drops every non-global translation */
+        "    movq %cr4, %rax\n"
+        "    movq %rax, %rcx\n"
+        "    andq $-129, %rcx\n" /* clear CR4.PGE (bit 7) ... */
+        "    movq %rcx, %cr4\n"
+        "    movq %rax, %cr4\n" /* ... and set it again: that drops the global ones (kernel mappings) too */
+        "    lock incq smp_tlb_acks(%rip)\n"
+        "    movq idle_lapic_eoi(%rip), %rax\n"
+        "    movl $0, (%rax)\n"
+        "    popq %rcx\n"
+        "    popq %rax\n"
+        "    iretq\n"
+        ".p2align 4\n"
         ".globl idle_isr_other\n"
         "idle_isr_other:\n"
         "    pushq %rax\n"
@@ -238,6 +258,7 @@ int idle_init(void)
         idt_set(i, i < 32 ? fault_stub_table[i] : idle_isr_other);
     idt_set(VEC_TIMER, idle_isr_timer);
     idt_set(VEC_NET, idle_isr_net); /* quiet until a driver routes an I/O APIC line to it (ioapic.h) */
+    idt_set(IDLE_VEC_TLB, idle_isr_tlb);
     IDT[8].ist = 1;  /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
     IDT[2].ist = 3;  /* an NMI runs on IST3, never on the user's stack (the SYSCALL entry has a window where RSP is the user's) */
     IDT[14].ist = 2; /* so does #PF (IST2): a thread stack that overflowed into its guard page cannot take the frame */
