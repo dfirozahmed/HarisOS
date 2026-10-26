@@ -60,3 +60,9 @@ int cpuload_cpu_percent(int cpu)
 {
     return cpu >= 0 && cpu < CPULOAD_MAX_CPUS ? CPU_PERCENT[cpu] : 0;
 }
+
+int cpuload_boot_percent(void)
+{
+    int p = PERCENT + cpuload_cpu_percent(0);
+    return p > 100 ? 100 : p;
+}

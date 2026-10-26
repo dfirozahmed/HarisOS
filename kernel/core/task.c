@@ -662,7 +662,9 @@ void task_tick(void)
     CPU_TICKS_ALL[cpu]++;
     if (!t->idle_cpu)
         t->run_ticks++; /* (thread 0 also counts the ticks that end its sleep in HLT: the Task Manager shows the main loop's own figure for it) */
-    if (cpu > 0 && !t->idle_cpu) /* an application processor that runs a user thread; its idle context is the rest */
+    /* busy = running a thread other than the processor's idle: on an application processor every thread but its idle context; on the boot
+     * processor every thread but the main loop (thread 0), whose own busy share is measured in the loop (cpuload.h, cpuload_boot_percent) */
+    if (cpu > 0 ? !t->idle_cpu : CUR != 0)
         CPU_TICKS_BUSY[cpu]++;
     if (t->kill_pending && CUR != 0)
     {

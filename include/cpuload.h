@@ -26,6 +26,9 @@
 #define CPULOAD_CPU_WINDOW_TICKS 1000ULL
 void cpuload_cpu_poll(int cpu, unsigned long long busy_total, unsigned long long all_total);
 int cpuload_cpu_percent(int cpu);
+/* The boot processor's whole load: the main loop's busy share (above) plus the share of its ticks that found it running some other thread
+ * (a user process, a kernel thread: cpuload_cpu_poll(0, ...) with the busy ticks of processor 0), at most 100. */
+int cpuload_boot_percent(void);
 
 void cpuload_add_busy(unsigned long long us);
 void cpuload_poll(unsigned long long now_us);

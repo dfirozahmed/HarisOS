@@ -183,11 +183,11 @@ static int ncpus(void)
     return n ? n : 1;
 }
 
-/* the average load of the running processors in percent: the boot processor's is the main loop's busy share, the others' the share of ticks
- * that found them running a user thread (cpuload.h) */
+/* the average load of the running processors in percent: the boot processor's is the main loop's busy share plus the share of ticks that
+ * found it running another thread, the others' the share of ticks that found them running a user thread (cpuload.h) */
 static int total_cpu_percent(void)
 {
-    int sum = cpuload_percent();
+    int sum = cpuload_boot_percent();
     for (int i = 1; i < smp_cpu_total(); i++)
         if (smp_cpu_online(i))
             sum += cpuload_cpu_percent(i);
@@ -606,7 +606,7 @@ static void draw_cpu(UiRect pane)
     UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 80);
     draw_graph(g, CPU_HIST, CPU_HIST_N);
     ui_progress(ui_rect(pane.x, g.y + g.h + 10, pane.w, 12), total_cpu_percent());
-    ui_text_color(pane.x, g.y + g.h + 28, "Load = average of the processors (main loop on CPU 0, user programs on the others)", UI_TEXT_SMALL,
+    ui_text_color(pane.x, g.y + g.h + 28, "Load = average of the processors (CPU 0: main loop and its threads; the others: user programs)", UI_TEXT_SMALL,
                   t->text_dim);
 
     const CpuInfo *c = cpuinfo_get();
@@ -661,7 +661,7 @@ static void draw_cpu(UiRect pane)
         y += 22;
         for (int i = 0; i < ncpu && y + 18 <= pane.y + pane.h; i++)
         {
-            int pct = i == 0 ? cpuload_percent() : cpuload_cpu_percent(i);
+            int pct = i == 0 ? cpuload_boot_percent() : cpuload_cpu_percent(i);
             n = 0;
             line[0] = 0;
             put_str(line, &n, "CPU ");

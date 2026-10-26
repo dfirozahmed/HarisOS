@@ -671,12 +671,19 @@ void kernel_main(const BootInfo *info)
         if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
             worked = 1;
         int others = task_others_ready();
+        unsigned long long yielded_us = 0; /* time the other threads had the processor during this pass */
         if (others)
+        {
+            unsigned long long y0 = timer_us();
             task_yield(); /* preemptible kernel threads run until their slice ends or they yield (see task.h) */
+            yielded_us = timer_us() - y0;
+        }
         unsigned long long pass_end = timer_us();
-        cpuload_add_busy(pass_end - pass_start); /* everything except the sleep below is CPU time (see cpuload.h) */
+        /* everything except the sleep below is CPU time (see cpuload.h); what other threads used while we yielded is not the main loop's: the
+         * timer ticks count it for the boot processor (task.c), and cpuload_boot_percent adds the two */
+        cpuload_add_busy(pass_end - pass_start - yielded_us);
         cpuload_poll(pass_end);
-        for (int c = 1; c < smp_cpu_total(); c++) /* the application processors: their busy ticks (see cpuload.h) */
+        for (int c = 0; c < smp_cpu_total(); c++) /* every processor: its busy ticks (see cpuload.h) */
         {
             unsigned long long busy, all;
             task_cpu_ticks(c, &busy, &all);
