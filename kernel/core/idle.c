@@ -60,6 +60,21 @@ static unsigned PER_MS; /* LAPIC timer counts per millisecond, measured on the b
  *   spurious  : return without EOI (the APIC says none is in service)
  * A CPU exception (vectors 0..31) is a bug: fault.c reports it and stops (see fault.h). */
 unsigned long long idle_lapic_eoi; /* address of the LAPIC EOI register, read by the handlers */
+unsigned idle_x2apic;              /* 1 = the local APIC is in x2APIC mode: registers are MSRs (0x800 + offset / 16), no MMIO, 32-bit ids */
+
+/* Acknowledge the interrupt being served (clobbers rax, rcx, rdx; uses the local labels 1 and 2). xAPIC: write 0 to the EOI register in
+ * memory. x2APIC: the same register is MSR 0x80B. */
+#define IDLE_ASM_EOI                         \
+    "    cmpl $0, idle_x2apic(%rip)\n"       \
+    "    jne 1f\n"                           \
+    "    movq idle_lapic_eoi(%rip), %rax\n"  \
+    "    movl $0, (%rax)\n"                  \
+    "    jmp 2f\n"                           \
+    "1:  movl $0x80B, %ecx\n"                \
+    "    xorl %eax, %eax\n"                  \
+    "    xorl %edx, %edx\n"                  \
+    "    wrmsr\n"                            \
+    "2:\n"
 void idle_isr_timer(void);
 void idle_isr_net(void);
 void idle_isr_tlb(void);
@@ -93,8 +108,7 @@ __asm__(".text\n"
         "    je 3f\n"
         "    incq %gs:8\n"
         "3:\n"
-        "    movq idle_lapic_eoi(%rip), %rax\n" /* EOI first: task_tick may not come back for a long time */
-        "    movl $0, (%rax)\n"
+        IDLE_ASM_EOI /* EOI first: task_tick may not come back for a long time */
         "    cld\n"
         "    call task_tick\n"
         "    leaq 128(%rsp), %rcx\n" /* the frame: r11 is the lowest word */
@@ -135,8 +149,7 @@ __asm__(".text\n"
         "    movups %xmm5, 112(%rsp)\n"
         "    cld\n"
         "    call net_irq_handler\n"
-        "    movq idle_lapic_eoi(%rip), %rax\n" /* the line is level triggered: the EOI comes after the card let go of it */
-        "    movl $0, (%rax)\n"
+        IDLE_ASM_EOI /* the line is level triggered: the EOI comes after the card let go of it */
         "    movups 32(%rsp), %xmm0\n"
         "    movups 48(%rsp), %xmm1\n"
         "    movups 64(%rsp), %xmm2\n"
@@ -167,8 +180,9 @@ __asm__(".text\n"
         "    movq %rcx, %cr4\n"
         "    movq %rax, %cr4\n" /* ... and set it again: that drops the global ones (kernel mappings) too */
         "    lock incq smp_tlb_acks(%rip)\n"
-        "    movq idle_lapic_eoi(%rip), %rax\n"
-        "    movl $0, (%rax)\n"
+        "    pushq %rdx\n" /* (the x2APIC EOI is a wrmsr: ecx, edx) */
+        IDLE_ASM_EOI
+        "    popq %rdx\n"
         "    popq %rcx\n"
         "    popq %rax\n"
         "    iretq\n"
@@ -176,8 +190,11 @@ __asm__(".text\n"
         ".globl idle_isr_other\n"
         "idle_isr_other:\n"
         "    pushq %rax\n"
-        "    movq idle_lapic_eoi(%rip), %rax\n"
-        "    movl $0, (%rax)\n"
+        "    pushq %rcx\n"
+        "    pushq %rdx\n"
+        IDLE_ASM_EOI
+        "    popq %rdx\n"
+        "    popq %rcx\n"
         "    popq %rax\n"
         "    iretq\n"
         ".p2align 4\n"
@@ -197,8 +214,16 @@ static void wrmsr(unsigned msr, unsigned long long v)
     __asm__ volatile("wrmsr" : : "c"(msr), "a"((unsigned)v), "d"((unsigned)(v >> 32)));
 }
 
-static unsigned lapic_read(unsigned reg) { return LAPIC[reg / 4]; }
-static void lapic_write(unsigned reg, unsigned v) { LAPIC[reg / 4] = v; }
+/* A register by its xAPIC offset. In x2APIC mode the same register is the MSR 0x800 + offset / 16 (the interrupt command register is the one
+ * exception, a single 64-bit MSR: idle_send_ipi). */
+static unsigned lapic_read(unsigned reg) { return idle_x2apic ? (unsigned)rdmsr(0x800 + reg / 16) : LAPIC[reg / 4]; }
+static void lapic_write(unsigned reg, unsigned v)
+{
+    if (idle_x2apic)
+        wrmsr(0x800 + reg / 16, v);
+    else
+        LAPIC[reg / 4] = v;
+}
 
 static void idt_set(int vec, void (*handler)(void))
 {
@@ -244,11 +269,11 @@ int idle_init(void)
 
     unsigned long long base = rdmsr(MSR_APIC_BASE);
     if (base & APIC_BASE_X2APIC)
-        return -1; /* x2APIC mode uses MSRs instead of MMIO: not supported here */
-    if (!(base & APIC_BASE_ENABLE))
+        idle_x2apic = 1; /* the firmware switched to x2APIC (it must when a processor has an id above 254): MSRs instead of MMIO */
+    else if (!(base & APIC_BASE_ENABLE))
         wrmsr(MSR_APIC_BASE, base | APIC_BASE_ENABLE);
     unsigned long long addr = base & 0xFFFFFFFFFF000ULL;
-    if (!addr)
+    if (!addr && !idle_x2apic)
         return -1;
     LAPIC = (volatile unsigned *)addr;
     idle_lapic_eoi = addr + LAPIC_EOI;
@@ -291,12 +316,22 @@ int idle_init(void)
 
 int idle_ready(void) { return READY; }
 
-unsigned idle_lapic_id(void) { return READY ? lapic_read(0x20) >> 24 : 0; }
+unsigned idle_lapic_id(void) { return READY ? (idle_x2apic ? lapic_read(0x20) : lapic_read(0x20) >> 24) : 0; }
+
+int idle_is_x2apic(void) { return idle_x2apic != 0; }
 
 int idle_send_ipi(unsigned apic_id, unsigned icr_low)
 {
     if (!READY)
         return -1;
+    if (idle_x2apic)
+    {
+        /* One 64-bit MSR: the 32-bit destination in the high half. There is no delivery status bit; the write itself is the send. */
+        wrmsr(0x830, ((unsigned long long)apic_id << 32) | icr_low);
+        return 0;
+    }
+    if (apic_id > 0xFF)
+        return -1; /* xAPIC: the destination field has 8 bits; an id above that would reach another processor */
     /* bit 12 of the low half: delivery status, 1 while the previous IPI is still being sent */
     for (int i = 0; lapic_read(0x300) & (1u << 12); i++)
         if (i > 1000000)
@@ -312,6 +347,12 @@ int idle_send_ipi(unsigned apic_id, unsigned icr_low)
 void idle_ap_init(void)
 {
     idt_load();
+    if (idle_x2apic)
+    {
+        /* INIT put this processor's APIC back into xAPIC mode: switch it to x2APIC like the boot processor's before touching any register. */
+        unsigned long long base = rdmsr(MSR_APIC_BASE);
+        wrmsr(MSR_APIC_BASE, base | APIC_BASE_ENABLE | APIC_BASE_X2APIC);
+    }
     lapic_write(LAPIC_TPR, 0);
     lapic_write(LAPIC_SVR, 0x100 | VEC_SPURIOUS);
 
@@ -327,6 +368,11 @@ void idle_send_self_nmi(void)
         return;
     /* Interrupt command register: delivery mode NMI (100b at bit 8), level assert (bit 14), destination shorthand
      * "self" (01b at bit 18). Writing the low half sends it. */
+    if (idle_x2apic)
+    {
+        wrmsr(0x830, (1u << 18) | (1u << 14) | (4u << 8));
+        return;
+    }
     lapic_write(0x310, 0);
     lapic_write(0x300, (1u << 18) | (1u << 14) | (4u << 8));
 }
@@ -362,6 +408,7 @@ void idle_wait(void)
 
 int idle_init(void) { return -1; }
 int idle_ready(void) { return 0; }
+int idle_is_x2apic(void) { return 0; }
 unsigned idle_lapic_id(void) { return 0; }
 int idle_send_ipi(unsigned apic_id, unsigned icr_low)
 {

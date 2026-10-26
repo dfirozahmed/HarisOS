@@ -14,6 +14,19 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void)
             ; /* long enough for several 1 ms timer interrupts while the user GS is active */
         sys_yield();
     }
+    /* SYS_CLOCK is answered without the big kernel lock (syscall.c): with the GS base cleared, on whichever processor this runs, the time
+     * must still never go backwards. */
+    long long last = sys_clock();
+    for (unsigned i = 0; i < 300000u; i++)
+    {
+        long long now = sys_clock();
+        if (now < last)
+        {
+            print("gstest: the clock went backwards\n");
+            sys_exit(2);
+        }
+        last = now;
+    }
     print("gstest: ok\n");
     sys_exit(0);
 }

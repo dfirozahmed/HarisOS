@@ -22,7 +22,7 @@
 #ifndef HARIS_SMP_H
 #define HARIS_SMP_H
 
-#define SMP_MAX_CPUS 16 /* boot processor included; more in the MADT are left asleep */
+#define SMP_MAX_CPUS 32 /* boot processor included; more in the MADT are left asleep. 32: the per-thread "has run on" masks (task_cpu_mask) are 32 bits */
 #define SMP_STACK_SIZE 16384
 #define SMP_DATA_PAGES 4
 
@@ -50,8 +50,8 @@ typedef struct
 
 /* ---- pure functions (host-tested) ---- */
 /* The APIC ids of the processors to start: `apic_ids` (n of them, from the MADT) without the boot processor, duplicates and ids
- * above 255 (xAPIC ids are 8 bits), at most `max`. Returns how many were written to `out`. */
-int smp_pick_aps(const unsigned *apic_ids, int n, unsigned bsp_id, unsigned *out, int max);
+ * above `max_id` (255 in xAPIC mode, where an id has 8 bits; 0xFFFFFFFE in x2APIC mode), at most `max`. Returns how many were written to `out`. */
+int smp_pick_aps(const unsigned *apic_ids, int n, unsigned bsp_id, unsigned max_id, unsigned *out, int max);
 /* Write the fields of the trampoline page `img` (SMP_IMAGE_SIZE bytes, code already copied in): pm32_off / lm64_off are the offsets
  * of the 32-bit and 64-bit entry points inside the page. */
 void smp_patch_image(unsigned char *img, unsigned code_phys, unsigned data_phys, unsigned pml4_phys, unsigned pm32_off,
@@ -84,6 +84,11 @@ int smp_selftest_alloc(void);
  * flushes at once; one that waits for the lock flushes as soon as interrupts come back on, before it returns to ring 3. */
 void smp_tlb_flush_others(void);
 extern volatile unsigned long long smp_tlb_acks; /* flush requests answered so far, all processors together */
+/* Which processor should take the interrupts of the next device: the local APIC id to give ioapic_route. Application processors in turn
+ * (the boot processor runs the desktop and the polling loop; an interrupt there only costs it time), the boot processor itself when there
+ * is no application processor usable. Only ids up to 255: an I/O APIC destination has 8 bits. The handler runs with the big kernel lock
+ * like every other kernel code, so it can be on any processor. */
+unsigned smp_irq_target(void);
 /* A thread has become ready (task.c): wake every other processor that sleeps in HLT, so it looks for work now and not at its next 1 ms timer
  * tick. The interrupt only ends the HLT (IDLE_VEC_WAKE); the idle loop then takes the big kernel lock and asks the scheduler. A processor
  * that runs something, or has interrupts off on its way to sleep (sti; hlt wakes at once), is left alone. Kernel, any state of IF. */

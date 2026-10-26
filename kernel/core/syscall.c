@@ -23,9 +23,11 @@
 
 typedef unsigned long long ull;
 
-static ull COUNT;
+static ull COUNT;      /* atomic: the calls that run without the big kernel lock count themselves too */
+static ull FAST_COUNT; /* how many of them did */
 
-ull syscall_count(void) { return COUNT; }
+ull syscall_count(void) { return __atomic_load_n(&COUNT, __ATOMIC_RELAXED); }
+ull syscall_fast_count(void) { return __atomic_load_n(&FAST_COUNT, __ATOMIC_RELAXED); }
 
 /* A signal with a handler arrived while this process slept in a system call: the call gives up (-1) so that the handler can run at its
  * return. */
@@ -1859,7 +1861,7 @@ static long long sys_brk(const SyscallFrame *f)
 
 static long long dispatch_call(SyscallFrame *f)
 {
-    COUNT++;
+    __atomic_fetch_add(&COUNT, 1, __ATOMIC_RELAXED);
     switch (f->rax)
     {
     case SYS_WRITE:
@@ -2026,6 +2028,22 @@ typedef unsigned long long u64;
 #define MSR_SFMASK 0xC0000084
 #define EFER_SCE 1ULL
 
+#define SYSCALL_STR_(x) #x
+#define SYSCALL_STR(x) SYSCALL_STR_(x)
+
+/* The system calls that run without the big kernel lock (syscall_entry decides by the call number before it takes it): only SYS_CLOCK for
+ * now, which reads the processor's time stamp counter and constants that never change after boot. Not for anything that reaches the
+ * process or thread tables, a device or a user pointer: those need the lock (bkl.h). Interrupts are off, the stack is this thread's kernel
+ * stack. Returns the result. */
+long long syscall_fast(SyscallFrame *f);
+long long syscall_fast(SyscallFrame *f)
+{
+    (void)f;
+    __atomic_fetch_add(&COUNT, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&FAST_COUNT, 1, __ATOMIC_RELAXED);
+    return (long long)timer_ms();
+}
+
 /* RFLAGS bits cleared on entry: IF (no interrupts until we are back), TF, DF (the C code expects it clear), NT, AC. */
 #define SYSCALL_FLAG_MASK 0x44700ULL
 
@@ -2055,7 +2073,15 @@ __asm__(".text\n"
         ".globl syscall_entry\n"
         "syscall_entry:\n"
         "    swapgs\n" /* SYSCALL leaves GS alone: swap in the kernel's per-CPU base (percpu.h); the user's waits in IA32_KERNEL_GS_BASE */
+        /* A call that touches no kernel state but the clock does not need the big kernel lock (syscall_fast): the processor flags that in its
+         * own record (gs:72) so that the exits below leave the lock alone. */
+        "    cmpq $" SYSCALL_STR(SYS_CLOCK) ", %rax\n"
+        "    jne 10f\n"
+        "    movq $1, %gs:72\n"
+        "    jmp 11f\n"
+        "10:\n"
         BKL_ASM_LOCK /* from here on this processor is the one in the kernel (bkl.h); no register is touched: rax, rcx and r11 are live */
+        "11:\n"
         "    movq %rsp, %gs:32\n" /* per-CPU (percpu.h): another processor may be in its own SYSCALL at the same time */
         "    movq %gs:24, %rsp\n"
         "    pushq %gs:32\n"
@@ -2077,7 +2103,12 @@ __asm__(".text\n"
         "    movups %xmm4, 96(%rsp)\n"
         "    movups %xmm5, 112(%rsp)\n"
         "    cld\n"
+        "    cmpq $0, %gs:72\n"
+        "    jne 12f\n"
         "    call syscall_dispatch\n"
+        "    jmp 13f\n"
+        "12: call syscall_fast\n"
+        "13:\n"
         "    movups 32(%rsp), %xmm0\n"
         "    movups 48(%rsp), %xmm1\n"
         "    movups 64(%rsp), %xmm2\n"
@@ -2104,10 +2135,19 @@ __asm__(".text\n"
         "    popq %rcx\n"
         "    popq %r11\n"
         "    popq %rsp\n" /* the user's stack again */
+        "    cmpq $0, %gs:72\n"
+        "    jne 14f\n"
         BKL_ASM_UNLOCK
+        "    jmp 15f\n"
+        "14: movq $0, %gs:72\n" /* a call that did not take the lock has nothing to give back */
+        "15:\n"
         "    swapgs\n"
         "    sysretq\n"
-        "2:  movq $-1, %rcx\n"
+        "2:  cmpq $0, %gs:72\n" /* a program that ends here has to be ended by a processor that holds the lock */
+        "    je 16f\n"
+        "    movq $0, %gs:72\n"
+        BKL_ASM_LOCK
+        "16: movq $-1, %rcx\n"
         "    subq $32, %rsp\n"
         "    call process_exit\n"
         "3:  hlt\n"

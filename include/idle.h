@@ -11,7 +11,10 @@
  *
  * The tick also calls task_tick() (task.h), which is how a preemptible kernel thread loses the CPU.
  *
- * If the local APIC cannot be used (missing, or already in x2APIC mode) idle_init() returns -1
+ * A local APIC that the firmware left in x2APIC mode is used as it is (registers through MSRs, 32-bit ids); the other processors are
+ * switched to it too. The kernel never switches to x2APIC by itself.
+ *
+ * If the local APIC cannot be used (missing) idle_init() returns -1
  * and idle_wait() only does "pause": everything works as before, just without the sleep.
  * ============================================================ */
 #ifndef HARIS_IDLE_H
@@ -19,6 +22,7 @@
 
 int idle_init(void);
 int idle_ready(void);
+int idle_is_x2apic(void); /* 1 when the local APICs run in x2APIC mode (32-bit ids; ids above 255 cannot be used with an I/O APIC) */
 unsigned idle_lapic_id(void); /* the id of this processor's local APIC: where an I/O APIC line is sent */
 #define IDLE_VEC_NET 0x41 /* the interrupt vector of the network card (e1000.c); 0x40 is the timer */
 #define IDLE_VEC_TLB 0x42 /* SMP: "flush your TLB" inter-processor interrupt (smp.h: smp_tlb_flush_others) */

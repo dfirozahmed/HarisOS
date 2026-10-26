@@ -389,10 +389,13 @@ void fault_dispatch(FaultFrame *f)
             for (;;)
                 __asm__ volatile("cli; hlt");
         }
-        NMI_COUNT++;
+        /* Any processor can take one, so the count is atomic. NMI_OWN_STACK is only meaningful for the boot processor's NMI_STACK: an
+         * application processor's NMI runs on its own IST3 stack (smp.c), which is not this array, so only the boot processor sets it. */
+        unsigned n = __atomic_add_fetch(&NMI_COUNT, 1, __ATOMIC_RELAXED);
         unsigned long long sp = (unsigned long long)f;
-        NMI_OWN_STACK = sp >= (unsigned long long)NMI_STACK && sp < (unsigned long long)(NMI_STACK + sizeof(NMI_STACK));
-        if (NMI_COUNT <= 3)
+        if (smp_cpu_total() == 1 || idle_lapic_id() == smp_cpu_apic_id(0))
+            NMI_OWN_STACK = sp >= (unsigned long long)NMI_STACK && sp < (unsigned long long)(NMI_STACK + sizeof(NMI_STACK));
+        if (n <= 3)
             serial_puts("HARISOS: NMI\n");
         return;
     }

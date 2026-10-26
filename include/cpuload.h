@@ -22,7 +22,7 @@
  *
  *   cpuload_cpu_poll(cpu, busy_total, all_total);   now and then (the main loop does it every pass)
  *   cpuload_cpu_percent(cpu);                        0..100 of the last finished window, 0 before the first */
-#define CPULOAD_MAX_CPUS 16
+#define CPULOAD_MAX_CPUS 32
 #define CPULOAD_CPU_WINDOW_TICKS 1000ULL
 void cpuload_cpu_poll(int cpu, unsigned long long busy_total, unsigned long long all_total);
 int cpuload_cpu_percent(int cpu);

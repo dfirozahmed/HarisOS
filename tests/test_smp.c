@@ -16,13 +16,16 @@ int main(void)
     /* processor list: the boot processor, duplicates and ids that do not fit in 8 bits are left out */
     unsigned ids[] = {0, 1, 2, 2, 3, 300, 5};
     unsigned out[8];
-    CHECK(smp_pick_aps(ids, 7, 0, out, 8) == 4);
+    CHECK(smp_pick_aps(ids, 7, 0, 0xFF, out, 8) == 4);
     CHECK(out[0] == 1 && out[1] == 2 && out[2] == 3 && out[3] == 5);
-    CHECK(smp_pick_aps(ids, 7, 2, out, 8) == 4 && out[0] == 0 && out[1] == 1 && out[2] == 3);
-    CHECK(smp_pick_aps(ids, 7, 0, out, 2) == 2); /* the limit */
-    CHECK(smp_pick_aps(ids, 0, 0, out, 8) == 0);
+    CHECK(smp_pick_aps(ids, 7, 2, 0xFF, out, 8) == 4 && out[0] == 0 && out[1] == 1 && out[2] == 3);
+    CHECK(smp_pick_aps(ids, 7, 0, 0xFF, out, 2) == 2); /* the limit */
+    CHECK(smp_pick_aps(ids, 0, 0, 0xFF, out, 8) == 0);
+    CHECK(smp_pick_aps(ids, 7, 0, 0xFFFFFFFEu, out, 8) == 5 && out[3] == 300 && out[4] == 5); /* x2APIC: ids above 255 are fine */
+    unsigned big[] = {0, 1, 0xFFFFFFFFu};
+    CHECK(smp_pick_aps(big, 3, 0, 0xFFFFFFFEu, out, 8) == 1); /* 0xFFFFFFFF is the broadcast id, not a processor */
     unsigned one[] = {4};
-    CHECK(smp_pick_aps(one, 1, 4, out, 8) == 0); /* only the boot processor */
+    CHECK(smp_pick_aps(one, 1, 4, 0xFF, out, 8) == 0); /* only the boot processor */
 
     /* the patched page */
     unsigned char img[SMP_IMAGE_SIZE];

@@ -566,6 +566,11 @@ void kernel_main(const BootInfo *info)
         }
 #if HARIS_BOOT_SELFTEST /* slow: runs a dozen test programs while the other processors take their share of the threads */
         smp_stress_programs();
+        serial_puts("HARISOS: SMP: system calls without the big kernel lock: ");
+        serial_putd((long long)syscall_fast_count());
+        serial_puts(" of ");
+        serial_putd((long long)syscall_count());
+        serial_puts("\n");
 #endif
     }
 

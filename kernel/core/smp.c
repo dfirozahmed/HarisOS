@@ -22,13 +22,13 @@ static void put64(u8 *p, u64 v)
     put32(p + 4, (unsigned)(v >> 32));
 }
 
-int smp_pick_aps(const unsigned *apic_ids, int n, unsigned bsp_id, unsigned *out, int max)
+int smp_pick_aps(const unsigned *apic_ids, int n, unsigned bsp_id, unsigned max_id, unsigned *out, int max)
 {
     int count = 0;
     for (int i = 0; i < n && count < max; i++)
     {
         unsigned id = apic_ids[i];
-        if (id == bsp_id || id > 0xFF)
+        if (id == bsp_id || id > max_id)
             continue;
         int seen = 0;
         for (int j = 0; j < count; j++)
@@ -460,6 +460,22 @@ void smp_tlb_flush_others(void)
     }
 }
 
+unsigned smp_irq_target(void)
+{
+    static unsigned next;
+    int aps = 0;
+    for (int k = 1; k < TOTAL; k++)
+        if (CPU[k].online && CPU[k].pc.apic_id <= 0xFF) /* an I/O APIC destination has 8 bits */
+            aps++;
+    if (!aps)
+        return CPU[0].pc.apic_id;
+    unsigned want = __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED) % (unsigned)aps;
+    for (int k = 1; k < TOTAL; k++)
+        if (CPU[k].online && CPU[k].pc.apic_id <= 0xFF && want-- == 0)
+            return CPU[k].pc.apic_id;
+    return CPU[0].pc.apic_id;
+}
+
 void smp_wake_idle(void)
 {
     unsigned me = idle_lapic_id();
@@ -535,7 +551,7 @@ int smp_start(u64 code, u64 data)
     for (int i = 0; i < n; i++)
         ids[i] = acpi_cpu_apic_id(i);
     unsigned bsp = idle_lapic_id();
-    int count = smp_pick_aps(ids, n, bsp, aps, SMP_MAX_CPUS - 1);
+    int count = smp_pick_aps(ids, n, bsp, idle_is_x2apic() ? 0xFFFFFFFEu : 0xFFu, aps, SMP_MAX_CPUS - 1);
 
     CPU[0].pc.apic_id = bsp;
     CPU[0].lapic_id = bsp;
@@ -625,6 +641,7 @@ int smp_selftest_tlb(void) { return 1; }
 void smp_tlb_flush_others(void) {}
 int smp_stop_others(void) { return 0; }
 void smp_wake_idle(void) {}
+unsigned smp_irq_target(void) { return 0; }
 int smp_cpu_total(void) { return 1; }
 int smp_cpu_online(int i) { return i == 0; }
 unsigned smp_cpu_apic_id(int i)

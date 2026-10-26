@@ -12,6 +12,7 @@
 #include "nic.h"
 #include "pci.h"
 #include "pmm.h"
+#include "smp.h"
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -304,6 +305,7 @@ void net_irq_handler(void)
     {
         IRQ_COUNT++;
         IRQ_FLAG = 1;
+        smp_wake_idle(); /* the poller that takes the flag (the main loop) may sleep on another processor: end its sleep now, not at the next tick */
     }
     else if (++IRQ_SPURIOUS >= IRQ_SPURIOUS_MAX) /* the wire is held by another device that nobody serves: stop listening, poll again */
     {
@@ -343,7 +345,7 @@ static int e1000_irq_init(void)
         {
             IRQ_SPURIOUS = 0;
             IRQ_FLAG = 1; /* (a frame may have come while we looked) */
-            ioapic_route(gsi, IDLE_VEC_NET, apic);
+            ioapic_route(gsi, IDLE_VEC_NET, smp_irq_target()); /* found it on this processor; from now on an application processor takes the interrupts (smp.h) */
             IRQ_ACTIVE = 1;
             wr(R_IMS, IRQ_CAUSES);
             return (int)gsi;

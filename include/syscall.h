@@ -335,6 +335,7 @@ void syscall_set_kernel_stack(unsigned long long top);
 long long syscall_dispatch(SyscallFrame *f);
 
 unsigned long long syscall_count(void); /* calls made since boot */
+unsigned long long syscall_fast_count(void); /* of those, the calls that ran without the big kernel lock (SYS_CLOCK) */
 
 /* For signal.c: after this system call the exit goes through IRETQ to rip / rflags instead of SYSRET (all registers of the frame are
  * then restored as they are, including rcx and r11). */
