@@ -5,9 +5,13 @@
 #include "amd_firmware.h"
 #include "gpu_log.h"
 #include "pci.h"
+#include "vfs.h"
+#include "exec.h"
 
 static const char *bringup_status = "AMD GPU not probed";
 static int bringup_ran, bringup_found, bringup_probed; /* for the Device Manager line */
+static uint64_t g_mmio;
+static uint32_t g_bar0, g_bar1;
 
 const char *amd_gpu_bringup_status(void) { return bringup_status; }
 
@@ -66,6 +70,7 @@ int amd_gpu_bringup(void)
             return 0;
         }
 
+        g_mmio = mmio; g_bar0 = bar0; g_bar1 = bar1;
         (void)amd_gpu_probe(d->device_id, mmio, 0, 0, 0);
         serial_print("  "); serial_print(amd_gpu_native_status()); serial_print("\n");
         bringup_status = amd_gpu_native_status();
@@ -89,17 +94,6 @@ int amd_gpu_bringup(void)
             amd_native_fault_probe(mmio);
             log_hex("  fault MM    ", amd_native_fault_mm_status());
             log_hex("  fault GC    ", amd_native_fault_gc_status());
-
-#if defined(HARIS_AMD_GPU_GART) && HARIS_AMD_GPU_GART
-            /* WRITES GPU registers (VMID0 on both hubs, one PTE). Verified and rolled back on mismatch. */
-            if (bar1 == 0 && (bar0 & 0xFFFFFFF0u))
-            {
-                if (amd_native_gart_enable(mmio, (uint64_t)(bar0 & 0xFFFFFFF0u)))
-                    (void)amd_native_gart_map(0, amd_native_vram_mc_addr(0x00100000u, 0x1000u));
-                serial_print("  GART: "); serial_print(amd_native_gart_status()); serial_print("\n");
-                (void)amd_native_vm_probe(mmio);
-            }
-#endif
         }
         return 1;
     }
@@ -154,4 +148,53 @@ void amd_gpu_bringup_summary(char *out, int n)
     cat_str(out, n, " MB, MMHUB ctx0 ");
     cat_num(out, n, amd_native_mmhub_ctx0_cntl(), 1);
     cat_str(out, n, amd_firmware_staged() ? ", fw staged" : ", no fw");
+}
+
+#define LOG_NAME "GPULOG.TXT"
+
+/* Writes the log to GPULOG.TXT in the top folder of the boot drive (the one that holds KERNEL.EFI: the EFI System
+ * Partition, which is locked against writing; it is unlocked for this one file and locked again). Returns 1 if the file
+ * was written. Called before every risky step, so a hang still leaves the last line that was reached. */
+int amd_gpu_log_save(void)
+{
+    if (!bringup_found)
+        return 0;
+    int k = exec_find("KERNEL.EFI");
+    if (k < 0)
+        return 0;
+    int vol = vfs_volume_of(k);
+    int dir = vfs_volume_node(vol);
+    VfsVolInfo vi;
+    if (dir < 0 || vfs_volume_info(vol, &vi) != 0)
+        return 0;
+    int was_locked = vi.locked;
+    if (was_locked && vfs_set_locked(vol, 0) != 0)
+        return 0;
+    unsigned len;
+    const char *text = gpu_log_text(&len);
+    int ok = vfs_save(dir, LOG_NAME, text, len) >= 0;
+    if (was_locked)
+        vfs_set_locked(vol, 1);
+    return ok;
+}
+
+/* The register-writing step (GART / VMID0 on both hubs, one PTE). Only when built with HARIS_AMD_GPU_GART. Needs the
+ * drives mounted (amd_gpu_log_save), so it runs after volume_mount_all(), not inside amd_gpu_bringup(). */
+void amd_gpu_bringup_gart(void)
+{
+#if defined(HARIS_AMD_GPU_GART) && HARIS_AMD_GPU_GART
+    if (!bringup_probed || g_bar1 != 0 || !(g_bar0 & 0xFFFFFFF0u))
+        return;
+    serial_print("GART: about to enable VMID0 (writes GPU registers)\n");
+    amd_gpu_log_save(); /* if the machine hangs now, this line is the last one in the file */
+    if (amd_native_gart_enable(g_mmio, (uint64_t)(g_bar0 & 0xFFFFFFF0u)))
+        (void)amd_native_gart_map(0, amd_native_vram_mc_addr(0x00100000u, 0x1000u));
+    serial_print("GART: "); serial_print(amd_native_gart_status()); serial_print("\n");
+    serial_print("GART map: "); serial_print(amd_native_gart_map_status()); serial_print("\n");
+    (void)amd_native_vm_probe(g_mmio);
+    serial_print("VM after: "); serial_print(amd_native_vm_probe_status()); serial_print("\n");
+    log_hex("  MMHUB ctx0  ", amd_native_mmhub_ctx0_cntl());
+    log_hex("  GFXHUB ctx0 ", amd_native_gfxhub_ctx0());
+    amd_gpu_log_save();
+#endif
 }

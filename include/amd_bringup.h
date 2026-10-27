@@ -10,6 +10,13 @@ int amd_gpu_bringup(void);
 /* One status of the last stage that ran, valid after amd_gpu_bringup(). */
 const char *amd_gpu_bringup_status(void);
 
+/* Saves everything the driver printed to GPULOG.TXT on the boot drive (unlocks it for that one file). 1 = written.
+ * Call after volume_mount_all(). */
+int amd_gpu_log_save(void);
+
+/* The GART / VMID0 step: does something only when built with HARIS_AMD_GPU_GART. Saves the log before it runs. */
+void amd_gpu_bringup_gart(void);
+
 /* One short line for the Device Manager (GC state, VRAM, VM hub, firmware); "" if there is no AMD GPU. */
 void amd_gpu_bringup_summary(char *out, int n);
 
