@@ -214,6 +214,11 @@ static int wait_changed(volatile uint32_t *r, uint32_t old){
 }
 
 static int psp_table_ok(volatile uint32_t *t){
+    /* The FirozOS loader left this table at physical 0x9A00. The HarisOS loader stages no PSP package, and that low
+       page belongs to the SMP start-up code here, so it is not read: the answer is always "missing". */
+    (void)t;
+    return 0;
+#if 0
     if(t[0]!=PSP_MAGIC || t[1]!=PSP_COUNT) return 0;
     for(int i=0;i<PSP_COUNT;i++){
         volatile uint32_t *e=t+4+i*4;
@@ -221,6 +226,7 @@ static int psp_table_ok(volatile uint32_t *t){
     }
     if(t[2]==0 || (t[2]&0xFFFFF)!=0) return 0;
     return 1;
+#endif
 }
 
 /* PSP table indices: 0 stage1, 1 legacy BL, 2 A/B BL, 3 SYS_DRV, 4 sOS. */

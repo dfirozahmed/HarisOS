@@ -53,6 +53,7 @@ int amd_gpu_bringup(void)
         log_hex("  subsystem  ", subsys);
         log_hex("  revision   ", d->revision);
         log_hex("  BAR0       ", bar0);
+        log_hex("  BAR1       ", bar1);
         log_hex("  BAR5       ", bar5);
         log_hex("  PCI command", pcicmd);
 
