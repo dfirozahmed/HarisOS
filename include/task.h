@@ -136,6 +136,15 @@ void task_cpu_ticks(int cpu, unsigned long long *busy, unsigned long long *all);
  * Thread 0's ticks include the time the main loop sleeps; its load is cpuload_percent(). */
 unsigned long long task_run_ticks(int id);
 int task_last_cpu(int id);
+/* Pin a thread to one processor (cpu = n), or let it run anywhere again (cpu = -1). Only a user thread can be pinned to an application
+ * processor (a kernel thread there would hold the big kernel lock all the time, bkl.h), and only to one that is running. A thread that is
+ * running elsewhere at this moment goes on until its next switch; after that only its processor takes it. 0, or -1 (bad id, a thread that
+ * is gone, a processor that is not there). task_affinity: the pinned processor, -1 = any (also for a bad id). */
+int task_set_affinity(int id, int cpu);
+int task_affinity(int id);
+/* 1 = the boot processor runs only what cannot run elsewhere (the main loop, the kernel threads) while an application processor is up:
+ * user threads go to the application processors. 0 (the default) = the boot processor takes its share of them too. */
+void task_reserve_boot_cpu(int on);
 unsigned task_cpu_mask(int id); /* bit n set: thread id has run on processor n (kept until the slot is used again) */
 
 int task_current(void); /* id of the running thread of the calling processor */

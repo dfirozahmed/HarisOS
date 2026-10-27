@@ -545,6 +545,24 @@ int main(void)
     CHECK(BLOCKS_OUT == 0); /* all stacks freed */
     CHECK(task_state(1) == TASK_UNUSED);
 
+    /* affinity: a new thread is not pinned; it can be pinned to the boot processor and released; an application processor is refused
+     * (there is none here, and a kernel thread may not go there anyway); a pinned or reserved-boot-processor kernel thread still runs */
+    LOGN = 0;
+    CHECK(task_create("P", turn_worker, (void *)(long long)1) == 1);
+    CHECK(task_affinity(1) == -1);
+    CHECK(task_set_affinity(1, 0) == 0 && task_affinity(1) == 0);
+    CHECK(task_set_affinity(1, 1) == -1 && task_affinity(1) == 0);
+    CHECK(task_set_affinity(1, 99) == -1 && task_set_affinity(1, -2) == -1);
+    CHECK(task_set_affinity(0, 0) == -1 && task_set_affinity(7, 0) == -1);
+    task_reserve_boot_cpu(1);
+    drain();
+    task_reserve_boot_cpu(0);
+    CHECK(LOGN == 3);
+    CHECK(task_affinity(1) == -1); /* gone: the slot says "any" */
+    CHECK(task_create("Q", turn_worker, (void *)(long long)2) == 1);
+    CHECK(task_affinity(1) == -1); /* the new thread of the same slot starts unpinned */
+    drain();
+
     /* callee-saved registers survive the switches */
     for (int i = 0; i < 4; i++)
         task_create("REG", reg_worker, (void *)(long long)i);

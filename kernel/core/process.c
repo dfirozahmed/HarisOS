@@ -914,6 +914,36 @@ static int spin_test(void)
     return (STATS.last_exit == 5 && preempted >= 3) ? 0 : -4;
 }
 
+/* The Task Manager's per-processor button: a SPIN program pinned to application processor `cpu`, which keeps it busy until
+ * process_spin_stop (or SPIN_MAX_MS, so a forgotten one does not run for ever). The thread is READY before the pin is set, so it may
+ * get a slice somewhere else first; after its next switch only `cpu` takes it. */
+#define SPIN_MAX_MS 600000ULL
+int process_spin_start(int cpu)
+{
+    unsigned khz = timer_tsc_khz();
+    if (cpu < 1 || !khz || !idle_ready())
+        return -1;
+    int id = process_start("SPIN", user_spin_start, (u64)(user_spin_end - user_spin_start));
+    AddressSpace *as = id >= 0 ? task_space_of(id) : 0;
+    if (!as)
+        return -1;
+    poke64(as, PAGING_USER_BASE + (u64)(user_spin_deadline - user_spin_start), rdtsc() + SPIN_MAX_MS * khz);
+    if (task_set_affinity(id, cpu) != 0)
+    {
+        poke64(as, PAGING_USER_BASE + (u64)(user_spin_stop - user_spin_start), 1); /* no such processor: let it end */
+        return -1;
+    }
+    return id;
+}
+
+void process_spin_stop(int id)
+{
+    AddressSpace *as = task_space_of(id);
+    const char *name = task_name(id);
+    if (as && name && name[0] == 'S' && name[1] == 'P' && name[2] == 'I' && name[3] == 'N' && name[4] == 0)
+        poke64(as, PAGING_USER_BASE + (u64)(user_spin_stop - user_spin_start), 1);
+}
+
 /* Start a program and give it the CPU until its thread has ended, then let the scheduler clean up. */
 static int run(const char *name, const unsigned char *start, const unsigned char *end)
 {

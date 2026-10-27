@@ -45,6 +45,7 @@ typedef struct
     unsigned cpus_ran;      /* bit n: this thread has been switched in on processor n (task_cpu_mask) */
     int idle_cpu;           /* the idle context of application processor n-1 (an entry of task_register_idle), 0 = an ordinary thread */
     int kill_pending;       /* task_kill found it running on another processor: it ends at that processor's next timer tick */
+    int affinity;           /* -1 = any processor that may run it (eligible), n = only processor n (task_set_affinity) */
     /* The floating point / SSE registers of a process thread while it is not running (see fpu.h). Only process threads use
      * it; kernel threads leave it alone. FXSAVE needs 16-byte alignment, which the attribute gives every Task. */
     unsigned char fpu[FPU_STATE_SIZE] __attribute__((aligned(16)));
@@ -88,6 +89,8 @@ static int IDLE_ID[SMP_MAX_CPUS]; /* the idle context of application processor n
 #define SLICE_LEFT (SLICES[percpu_index()])
 #define ACTIVE_AS (ACTIVE[percpu_index()])
 #define FPU_HOLDS_PROCESS (FPU_HOLDS[percpu_index()])
+static int AP_READY;      /* application processors that have registered their idle context (task_register_idle) */
+static int BOOT_RESERVED; /* 1 = the boot processor runs no user thread while an application processor can (task_reserve_boot_cpu) */
 static unsigned long long SWITCHES;
 static unsigned long long CPU_TICKS_ALL[SMP_MAX_CPUS], CPU_TICKS_BUSY[SMP_MAX_CPUS]; /* per processor, for task_cpu_ticks */
 static unsigned long long TICKS; /* timer interrupts seen by task_tick, for the boot log */
@@ -158,13 +161,20 @@ unsigned task_slice_for(int prio)
 
 /* May processor `cpu` run thread k? The boot processor runs everything but the idle contexts of the others; an application processor only
  * user threads (their ring 3 code is what runs in parallel: kernel threads drive hardware and the GUI, which belong to the boot
- * processor), and never the main loop. The idle context of a processor is never a candidate: it is what runs when there is none. */
+ * processor), and never the main loop. The idle context of a processor is never a candidate: it is what runs when there is none.
+ * Two refinements. A thread with an affinity runs only on that processor (an application processor only if the thread is a user thread:
+ * a kernel thread would hold the big kernel lock the whole time and stop the boot processor's main loop). With the boot processor
+ * reserved, the user threads leave it as soon as an application processor is there to take them, so it keeps to the desktop. */
 static int eligible(int k, int cpu)
 {
     const Task *t = tk(k);
     if (t->idle_cpu)
         return 0;
-    return cpu == 0 || t->as != 0;
+    if (t->affinity >= 0)
+        return cpu == t->affinity && (cpu == 0 || t->as != 0);
+    if (cpu == 0)
+        return !(BOOT_RESERVED && AP_READY > 0 && t->as != 0);
+    return t->as != 0;
 }
 
 /* 1 if thread k is the running thread of some processor. */
@@ -407,6 +417,7 @@ static int add_chunk(void)
     {
         c->t[i].prio = TASK_PRIO_DEFAULT;
         c->t[i].inherit = -1;
+        c->t[i].affinity = -1;
     }
     unsigned long long irq = irq_save();
     sched_lock();
@@ -450,7 +461,10 @@ int task_init(void)
         tk(i)->last_cpu = i == 0 ? 0 : -1;
         tk(i)->idle_cpu = 0;
         tk(i)->kill_pending = 0;
+        tk(i)->affinity = -1;
     }
+    AP_READY = 0;
+    BOOT_RESERVED = 0;
     for (int c = 0; c < SMP_MAX_CPUS; c++)
     {
         CURS[c] = 0;
@@ -665,6 +679,7 @@ static int create(const char *name, TaskFn fn, void *arg, unsigned flags, Addres
     t->run_ticks = 0;
     t->last_cpu = -1;
     t->kill_pending = 0;
+    t->affinity = -1; /* (a slot used before may have been pinned) */
     int n = 0;
     for (; name && name[n] && n < TASK_NAME_MAX - 1; n++)
         t->name[n] = name[n];
@@ -891,6 +906,44 @@ int task_last_cpu(int id) { return id >= 0 && id < CAP && !tk(id)->idle_cpu ? tk
 
 unsigned task_cpu_mask(int id) { return id >= 0 && id < CAP ? tk(id)->cpus_ran : 0; }
 
+int task_set_affinity(int id, int cpu)
+{
+    if (id <= 0 || id >= CAP || cpu < -1 || cpu >= SMP_MAX_CPUS)
+        return -1;
+    unsigned long long irq = irq_save();
+    sched_lock();
+    Task *t = tk(id);
+    int bad = t->state == TASK_UNUSED || t->state == TASK_DEAD || t->idle_cpu || (cpu > 0 && (!t->as || !IDLE_ID[cpu]));
+    if (!bad)
+        t->affinity = cpu;
+    sched_unlock();
+    if (!bad)
+        kick_idle_cpus(); /* the processor it is pinned to may sleep in HLT while the thread is READY */
+    irq_restore(irq);
+    return bad ? -1 : 0;
+}
+
+int task_affinity(int id)
+{
+    if (id < 0 || id >= CAP)
+        return -1;
+    unsigned long long irq = irq_save();
+    sched_lock();
+    int a = tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD && !tk(id)->idle_cpu ? tk(id)->affinity : -1;
+    sched_unlock();
+    irq_restore(irq);
+    return a;
+}
+
+void task_reserve_boot_cpu(int on)
+{
+    unsigned long long irq = irq_save();
+    sched_lock();
+    BOOT_RESERVED = on != 0;
+    sched_unlock();
+    irq_restore(irq);
+}
+
 /* The calling application processor (its idle loop in smp.c, in the kernel with the big kernel lock, interrupts off) becomes a context the
  * scheduler can switch to and from: a slot of its own that is never a candidate for the others. 0, or -1 (not an application processor,
  * already done, no slot). */
@@ -924,6 +977,7 @@ int task_register_idle(void)
                 t->last_cpu = cpu;
                 t->kill_pending = 0;
                 t->idle_cpu = cpu;
+                t->affinity = -1;
                 t->name[0] = 'I';
                 t->name[1] = 'D';
                 t->name[2] = 'L';
@@ -932,6 +986,7 @@ int task_register_idle(void)
                 t->name[5] = 0;
                 t->state = TASK_RUNNING; /* the calling processor is running it right now */
                 IDLE_ID[cpu] = i;
+                AP_READY++;
                 CURS[cpu] = i;
                 sched_unlock();
                 irq_restore(irq);

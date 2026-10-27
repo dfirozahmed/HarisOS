@@ -617,6 +617,11 @@ void kernel_main(const BootInfo *info)
         serial_puts("\n");
     }
 
+    /* The boot self tests are over: from here the boot processor keeps to the desktop (main loop, kernel threads) and the user programs
+     * run on the application processors (task.h). Without an application processor nothing changes. */
+    if (smp_cpu_total() > 1)
+        task_reserve_boot_cpu(1);
+
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
 

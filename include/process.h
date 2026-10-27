@@ -31,6 +31,12 @@
 /* The thread id (see task.h) or -1: bad image, no memory, no free thread slot. Nothing stays allocated on failure. */
 int process_start(const char *name, const void *image, unsigned long long size);
 
+/* A built-in program that only keeps a processor busy (the Task Manager's per-processor button), pinned to application processor `cpu`
+ * (task_set_affinity). process_spin_start: the thread id, or -1 (no such processor, no clock, no memory). It ends by itself after ten
+ * minutes. process_spin_stop(id): tell it to end; harmless for an id that is gone or that is not a SPIN program. */
+int process_spin_start(int cpu);
+void process_spin_stop(int id);
+
 /* The same for an ELF64 executable (elf.h): each PT_LOAD segment is mapped at its own address with its own permissions
  * (read, write, execute, never write + execute), the entry point is the file's. `file` is only read, and may be freed
  * as soon as this returns. Returns the thread id, or -1 with *err (if not NULL) = the ELF_ERR_* reason (a file that is

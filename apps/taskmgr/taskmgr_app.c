@@ -11,6 +11,7 @@
 #include "gfx.h"
 #include "heap.h"
 #include "pmm.h"
+#include "process.h"
 #include "smp.h"
 #include "task.h"
 #include "taskbar.h"
@@ -78,6 +79,21 @@ static unsigned long long LAST_MS;
 static unsigned long long T_PREV[TM_THREADS]; /* task_run_ticks at the last sample */
 static unsigned long long T_ALL_PREV[CPULOAD_MAX_CPUS]; /* each processor's tick count at the last sample */
 static int T_PCT[TM_THREADS];                 /* tenths of a percent of the capacity of all processors, in the last interval */
+
+/* The "Load" button of every application processor (the row of the CPU page it was drawn in; width 0 = no button): it starts a SPIN
+ * program pinned to that processor (process.h), and the same button stops it. */
+static UiRect CPU_BTN[CPULOAD_MAX_CPUS];
+static int SPIN_ID[CPULOAD_MAX_CPUS]; /* thread id of the SPIN started for the processor, 0 = none */
+
+/* 1 while the SPIN started for processor `cpu` is still there (its slot could have been reused by something else: name and pin are checked). */
+static int spin_running(int cpu)
+{
+    int id = SPIN_ID[cpu];
+    const char *name = id > 0 ? task_name(id) : 0;
+    TaskState s = id > 0 ? task_state(id) : TASK_UNUSED;
+    return name && name[0] == 'S' && name[1] == 'P' && name[2] == 'I' && name[3] == 'N' && name[4] == 0 && s != TASK_UNUSED &&
+           s != TASK_DEAD && task_affinity(id) == cpu;
+}
 
 static void put_dec(char *s, int *n, unsigned v)
 {
@@ -655,6 +671,8 @@ static void draw_cpu(UiRect pane)
     /* One bar for every processor the kernel started (smp.h): the boot processor's is the main loop's busy share, the others' the share
      * of their timer ticks that found them running a user thread (cpuload.h). Rows that do not fit in the pane are left out. */
     int ncpu = smp_cpu_total();
+    for (int i = 0; i < CPULOAD_MAX_CPUS; i++)
+        CPU_BTN[i] = ui_rect(0, 0, 0, 0); /* (only the rows drawn below get a button) */
     if (ncpu > 1)
     {
         ui_text_color(pane.x, y, "Per processor", UI_TEXT_BODY, t->text_dim);
@@ -677,7 +695,13 @@ static void draw_cpu(UiRect pane)
             else
                 put_str(line, &n, "off");
             ui_text_in(ui_rect(pane.x + pane.w - 50, y, 50, 16), line, UI_TEXT_SMALL, UI_ALIGN_RIGHT);
-            ui_progress(ui_rect(pane.x + 60, y + 2, pane.w - 120, 12), smp_cpu_online(i) ? pct : 0);
+            int has_btn = i > 0 && i < CPULOAD_MAX_CPUS && smp_cpu_online(i); /* CPU 0 keeps to the desktop: no work is sent there */
+            ui_progress(ui_rect(pane.x + 60, y + 2, pane.w - (has_btn ? 190 : 120), 12), smp_cpu_online(i) ? pct : 0);
+            if (has_btn)
+            {
+                CPU_BTN[i] = ui_rect(pane.x + pane.w - 124, y, 70, 16);
+                ui_button(CPU_BTN[i], spin_running(i) ? "Stop" : "Load", spin_running(i) ? UI_BTN_DANGER : UI_BTN_SECONDARY, UI_STATE_NORMAL);
+            }
             y += 18;
         }
     }
@@ -884,6 +908,19 @@ static int tm_press(Window *w, int x, int y)
                 return changed;
             }
         }
+        if (PERF == PERF_CPU)
+            for (int c = 1; c < CPULOAD_MAX_CPUS; c++)
+                if (CPU_BTN[c].w > 0 && ui_contains(CPU_BTN[c], x, y))
+                {
+                    if (spin_running(c))
+                        process_spin_stop(SPIN_ID[c]);
+                    else
+                    {
+                        int id = process_spin_start(c);
+                        SPIN_ID[c] = id > 0 ? id : 0;
+                    }
+                    return 1;
+                }
         return 0;
     }
     if (TAB != TAB_PROCESSES) /* the thread list cannot be selected */
