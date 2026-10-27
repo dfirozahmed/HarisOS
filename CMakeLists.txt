@@ -122,7 +122,12 @@ set(KERNEL_SOURCES
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
     kernel/cpu/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
     kernel/cpu/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
-    kernel/cpu/smp.c               # SMP stage 1: INIT-SIPI start of the other processors, real mode -> 64-bit trampoline, parked in hlt
+    kernel/cpu/smp/smp_plan.c                       # SMP
+    kernel/cpu/smp/smp_start.c                      # SMP
+    kernel/cpu/smp/smp_selftest.c                   # SMP
+    kernel/cpu/smp/smp_tlb.c                        # SMP
+    kernel/cpu/smp/smp_boot.c                       # SMP
+    kernel/cpu/smp/smp_stub.c                       # SMP
     kernel/cpu/ioapic.c            # I/O APIC: device interrupt lines to processor interrupts (used by the network card)
     kernel/drivers/bus/pci.c                # PCI device enumeration (Device Manager)
     kernel/device/devmgr.c             # Device Manager list (PCI + input devices)
@@ -184,7 +189,11 @@ set(KERNEL_SOURCES
     kernel/fs/ntfs/ntfs_move.c       # NTFS write: rename and move
     kernel/fs/volume.c               # puts FAT32 / exFAT / NTFS volumes into the virtual file system
     kernel/device/devmgr_sys.c         # Device Manager glue: asks PCI and the drivers
-    kernel/fs/vfs.c                  # in-memory file system (File Explorer)
+    kernel/fs/vfs/vfs_core.c                        # in-memory file system
+    kernel/fs/vfs/vfs_mount.c                       # vfs
+    kernel/fs/vfs/vfs_list.c                        # vfs
+    kernel/fs/vfs/vfs_edit.c                        # vfs
+    kernel/fs/vfs/vfs_io.c                          # vfs
     kernel/time/rtc.c
     kernel/time/cpuload.c            # main-loop busy share, for the Task Manager
     kernel/time/timer.c            # milliseconds since boot (PIT + rdtsc), for double-click

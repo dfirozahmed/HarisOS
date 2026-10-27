@@ -6,6 +6,6 @@ OUT=${TMPDIR:-/tmp}/harisos-notepad-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=gnu11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_notepad.c" \
-  "$ROOT/kernel/fs/vfs.c" \
+  "$ROOT"/kernel/fs/vfs/*.c \
   -o "$OUT"
 "$OUT"
