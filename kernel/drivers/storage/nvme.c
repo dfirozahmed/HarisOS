@@ -11,7 +11,7 @@
  * second, or - when there are more - the address of a page full of further PRP entries (the PRP list). */
 #include "blk.h"
 #include "pci.h"
-#include "storage_internal.h"
+#include "../../storage/storage_internal.h"
 
 #define R_CAP 0x00
 #define R_INTMS 0x0C

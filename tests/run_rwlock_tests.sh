@@ -7,9 +7,9 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
 # Runs on the real scheduler (task.c, task_ctx.c) like run_task_tests.sh, so it needs the same x86_64 Microsoft-ABI clang.
 "$CC" -std=c11 -Wall -Wextra -Werror -O1 -DHARIS_HOST -I"$ROOT/include" \
   "$ROOT/tests/test_rwlock.c" \
-  "$ROOT/kernel/core/rwlock.c" \
-  "$ROOT/kernel/core/task.c" \
-  "$ROOT/kernel/core/task_ctx.c" \
-  "$ROOT/kernel/core/taskset.c" \
+  "$ROOT/kernel/sync/rwlock.c" \
+  "$ROOT/kernel/sched/task.c" \
+  "$ROOT/kernel/sched/task_ctx.c" \
+  "$ROOT/kernel/sched/taskset.c" \
   -o "$OUT"
 "$OUT"

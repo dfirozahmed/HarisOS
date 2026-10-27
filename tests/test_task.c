@@ -1,4 +1,4 @@
-/* Host test for the kernel threads (kernel/core/task.c + task_ctx.c): the real context switch runs here, on stacks
+/* Host test for the kernel threads (kernel/sched/task.c + task_ctx.c): the real context switch runs here, on stacks
  * made by task_create(). The heap and the clock are replaced by host versions so the test can find leaks and move time. */
 #include "task.h"
 #include "aspace.h"

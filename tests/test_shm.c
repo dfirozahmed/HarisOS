@@ -1,4 +1,4 @@
-/* Host test for shared memory segments (kernel/core/shm.c): names, creation, sizes, references, unlink, freeing. */
+/* Host test for shared memory segments (kernel/ipc/shm.c): names, creation, sizes, references, unlink, freeing. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

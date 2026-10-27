@@ -3,7 +3,7 @@
  *
  *   mkelf <in.exe> <out.elf>
  *
- * Why this exists: the kernel loads ELF files (kernel/core/elf.c), but the toolchain on a Windows machine (MSYS2 clang +
+ * Why this exists: the kernel loads ELF files (kernel/proc/elf.c), but the toolchain on a Windows machine (MSYS2 clang +
  * lld) has no ELF linker: its lld and binutils only know PE. clang can still compile freestanding code, and lld-link can
  * link it at a fixed address with page-aligned sections (CMakeLists.txt does that for the programs in user/). The linked result already
  * is what an ELF executable is: sections at fixed addresses with known contents and permissions, and an entry point.

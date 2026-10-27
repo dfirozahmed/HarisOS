@@ -16,7 +16,7 @@
  * Send: we fill a buffer, set DescOwn | FirstFrag | LastFrag | length, and poke TxPoll; the card clears DescOwn when sent. */
 #include "io.h"
 #include "net.h"
-#include "nic.h"
+#include "../../net/nic.h"
 #include "pci.h"
 #include "pmm.h"
 

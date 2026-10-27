@@ -8,7 +8,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../kernel/net/rtl8821ce.c"
+/* the driver is several files; the test includes them all, in one unit, because it needs the internals */
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_core.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_fw.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_efuse.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_mac.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_phy.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_chan.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_rx.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_scan.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_txpwr.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_tx.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_join.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_speed.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_keys.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_data.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_addba.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_link.c"
+#include "../kernel/drivers/net/rtl8821ce/rtl8821ce_select.c"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -1195,7 +1212,7 @@ int main(void)
     file(IMG, IMG_SIZE, IMG_SIZE);
     NIC_RTL8821CE.probe(&WIFI);
     NIC_RTL8821CE.status(st, sizeof st);
-    CHECK(DL.state == DL_SKIPPED && FW.state == FW_OK && W.pwr_state == PWR_OK);
+    CHECK(DL.state == DL_SKIPPED && FW.state == FW_OK && WF.pwr_state == PWR_OK);
     CHECK(strstr(st, "not loaded: no DMA memory below 4 GiB") && strstr(st, "fw 24.11 ok") && strlen(st) < sizeof st);
     DMA_FAIL = 0;
     D.ready = 0;
@@ -3570,7 +3587,7 @@ int main(void)
     REGS[6] = 0x02;
     file(IMG, IMG_SIZE, IMG_SIZE);
     NIC_RTL8821CE.probe(&WIFI);
-    CHECK(DL.state == DL_OK && W.was_on && BOOTED);
+    CHECK(DL.state == DL_OK && WF.was_on && BOOTED);
     file(0, 0, 0);
 
     /* ---- failures of stage 1 say why ---- */

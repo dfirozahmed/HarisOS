@@ -6,6 +6,6 @@ OUT=${TMPDIR:-/tmp}/harisos-shm-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_shm.c" \
-  "$ROOT/kernel/core/shm.c" \
+  "$ROOT/kernel/ipc/shm.c" \
   -o "$OUT"
 "$OUT"

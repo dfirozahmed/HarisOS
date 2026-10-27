@@ -1,4 +1,4 @@
-/* Host test for semaphores (kernel/core/sem.c): counting, blocking protocol, wake-ups, names, references, overflow. */
+/* Host test for semaphores (kernel/sync/sem.c): counting, blocking protocol, wake-ups, names, references, overflow. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

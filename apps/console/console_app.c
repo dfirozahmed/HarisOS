@@ -1,7 +1,7 @@
 /* Console window: where a program started from the File Explorer prints and reads.
  *
  * It is not an app in the start menu: console_window_open() is called when a program is launched (see
- * include/console.h). The window only draws the character grid of a console (kernel/core/console.c) and passes typed
+ * include/console.h). The window only draws the character grid of a console (kernel/userio/console.c) and passes typed
  * keys to its line editor. Everything the program does goes through the grid: system calls write into it from the
  * program's thread and mark it changed; this window notices on its next tick and redraws, so no window code ever runs
  * inside a system call. Closing the window closes the console: the program's reads then return end of input, which

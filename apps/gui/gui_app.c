@@ -1,4 +1,4 @@
-/* Compositor: shows the surfaces of user programs (kernel/core/gui.c) as desktop windows. See include/guiapp.h.
+/* Compositor: shows the surfaces of user programs (kernel/userio/gui.c) as desktop windows. See include/guiapp.h.
  *
  * A program asks for a surface with SYS_GUI_CREATE; gui_app_poll() (called from the main loop) opens an ordinary window for it. The window
  * only copies the program's pixels to the screen - when the program said they changed (SYS_GUI_PRESENT) - and turns its own keys and

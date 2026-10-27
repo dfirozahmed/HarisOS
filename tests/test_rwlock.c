@@ -1,4 +1,4 @@
-/* Host test for the spinlock (include/spinlock.h) and the reader-writer lock (kernel/core/rwlock.c) on the real scheduler (task.c,
+/* Host test for the spinlock (include/spinlock.h) and the reader-writer lock (kernel/sync/rwlock.c) on the real scheduler (task.c,
  * task_ctx.c): the threads really block, are woken and switch stacks. The platform pieces task.c needs are stubs, like in test_mutex.c. */
 #include "rwlock.h"
 #include "spinlock.h"

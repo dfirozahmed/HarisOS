@@ -1,4 +1,4 @@
-/* Device Manager app: the list from kernel/core/devmgr.c grouped by category, with a
+/* Device Manager app: the list from kernel/device/devmgr.c grouped by category, with a
  * details strip for the selected device. Up/Down/Home/End/PageUp/PageDown or a click select.
  * An app uses only public headers (ui.h, wm.h, desktop.h, devmgr.h) - never desktop_internal.h. */
 #include "app.h"

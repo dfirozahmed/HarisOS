@@ -10,7 +10,7 @@
  * the bit when it is done. */
 #include "blk.h"
 #include "pci.h"
-#include "storage_internal.h"
+#include "../../storage/storage_internal.h"
 
 #define HBA_CAP 0x00
 #define HBA_GHC 0x04

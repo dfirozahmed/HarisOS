@@ -8,8 +8,8 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
 # (MSYS2 UCRT64 clang), the same ABI the kernel is built for.
 "$CC" -std=c11 -Wall -Wextra -Werror -O1 -DHARIS_HOST -I"$ROOT/include" \
   "$ROOT/tests/test_task.c" \
-  "$ROOT/kernel/core/task.c" \
-  "$ROOT/kernel/core/task_ctx.c" \
-  "$ROOT/kernel/core/taskset.c" \
+  "$ROOT/kernel/sched/task.c" \
+  "$ROOT/kernel/sched/task_ctx.c" \
+  "$ROOT/kernel/sched/taskset.c" \
   -o "$OUT"
 "$OUT"

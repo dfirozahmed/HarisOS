@@ -73,60 +73,92 @@ set(KERNEL_SOURCES
     kernel/memory/cow.c             # copy-on-write: who holds a shared page (host-tested)
     kernel/memory/mem.c             # memcpy / memmove / memset / memcmp (the compiler calls them; no libc)
     kernel/memory/heap.c          # kernel heap: kmalloc / kfree on top of the page allocator
-    kernel/core/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
-    kernel/core/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
+    kernel/memory/fbwc.c               # frame buffer write-combining (PAT) for fast presenting
+    kernel/cpu/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
     kernel/core/serial.c            # COM1 output for debugging (boot self test, crash report)
-    kernel/core/fault_fmt.c        # CPU exceptions: report text (host-tested)
-    kernel/core/task.c             # kernel threads (cooperative): task table, round-robin scheduler, boot self test
-    kernel/core/task_ctx.c          # kernel threads: the register-saving context switch
-    kernel/core/heapmon.c           # background thread: checks the kernel heap once a second
-    kernel/core/syscall.c           # system calls: SYSCALL entry, write / read / open / close / seek / exit / yield
-    kernel/core/console.c           # console: character grid, cursor and line editor for a program's window (host-tested)
-    kernel/core/pipe.c              # pipes: the byte queue between processes (host-tested)
-    kernel/core/shm.c               # shared memory segments (host-tested)
-    kernel/core/mq.c                # message queues (host-tested)
-    kernel/core/taskset.c           # sets of threads that sleep on an object (host-tested)
-    kernel/core/gui.c               # GUI surfaces for user programs: pixels in shared memory, event queues (host-tested)
-    kernel/core/sem.c               # semaphores (host-tested)
-    kernel/core/mutex.c             # kernel mutex + condition variable (host-tested)
-    kernel/core/usync.c             # named mutexes / condition variables for processes (host-tested through test_syscall)
-    kernel/core/rwlock.c            # reader-writer lock (host-tested)
-    kernel/core/signal.c            # signal handlers: frames on the user stack, sigreturn
-    kernel/core/elf.c               # ELF64 executables: header and segment checks (host-tested)
-    kernel/core/exec.c              # run a program that is a file on a drive: find, read, load, start
-    kernel/core/process.c          # user processes: address space + thread, ring 3 entry, boot self test
-    kernel/core/user_demo.c         # ring 3 demo programs for the self test
-    kernel/core/protect.c           # SMEP / SMAP, boot self test of the protections and the NMI stack
-    kernel/core/gdt.c             # GDT: kernel + user segments, TSS (host-tested layout)
-    kernel/core/fpu.c               # x87 / SSE state: per-process FXSAVE images, clean default state
-    kernel/core/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
+    kernel/cpu/fault_fmt.c        # CPU exceptions: report text (host-tested)
+    kernel/sched/task.c             # kernel threads (cooperative): task table, round-robin scheduler, boot self test
+    kernel/sched/task_ctx.c          # kernel threads: the register-saving context switch
+    kernel/memory/heapmon.c           # background thread: checks the kernel heap once a second
+    kernel/syscall/syscall.c        # system calls: SYSCALL entry, the call table, counters
+    kernel/syscall/sys_util.c       # system calls: ring 3 pointers, sleeping, paths
+    kernel/syscall/sys_fd.c         # system calls: file descriptors, read / write / open / close / seek
+    kernel/syscall/sys_fs.c         # system calls: folders, stat, mkdir, unlink, rename, lock
+    kernel/syscall/sys_proc.c       # system calls: spawn, wait, fork, exec, dup2, signals, process list, brk
+    kernel/syscall/sys_ipc.c        # system calls: shared memory, message queues, semaphores, mutexes, condition variables
+    kernel/syscall/sys_net.c        # system calls: sockets
+    kernel/syscall/sys_time.c       # system calls: clock and wall time
+    kernel/syscall/sys_gui.c        # system calls: GUI windows
+    kernel/userio/console.c           # console: character grid, cursor and line editor for a program's window (host-tested)
+    kernel/ipc/pipe.c              # pipes: the byte queue between processes (host-tested)
+    kernel/ipc/shm.c               # shared memory segments (host-tested)
+    kernel/ipc/mq.c                # message queues (host-tested)
+    kernel/sched/taskset.c           # sets of threads that sleep on an object (host-tested)
+    kernel/userio/gui.c               # GUI surfaces for user programs: pixels in shared memory, event queues (host-tested)
+    kernel/sync/sem.c               # semaphores (host-tested)
+    kernel/sync/mutex.c             # kernel mutex + condition variable (host-tested)
+    kernel/sync/usync.c             # named mutexes / condition variables for processes (host-tested through test_syscall)
+    kernel/sync/rwlock.c            # reader-writer lock (host-tested)
+    kernel/proc/signal.c            # signal handlers: frames on the user stack, sigreturn
+    kernel/proc/elf.c               # ELF64 executables: header and segment checks (host-tested)
+    kernel/proc/exec.c              # run a program that is a file on a drive: find, read, load, start
+    kernel/proc/process.c          # user processes: address space + thread, ring 3 entry, boot self test
+    kernel/proc/user_demo.c         # ring 3 demo programs for the self test
+    kernel/cpu/protect.c           # SMEP / SMAP, boot self test of the protections and the NMI stack
+    kernel/cpu/gdt.c             # GDT: kernel + user segments, TSS (host-tested layout)
+    kernel/cpu/fpu.c               # x87 / SSE state: per-process FXSAVE images, clean default state
+    kernel/cpu/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
-    kernel/core/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
-    kernel/core/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
-    kernel/core/smp.c               # SMP stage 1: INIT-SIPI start of the other processors, real mode -> 64-bit trampoline, parked in hlt
-    kernel/core/ioapic.c            # I/O APIC: device interrupt lines to processor interrupts (used by the network card)
-    kernel/core/pci.c                # PCI device enumeration (Device Manager)
-    kernel/core/devmgr.c             # Device Manager list (PCI + input devices)
+    kernel/cpu/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
+    kernel/cpu/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
+    kernel/cpu/smp.c               # SMP stage 1: INIT-SIPI start of the other processors, real mode -> 64-bit trampoline, parked in hlt
+    kernel/cpu/ioapic.c            # I/O APIC: device interrupt lines to processor interrupts (used by the network card)
+    kernel/drivers/bus/pci.c                # PCI device enumeration (Device Manager)
+    kernel/device/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/nic.c                 # network: picks the card driver, forwards net_send / net_recv ...
-    kernel/net/e1000.c               # network: Intel e1000 NIC driver (interrupt or polled), raw Ethernet frames
-    kernel/net/rtl8821ce.c           # network: Realtek RTL8821CE Wi-Fi, identification only (stage 1; not a working adapter)
+    kernel/drivers/net/e1000.c               # network: Intel e1000 NIC driver (interrupt or polled), raw Ethernet frames
+    kernel/drivers/net/rtl8821ce/rtl8821ce_core.c           # Realtek RTL8821CE Wi-Fi: identification and power on
+    kernel/drivers/net/rtl8821ce/rtl8821ce_fw.c             # Realtek RTL8821CE Wi-Fi: firmware file, DMA rings, firmware download
+    kernel/drivers/net/rtl8821ce/rtl8821ce_efuse.c          # Realtek RTL8821CE Wi-Fi: efuse (board data)
+    kernel/drivers/net/rtl8821ce/rtl8821ce_mac.c            # Realtek RTL8821CE Wi-Fi: MAC init
+    kernel/drivers/net/rtl8821ce/rtl8821ce_phy.c            # Realtek RTL8821CE Wi-Fi: baseband / AGC / RF tables
+    kernel/drivers/net/rtl8821ce/rtl8821ce_chan.c           # Realtek RTL8821CE Wi-Fi: H2C commands, antenna, channel
+    kernel/drivers/net/rtl8821ce/rtl8821ce_rx.c             # Realtek RTL8821CE Wi-Fi: receive
+    kernel/drivers/net/rtl8821ce/rtl8821ce_scan.c           # Realtek RTL8821CE Wi-Fi: scan
+    kernel/drivers/net/rtl8821ce/rtl8821ce_txpwr.c          # Realtek RTL8821CE Wi-Fi: transmit power
+    kernel/drivers/net/rtl8821ce/rtl8821ce_tx.c             # Realtek RTL8821CE Wi-Fi: first frame on the air
+    kernel/drivers/net/rtl8821ce/rtl8821ce_join.c           # Realtek RTL8821CE Wi-Fi: which network to join, authentication, association
+    kernel/drivers/net/rtl8821ce/rtl8821ce_speed.c          # Realtek RTL8821CE Wi-Fi: rate adaptation
+    kernel/drivers/net/rtl8821ce/rtl8821ce_keys.c           # Realtek RTL8821CE Wi-Fi: keys in the chip, WPA2 4-way handshake
+    kernel/drivers/net/rtl8821ce/rtl8821ce_data.c           # Realtek RTL8821CE Wi-Fi: data frames, A-MPDU
+    kernel/drivers/net/rtl8821ce/rtl8821ce_addba.c          # Realtek RTL8821CE Wi-Fi: block ack agreements
+    kernel/drivers/net/rtl8821ce/rtl8821ce_link.c           # Realtek RTL8821CE Wi-Fi: keeping the connection, background start
+    kernel/drivers/net/rtl8821ce/rtl8821ce_select.c         # Realtek RTL8821CE Wi-Fi: choosing a network at run time
     kernel/net/wpa.c                 # network: WPA2 crypto (SHA-1, HMAC, PBKDF2, AES, the 4-way handshake; host-tested)
-    kernel/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
+    kernel/drivers/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
     kernel/net/sock.c                # network: socket table for the system calls (SYS_SOCKET ...)
     kernel/net/tcp.c                 # network: TCP client (connect / send / receive / close, retransmission)
     kernel/net/net.c                 # network: ARP cache, answering ARP / ping, ping, boot self test
     kernel/storage/blk.c             # block devices: sector I/O and the write lock
     kernel/storage/part.c            # partition tables (GPT, MBR)
-    kernel/storage/ahci.c            # SATA SSD / hard disk driver (AHCI)
-    kernel/storage/nvme.c            # NVMe SSD driver
-    kernel/storage/usb_msc.c         # USB mass storage (pen drives): bulk-only transport + SCSI commands
+    kernel/drivers/storage/ahci.c            # SATA SSD / hard disk driver (AHCI)
+    kernel/drivers/storage/nvme.c            # NVMe SSD driver
+    kernel/drivers/storage/usb_msc.c         # USB mass storage (pen drives): bulk-only transport + SCSI commands
     kernel/storage/storage.c         # starts the drivers
     kernel/fs/fat32.c                # FAT32 file system
     kernel/fs/exfat.c                # exFAT file system (read only)
-    kernel/fs/ntfs.c                 # NTFS file system (read and write)
+    kernel/fs/ntfs/ntfs_core.c       # NTFS: reading the volume, data runs, MFT records
+    kernel/fs/ntfs/ntfs_mount.c      # NTFS: names, mount, folder listing, file data
+    kernel/fs/ntfs/ntfs_wio.c        # NTFS write: how a change is made, raw writes, records and attributes
+    kernel/fs/ntfs/ntfs_bitmap.c     # NTFS write: cluster bitmap and MFT bitmap
+    kernel/fs/ntfs/ntfs_change.c     # NTFS write: names, timestamps, begin / end of a change
+    kernel/fs/ntfs/ntfs_index.c      # NTFS write: folder indexes (B-tree)
+    kernel/fs/ntfs/ntfs_rec.c        # NTFS write: file records, create
+    kernel/fs/ntfs/ntfs_write.c      # NTFS write: write, truncate, delete
+    kernel/fs/ntfs/ntfs_move.c       # NTFS write: rename and move
     kernel/fs/volume.c               # puts FAT32 / exFAT / NTFS volumes into the virtual file system
-    kernel/core/devmgr_sys.c         # Device Manager glue: asks PCI and the drivers
+    kernel/device/devmgr_sys.c         # Device Manager glue: asks PCI and the drivers
     kernel/fs/vfs.c                  # in-memory file system (File Explorer)
     kernel/time/rtc.c
     kernel/time/cpuload.c            # main-loop busy share, for the Task Manager
@@ -136,7 +168,7 @@ set(KERNEL_SOURCES
     kernel/graphics/gfx_layer.c  # draw into a separate buffer, paste with transparency (window drag)
     kernel/graphics/gfx_dirty.c # dirty-region tracking
     kernel/graphics/gfx_backend.c # framebuffer initialization and backend properties
-    kernel/core/display.c         # display adapters on PCI: Bochs VBE mode setting, framebuffer owner
+    kernel/drivers/bus/display.c         # display adapters on PCI: Bochs VBE mode setting, framebuffer owner
     kernel/graphics/gfx_shapes.c  # anti-aliased rounded rectangles and circles
     kernel/graphics/gfx_effects.c # gradients, shadows and glow effects
     kernel/graphics/gfx_cursor.c # software cursor save/restore and rendering
@@ -145,14 +177,14 @@ set(KERNEL_SOURCES
     kernel/graphics/font.c      # smooth text rendering
     kernel/graphics/font_data.c # Poppins
     kernel/graphics/cursor_data.c # mouse arrow
-    kernel/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
-    kernel/input/usb_xhci.c     # USB 3 (xHCI) controller + HID mouse / keyboard + mass storage (polled)
+    kernel/drivers/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
+    kernel/drivers/input/usb_xhci.c     # USB 3 (xHCI) controller + HID mouse / keyboard + mass storage (polled)
     kernel/input/aml_scan.c     # finds I2C-HID devices in ACPI byte code
     kernel/input/hid_desc.c     # HID report descriptor: where the mouse fields are
-    kernel/input/i2c_dw.c       # DesignWare I2C controller (AMD / Intel)
-    kernel/input/i2c_hid.c      # I2C-HID touchpad (polled)
-    kernel/input/mouse.c        # mouse driver: PS/2 and USB (polled)
-    kernel/input/keyboard.c     # PS/2 keyboard driver (polled)
+    kernel/drivers/input/i2c_dw.c       # DesignWare I2C controller (AMD / Intel)
+    kernel/drivers/input/i2c_hid.c      # I2C-HID touchpad (polled)
+    kernel/drivers/input/mouse.c        # mouse driver: PS/2 and USB (polled)
+    kernel/drivers/input/keyboard.c     # PS/2 keyboard driver (polled)
     kernel/ui/ui_theme.c       # theme colors and active theme
     kernel/ui/ui_layout.c      # rectangle layout and clipping helpers
     kernel/ui/ui_text.c        # text styles and alignment
@@ -409,7 +441,7 @@ add_custom_command(
 )
 
 # Optional extra files for the boot disk that do not belong in the repository. firmware/RTW8821C.BIN is the firmware of the Realtek
-# RTL8821CE Wi-Fi card (linux-firmware rtw88/rtw8821c_fw.bin, Realtek's licence: you fetch it yourself, see kernel/net/rtl8821ce.c).
+# RTL8821CE Wi-Fi card (linux-firmware rtw88/rtw8821c_fw.bin, Realtek's licence: you fetch it yourself, see kernel/drivers/net/rtl8821ce/).
 # The driver looks for a file of that name in the top folder of any drive. The folder is ignored by git.
 set(HARIS_EXTRA_FILES "")
 if(EXISTS ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)

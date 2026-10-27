@@ -1,4 +1,4 @@
-/* Host test for pipes (kernel/core/pipe.c): the byte queue, end of input, broken pipes, wake-ups, slots. */
+/* Host test for pipes (kernel/ipc/pipe.c): the byte queue, end of input, broken pipes, wake-ups, slots. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

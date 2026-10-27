@@ -6,7 +6,7 @@ OUT=${TMPDIR:-/tmp}/harisos-gui-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_gui.c" \
-  "$ROOT/kernel/core/gui.c" \
-  "$ROOT/kernel/core/shm.c" \
+  "$ROOT/kernel/userio/gui.c" \
+  "$ROOT/kernel/ipc/shm.c" \
   -o "$OUT"
 "$OUT"

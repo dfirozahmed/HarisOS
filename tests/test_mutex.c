@@ -1,4 +1,4 @@
-/* Host test for the kernel mutex and condition variable (kernel/core/mutex.c) on the real scheduler (task.c, task_ctx.c):
+/* Host test for the kernel mutex and condition variable (kernel/sync/mutex.c) on the real scheduler (task.c, task_ctx.c):
  * the threads really block, are woken and switch stacks. The platform pieces task.c needs are replaced by stubs, like in
  * test_task.c. */
 #include "mutex.h"

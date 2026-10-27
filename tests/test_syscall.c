@@ -1,4 +1,4 @@
-/* Host test for the system call dispatcher (kernel/core/syscall.c): what each call does with its arguments. The entry
+/* Host test for the system call dispatcher (kernel/syscall/syscall.c): what each call does with its arguments. The entry
  * code (SYSCALL instruction, register saving) is hardware and is only built for the kernel; the checks a call makes on
  * pointers from ring 3, the file descriptors and the console are what matters most, and they are tested here against
  * small fakes of the console, the scheduler and the file system. */

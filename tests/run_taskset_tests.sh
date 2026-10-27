@@ -6,6 +6,6 @@ OUT=${TMPDIR:-/tmp}/harisos-taskset-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_taskset.c" \
-  "$ROOT/kernel/core/taskset.c" \
+  "$ROOT/kernel/sched/taskset.c" \
   -o "$OUT"
 "$OUT"

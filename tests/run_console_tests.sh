@@ -6,6 +6,6 @@ OUT=${TMPDIR:-/tmp}/harisos-console-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_console.c" \
-  "$ROOT/kernel/core/console.c" \
+  "$ROOT/kernel/userio/console.c" \
   -o "$OUT"
 "$OUT"

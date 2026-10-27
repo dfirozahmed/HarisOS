@@ -1,4 +1,4 @@
-/* Host test for message queues (kernel/core/mq.c): boundaries, order, depth, sizes, names, wake-ups, references. */
+/* Host test for message queues (kernel/ipc/mq.c): boundaries, order, depth, sizes, names, wake-ups, references. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

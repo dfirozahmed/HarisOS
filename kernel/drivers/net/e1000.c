@@ -9,7 +9,7 @@
 #include "io.h"
 #include "ioapic.h"
 #include "net.h"
-#include "nic.h"
+#include "../../net/nic.h"
 #include "pci.h"
 #include "pmm.h"
 #include "smp.h"

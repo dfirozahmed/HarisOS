@@ -6,6 +6,6 @@ OUT=${TMPDIR:-/tmp}/harisos-protect-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -DHARIS_HOST -I"$ROOT/include" \
   "$ROOT/tests/test_protect.c" \
-  "$ROOT/kernel/core/protect.c" \
+  "$ROOT/kernel/cpu/protect.c" \
   -o "$OUT"
 "$OUT"

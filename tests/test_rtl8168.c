@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pmm.h"
-#include "../kernel/net/rtl8168.c"
+#include "../kernel/drivers/net/rtl8168.c"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)

@@ -1,4 +1,4 @@
-/* Host test for signal handler delivery (kernel/core/signal.c): the frame pushed on the user stack, the registers of the entry stub, the
+/* Host test for signal handler delivery (kernel/proc/signal.c): the frame pushed on the user stack, the registers of the entry stub, the
  * return from the handler (SYSRET and IRETQ flavours), the checks on a frame that a program may have changed, blocking and ordering. */
 #include <setjmp.h>
 #include <stdio.h>

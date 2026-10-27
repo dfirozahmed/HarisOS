@@ -6,7 +6,7 @@ OUT=${TMPDIR:-/tmp}/harisos-cpuinfo-tests-$$
 trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -I"$ROOT/include" \
   "$ROOT/tests/test_cpuinfo.c" \
-  "$ROOT/kernel/core/cpuinfo.c" \
-  "$ROOT/kernel/core/acpi.c" \
+  "$ROOT/kernel/cpu/cpuinfo.c" \
+  "$ROOT/kernel/cpu/acpi.c" \
   -o "$OUT"
 "$OUT"

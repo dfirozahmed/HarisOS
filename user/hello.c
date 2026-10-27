@@ -1,5 +1,5 @@
 /* HarisOS user program: the first one that is a real file. It is built as an ELF executable (see CMakeLists.txt),
- * stored on the boot disk as HELLO.ELF and started by the kernel's ELF loader (kernel/core/exec.c) - at boot as a self
+ * stored on the boot disk as HELLO.ELF and started by the kernel's ELF loader (kernel/proc/exec.c) - at boot as a self
  * test, or by a double click on it in the File Explorer, when its text appears in a console window.
  *
  * There is no C library: the program talks to the kernel with the "syscall" instruction (user/sys.h). It exercises what a
