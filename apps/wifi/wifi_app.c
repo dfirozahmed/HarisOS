@@ -3,7 +3,7 @@
  * Click a network (or Up / Down), type its passphrase, press Connect (or Enter). Only WPA2-Personal networks can be joined; the others are listed
  * greyed out. The passphrase stays in memory: nothing is written to a disk, and the field is wiped when the window closes or the join worked.
  * Scanning (about 4 seconds) and joining (several seconds, then DHCP) wait for the radio: the window shows "Scanning..." / "Connecting..." first
- * and does the work on the next pass of the main loop, so the rest of the desktop stands still for that time.
+ * and starts the work on the next pass of the main loop. A scan goes on in small steps; the join runs in a thread, so the desktop does not stand still.
  * An app uses only public headers (ui.h, wm.h, desktop.h, net.h) - never desktop_internal.h. */
 #include "app.h"
 #include "desktop.h"
@@ -20,7 +20,7 @@
 #define BTN_RESCAN 0
 #define BTN_CONNECT 1
 
-enum { OP_NONE, OP_SCAN, OP_JOIN_WAIT, OP_JOIN }; /* OP_SCAN: a scan in steps goes on in the driver; the join waits for a redraw first, then holds the system up */
+enum { OP_NONE, OP_SCAN, OP_JOIN_WAIT, OP_JOIN, OP_JOIN_RUN }; /* OP_SCAN: a scan in steps goes on in the driver; the join waits for a redraw first, starts, then a thread of its own does it (OP_JOIN_RUN) */
 static int SCAN_PCT = -1;
 
 static Window *WF_WIN;
@@ -245,7 +245,7 @@ static void wf_draw(Window *w, UiRect body)
         put_str(line, sizeof line, &n, "%");
         ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 112, 8), SCAN_PCT < 0 ? 0 : SCAN_PCT);
     }
-    else if (OP == OP_JOIN_WAIT || OP == OP_JOIN)
+    else if (OP == OP_JOIN_WAIT || OP == OP_JOIN || OP == OP_JOIN_RUN)
     {
         put_str(line, sizeof line, &n, "Connecting to ");
         put_str(line, sizeof line, &n, JOIN_SSID);
@@ -420,10 +420,28 @@ static int wf_tick(Window *w)
         char pass[UI_EDIT_MAX + 1];
         for (int i = 0; i <= w->edits[0].len && i < (int)sizeof pass; i++)
             pass[i] = w->edits[0].text[i];
-        int r = net_wifi_connect(JOIN_SSID, pass);
+        int r = net_wifi_join_start(JOIN_SSID, pass); /* copies the passphrase; the thread does the rest */
         for (unsigned i = 0; i < sizeof pass; i++)
             ((volatile char *)pass)[i] = 0;
+        if (r == NET_WIFI_OK)
+        {
+            OP = OP_JOIN_RUN;
+            return 0;
+        }
         OP = OP_NONE;
+        set_msg(2, join_error(r));
+        update_buttons(w);
+        return 1;
+    }
+    if (OP == OP_JOIN_RUN)
+    {
+        int r;
+        int s = net_wifi_join_poll(&r);
+        if (s > 0)
+            return 0; /* still joining; the desktop goes on meanwhile */
+        OP = OP_NONE;
+        if (s < 0)
+            r = NET_WIFI_E_NO_ADAPTER;
         poll_status();
         if (r == NET_WIFI_OK)
         {

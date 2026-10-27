@@ -99,6 +99,11 @@ void net_wifi_boot_abort(void);
 /* Join a network from the scan list (several seconds, then DHCP). The network the card was connected to before stays the one to reconnect to when
  * this fails. Returns NET_WIFI_OK or a NET_WIFI_E_ code. */
 int net_wifi_connect(const char *ssid, const char *passphrase);
+/* The same without holding the desktop up: _start() returns at once (NET_WIFI_OK, or a NET_WIFI_E_ code when it cannot begin) and a thread does the join.
+ * _poll() returns 1 while it goes on; 0 when it has ended, with its NET_WIFI_OK / NET_WIFI_E_ code in *result (DHCP is asked for here, once); -1 when none is
+ * going on or waiting to be reported. */
+int net_wifi_join_start(const char *ssid, const char *passphrase);
+int net_wifi_join_poll(int *result);
 int net_irq_init(void);
 int net_irq_active(void);
 int net_irq_take(void);

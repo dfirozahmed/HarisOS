@@ -2,6 +2,7 @@
 #include "net.h"
 #include "nic.h"
 #include "pci.h"
+#include "task.h"
 
 static const NicDriver *const DRIVERS[] = {&NIC_E1000, &NIC_RTL8168, &NIC_RTL8821CE};
 #define NDRIVERS ((int)(sizeof DRIVERS / sizeof DRIVERS[0]))
@@ -134,6 +135,37 @@ void net_wifi_boot_abort(void)
 {
     if (wifi_active())
         rtl8821ce_boot_abort();
+}
+
+static void join_thread(void *arg)
+{
+    (void)arg;
+    rtl8821ce_join_run();
+}
+
+int net_wifi_join_start(const char *ssid, const char *passphrase)
+{
+    if (!wifi_active())
+        return NET_WIFI_E_NO_ADAPTER;
+    int r = rtl8821ce_join_begin(ssid, passphrase);
+    if (r < 0)
+        return r;
+    if (task_create_flags("WIFIJOIN", join_thread, 0, TASK_PREEMPTIBLE) < 0)
+    {
+        rtl8821ce_join_abort();
+        return NET_WIFI_E_BUSY;
+    }
+    return NET_WIFI_OK;
+}
+
+int net_wifi_join_poll(int *result)
+{
+    if (!wifi_active())
+        return -1;
+    int s = rtl8821ce_join_poll(result);
+    if (s == 0 && *result == NET_WIFI_OK)
+        net_dhcp(3000); /* another network: another address. Here, in the main loop, because the thread must not use the network stack beside it */
+    return s;
 }
 
 int net_wifi_connect(const char *ssid, const char *passphrase)

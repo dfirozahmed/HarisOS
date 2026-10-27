@@ -4208,9 +4208,19 @@ static struct
     int busy;
 } BOOT;
 
+/* A join started from the Wi-Fi window (rtl8821ce_join_begin): the chip belongs to its thread, like with BOOT.busy. */
+static struct
+{
+    int busy;
+    int done;
+    int result;
+    char ssid[33];
+    char psk[64];
+} JOIN;
+
 static int wifi_send(const void *eth, unsigned len)
 {
-    if (BOOT.busy || !LINK.up || LINK.scanning || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
+    if (BOOT.busy || JOIN.busy ||!LINK.up || LINK.scanning || CONN.dropped || !eth || len < 14 || len > ETH_MAX)
         return -1;
     const u8 *e = (const u8 *)eth;
     u8 f[26 + 8 + 8 + ETH_MAX];
@@ -4703,7 +4713,7 @@ int rtl8821ce_wifi_scan_start(void)
 {
     if (!LINK.adapter || !D.ready || !clock_ok())
         return NET_WIFI_E_NO_ADAPTER;
-    if (BOOT.busy)
+    if (BOOT.busy || JOIN.busy)
         return NET_WIFI_E_BUSY;
     if (SCN.active)
         return NET_WIFI_OK; /* already going on */
@@ -4870,9 +4880,60 @@ int rtl8821ce_wifi_connect(const char *ssid, const char *psk)
     return result;
 }
 
+/* A join in a thread of its own, like the first connection ("starting in the background"): connect_exchange() waits with udelay() for the access point
+ * and the 4-way handshake for seconds, and in the main loop the whole desktop (mouse included) would stand still for that. begin() copies the
+ * arguments and claims the chip (nobody else sends, receives or scans while busy), run() is the thread, poll() hands over the result once. */
+int rtl8821ce_join_begin(const char *ssid, const char *psk)
+{
+    if (JOIN.busy)
+        return NET_WIFI_E_BUSY;
+    unsigned sl = 0, pl = 0;
+    while (ssid && ssid[sl])
+        sl++;
+    while (psk && psk[pl])
+        pl++;
+    if (sl < 1 || sl > 32 || pl < 8 || pl > 63) /* (the same check as rtl8821ce_wifi_connect, before a thread is made for nothing) */
+        return NET_WIFI_E_ARGS;
+    for (unsigned i = 0; i <= sl; i++)
+        JOIN.ssid[i] = ssid[i];
+    for (unsigned i = 0; i <= pl; i++)
+        JOIN.psk[i] = psk[i];
+    JOIN.done = 0;
+    JOIN.busy = 1;
+    return NET_WIFI_OK;
+}
+
+void rtl8821ce_join_run(void)
+{
+    if (!JOIN.busy)
+        return;
+    JOIN.result = rtl8821ce_wifi_connect(JOIN.ssid, JOIN.psk);
+    wipe(JOIN.psk, sizeof JOIN.psk);
+    JOIN.done = 1;
+    JOIN.busy = 0;
+}
+
+void rtl8821ce_join_abort(void)
+{
+    wipe(JOIN.psk, sizeof JOIN.psk);
+    JOIN.busy = 0;
+}
+
+/* 1 while the join goes on; 0 when it has ended (*result is its NET_WIFI_ code, given once); -1 when there is none to report */
+int rtl8821ce_join_poll(int *result)
+{
+    if (JOIN.busy)
+        return 1;
+    if (!JOIN.done)
+        return -1;
+    JOIN.done = 0;
+    *result = JOIN.result;
+    return 0;
+}
+
 static int rtl8821ce_recv_up(void *buf, unsigned max)
 {
-    if (!LINK.adapter || BOOT.busy)
+    if (!LINK.adapter || BOOT.busy || JOIN.busy)
         return 0;
     rx_poll();
     link_service();
