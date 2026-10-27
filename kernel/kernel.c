@@ -8,6 +8,7 @@
 #include "desktop.h"
 #include "devmgr.h"
 #include "display.h"
+#include "amd_bringup.h"
 #include "exec.h"
 #include "exfat.h"
 #include "fbwc.h"
@@ -272,6 +273,8 @@ void kernel_main(const BootInfo *info)
     splash_progress(55, "Scanning devices and disks");
     pci_scan();
     display_init((unsigned long long)info->framebuffer, 0); /* GPUs on PCI; which one shows the framebuffer */
+    if (pmm_ok)
+        amd_gpu_bringup(); /* AMD Radeon: read-only checks, results go to COM1 */
     if (pmm_ok)
         storage_init(); /* NVMe and SATA disks, their partitions */
     devmgr_init(kbd_ok);

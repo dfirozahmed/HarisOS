@@ -3,6 +3,7 @@
 #include "blk.h"
 #include "devmgr.h"
 #include "display.h"
+#include "amd_bringup.h"
 #include "i2c_hid.h"
 #include "mouse.h"
 #include "net.h"
@@ -70,6 +71,7 @@ int devmgr_refresh(void)
         in.net_dev = loc[1];
         in.net_fn = loc[2];
     }
+    amd_gpu_bringup_summary(in.amd_status, sizeof in.amd_status);
     in.i2c_count = 0;
     for (int i = 0; i < i2c_hid_count() && in.i2c_count < DEVMGR_MAX_I2C; i++)
     {

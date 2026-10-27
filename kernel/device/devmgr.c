@@ -175,6 +175,8 @@ int devmgr_build(const DevmgrInputs *in)
             const DevmgrDisplay *g = find_display(in, d);
             if (g)
                 describe_display(e, g);
+            if (d->vendor_id == 0x1002 && in->amd_status[0])
+                copy(e->note, sizeof e->note, in->amd_status);
         }
     }
 

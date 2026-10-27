@@ -1,0 +1,108 @@
+#ifndef FIROZOS_AMD_PSP_H
+#define FIROZOS_AMD_PSP_H
+#include "gpu_types.h"
+int amd_psp_preflight(uint64_t mmio_base, uint32_t bar0, uint32_t bar1, uint32_t bar2, uint32_t bar3, uint32_t bar4, uint32_t bar5, uint16_t pci_command);
+const char *amd_psp_status(void);
+uint32_t amd_psp_tmr_addr(void);
+uint32_t amd_psp_tmr_size(void);
+uint32_t amd_psp_tmr_sys_addr(void);
+uint32_t amd_psp_cmd_addr(void);
+uint32_t amd_psp_fence_addr(void);
+uint32_t amd_psp_cmd_attempted(void);
+uint32_t amd_psp_cmd_stage(void);
+uint32_t amd_psp_cmd_result(void);
+uint32_t amd_psp_cmd_last_id(void);
+uint32_t amd_psp_cmd_last_fw_type(void);
+uint32_t amd_psp_cmd_last_fw_addr(void);
+uint32_t amd_psp_cmd_last_fw_size(void);
+uint32_t amd_psp_cmd_last_status(void);
+uint32_t amd_psp_cmd_last_fence(void);
+uint32_t amd_psp_mailbox33(void);
+uint32_t amd_psp_sol(void);
+uint32_t amd_psp_mailbox35(void);
+uint32_t amd_psp_mailbox64(void);
+uint32_t amd_psp_mailbox81(void);
+uint32_t amd_psp_ring_pre64(void);
+uint32_t amd_psp_ring_post64(void);
+uint32_t amd_psp_ring_post67(void);
+uint32_t amd_psp_ring_post69(void);
+uint32_t amd_psp_ring_post70(void);
+uint32_t amd_psp_ring_post71(void);
+uint32_t amd_psp_ring_result(void);
+uint32_t amd_psp_ring_addr(void);
+uint32_t amd_psp_ring_alloc_addr(void);
+uint32_t amd_psp_ring_cmd(void);
+uint32_t amd_psp_ring_post33(void);
+uint32_t amd_psp_ring_post35(void);
+uint32_t amd_psp_ring_post81(void);
+uint32_t amd_psp_ring_resp_code(void);
+uint32_t amd_psp_ring_attempted(void);
+uint32_t amd_psp_ring_stage(void);
+int amd_psp_active(void);
+/* Opt-in: one SETUP_TMR command with a VRAM-resident TMR (MC address). */
+int amd_psp_setup_tmr_vram(uint64_t tmr_mc_addr, uint32_t tmr_bytes);
+const char *amd_psp_tmr_test_status(void);
+/* Opt-in: LOAD_IP_FW for one firmware (ucode body copied to an aligned buffer). */
+int amd_psp_load_fw_test(int fw_index, uint32_t fw_type);
+/* Opt-in: LOAD_IP_FW for CE/PFP/ME/MEC1(+JT)/MEC2(+JT)/RLC_G/SDMA0 in one run. */
+int amd_psp_load_fw_batch(void);
+const char *amd_psp_fw_batch_status(void);
+uint32_t amd_psp_fw_batch_accepted(void);
+int amd_psp_fw_batch_count(void);
+const char *amd_psp_fw_job_name(int i);
+uint32_t amd_psp_fw_job_state(int i);   /* 0 not run,1 accepted,2 rejected,3 timeout,4 skipped,5 aborted */
+uint32_t amd_psp_fw_job_resp(int i);
+uint32_t amd_psp_fw_job_size(int i);
+uint32_t amd_psp_fw_job_type(int i);
+const char *amd_psp_fw_test_status(void);
+uint32_t amd_psp_fw_test_resp(void);
+uint32_t amd_psp_fw_test_size(void);
+uint32_t amd_psp_fw_test_addr(void);
+uint32_t amd_psp_fw_test_type(void);
+uint32_t amd_psp_tmr_test_resp(void);
+uint32_t amd_psp_tmr_test_ran(void);
+uint32_t amd_psp_tmr_test_lo(void);
+uint32_t amd_psp_tmr_test_hi(void);
+uint32_t amd_psp_tmr_test_wptr_before(void);
+uint32_t amd_psp_tmr_test_wptr_after(void);
+uint32_t amd_psp_probe58000(void);
+uint32_t amd_psp_probe58004(void);
+uint32_t amd_psp_probe58180(void);
+uint32_t amd_psp_probe16000(void);
+uint32_t amd_psp_probe16000_61(void);
+uint32_t amd_psp_bar0(void);
+uint32_t amd_psp_bar1(void);
+uint32_t amd_psp_bar2(void);
+uint32_t amd_psp_bar3(void);
+uint32_t amd_psp_bar4(void);
+uint32_t amd_psp_bar5(void);
+uint32_t amd_psp_selected_mmio(void);
+uint32_t amd_psp_cand2_81(void);
+uint32_t amd_psp_cand5_81(void);
+uint32_t amd_psp_cand2_35(void);
+uint32_t amd_psp_cand5_35(void);
+uint32_t amd_psp_cand2_64(void);
+uint32_t amd_psp_cand5_64(void);
+uint32_t amd_psp_cand2_58180(void);
+uint32_t amd_psp_cand5_58180(void);
+uint16_t amd_psp_pci_command(void);
+#endif
+
+uint32_t amd_psp_vm_l2_cntl(void);
+uint32_t amd_psp_vm_l2_cntl2(void);
+uint32_t amd_psp_vm_l2_cntl3(void);
+uint32_t amd_psp_vm_l2_status(void);
+uint32_t amd_psp_vm_ctx0_cntl(void);
+uint32_t amd_psp_vm_ctx0_pt_base(void);
+uint32_t amd_psp_vm_ctx0_pt_start(void);
+uint32_t amd_psp_vm_ctx0_pt_end(void);
+uint32_t amd_psp_vm_ctx0_fault_default(void);
+uint32_t amd_psp_vm_inv_req(void);
+uint32_t amd_psp_vm_inv_resp(void);
+uint32_t amd_psp_vm_sys_ap_low(void);
+uint32_t amd_psp_vm_sys_ap_high(void);
+uint32_t amd_psp_vm_sys_ap_default(void);
+uint32_t amd_psp_vm_l1_tlb_cntl(void);
+uint32_t amd_psp_vm_probe_ok(void);
+uint32_t amd_psp_vm_probe_bar5(void);
+const char *amd_psp_vm_status(void);

@@ -82,6 +82,7 @@ typedef struct {
     int net_working; /* ... and it started */
     unsigned char net_bus, net_dev, net_fn;
     char net_status[96]; /* one line: chip, link, counters, or why it did not start */
+    char amd_status[96]; /* one line from the AMD GPU bring-up (amd_bringup.h), "" = no AMD GPU */
 } DevmgrInputs;
 
 /* Rebuilds the list from pci_count()/pci_get() and the inputs. Returns the entry count. */

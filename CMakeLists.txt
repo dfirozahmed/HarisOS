@@ -39,6 +39,13 @@ if(HARIS_BOOT_SELFTEST)
     list(APPEND EFI_CFLAGS -DHARIS_BOOT_SELFTEST=1)
 endif()
 
+# AMD Radeon GART/VMID0 bring-up: WRITES GPU registers (may blank the screen or hang the machine). Off = read-only probe.
+#   cmake -S . -B build -DHARIS_AMD_GPU_GART=ON
+option(HARIS_AMD_GPU_GART "AMD GPU: enable the GART/VMID0 register-writing bring-up" OFF)
+if(HARIS_AMD_GPU_GART)
+    list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_GART=1)
+endif()
+
 # helper: haris_efi_program
 function(haris_efi_program NAME SRC ENTRY OUTNAME)
     set(OBJ ${CMAKE_BINARY_DIR}/${NAME}.obj)
@@ -130,6 +137,13 @@ set(KERNEL_SOURCES
     kernel/cpu/smp/smp_stub.c                       # SMP
     kernel/cpu/ioapic.c            # I/O APIC: device interrupt lines to processor interrupts (used by the network card)
     kernel/drivers/bus/pci.c                # PCI device enumeration (Device Manager)
+    kernel/drivers/gpu/gpu_log.c            # AMD GPU: COM1 log helpers
+    kernel/drivers/gpu/gpu_mmio.c           # AMD GPU: register window access
+    kernel/drivers/gpu/amd_gpu.c            # AMD GPU: supported device list, BAR probe
+    kernel/drivers/gpu/amd_firmware.c       # AMD GPU: firmware staging record
+    kernel/drivers/gpu/amd_psp.c            # AMD GPU: PSP (security processor) mailbox / ring
+    kernel/drivers/gpu/amd_native.c         # AMD GPU: Renoir GC / VM hubs / GART / CP ring
+    kernel/drivers/gpu/amd_bringup.c        # AMD GPU: finds the GPU on PCI and runs the checks
     kernel/device/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/nic.c                 # network: picks the card driver, forwards net_send / net_recv ...
     kernel/drivers/net/e1000.c               # network: Intel e1000 NIC driver (interrupt or polled), raw Ethernet frames
