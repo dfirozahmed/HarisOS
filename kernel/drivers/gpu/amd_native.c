@@ -10,7 +10,7 @@ static const char *status = "not initialized";
 /* AMDGPU common firmware header fields (little-endian on x86).
  * We only validate the memory image here; this does NOT verify AMD's
  * cryptographic signature. PSP remains the authority for authentication. */
-static uint32_t fw32(const volatile uint8_t *p, uint32_t off)
+static __attribute__((unused)) uint32_t fw32(const volatile uint8_t *p, uint32_t off)
 {
     const volatile uint32_t *v = (const volatile uint32_t *)(p + off);
     return *v;
@@ -1125,8 +1125,8 @@ typedef struct {
 } CpVar;
 #define CPV_COUNT 6
 static CpVar cpv[CPV_COUNT] = {
-    { "UCFG3" }, { "UCFG253" }, { "WRDATA" },
-    { "D-UCFG3" }, { "D-UCFG253" }, { "D-WRDATA" },   /* same three, after direct ucode load */
+    { .name = "UCFG3" }, { .name = "UCFG253" }, { .name = "WRDATA" },
+    { .name = "D-UCFG3" }, { .name = "D-UCFG253" }, { .name = "D-WRDATA" },   /* same three, after direct ucode load */
 };
 static const char *cpm_status = "CP ring matrix not run (FIROZOS_CP_RING_MATRIX=0)";
 
@@ -1538,8 +1538,7 @@ cleanup:
 int amd_native_cp_vm_gart_test(uint64_t mmio, uint64_t cpu_vram, int fw_ready)
 {
     uint64_t ring_mc, wb_mc, va;
-    uint32_t me, i, wptr = 5u, target_before, target_after;
-    const uint32_t pattern = 0xFACEB00Cu;
+    uint32_t me, i, target_before, target_after;
     const uint32_t physical_off = 0x00100000u;
     cp_vm_pass = cp_vm_step = cp_vm_rptr = cp_vm_me = cp_vm_fault_mm = cp_vm_fault_gc = 0;
     cp_vm_rbv = cp_vm_rbb = cp_vm_rbbhi = 0;
@@ -2728,7 +2727,7 @@ uint32_t amd_gpu2d_value(int what)
    bottom screen rows and compares.  Mismatch => feature stays off.         */
 #define GP_IDX 0x200u                            /* GART pages 0x200.. */
 static uint64_t gp_va;
-static uint32_t gp_state, gp_good, gp_total, gp_pages, gp_bytes, gp_calls, gp_pkts_before;
+static uint32_t gp_state, gp_good, gp_total, gp_pages, gp_bytes, gp_calls;
 static const char *gp_status = "GPU present not initialised";
 
 int amd_gpu2d_present_ready(void) { return gp_state == 0x100u && amd_gpu2d_ready(); }

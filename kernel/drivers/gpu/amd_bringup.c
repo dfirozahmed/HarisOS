@@ -199,3 +199,74 @@ void amd_gpu_bringup_gart(void)
     amd_gpu_log_save();
 #endif
 }
+
+/* Loads the firmware images from the boot drive and logs what was found. Reads only. Needs the drives mounted. */
+void amd_gpu_bringup_firmware(void)
+{
+    if (!bringup_probed)
+        return;
+    serial_print("Firmware:\n");
+    (void)amd_firmware_load();
+    serial_print("  "); serial_print(amd_firmware_status()); serial_print("\n");
+}
+
+/* PSP (security processor) steps, in the order of Linux psp_v12_0 and of the FirozOS V89 bring-up. They write PSP mailbox
+ * registers, so they are compiled in only with HARIS_AMD_GPU_PSP_LEVEL (0 = off):
+ *   1  create the KM ring, then one SETUP_TMR (a 4 MiB trusted memory region in VRAM, 192 MiB in)
+ *   2  also LOAD_IP_FW for CE, PFP, ME, MEC1/2, RLC_G, SDMA0 (needs the firmware loaded by amd_gpu_bringup_firmware())
+ * It must run BEFORE the GART step: the PSP is given physical addresses, which stop being valid once VMID0 translates.
+ * Every step saves the log first, so a hang leaves the last line that was reached. */
+#ifndef HARIS_AMD_GPU_PSP_LEVEL
+#define HARIS_AMD_GPU_PSP_LEVEL 0
+#endif
+#define PSP_TMR_VRAM_OFF 0x0C000000u /* 192 MiB into VRAM, 4 MiB aligned */
+#define PSP_TMR_BYTES    0x00400000u
+
+void amd_gpu_bringup_psp(void)
+{
+#if HARIS_AMD_GPU_PSP_LEVEL >= 1
+    if (!bringup_probed || (amd_native_mmhub_ctx0_cntl() & 1u))
+        return; /* not probed, or VMID0 translation is already on */
+    serial_print("PSP: about to create the KM ring (writes PSP mailbox registers)\n");
+    amd_gpu_log_save();
+    int ring_ok = amd_psp_ring_init();
+    serial_print("PSP: "); serial_print(amd_psp_status()); serial_print("\n");
+    log_hex("  ring cmd      ", amd_psp_ring_cmd());
+    log_hex("  ring resp     ", amd_psp_ring_result());
+    log_hex("  ring stage    ", amd_psp_ring_stage());
+    log_hex("  C2PMSG_64     ", amd_psp_ring_post64());
+    log_hex("  C2PMSG_81     ", amd_psp_ring_post81());
+    amd_gpu_log_save();
+    if (!ring_ok)
+        return;
+
+    uint64_t tmr_mc = amd_native_vram_mc_addr(PSP_TMR_VRAM_OFF, PSP_TMR_BYTES);
+    if (!tmr_mc) {
+        serial_print("PSP: TMR skipped: no VRAM MC address\n");
+        amd_gpu_log_save();
+        return;
+    }
+    serial_print("PSP: about to send SETUP_TMR\n");
+    amd_gpu_log_save();
+    int tmr_ok = amd_psp_setup_tmr_vram(tmr_mc, PSP_TMR_BYTES);
+    serial_print("PSP: "); serial_print(amd_psp_tmr_test_status()); serial_print("\n");
+    amd_gpu_log_save();
+
+#if HARIS_AMD_GPU_PSP_LEVEL >= 2
+    if (!tmr_ok || !amd_firmware_staged())
+        return;
+    serial_print("PSP: about to load the firmware images (LOAD_IP_FW)\n");
+    amd_gpu_log_save();
+    (void)amd_psp_load_fw_batch();
+    serial_print("PSP: "); serial_print(amd_psp_fw_batch_status()); serial_print("\n");
+    for (int i = 0; i < amd_psp_fw_batch_count(); i++) {
+        serial_print("  "); serial_print(amd_psp_fw_job_name(i));
+        log_hex(" state ", amd_psp_fw_job_state(i));
+        log_hex("     resp ", amd_psp_fw_job_resp(i));
+    }
+    amd_gpu_log_save();
+#else
+    (void)tmr_ok;
+#endif
+#endif
+}

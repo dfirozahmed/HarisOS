@@ -204,7 +204,7 @@ static int wait_mask(volatile uint32_t *r, uint32_t mask, uint32_t value){
     return 0;
 }
 
-static int wait_changed(volatile uint32_t *r, uint32_t old){
+static __attribute__((unused)) int wait_changed(volatile uint32_t *r, uint32_t old){
     for(uint32_t i=0;i<PSP_WAIT_LOOPS;i++){
         uint32_t v=rd(r);
         if(v!=old) return 1;
@@ -213,7 +213,7 @@ static int wait_changed(volatile uint32_t *r, uint32_t old){
     return 0;
 }
 
-static int psp_table_ok(volatile uint32_t *t){
+static __attribute__((unused)) int psp_table_ok(volatile uint32_t *t){
     /* The FirozOS loader left this table at physical 0x9A00. The HarisOS loader stages no PSP package, and that low
        page belongs to the SMP start-up code here, so it is not read: the answer is always "missing". */
     (void)t;
@@ -236,7 +236,7 @@ static volatile uint8_t *payload_ptr(volatile uint32_t *t, int index, uint32_t *
     return (volatile uint8_t *)(unsigned long long)(uint32_t)e[0];
 }
 
-static int load_component(volatile uint8_t *b, volatile uint32_t *t,
+static __attribute__((unused)) int load_component(volatile uint8_t *b, volatile uint32_t *t,
                           int table_index, uint32_t command){
     uint32_t size=0;
     volatile uint8_t *src=payload_ptr(t,table_index,&size);
@@ -354,7 +354,7 @@ static int psp_submit_cmd(volatile uint8_t *b, uint32_t cmd_id,
     return 0;
 }
 
-static int psp_setup_tmr_and_load_pfp(volatile uint8_t *b, volatile uint32_t *t){
+static __attribute__((unused)) int psp_setup_tmr_and_load_pfp(volatile uint8_t *b, volatile uint32_t *t){
     const AmdFirmwareEntry *pfp;
     uint32_t fw_addr, fw_size;
     cmd_attempted=1; cmd_stage=1; cmd_result=0; cmd_last_status=0;
@@ -460,11 +460,6 @@ int amd_psp_preflight(uint64_t mmio_base, uint32_t bar0, uint32_t bar1, uint32_t
     vm_sys_ap_low=vm_sys_ap_high=vm_sys_ap_default=vm_l1_tlb_cntl=0;
     vm_probe_ok=0; vm_probe_bar=0; vm_status="not run";
 
-    if(!psp_table_ok((volatile uint32_t*)PSP_INFO)){
-        st="PSP package staging record missing/incomplete";
-        return 0;
-    }
-
     /* V64: diagnostic-only. Never issue PSP mailbox writes. */
     volatile uint8_t *b2 = (bar2 && ((bar2 & 0x1u)==0)) ? gpu_mmio_ptr((uint64_t)(bar2 & 0xFFFFFFF0u)) : (volatile uint8_t*)0;
     volatile uint8_t *b5 = (bar5 && ((bar5 & 0x1u)==0)) ? gpu_mmio_ptr((uint64_t)(bar5 & 0xFFFFFFF0u)) : (volatile uint8_t*)0;
@@ -505,24 +500,39 @@ int amd_psp_preflight(uint64_t mmio_base, uint32_t bar0, uint32_t bar1, uint32_t
     last81=rd(regp(b,C2PMSG81));
     sol=last81;
 
-    /* BAR5 passed the sOS sign-of-life test. Perform only the Linux-matching
-       Renoir v12 KM-ring initialization sequence; no firmware loading or
-       reset is attempted here. */
-    int ok = create_km_ring(b);
-    if(!ok){ st="V72: BAR5 KM ring command failed"; return 0; }
-
-    /* v72 deliberately stops here. Linux's Renoir PSP interface passes the
-       TMR GPU virtual address to SETUP_TMR; FirozOS does not yet own a valid
-       GFXHUB VMID0/GART mapping. Do not submit SETUP_TMR or LOAD_IP_FW until
-       that mapping has been established and verified. */
-    volatile uint32_t *t=(volatile uint32_t*)PSP_INFO;
-    tmr_addr=psp_table_value(t,PSP_TMR_TABLE_ADDR);
-    tmr_size=psp_table_value(t,PSP_TMR_TABLE_SIZE);
-    tmr_sys_addr=tmr_addr;
-    cmd_addr=psp_table_value(t,PSP_CMD_TABLE_ADDR);
-    fence_addr=psp_table_value(t,PSP_FENCE_TABLE_ADDR);
+    /* BAR5 passed the sOS sign-of-life test. Everything above only READ registers. Creating the KM ring writes the PSP
+       mailbox (C2PMSG_69/70/71/64), so it is a separate step: amd_psp_ring_init(). */
     renoir_gmc_readonly_preflight(pbar5);
-    st="V75: PSP KM ring ready; Renoir GFXHUB VM/GART register preflight is read-only";
+    st="PSP sOS alive (C2PMSG_81 sign of life); KM ring not created (read-only preflight)";
+    return 1;
+}
+
+/* One 4 KiB command buffer and one 4 KiB fence page for the GPCOM ring. The FirozOS loader allocated these before
+   ExitBootServices and passed them in a table; here they come from the heap. They must be 4 KiB aligned and below
+   4 GiB (the PSP is given 32-bit addresses) and stay allocated for the lifetime of the PSP. */
+static uint8_t *cf_alloc;
+
+static int alloc_cmd_fence(void){
+    if(cmd_addr && fence_addr) return 1;
+    cf_alloc=(uint8_t*)kmalloc(0x3000u);
+    if(!cf_alloc) return 0;
+    if((unsigned long long)cf_alloc+0x3000u>GPU_DMA_LIMIT){ kfree(cf_alloc); cf_alloc=0; return 0; }
+    uint8_t *page=(uint8_t*)(unsigned long long)((((uint32_t)(unsigned long long)cf_alloc)+0xFFFu)&~0xFFFu);
+    for(uint32_t i=0;i<0x2000u;i++) page[i]=0;
+    cmd_addr=(uint32_t)(unsigned long long)page;
+    fence_addr=cmd_addr+0x1000u;
+    return 1;
+}
+
+/* Creates the PSP KM ring (WRITES the PSP mailbox). Needs a successful amd_psp_preflight() (selected_mmio). */
+int amd_psp_ring_init(void){
+    if(active) return 1;
+    if(!selected_mmio){ st="PSP ring init skipped: preflight did not find the sOS"; return 0; }
+    if(!alloc_cmd_fence()){ st="PSP ring init skipped: no command buffer below 4 GiB"; return 0; }
+    if(!create_km_ring((volatile uint8_t*)(unsigned long long)selected_mmio)){
+        st="V72: BAR5 KM ring command failed"; return 0;
+    }
+    st="V75: PSP KM ring ready";
     return 1;
 }
 
@@ -619,7 +629,7 @@ int amd_psp_setup_tmr_vram(uint64_t tmr_mc_addr, uint32_t tmr_bytes)
         tmr_test_status="TMR test skipped: PSP KM ring not ready"; return 0;
     }
     if(!cmd_addr || !fence_addr || (cmd_addr&0xFFFu) || (fence_addr&0xFFFu)){
-        tmr_test_status="TMR test skipped: no valid cmd/fence buffer from loader"; return 0;
+        tmr_test_status="TMR test skipped: no valid cmd/fence buffer"; return 0;
     }
     if(tmr_bytes < PSP_TMR_SIZE || (tmr_mc_addr & (PSP_TMR_ALIGN-1u))){
         tmr_test_status="TMR test skipped: TMR size/alignment invalid"; return 0;

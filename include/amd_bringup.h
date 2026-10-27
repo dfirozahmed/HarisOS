@@ -17,6 +17,14 @@ int amd_gpu_log_save(void);
 /* The GART / VMID0 step: does something only when built with HARIS_AMD_GPU_GART. Saves the log before it runs. */
 void amd_gpu_bringup_gart(void);
 
+/* The PSP steps (KM ring, SETUP_TMR, firmware load): only when built with HARIS_AMD_GPU_PSP_LEVEL 1 or 2. Runs before
+ * amd_gpu_bringup_gart(), which has to stay off while the PSP gets physical addresses. */
+void amd_gpu_bringup_psp(void);
+
+/* Loads the Renoir firmware files from the boot drive (reads only) and logs them. Call after volume_mount_all(), before
+ * amd_gpu_log_save(). */
+void amd_gpu_bringup_firmware(void);
+
 /* One short line for the Device Manager (GC state, VRAM, VM hub, firmware); "" if there is no AMD GPU. */
 void amd_gpu_bringup_summary(char *out, int n);
 

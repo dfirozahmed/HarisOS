@@ -39,6 +39,8 @@ uint32_t amd_psp_ring_resp_code(void);
 uint32_t amd_psp_ring_attempted(void);
 uint32_t amd_psp_ring_stage(void);
 int amd_psp_active(void);
+/* Creates the PSP KM ring: WRITES the PSP mailbox registers. After a successful amd_psp_preflight(). 1 = ring ready. */
+int amd_psp_ring_init(void);
 /* Opt-in: one SETUP_TMR command with a VRAM-resident TMR (MC address). */
 int amd_psp_setup_tmr_vram(uint64_t tmr_mc_addr, uint32_t tmr_bytes);
 const char *amd_psp_tmr_test_status(void);

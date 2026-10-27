@@ -46,6 +46,14 @@ if(HARIS_AMD_GPU_GART)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_GART=1)
 endif()
 
+# AMD Radeon PSP bring-up: WRITES the PSP mailbox registers. 0 = off (read-only), 1 = KM ring + SETUP_TMR, 2 = also load the firmware.
+# Use it WITHOUT HARIS_AMD_GPU_GART (the PSP is given physical addresses, so the GART step must not run first).
+#   cmake -S . -B build-psp -DHARIS_AMD_GPU_PSP_LEVEL=1
+set(HARIS_AMD_GPU_PSP_LEVEL 0 CACHE STRING "AMD GPU: PSP bring-up level (0 off, 1 ring + TMR, 2 + firmware)")
+if(HARIS_AMD_GPU_PSP_LEVEL GREATER 0)
+    list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_PSP_LEVEL=${HARIS_AMD_GPU_PSP_LEVEL})
+endif()
+
 # helper: haris_efi_program
 function(haris_efi_program NAME SRC ENTRY OUTNAME)
     set(OBJ ${CMAKE_BINARY_DIR}/${NAME}.obj)
@@ -502,6 +510,22 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)
     list(APPEND HARIS_EXTRA_FILES ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)
     message(STATUS "Wi-Fi firmware found: firmware/RTW8821C.BIN goes onto haris.img")
 endif()
+
+# AMD Radeon (Renoir) firmware: linux-firmware amdgpu/renoir_*.bin in firmware/amd/renoir/ (AMD's licence, git ignores the folder). A FAT
+# root folder here only has 8.3 names, so each file goes onto haris.img as R_<NAME>.BIN (renoir_pfp.bin -> R_PFP.BIN); amd_firmware.c reads them.
+set(RENOIR_FW_MAP
+    gpu_info:R_GPUINF asd:R_ASD ce:R_CE me:R_ME mec:R_MEC mec2:R_MEC2 pfp:R_PFP rlc:R_RLC sdma:R_SDMA ta:R_TA vcn:R_VCN dmcub:R_DMCUB)
+foreach(PAIR ${RENOIR_FW_MAP})
+    string(REPLACE ":" ";" PARTS "${PAIR}")
+    list(GET PARTS 0 FW_SRC)
+    list(GET PARTS 1 FW_DST)
+    set(FW_FILE ${CMAKE_SOURCE_DIR}/firmware/amd/renoir/renoir_${FW_SRC}.bin)
+    if(EXISTS ${FW_FILE})
+        file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/fw)
+        configure_file(${FW_FILE} ${CMAKE_BINARY_DIR}/fw/${FW_DST}.BIN COPYONLY)
+        list(APPEND HARIS_EXTRA_FILES ${CMAKE_BINARY_DIR}/fw/${FW_DST}.BIN)
+    endif()
+endforeach()
 
 # pconfig/WIFI.CFG (git ignores the folder): the name and passphrase of the Wi-Fi network to join, two lines "ssid=NAME" and "psk=PASSPHRASE".
 # It goes into the top folder of the boot disk; the driver reads it at start-up and never prints the passphrase.
