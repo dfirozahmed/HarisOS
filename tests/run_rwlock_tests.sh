@@ -8,7 +8,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
 "$CC" -std=c11 -Wall -Wextra -Werror -O1 -DHARIS_HOST -I"$ROOT/include" \
   "$ROOT/tests/test_rwlock.c" \
   "$ROOT/kernel/sync/rwlock.c" \
-  "$ROOT/kernel/sched/task.c" \
+  "$ROOT"/kernel/sched/task/*.c \
   "$ROOT/kernel/sched/task_ctx.c" \
   "$ROOT/kernel/sched/taskset.c" \
   -o "$OUT"

@@ -77,7 +77,12 @@ set(KERNEL_SOURCES
     kernel/cpu/fault.c             # CPU exceptions: register-saving stubs, crash screen + serial output, #DF stack
     kernel/core/serial.c            # COM1 output for debugging (boot self test, crash report)
     kernel/cpu/fault_fmt.c        # CPU exceptions: report text (host-tested)
-    kernel/sched/task.c             # kernel threads (cooperative): task table, round-robin scheduler, boot self test
+    kernel/sched/task/task_core.c                   # kernel threads
+    kernel/sched/task/task_sched.c                  # kernel threads
+    kernel/sched/task/task_create.c                 # kernel threads
+    kernel/sched/task/task_run.c                    # kernel threads
+    kernel/sched/task/task_smp.c                    # kernel threads
+    kernel/sched/task/task_selftest.c               # kernel threads
     kernel/sched/task_ctx.c          # kernel threads: the register-saving context switch
     kernel/memory/heapmon.c           # background thread: checks the kernel heap once a second
     kernel/syscall/syscall.c        # system calls: SYSCALL entry, the call table, counters
@@ -101,8 +106,14 @@ set(KERNEL_SOURCES
     kernel/sync/rwlock.c            # reader-writer lock (host-tested)
     kernel/proc/signal.c            # signal handlers: frames on the user stack, sigreturn
     kernel/proc/elf.c               # ELF64 executables: header and segment checks (host-tested)
-    kernel/proc/exec.c              # run a program that is a file on a drive: find, read, load, start
-    kernel/proc/process.c          # user processes: address space + thread, ring 3 entry, boot self test
+    kernel/proc/exec/exec_core.c                    # run a program that is a file on a drive
+    kernel/proc/exec/exec_selftest.c                # loader boot self test
+    kernel/proc/process/process_core.c              # user processes
+    kernel/proc/process/process_launch.c            # processes
+    kernel/proc/process/process_exec.c              # processes
+    kernel/proc/process/process_stack.c             # processes
+    kernel/proc/process/process_exit.c              # processes
+    kernel/proc/process/process_selftest.c          # processes
     kernel/proc/user_demo.c         # ring 3 demo programs for the self test
     kernel/cpu/protect.c           # SMEP / SMAP, boot self test of the protections and the NMI stack
     kernel/cpu/gdt.c             # GDT: kernel + user segments, TSS (host-tested layout)
@@ -146,8 +157,22 @@ set(KERNEL_SOURCES
     kernel/drivers/storage/nvme.c            # NVMe SSD driver
     kernel/drivers/storage/usb_msc.c         # USB mass storage (pen drives): bulk-only transport + SCSI commands
     kernel/storage/storage.c         # starts the drivers
-    kernel/fs/fat32.c                # FAT32 file system
-    kernel/fs/exfat.c                # exFAT file system (read only)
+    kernel/fs/fat32/fat32_core.c                    # FAT32 file system
+    kernel/fs/fat32/fat32_fat.c                     # FAT32
+    kernel/fs/fat32/fat32_mount.c                   # FAT32
+    kernel/fs/fat32/fat32_name.c                    # FAT32
+    kernel/fs/fat32/fat32_list.c                    # FAT32
+    kernel/fs/fat32/fat32_data.c                    # FAT32
+    kernel/fs/fat32/fat32_entry.c                   # FAT32
+    kernel/fs/fat32/fat32_ops.c                     # FAT32
+    kernel/fs/exfat/exfat_core.c                    # exFAT file system
+    kernel/fs/exfat/exfat_read.c                    # exFAT
+    kernel/fs/exfat/exfat_dir.c                     # exFAT
+    kernel/fs/exfat/exfat_mount.c                   # exFAT
+    kernel/fs/exfat/exfat_fat.c                     # exFAT
+    kernel/fs/exfat/exfat_cluster.c                 # exFAT
+    kernel/fs/exfat/exfat_name.c                    # exFAT
+    kernel/fs/exfat/exfat_write.c                   # exFAT
     kernel/fs/ntfs/ntfs_core.c       # NTFS: reading the volume, data runs, MFT records
     kernel/fs/ntfs/ntfs_mount.c      # NTFS: names, mount, folder listing, file data
     kernel/fs/ntfs/ntfs_wio.c        # NTFS write: how a change is made, raw writes, records and attributes
@@ -178,7 +203,13 @@ set(KERNEL_SOURCES
     kernel/graphics/font_data.c # Poppins
     kernel/graphics/cursor_data.c # mouse arrow
     kernel/drivers/input/ps2.c          # PS/2 controller: sorts keyboard / mouse bytes
-    kernel/drivers/input/usb_xhci.c     # USB 3 (xHCI) controller + HID mouse / keyboard + mass storage (polled)
+    kernel/drivers/input/usb_xhci/usb_xhci_core.c   # USB 3 (xHCI)
+    kernel/drivers/input/usb_xhci/usb_xhci_hid.c    # xHCI
+    kernel/drivers/input/usb_xhci/usb_xhci_enum.c   # xHCI
+    kernel/drivers/input/usb_xhci/usb_xhci_msc.c    # xHCI
+    kernel/drivers/input/usb_xhci/usb_xhci_dev.c    # xHCI
+    kernel/drivers/input/usb_xhci/usb_xhci_ctrl.c   # xHCI
+    kernel/drivers/input/usb_xhci/usb_xhci_stub.c   # xHCI
     kernel/input/aml_scan.c     # finds I2C-HID devices in ACPI byte code
     kernel/input/hid_desc.c     # HID report descriptor: where the mouse fields are
     kernel/drivers/input/i2c_dw.c       # DesignWare I2C controller (AMD / Intel)
