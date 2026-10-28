@@ -33,6 +33,8 @@
 #define R3D_PA_SC_VPORT_SCISSOR_0_BR                 0x0095
 #define R3D_PA_SC_VPORT_ZMIN_0                       0x00b4
 #define R3D_PA_SC_VPORT_ZMAX_0                       0x00b5
+#define R3D_PA_SC_RASTER_CONFIG                      0x00d4
+#define R3D_PA_SC_RASTER_CONFIG_1                    0x00d5
 #define R3D_PA_CL_VTE_CNTL                           0x0206
 #define R3D_PA_CL_VS_OUT_CNTL                        0x0207
 #define R3D_PA_CL_CLIP_CNTL                          0x0204

@@ -130,4 +130,29 @@ static inline uint32_t a3d_mimg_1(uint32_t vaddr, uint32_t vdata, uint32_t srsrc
     return vaddr | (vdata << 8) | ((srsrc_sgpr >> 2) << 16) | ((ssamp_sgpr >> 2) << 21);
 }
 
+/* ---- for the diagnostic store from the vertex shader ----
+ * GLOBAL (FLAT format, GFX9, Mesa aco_assembler.cpp emit_flatlike_instruction):
+ *   dword0: [12:0] OFFSET (signed), [13] LDS, [15:14] SEG (2 = global), [16] GLC, [17] SLC, [24:18] OP, [31:26] = 110111
+ *   dword1: [7:0] ADDR (VGPR pair, 64-bit address), [15:8] DATA (VGPR), [22:16] SADDR (0x7F = none), [23] NV, [31:24] VDST
+ * Opcode numbers (Mesa aco_opcodes.py, the gfx8 column, which GFX9 uses): GLOBAL_STORE_DWORD 0x1C, GLOBAL_STORE_DWORDX4 0x1F;
+ * VOP2 V_LSHLREV_B32 0x12 (D = S1 << S0), V_OR_B32 0x14, V_ADD_CO_U32 0x19 (carry to VCC), V_ADDC_CO_U32 0x1C (D = S0 + S1 + VCC).
+ * GFX9 VALU rule (Mesa aco_validate.cpp, const_bus_limit = 1): at most ONE scalar operand per instruction, counting SGPRs, literals
+ * and the VCC that V_CNDMASK_B32 / V_ADDC_CO_U32 read. So those two take only VGPRs or inline constants besides VCC. */
+#define A3D_OP2_LSHLREV_B32 0x12u
+#define A3D_OP2_OR_B32 0x14u
+#define A3D_OP2_ADD_CO_U32 0x19u
+#define A3D_OP2_ADDC_CO_U32 0x1Cu
+#define A3D_GLOBAL_STORE_DWORD 0x1Cu
+#define A3D_GLOBAL_STORE_DWORDX4 0x1Fu
+
+static inline uint32_t a3d_global_0(uint32_t op, uint32_t offset)
+{
+    return 0xDC000000u | (op << 18) | (2u << 14) | (offset & 0x1FFFu);
+}
+
+static inline uint32_t a3d_global_1(uint32_t addr_vgpr, uint32_t data_vgpr)
+{
+    return addr_vgpr | (data_vgpr << 8) | (0x7Fu << 16);
+}
+
 #endif

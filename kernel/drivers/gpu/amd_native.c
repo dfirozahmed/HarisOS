@@ -2214,6 +2214,38 @@ uint32_t amd_gpu_submit_ib(uint64_t ib_va, uint32_t ib_dw)
     return seq;
 }
 
+/* Packets written straight into the ring (not through an IB), then the same RELEASE_MEM fence. Linux gfx_v9_0_cp_gfx_start() writes
+   its start-up packets (PREAMBLE_CNTL, the clear state, CLEAR_STATE, SET_BASE) this way, in the kernel ring. n + 8 must fit in the
+   ring (RG_DW - 1); the call waits for that much free space first. */
+uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n)
+{
+    uint32_t need = n + 8u, spin, seq, i;
+    uint64_t fa = rg_va_fence;
+    if (!rg_up || rg_dead || need > RG_DW - 1u) return 0;
+    for (spin = 0; ; spin++) {
+        uint32_t rptr = gpu_mmio_read32(rg_mmio, R_CP_RB0_RPTR) & (RG_DW - 1u);
+        uint32_t used = (rg_w - rptr) & (RG_DW - 1u);
+        if (RG_DW - 1u - used >= need) break;
+        if (spin > 2000000u) { rg_full++; rg_dead = 1; return 0; }
+    }
+    seq = ++rg_seq;
+    for (i = 0; i < n; i++) rg_put(dw[i]);
+    rg_put(0xC0064900u);                                 /* RELEASE_MEM, as in amd_gpu_submit_ib() */
+    rg_put((1u << 15) | (1u << 19) | 0x14u | (5u << 8));
+    rg_put(1u << 29);
+    rg_put((uint32_t)fa);
+    rg_put((uint32_t)(fa >> 32));
+    rg_put(seq);
+    rg_put(0u);
+    rg_put(0u);
+    __asm__ volatile("mfence" ::: "memory");
+    (void)cpm_rd(0x1FFCu);
+    gpu_mmio_write32(rg_mmio, R_CP_RB0_WPTR, rg_w & (RG_DW - 1u));
+    gpu_mmio_write32(rg_mmio, R_CP_RB0_WPTR_HI, 0u);
+    rg_submits++;
+    return seq;
+}
+
 /* IB slot k: WRITE_DATA(marker k) + NOP padding. */
 static void rg_build_slot(uint32_t k, uint32_t value)
 {
@@ -3197,3 +3229,24 @@ void amd_gpu_wc_flush(void)
 }
 /* Reads the VM protection-fault registers (read only) into the accessors amd_native_fault_*(). */
 void amd_gpu_fault_snapshot(void) { amd_native_fault_probe(rg_mmio); }
+/* Clears the GC VM fault status as Linux gmc_v9_0_process_interrupt() does: VM_L2_PROTECTION_FAULT_CNTL (gc_9_1_offset.h 0x847,
+   BASE_IDX 0) |= CLEAR_PROTECTION_FAULT_STATUS_ADDR (bit 0, gc_9_1_sh_mask.h). */
+void amd_gpu_fault_clear(void)
+{
+    uint32_t off = RNO_GC_BYTE(0x0847u);
+    if (!gpu_mmio_can_access(rg_mmio)) return;
+    gpu_mmio_write32(rg_mmio, off, gpu_mmio_read32(rg_mmio, off) | 1u);
+}
+/* A register of the GPU by its dword address. WRITES the GPU: only for the few registers the 3D code sets directly. */
+void amd_gpu_reg_write32(uint32_t dword_addr, uint32_t v) { gpu_mmio_write32(rg_mmio, dword_addr << 2, v); }
+/* 2 KiB of scratch in the fence page (system RAM, GART page RG_FENCE_IDX, offsets 0x800 .. 0xFFF): the GPU address, and CPU access. */
+uint64_t amd_gpu_scratch_va(void) { return (rg_fence && rg_va_fence) ? rg_va_fence + 0x800u : 0; }
+void amd_gpu_scratch_write32(uint32_t off, uint32_t v)
+{
+    volatile uint32_t *p;
+    if (!rg_fence || off >= 0x800u) return;
+    p = &rg_fence[(0x800u + off) >> 2];
+    *p = v;
+    cache_flush_line(p);
+}
+uint32_t amd_gpu_scratch_read32(uint32_t off) { return (rg_fence && off < 0x800u) ? rg_fence_read(0x800u + off) : 0xFFFFFFFFu; }

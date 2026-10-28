@@ -5,6 +5,7 @@
 #include "amd_psp.h"
 #include "amd_firmware.h"
 #include "gpu_log.h"
+#include "gpu_mmio.h"
 #include "pci.h"
 #include "gfx.h"
 #include "vfs.h"
@@ -381,6 +382,47 @@ void amd_gpu_bringup_psp(void)
  * packet but the register write never landed, while the FirozOS log of the same tests with VMID0 enabled (GART on) passes
  * (CP -> memory through GPU virtual addresses, IBs with fences, a persistent ring). So build with HARIS_AMD_GPU_GART=ON and
  * HARIS_AMD_GPU_PSP_LEVEL=3. All of it WRITES GPU registers; every step saves the log first. */
+#if defined(HARIS_AMD_GPU_GOLDEN) && HARIS_AMD_GPU_PSP_LEVEL >= 3
+/* The Linux "golden" register settings for Renoir: gfx_v9_0.c golden_settings_gc_9_1_rn[] (gfx_v9_0_init_golden_registers(), case
+ * IP_VERSION(9, 3, 0); Renoir gets only this table, "for renoir, don't need common goldensetting"). Linux writes them in
+ * gfx_v9_0_hw_init() before the RLC and the CP are started; here they go in before the first CP test. Applied like
+ * soc15_program_register_sequence(): an and-mask of 0xFFFFFFFF writes the value as it is, otherwise
+ * new = (old & ~and_mask) | (or_mask & and_mask). Register offsets from gc_9_1_offset.h; BASE_IDX 0 = dword 0x2000 + offset,
+ * BASE_IDX 1 = dword 0xA000 + offset (as RNO_GC_SEG0_DW / RNO_GC_SEG1_DW in amd_native.c). */
+static const struct { uint32_t dw, and_mask, or_mask; const char *name; } golden_rn[] = {
+    { 0x2000u + 0x0680u, 0xFFFDF3CFu, 0x00014104u, "  CB_HW_CONTROL" },
+    { 0x2000u + 0x0682u, 0xFF7FFFFFu, 0x0A000000u, "  CB_HW_CONTROL_2" },
+    { 0x2000u + 0x060Du, 0xF00FFFFFu, 0x00000400u, "  DB_DEBUG2" },
+    { 0x2000u + 0x063Eu, 0xF3E777FFu, 0x24000042u, "  GB_ADDR_CONFIG" },
+    { 0x2000u + 0x0642u, 0xF3E777FFu, 0x24000042u, "  GB_ADDR_CONFIG_READ" },
+    { 0x2000u + 0x02FCu, 0x3FFFFFFFu, 0x00000001u, "  PA_SC_ENHANCE" },
+    { 0x2000u + 0x02FDu, 0xFFFFFFFFu, 0x04040000u, "  PA_SC_ENHANCE_1" },
+    { 0xA000u + 0x2281u, 0x0000FF0Fu, 0x00000000u, "  PA_SC_LINE_STIPPLE_STATE" },
+    { 0x2000u + 0x0542u, 0xFFFFFEEFu, 0x010B0000u, "  TA_CNTL_AUX" },
+    { 0x2000u + 0x0B04u, 0xFFFFFFFFu, 0x00000000u, "  TCP_CHAN_STEER_HI" },
+    { 0x2000u + 0x0B03u, 0xFFFFFFFFu, 0x00003120u, "  TCP_CHAN_STEER_LO" },
+    { 0x2000u + 0x070Cu, 0xFFFFFFFFu, 0x0000CCCCu, "  GCEA_PROBE_MAP" },
+};
+
+static void golden_registers(void)
+{
+    uint32_t i;
+    serial_print("GOLDEN: about to write the Linux golden registers for Renoir (golden_settings_gc_9_1_rn, 12 registers)\n");
+    amd_gpu_log_save();
+    for (i = 0; i < sizeof golden_rn / sizeof golden_rn[0]; i++) {
+        uint32_t off = golden_rn[i].dw << 2, old = gpu_mmio_read32(g_mmio, off), v;
+        v = golden_rn[i].and_mask == 0xFFFFFFFFu ? golden_rn[i].or_mask
+                                                 : (old & ~golden_rn[i].and_mask) | (golden_rn[i].or_mask & golden_rn[i].and_mask);
+        if (v != old)
+            gpu_mmio_write32(g_mmio, off, v);
+        log_hex(golden_rn[i].name, old);
+        log_hex("    now", gpu_mmio_read32(g_mmio, off));
+    }
+    serial_print("GOLDEN: done (each register: the value before, then after)\n");
+    amd_gpu_log_save();
+}
+#endif
+
 void amd_gpu_bringup_cp(void)
 {
 #if HARIS_AMD_GPU_PSP_LEVEL >= 3
@@ -399,6 +441,9 @@ void amd_gpu_bringup_cp(void)
         return;
     }
 
+#if defined(HARIS_AMD_GPU_GOLDEN)
+    golden_registers();
+#endif
     serial_print("CP: about to run the CP pulse test (un-halts CE/PFP/ME and MEC for ~20 ms, then restores)\n");
     amd_gpu_log_save();
     (void)amd_native_cp_pulse_test(g_mmio);
@@ -431,6 +476,65 @@ void amd_gpu_bringup_cp(void)
     amd_gpu_log_save();
 
 #if HARIS_AMD_GPU_PSP_LEVEL >= 5
+    /* What Linux gfx_v9_0_cp_gfx_start() writes into the ring once and HarisOS never did (PREAMBLE + clear state + CLEAR_STATE +
+     * SET_BASE + VGT_INDEX_TYPE). The first ~20 draws of a boot got lost however long they took (2026-10-29: 8 of the first 20 tiny
+     * draws, none of the 364 after): something per draw / per context settles. The warm-up below shows if this cures it. */
+    /* Read only: registers Linux gfx_v9_0_constants_init() sets for VMID0 and HarisOS does not (offsets gc_9_1_offset.h, BASE_IDX 0:
+     * SH_MEM_CONFIG 0x30D, SH_MEM_BASES 0x30A, GRBM_GFX_CNTL 0x22, which selects the VMID the SH_MEM registers belong to). */
+    if (ib_ok) {                      /* the ring's MMIO base is set once the CP tests ran */
+        serial_print("3D: registers Linux sets in constants_init (read only):\n");
+        log_hex("  GRBM_GFX_CNTL", amd_gpu_reg_read32(0x2000u + 0x022u));
+        log_hex("  SH_MEM_CONFIG", amd_gpu_reg_read32(0x2000u + 0x30Du));
+        log_hex("  SH_MEM_BASES ", amd_gpu_reg_read32(0x2000u + 0x30Au));
+        log_hex("  MC_VM_FB_OFFSET (MMHUB, 16 MiB units: VRAM physical base = this << 24)", amd_native_mmhub_fb_offset());
+        amd_gpu_log_save();
+    }
+    if (ib_ok) {
+        int rs_ok;
+        serial_print("3D: about to send the Linux ring start-up packets (PREAMBLE_CNTL, clear state, CLEAR_STATE, SET_BASE) through the ring\n");
+        amd_gpu_log_save();
+        rs_ok = amd_3d_ring_start();
+        serial_print("3D: "); serial_print(amd_3d_status()); serial_print("\n");
+        log_hex("  dwords", amd_3d_value(6));
+        log_hex("  fence ", amd_3d_value(7));
+        amd_gpu_log_save();
+        if (!rs_ok)
+            ib_ok = 0;                /* a CP that did not get through them may be stuck: no 3D test after this */
+    }
+#if !defined(HARIS_AMD_GPU_GOLDEN)
+    /* The first ~20-24 draws of every boot were randomly lost (no fault, the stream ran to its end); later ones never were. Until the
+     * cause is known, 32 throw-away draws come first; on the laptop up to ~10 of them failed, every draw after them was right. (Built with
+     * HARIS_AMD_GPU_GOLDEN they are left out: the golden registers alone did NOT cure it, the stress test W still lost 8 of 24.) */
+    if (ib_ok) {
+        uint32_t wb[AMD_3D_WARMUP_WORDS], wi[4];
+        int wr, k;
+        serial_print("3D: warm-up: 384 tiny throw-away draws (8 x 8; do the failures stop after a number of draws or after some time?)\n");
+        amd_gpu_log_save();
+        wr = amd_3d_warmup(32 * AMD_3D_WARMUP_WORDS, wb, wi, 0);
+        log_hex("  draws right (of 384)", (uint32_t)wr);
+        log_hex("  failed draws", wi[1]);
+        log_hex("  last failed draw + 1 (0 = none)", wi[0]);
+        log_hex("  TSC/2^20 for all 384 draws", wi[2]);
+        log_hex("  TSC/2^20 from the first draw to the last failed one", wi[3]);
+        for (k = 0; k < AMD_3D_WARMUP_WORDS; k++)
+            log_hex("  bits (draw 32k + i right), k =", wb[k]);
+        {
+            static const char *const cn[6] = { "IA vertices", "IA primitives", "VS invocations", "C invocations", "C primitives",
+                                               "PS invocations" };
+            serial_print("  pipeline statistics per draw (after - before): first RIGHT draw / first LOST draw / lost draws with it 0 / right draws with it 0\n");
+            for (k = 0; k < 6; k++) {
+                serial_print("  "); serial_print(cn[k]); serial_print(":\n");
+                log_hex("    first right", amd_3d_warmup_stat(k));
+                log_hex("    first lost ", amd_3d_warmup_stat(6 + k));
+                log_hex("    lost, 0    ", amd_3d_warmup_stat(12 + k));
+                log_hex("    right, 0   ", amd_3d_warmup_stat(19 + k));
+            }
+            log_hex("  draws whose statistics were not written", amd_3d_warmup_stat(18));
+        }
+        log_hex("  ring still running afterwards (1 = yes)", amd_3d_warmup_vs(34));
+        amd_gpu_log_save();
+    }
+#endif
     /* M1a: the 3D pipeline draws a rectangle into a buffer in VRAM that nothing shows; every pixel is checked afterwards. */
     if (ib_ok) {
         serial_print("3D: about to draw a rectangle with the graphics pipeline into an offscreen buffer\n");
@@ -465,7 +569,7 @@ void amd_gpu_bringup_cp(void)
     /* The draws came and went between boots: eight tries each in three modes, to see what the failures depend on. */
     if (ib_ok) {
         uint32_t sb[3];
-        serial_print("3D: stress test: 8 solid draws in 3 modes (A shader code written once, B written every time, C written every time + 20 ms wait)\n");
+        serial_print("3D: stress test: 8 solid draws per mode, run order: W (24 warm-up draws, draws 0..23), about 2 s GPU idle, L1 24..31, D E F G 32..63, A B C 64..87, L2 88..95\n");
         amd_gpu_log_save();
         amd_3d_stress(sb);
         log_hex("  mode A (bit i = try i right)", sb[0]);
@@ -483,6 +587,27 @@ void amd_gpu_bringup_cp(void)
         log_hex("  mode E (as D, but the pattern is written before every draw), bit i = try i right", amd_3d_stress_d(9));
         log_hex("  mode E failed draws by marker state", amd_3d_stress_combo(4));
         { int k; for (k = 10; k <= 17; k++) log_hex("  mode E first wrong inside pixel, try", amd_3d_stress_d(k)); }
+        log_hex("  mode F (same colour as A..C, but the pixel shader code differs every draw), bit i = try i right", amd_3d_stress_d(18));
+        log_hex("  mode F failed draws by marker state", amd_3d_stress_combo(5));
+        log_hex("  mode G (same colour, same code bytes, a new shader address every draw), bit i = try i right", amd_3d_stress_d(27));
+        log_hex("  mode G failed draws by marker state", amd_3d_stress_combo(6));
+        log_hex("  control L1 (the OLD light stream, run FIRST), bit i = try i right", amd_3d_stress_d(45));
+        log_hex("  control L1 failed draws by marker state", amd_3d_stress_combo(8));
+        log_hex("  control L2 (the OLD light stream, run LAST), bit i = try i right", amd_3d_stress_d(36));
+        log_hex("  control L2 failed draws by marker state", amd_3d_stress_combo(7));
+        log_hex("  all draws in run order, bit n = draw n right (0 .. 31, W = 0 .. 23)", amd_3d_stress_info(0));
+        log_hex("  draws 32 .. 63                                       ", amd_3d_stress_info(1));
+        log_hex("  draws 64 .. 95                                       ", amd_3d_stress_info(2));
+        log_hex("  TSC/2^20 at the start (CPU cycles since power-on / 1048576)", amd_3d_stress_info(3));
+        log_hex("  TSC/2^20 from the start to the first failed draw (FFFFFFFF = none)", amd_3d_stress_info(4));
+        log_hex("  TSC/2^20 to the last failed draw", amd_3d_stress_info(5));
+        log_hex("  index of the last failed draw", amd_3d_stress_info(23));
+        log_hex("  TSC/2^20 of the idle wait after W", amd_3d_stress_info(22));
+        log_hex("  TSC/2^20 for the whole stress test", amd_3d_stress_info(6));
+        { static const char *const rn[5] = { "  RLC_STAT", "  RLC_GPM_STAT", "  RLC_PG_CNTL", "  RLC_CGCG_CGLS_CTRL", "  GRBM_STATUS2" };
+          static const char *const when[3] = { "start", "first failure", "end" };
+          int w, r; for (w = 0; w < 3; w++) { serial_print("  registers at the "); serial_print(when[w]); serial_print(":\n");
+              for (r = 0; r < 5; r++) log_hex(rn[r], amd_3d_stress_info(7 + 5 * w + r)); } }
         amd_gpu_log_save();
     }
 #endif
@@ -494,6 +619,45 @@ void amd_gpu_bringup_cp(void)
         int ok3dt = amd_3d_tex_offscreen();
         log_3d_result(ok3dt, 1);
         amd_gpu_log_save();
+    }
+#endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 7
+    /* Shader stores. On 2026-10-29 a vertex shader store to VRAM faulted (WRITE, MAPPING_ERROR) and, with SH_MEM_CONFIG = 0
+     * (RETRY_DISABLE = 0), retried forever: the GPU hung. Linux gfx_v9_0_constants_init() sets RETRY_DISABLE (bit 12,
+     * gc_9_1_sh_mask.h) = noretry for every VMID; here only for VMID0 (GRBM_GFX_CNTL read 0, so VMID0's bank is selected), the other
+     * fields are left as they read. Then one store draw into system RAM through the GART, and one into VRAM. Last, in case it hangs. */
+    if (ib_ok) {
+        static const char *const slot_name[4] = { "    slot 0 v0", "    slot 1 v0", "    slot 2 v0", "    slot 3 v0" };
+        uint32_t shm = amd_gpu_reg_read32(0x2000u + 0x30Du), po[20], s;
+        int t;
+        serial_print("3D: about to set SH_MEM_CONFIG.RETRY_DISABLE (a VM fault then drops the access instead of hanging)\n");
+        amd_gpu_log_save();
+        amd_gpu_reg_write32(0x2000u + 0x30Du, shm | (1u << 12));
+        log_hex("  SH_MEM_CONFIG before", shm);
+        log_hex("  SH_MEM_CONFIG now   ", amd_gpu_reg_read32(0x2000u + 0x30Du));
+        for (t = 0; t < 2; t++) {
+            serial_print(t ? "3D: about to run one draw whose vertex shader stores into VRAM (MC address, system aperture)\n"
+                           : "3D: about to run one draw whose vertex shader stores into system RAM (GART page table)\n");
+            amd_gpu_log_save();
+            (void)amd_3d_vs_store_probe(t, po);
+            log_hex("  store address hi", po[19]);
+            log_hex("  store address lo", po[18]);
+            log_hex("  draw right (1 = yes)", po[12]);
+            serial_print("  stored (per slot s: v0 = s, x = 0x42000000 / 0x42200000, y = 0x41800000 / 0x41C00000; 0xFFFFFFFF = not written):\n");
+            for (s = 0; s < 4; s++) {
+                log_hex(slot_name[s], po[3 * s]);
+                log_hex("           x", po[3 * s + 1]);
+                log_hex("           y", po[3 * s + 2]);
+            }
+            log_hex("  VM fault: GC status    ", po[13]);
+            log_hex("  VM fault: GC address lo", po[14]);
+            log_hex("  VM fault: GC address hi", po[15]);
+            log_hex("  VM fault: MM status    ", po[16]);
+            log_hex("  ring still running afterwards (1 = yes)", po[17]);
+            amd_gpu_log_save();
+            if (!po[17])
+                break;
+        }
     }
 #endif
 #endif

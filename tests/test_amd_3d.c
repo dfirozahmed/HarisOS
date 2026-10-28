@@ -23,6 +23,11 @@ uint32_t amd_native_fault_mm_status(void) { return 0; }
 uint32_t amd_gpu_submit_ib(uint64_t va, uint32_t dw) { (void)va; (void)dw; return 0; }
 int amd_gpu_fence_wait(uint32_t seq, uint32_t loops) { (void)seq; (void)loops; return 0; }
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { (void)dword_addr; return 0; }
+uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n) { (void)dw; (void)n; return 0; }
+void amd_gpu_fault_clear(void) {}
+uint64_t amd_gpu_scratch_va(void) { return 0; }
+void amd_gpu_scratch_write32(uint32_t off, uint32_t v) { (void)off; (void)v; }
+uint32_t amd_gpu_scratch_read32(uint32_t off) { (void)off; return 0; }
 
 static int ok = 1;
 
@@ -270,8 +275,8 @@ int main(void)
             if ((op == 0x46 || op == 0x49 || op == 0x3C) && tail < 3) tail_ops[tail++] = op;
             k += 1 + body;
         }
-        /* 5 + 5 dwords of markers, then EVENT_WRITE (2) + RELEASE_MEM (8) + WAIT_REG_MEM (7) */
-        check(nm == n + 10 + 17 && wd == 2 && np == 3 && pos[0] == 0x37 && pos[1] == 0x2D && pos[2] == 0x37,
+        /* 5 + 5 dwords of markers, and the colour buffer sync (EVENT_WRITE 2 + RELEASE_MEM 8 + WAIT_REG_MEM 7 = 17) before the state and after the draw */
+        check(nm == n + 10 + 17 + 17 && wd == 2 && np == 3 && pos[0] == 0x37 && pos[1] == 0x2D && pos[2] == 0x37,
               "marker: WRITE_DATA before and after the DRAW_INDEX_AUTO (5 dwords each)");
         check(mib[nm - 17 - 5 + 4] == 0x3D3D0002u && mib[nm - 17 - 5 + 2] == (uint32_t)(mj.marker_mc + 4u), "marker after the draw: 0x3D3D0002 at marker + 4");
         check(tail == 3 && tail_ops[0] == 0x46 && tail_ops[1] == 0x49 && tail_ops[2] == 0x3C &&
@@ -284,6 +289,76 @@ int main(void)
     check(R3D_CB_COLOR0_BASE == 0x318 && R3D_SPI_SHADER_PGM_LO_PS == 0x008 && R3D_SPI_SHADER_PGM_LO_VS == 0x048 &&
           R3D_VGT_PRIMITIVE_TYPE == 0x242 && R3D_IA_MULTI_VGT_PARAM == 0x258,
           "register offsets match Mesa R_028C60 / R_00B020 / R_00B120 / R_030908 / R_030960");
+
+    /* GFX9 constant bus (Mesa aco_validate.cpp, const_bus_limit = 1): walk every shader instruction by instruction; an instruction
+     * that reads VCC implicitly (VOP2 V_CNDMASK_B32 0, V_ADDC_CO_U32 0x1C, V_SUBB_CO_U32 0x1D, V_SUBBREV_CO_U32 0x1E) must not also
+     * read a literal (src0 255) or an SGPR (src0 0 .. 127). The old vertex shader broke this with "v_cndmask_b32 v3, x0, v2, vcc". */
+    {
+        static uint32_t code[AMD_3D_VS_MAX + AMD_3D_PS_MAX];
+        Amd3dJob tj = job;
+        int which, bad = 0, walked = 1;
+        for (which = 0; which < 3; which++) {
+            uint32_t cn, k = 0;
+            tj.textured = which == 2;
+            cn = which == 0 ? amd_3d_build_vs(code, &tj) : amd_3d_build_ps(code, &tj);
+            while (k < cn) {
+                uint32_t w = code[k], top6 = w >> 26, src0 = w & 0x1FFu;
+                if (!(w >> 31)) {                                       /* VOP2 */
+                    uint32_t op = (w >> 25) & 0x3Fu;
+                    if ((op == 0 || op == 0x1C || op == 0x1D || op == 0x1E) && (src0 == 255 || src0 < 128)) bad++;
+                    k += src0 == 255 ? 2 : 1;
+                } else if ((w & 0xFE000000u) == 0x7E000000u || (w & 0xFE000000u) == 0x7C000000u) {  /* VOP1, VOPC */
+                    k += src0 == 255 ? 2 : 1;
+                } else if (top6 == 0x31 || top6 == 0x34 || top6 == 0x3C || top6 == 0x37) {          /* EXP, VOP3, MIMG, GLOBAL */
+                    k += 2;
+                } else if ((w >> 23) == 0x17Fu) {                                                   /* SOPP */
+                    k += 1;
+                } else {
+                    walked = 0; break;                                  /* an encoding this walker does not know */
+                }
+            }
+        }
+        check(walked && bad == 0, "no shader instruction reads VCC together with a literal or an SGPR (GFX9 constant bus limit 1)");
+    }
+
+    /* the diagnostic global stores of the vertex shader, against encodings worked out from Mesa aco_assembler.cpp (GFX9):
+     * global_store_dwordx4 v[8:9], v[3:6], off  = 0xDC7C8000 0x007F0308; global_store_dword v[8:9], v0, off offset:16 = 0xDC708010 0x007F0008 */
+    check(a3d_global_0(A3D_GLOBAL_STORE_DWORDX4, 0) == 0xDC7C8000u && a3d_global_1(8, 3) == 0x007F0308u,
+          "global_store_dwordx4 v[8:9], v[3:6], off = 0xDC7C8000 0x007F0308");
+    check(a3d_global_0(A3D_GLOBAL_STORE_DWORD, 16) == 0xDC708010u && a3d_global_1(8, 0) == 0x007F0008u,
+          "global_store_dword v[8:9], v0, off offset:16 = 0xDC708010 0x007F0008");
+    check(a3d_vop2(A3D_OP2_LSHLREV_B32, 7, 7, A3D_SRC_INT(5)) == 0x240E0E85u, "v_lshlrev_b32 v7, 5, v7 = 0x240E0E85");
+    check(a3d_vop2(A3D_OP2_ADD_CO_U32, 8, 7, A3D_SRC_LITERAL) == 0x32100EFFu, "v_add_co_u32 v8, vcc, literal, v7 = 0x32100EFF");
+    check(a3d_vop2(A3D_OP2_ADDC_CO_U32, 9, 10, A3D_SRC_LITERAL) == 0x381214FFu, "v_addc_co_u32 v9, vcc, literal, v10, vcc = 0x381214FF");
+
+    /* PA_SC_RASTER_CONFIG / _1: outside the clear-state table, so the draw stream itself writes both (0, as Mesa's GFX9 default) */
+    {
+        static uint32_t rib[AMD_3D_IB_MAX];
+        uint32_t rn = amd_3d_build_ib(rib, AMD_3D_IB_MAX, &job), cnt = 0;
+        const uint32_t *rc = find_set(rib, rn, 0x69, R3D_PA_SC_RASTER_CONFIG, &cnt);
+        check(R3D_PA_SC_RASTER_CONFIG == 0x0D4 && R3D_PA_SC_RASTER_CONFIG_1 == 0x0D5 && rc && cnt >= 2 && rc[0] == 0 && rc[1] == 0,
+              "PA_SC_RASTER_CONFIG and _1 (0x0D4, 0x0D5, not in the clear-state table) are written as 0");
+    }
+
+    /* the ring start-up packets of Linux gfx_v9_0_cp_gfx_start(): order, and small enough for the 1024-dword ring with the fence */
+    {
+        static uint32_t rs[1100];
+        uint32_t nr = amd_3d_build_ring_start(rs, 1100), k = 0, ops[8], no = 0, last_op = 0, nctx = 0;
+        while (k < nr) {
+            uint32_t h = rs[k], body = ((h >> 16) & 0x3FFF) + 1, op = (h >> 8) & 0xFF;
+            if (op == 0x69) nctx++;
+            else if (no < 8) ops[no++] = op;
+            last_op = op;
+            k += 1 + body;
+        }
+        printf("ring start dwords: %u\n", nr);
+        check(nr > 0 && k == nr && nr + 8 <= 1023, "ring start: whole packets, fits in the 1024-dword ring with the 8-dword fence");
+        check(no == 6 && ops[0] == 0x4A && ops[1] == 0x28 && ops[2] == 0x4A && ops[3] == 0x12 && ops[4] == 0x11 && ops[5] == 0x79 &&
+              last_op == 0x79 && nctx > 0,
+              "ring start: PREAMBLE_CNTL, CONTEXT_CONTROL, SET_CONTEXT_REG..., PREAMBLE_CNTL, CLEAR_STATE, SET_BASE, SET_UCONFIG_REG");
+        check(rs[1] == (2u << 28) && rs[nr - 2] == 0x20000243u && rs[nr - 1] == 0,
+              "ring start: BEGIN_CLEAR_STATE first, VGT_INDEX_TYPE = 0 with INDEX_TYPE last");
+    }
 
     printf("\nAMD 3D TEST %s\n", ok ? "PASSED" : "FAILED");
     return ok ? 0 : 1;

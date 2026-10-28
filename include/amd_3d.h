@@ -28,7 +28,7 @@ typedef struct
 } Amd3dJob;
 
 #define AMD_3D_IB_MAX 600 /* dwords amd_3d_build_ib() can write at most */
-#define AMD_3D_VS_MAX 32  /* dwords of the vertex / pixel shader the builders write at most */
+#define AMD_3D_VS_MAX 48  /* dwords of the vertex / pixel shader the builders write at most */
 #define AMD_3D_PS_MAX 32
 
 /* Shader code. Return the number of dwords written. */
@@ -42,12 +42,33 @@ uint32_t amd_3d_texel(const Amd3dJob *job, uint32_t x, uint32_t y);
  * number of dwords, 0 if it does not fit in cap. */
 #define AMD_3D_DEFAULT_IB_MAX 1000
 uint32_t amd_3d_build_default_ib(uint32_t *ib, uint32_t cap);
+/* The packets Linux gfx_v9_0_cp_gfx_start() writes into the ring once (PREAMBLE_CNTL, clear state, CLEAR_STATE, SET_BASE,
+ * VGT_INDEX_TYPE). Returns the number of dwords, 0 if cap is too small. amd_3d_ring_start() sends them through the ring: 1 = done. */
+uint32_t amd_3d_build_ring_start(uint32_t *p, uint32_t cap);
+int amd_3d_ring_start(void);
 
 /* The whole command stream (state, shaders' addresses, the draw). Returns the number of dwords, 0 if it does not fit in cap. */
 uint32_t amd_3d_build_ib(uint32_t *ib, uint32_t cap, const Amd3dJob *job);
 
 /* On the GPU. offscreen: a 256 x 64 buffer in VRAM that nothing shows; checks every pixel afterwards. screen: a rectangle in the
  * real framebuffer (fb_phys is its CPU address, vram_cpu the CPU address of the VRAM aperture). 1 = the pixels are right. */
+/* n tiny throw-away solid draws (8 x 8, a new colour each) right after bring-up: the first ~20-24 draws of a boot were randomly lost on
+ * the real laptop. Returns how many were right. bits[k] bit i = draw 32k + i right; info[0] = index of the last failed draw + 1
+ * (0: none), info[1] = failed draws, info[2] = CPU cycles / 2^20 for all of them, info[3] = CPU cycles / 2^20 to the last failed one. */
+#define AMD_3D_WARMUP_WORDS 12
+/* vs_store = 1: the vertex shader also stores what it computed (see amd_3d_warmup_vs); it hung the GPU once, so run it last. */
+int amd_3d_warmup(int n, uint32_t bits[AMD_3D_WARMUP_WORDS], uint32_t info[4], int vs_store);
+/* Pipeline statistics of the warm-up draws (IA vertices, IA primitives, VS, C invocations, C primitives, PS invocations, per draw):
+ * 0 .. 5 the first right draw, 6 .. 11 the first lost one, 12 .. 17 lost draws with that counter 0, 18 draws whose samples were not
+ * written, 19 .. 24 right draws with that counter 0. */
+uint32_t amd_3d_warmup_stat(int k);
+/* What the warm-up's vertex shader stored per vertex (diagnostic): 0 .. 11 the first right draw (slot 0 .. 3: v0, x, y), 12 .. 23 the
+ * first lost one, 24 .. 26 lost draws with a slot not written / a wrong v0 / a wrong position, 27 .. 29 the same for right draws,
+ * 30 .. 33 VM fault GC status / GC address lo / hi / MM status after the last draw, 34 = 1 if the ring still ran afterwards. */
+uint32_t amd_3d_warmup_vs(int k);
+/* One tiny draw whose vertex shader stores what it computed: target 0 = system-RAM scratch through the GART, 1 = VRAM. out[0 .. 11]
+ * slot 0 .. 3: v0, x, y; [12] draw right; [13 .. 16] VM fault GC status / lo / hi / MM status; [17] ring alive; [18], [19] address. */
+int amd_3d_vs_store_probe(int target, uint32_t out[20]);
 int amd_3d_rect_offscreen(void);
 int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 /* The same two, with the rectangle textured from an image in VRAM (M2). */
@@ -64,6 +85,11 @@ uint32_t amd_3d_stress_combo(int mode); /* mode 3 = D, 4 = E */
 uint32_t amd_3d_stress_d(int k);
 /* After amd_3d_stress(), modes 0..2: low byte = failed draws that showed the whole rectangle after the CPU read 1 MiB of other video memory, next byte = after 16 MiB. */
 uint32_t amd_3d_stress_fix(int mode);
+/* After amd_3d_stress(): k = 0 .. 2 bit n = draw n (run order, 96 draws) was right; 3 = TSC/2^20 at the start; 4 / 5 = TSC/2^20 from the
+ * start to the first / last failed draw (0xFFFFFFFF: none); 6 = TSC/2^20 for the whole test; 7 .. 11, 12 .. 16, 17 .. 21 = RLC_STAT, RLC_GPM_STAT,
+ * RLC_PG_CNTL, RLC_CGCG_CGLS_CTRL, GRBM_STATUS2 at the start, at the first failed draw and at the end; 22 = TSC/2^20 of the idle wait;
+ * 23 = index of the last failed draw. */
+uint32_t amd_3d_stress_info(int k);
 const char *amd_3d_status(void);
 /* After amd_3d_rect_offscreen(): row 0 .. 15 of a 32 x 16 picture of the 256 x 64 buffer (# colour, . untouched, ? other), 0 beyond. */
 const char *amd_3d_map_row(int row);

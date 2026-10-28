@@ -139,6 +139,7 @@ const char *amd_native_cp_ib_va_status(void);
 /* V148 persistent ring API (VMID0, GART VA) */
 int      amd_gpu_ring_init(uint64_t mmio);
 uint32_t amd_gpu_submit_ib(uint64_t ib_va, uint32_t ib_dwords);  /* 0 = error, else fence seq */
+uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n);   /* packets straight into the ring + fence; 0 = error, else fence seq */
 int      amd_gpu_fence_wait(uint32_t seq, uint32_t loops);       /* 1 reached, 0 timeout */
 int      amd_gpu_ring_selftest(uint64_t mmio);
 /* The persistent ring is up and not wedged; CPU access to VRAM (byte offset) and to the 4 KiB IB page the ring runs (for amd_3d.c) */
@@ -150,6 +151,11 @@ void     amd_gpu_ib_flush(void);
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr); /* a register of the GPU by its dword address (read only) */
 void     amd_gpu_wc_flush(void);        /* mfence + a read: the CPU's write-combined VRAM writes are in memory */
 void     amd_gpu_fault_snapshot(void);  /* then read amd_native_fault_gc_status() etc. */
+void     amd_gpu_fault_clear(void);     /* clears the GC VM fault status (Linux gmc_v9_0_process_interrupt) */
+void     amd_gpu_reg_write32(uint32_t dword_addr, uint32_t v);  /* WRITES a GPU register by its dword address */
+uint64_t amd_gpu_scratch_va(void);     /* GPU (GART) address of 2 KiB of system-RAM scratch, 0 if none */
+void     amd_gpu_scratch_write32(uint32_t off, uint32_t v);
+uint32_t amd_gpu_scratch_read32(uint32_t off);
 uint64_t amd_gpu_ib_va(void);
 const char *amd_native_ring_status(void);
 /* V151 GPU draw test */

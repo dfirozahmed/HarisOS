@@ -66,6 +66,15 @@ if(HARIS_AMD_GPU_LOG)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_LOG=1)
 endif()
 
+# The Linux "golden" register values for Renoir (gfx_v9_0.c golden_settings_gc_9_1_rn, 12 registers), written before the CP tests.
+# An experiment for the first ~20-24 3D draws of a boot that get lost. Result on the laptop (2026-10-29): NO help, W still lost 8 of 24.
+# Kept for reference; with this ON the 32 throw-away draws are left out. Writes GPU registers (GB_ADDR_CONFIG 0x24000011 -> 0x24000042).
+#   cmake -S . -B build -DHARIS_AMD_GPU_GOLDEN=ON
+option(HARIS_AMD_GPU_GOLDEN "AMD GPU: write the Linux golden registers for Renoir (experiment; skips the 3D warm-up draws)" OFF)
+if(HARIS_AMD_GPU_GOLDEN)
+    list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_GOLDEN=1)
+endif()
+
 # helper: haris_efi_program
 function(haris_efi_program NAME SRC ENTRY OUTNAME)
     set(OBJ ${CMAKE_BINARY_DIR}/${NAME}.obj)
