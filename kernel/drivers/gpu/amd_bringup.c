@@ -214,6 +214,9 @@ void amd_gpu_bringup_firmware(void)
  * registers, so they are compiled in only with HARIS_AMD_GPU_PSP_LEVEL (0 = off):
  *   1  create the KM ring, then one SETUP_TMR (a 4 MiB trusted memory region in VRAM, 192 MiB in)
  *   2  also LOAD_IP_FW for CE, PFP, ME, MEC1/2, RLC_G, SDMA0 (needs the firmware loaded by amd_gpu_bringup_firmware())
+ *   3  also starts the RLC (like Linux rlc_resume, partial), then a minimal CP ring test: un-halts CE/PFP/ME and asks the CP to
+ *      write SCRATCH_REG0 (writes GPU registers)
+ *   4  also the CP ring matrix: VRAM ring and system-RAM ring with extra read-backs, to find why the CP does not fetch
  * It must run BEFORE the GART step: the PSP is given physical addresses, which stop being valid once VMID0 translates.
  * Every step saves the log first, so a hang leaves the last line that was reached. */
 #ifndef HARIS_AMD_GPU_PSP_LEVEL
@@ -265,6 +268,68 @@ void amd_gpu_bringup_psp(void)
         log_hex("     resp ", amd_psp_fw_job_resp(i));
     }
     amd_gpu_log_save();
+
+#if HARIS_AMD_GPU_PSP_LEVEL >= 3
+    /* Minimal CP ring test (WRITES GPU registers): un-halts CE/PFP/ME, points ring 0 at a 4 KiB ring in VRAM and asks the
+     * CP to write a value into SCRATCH_REG0. On any failure CE/PFP/ME are halted again. Needs CE, PFP and ME accepted. */
+    int fw_ok = amd_psp_fw_job_state(0) == 1 && amd_psp_fw_job_state(1) == 1 && amd_psp_fw_job_state(2) == 1;
+    if (g_bar1 != 0 || !(g_bar0 & 0xFFFFFFF0u))
+        return;
+    /* Linux starts the RLC before the CP (gfx_v9_0_rlc_resume, then gfx_v9_0_cp_resume). */
+    serial_print("RLC: about to stop and start the RLC (writes GPU registers)\n");
+    amd_gpu_log_save();
+    int rlc_ok = amd_native_rlc_start(g_mmio);
+    serial_print("RLC: "); serial_print(amd_native_rlc_status()); serial_print(rlc_ok ? "\n" : " (FAILED)\n");
+    log_hex("  RLC_CNTL before ", amd_native_rlc_value(0));
+    log_hex("  RLC_STAT before ", amd_native_rlc_value(1));
+    log_hex("  GPM_STAT before ", amd_native_rlc_value(2));
+    log_hex("  CGCG_CGLS before", amd_native_rlc_value(3));
+    log_hex("  CNTL after stop ", amd_native_rlc_value(4));
+    log_hex("  CNTL after start", amd_native_rlc_value(5));
+    log_hex("  RLC_STAT after  ", amd_native_rlc_value(6));
+    log_hex("  GPM_STAT after  ", amd_native_rlc_value(7));
+    log_hex("  RLC_STAT +1 ms  ", amd_native_rlc_value(8));
+    log_hex("  GPM_STAT +1 ms  ", amd_native_rlc_value(9));
+    amd_gpu_log_save();
+
+    serial_print("CP: about to un-halt CE/PFP/ME and run the ring test (writes GPU registers)\n");
+    amd_gpu_log_save();
+    int cp_ok = amd_native_cp_ring_test(g_mmio, (uint64_t)(g_bar0 & 0xFFFFFFF0u), fw_ok);
+    serial_print("CP: "); serial_print(amd_native_cp_status()); serial_print(cp_ok ? "\n" : " (FAILED)\n");
+    log_hex("  step          ", amd_native_cp_step());
+    log_hex("  SCRATCH_REG0  ", amd_native_cp_scratch());
+    log_hex("  ME_CNTL before", amd_native_cp_me_before());
+    log_hex("  ME_CNTL after ", amd_native_cp_me_after());
+    log_hex("  RPTR register ", amd_native_cp_rptr_reg());
+    log_hex("  RPTR write-bck", amd_native_cp_rptr_wb());
+    log_hex("  WPTR end      ", amd_native_cp_wptr_end());
+    log_hex("  GRBM_STATUS   ", amd_native_cp_grbm_after());
+    log_hex("  CP_BUSY_STAT  ", amd_native_cp_busy_after());
+    amd_gpu_log_save();
+
+#if HARIS_AMD_GPU_PSP_LEVEL >= 4
+    /* CP ring test matrix (WRITES GPU registers): the same ring test with the ring in VRAM and in system RAM, plus extra
+     * read-backs (CP_STALLED_STAT1, WPTR_POLL_CNTL, DOORBELL_CONTROL, RB0_BASE, GFXHUB aperture ...) to tell why the CP does
+     * not fetch. Each variant halts the CP again afterwards. */
+    serial_print("CPM: about to run the CP ring matrix (writes GPU registers)\n");
+    amd_gpu_log_save();
+    (void)amd_native_cp_ring_matrix(g_mmio, (uint64_t)(g_bar0 & 0xFFFFFFF0u), fw_ok, 0);
+    serial_print("CPM: "); serial_print(amd_native_cp_matrix_status()); serial_print("\n");
+    serial_print("  fields: ran pass step rptr wb scratch me_cntl grbm busy stalled1 poll_cntl doorbell rb0_base ap_low ap_high\n");
+    serial_print("          pfp_hdr me_hdr ce_hdr stalled2 stalled3 cpf_status grbm2\n");
+    for (int v = 0; v < amd_native_cp_var_count(); v++) {
+        if (!amd_native_cp_var(v, 0))
+            continue;
+        serial_print("  "); serial_print(amd_native_cp_var_name(v)); serial_print(":");
+        for (int f = 0; f < 22; f++) {
+            serial_print(f == 15 ? "\n          " : " ");
+            serial_hex32(amd_native_cp_var(v, f));
+        }
+        serial_print("\n");
+    }
+    amd_gpu_log_save();
+#endif
+#endif
 #else
     (void)tmr_ok;
 #endif

@@ -938,6 +938,70 @@ static int cp_wr_ok(uint64_t m, uint32_t off, uint32_t v, uint32_t mask, uint32_
     return 0;
 }
 
+
+/* =====================================================================
+   OPT-IN: start the RLC (run-list controller) before the CP.
+
+   WRITES GPU REGISTERS. The PSP loaded the RLC_G microcode but nothing started the RLC, and the CP ring test (see
+   above) timed out with RPTR stuck at 0. Linux gfx_v9_0_hw_init() runs gfx_v9_0_rlc_resume() BEFORE
+   gfx_v9_0_cp_resume(): rlc_stop (RLC_CNTL.RLC_ENABLE_F32 = 0, wait for the serdes), RLC_CGCG_CGLS_CTRL = 0, init_pg
+   (clear-state buffer address in RLC_CSIB_*, save/restore machine), RLC_SPM_MC_CNTL VMID, then rlc_start
+   (RLC_ENABLE_F32 = 1, 50 us). Offsets: gc_9_1_offset.h (all BASE_IDX 1); bit 0 of RLC_CNTL = RLC_ENABLE_F32
+   (gc_9_1_sh_mask.h).
+
+   This does only: stop, CGCG/CGLS off, start. NOT done (yet): the clear-state buffer (RLC_CSIB_*, needs the gfx9 clear
+   state table), the save/restore machine, the SPM VMID, the wait for RLC_SERDES_CU_MASTER_BUSY (Linux selects every
+   SE/SH with GRBM_GFX_INDEX first), the GUI-idle interrupt enables. If the RLC does not run after this, those are the
+   next candidates.
+   ===================================================================== */
+#define R_RLC_CNTL          GC1_BYTE(0x4C00u)
+#define R_RLC_STAT          GC1_BYTE(0x4C04u)
+#define R_RLC_GPM_STAT      GC1_BYTE(0x4C40u)
+#define R_RLC_CGCG_CGLS     GC1_BYTE(0x4C49u)
+#define RLC_ENABLE_F32      0x00000001u
+
+static const char *rlc_status = "RLC start not run";
+static uint32_t rlc_v[10];   /* 0 CNTL before, 1 STAT before, 2 GPM_STAT before, 3 CGCG before, 4 CNTL after stop,
+                                5 CNTL after start, 6 STAT after, 7 GPM_STAT after, 8 STAT +1 ms, 9 GPM_STAT +1 ms */
+
+const char *amd_native_rlc_status(void) { return rlc_status; }
+uint32_t amd_native_rlc_value(int i) { return (i >= 0 && i < 10) ? rlc_v[i] : 0; }
+
+int amd_native_rlc_start(uint64_t mmio)
+{
+    int i;
+    for (i = 0; i < 10; i++) rlc_v[i] = 0;
+    if (!gpu_mmio_can_access(mmio)) { rlc_status = "RLC start skipped: no MMIO"; return 0; }
+
+    rlc_v[0] = gpu_mmio_read32(mmio, R_RLC_CNTL);
+    rlc_v[1] = gpu_mmio_read32(mmio, R_RLC_STAT);
+    rlc_v[2] = gpu_mmio_read32(mmio, R_RLC_GPM_STAT);
+    rlc_v[3] = gpu_mmio_read32(mmio, R_RLC_CGCG_CGLS);
+    if (rlc_v[0] == 0xFFFFFFFFu && rlc_v[1] == 0xFFFFFFFFu) {
+        rlc_status = "RLC start skipped: RLC registers read 0xFFFFFFFF"; return 0; }
+
+    /* rlc_stop (without the serdes wait and the GUI-idle interrupt) */
+    gpu_mmio_write32(mmio, R_RLC_CNTL, rlc_v[0] & ~RLC_ENABLE_F32);
+    rlc_v[4] = gpu_mmio_read32(mmio, R_RLC_CNTL);
+    if (rlc_v[4] & RLC_ENABLE_F32) { rlc_status = "RLC start abort: RLC_ENABLE_F32 did not clear"; return 0; }
+
+    gpu_mmio_write32(mmio, R_RLC_CGCG_CGLS, 0);
+
+    /* rlc_start: read-modify-write like WREG32_FIELD15, then 50 us */
+    gpu_mmio_write32(mmio, R_RLC_CNTL, gpu_mmio_read32(mmio, R_RLC_CNTL) | RLC_ENABLE_F32);
+    cp_delay_us(mmio, 50);
+    rlc_v[5] = gpu_mmio_read32(mmio, R_RLC_CNTL);
+    rlc_v[6] = gpu_mmio_read32(mmio, R_RLC_STAT);
+    rlc_v[7] = gpu_mmio_read32(mmio, R_RLC_GPM_STAT);
+    if (!(rlc_v[5] & RLC_ENABLE_F32)) { rlc_status = "RLC start FAILED: RLC_ENABLE_F32 did not stick"; return 0; }
+
+    cp_delay_us(mmio, 1000);
+    rlc_v[8] = gpu_mmio_read32(mmio, R_RLC_STAT);
+    rlc_v[9] = gpu_mmio_read32(mmio, R_RLC_GPM_STAT);
+    rlc_status = "RLC_ENABLE_F32 set (stop, CGCG/CGLS off, start); clear-state buffer and save/restore NOT set up";
+    return 1;
+}
+
 int amd_native_cp_ring_test(uint64_t mmio, uint64_t cpu_vram, int fw_ready)
 {
     uint64_t ring_mc, wb_mc;

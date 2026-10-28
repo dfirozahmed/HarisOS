@@ -1,8 +1,8 @@
 #include "gpu_log.h"
 #include "serial.h"
 
-/* Everything the AMD driver prints is also kept here, so it can be saved to a file (a laptop has no COM1 to watch). */
-#define LOG_MAX 8192
+/* Everything the AMD driver prints is also kept here (16 KiB), so it can be saved to a file (a laptop has no COM1 to watch). */
+#define LOG_MAX 16384
 static char log_buf[LOG_MAX];
 static unsigned log_len;
 static int log_cut;

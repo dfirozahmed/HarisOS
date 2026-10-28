@@ -46,10 +46,10 @@ if(HARIS_AMD_GPU_GART)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_GART=1)
 endif()
 
-# AMD Radeon PSP bring-up: WRITES the PSP mailbox registers. 0 = off (read-only), 1 = KM ring + SETUP_TMR, 2 = also load the firmware.
+# AMD Radeon PSP bring-up: WRITES the PSP mailbox registers. 0 = off (read-only), 1 = KM ring + SETUP_TMR, 2 = also load the firmware, 3 = also the RLC start + CP ring test, 4 = also the CP ring matrix.
 # Use it WITHOUT HARIS_AMD_GPU_GART (the PSP is given physical addresses, so the GART step must not run first).
 #   cmake -S . -B build-psp -DHARIS_AMD_GPU_PSP_LEVEL=1
-set(HARIS_AMD_GPU_PSP_LEVEL 0 CACHE STRING "AMD GPU: PSP bring-up level (0 off, 1 ring + TMR, 2 + firmware)")
+set(HARIS_AMD_GPU_PSP_LEVEL 0 CACHE STRING "AMD GPU: PSP bring-up level (0 off, 1 ring + TMR, 2 + firmware, 3 + RLC + CP ring test, 4 + CP ring matrix)")
 if(HARIS_AMD_GPU_PSP_LEVEL GREATER 0)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_PSP_LEVEL=${HARIS_AMD_GPU_PSP_LEVEL})
 endif()

@@ -109,6 +109,10 @@ int amd_native_cp_var_count(void);
    15 pfp_hdr,16 me_hdr,17 ce_hdr,18 stalled2,19 stalled3,20 cpf_status,21 grbm_status2 */
 uint32_t amd_native_cp_var(int i, int field);
 int amd_native_cp_ring_test(uint64_t mmio_base, uint64_t cpu_vram_base, int fw_ready);
+/* Opt-in: stop and start the RLC like Linux gfx_v9_0_rlc_resume() (partial: no clear-state buffer). WRITES registers. */
+int amd_native_rlc_start(uint64_t mmio_base);
+const char *amd_native_rlc_status(void);
+uint32_t amd_native_rlc_value(int i);   /* 0 CNTL before, 1 STAT before, 2 GPM before, 3 CGCG before, 4 CNTL after stop, 5 CNTL after start, 6 STAT, 7 GPM, 8 STAT +1ms, 9 GPM +1ms */
 const char *amd_native_cp_status(void);
 uint32_t amd_native_cp_step(void);
 uint32_t amd_native_cp_scratch(void);
