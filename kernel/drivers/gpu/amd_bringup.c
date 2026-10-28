@@ -27,6 +27,26 @@ static void log_hex(const char *label, uint32_t v)
     serial_print("\n");
 }
 
+#if HARIS_AMD_GPU_PSP_LEVEL >= 6
+/* The result of the last amd_3d_* test: the status line, the pixel counts and, for the offscreen one, a coarse picture. */
+static void log_3d_result(int ok, int with_map)
+{
+    serial_print("3D: "); serial_print(amd_3d_status()); serial_print("\n");
+    log_hex("  pixels right inside  ", amd_3d_value(0));
+    log_hex("  pixels inside        ", amd_3d_value(1));
+    log_hex("  pixels changed outside", amd_3d_value(2));
+    log_hex("  pixels outside       ", amd_3d_value(3));
+    log_hex("  first wrong inside   ", amd_3d_value(4));
+    log_hex("  first wrong outside  ", amd_3d_value(5));
+    if (with_map)
+        for (int row = 0; row < 16; row++) {
+            const char *m = amd_3d_map_row(row);
+            if (m) { serial_print("  map "); serial_print(m); serial_print("\n"); }
+        }
+    serial_print(ok ? "3D: PASS\n" : "3D: did not pass\n");
+}
+#endif
+
 int amd_gpu_bringup(void)
 {
     int i;
@@ -281,6 +301,7 @@ void amd_gpu_bringup_firmware(void)
  *   3  (with HARIS_AMD_GPU_GART=ON) the CP tests of amd_gpu_bringup_cp(), which run after the GART step
  *   4  also amd_gpu_bringup_screen(): the GPU paints into the screen, and a 2D fill / copy benchmark (leaves stripes until the repaint)
  *   5  also the 3D pipeline test (amd_3d.c): one rectangle drawn by vertex + pixel shaders, offscreen first, then on the screen
+ *   6  also the same rectangle textured from an image in VRAM (the pixel shader reads it with IMAGE_LOAD)
  * It must run BEFORE the GART step: the PSP is given physical addresses, which stop being valid once VMID0 translates.
  * Every step saves the log first, so a hang leaves the last line that was reached. */
 #ifndef HARIS_AMD_GPU_PSP_LEVEL
@@ -423,6 +444,16 @@ void amd_gpu_bringup_cp(void)
         amd_gpu_log_save();
     }
 #endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 6
+    /* M2a: the same rectangle, but the pixel shader reads an image from VRAM (IMAGE_LOAD) and shows that. */
+    if (ib_ok) {
+        serial_print("3D: about to draw a textured rectangle with the graphics pipeline into an offscreen buffer\n");
+        amd_gpu_log_save();
+        int ok3dt = amd_3d_tex_offscreen();
+        log_3d_result(ok3dt, 1);
+        amd_gpu_log_save();
+    }
+#endif
 #endif
 }
 
@@ -512,6 +543,18 @@ int amd_gpu_bringup_screen(void)
         serial_print(ok3d ? "3D: screen PASS\n" : "3D: screen did not pass\n");
         amd_gpu_log_save();
         result = 1; /* the screen was painted over: the caller redraws the desktop */
+    }
+#endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 6
+    /* M2b: the textured rectangle on the real screen. */
+    {
+        serial_print("3D: about to draw a textured rectangle into the screen\n");
+        amd_gpu_log_save();
+        int ok3dt = amd_3d_tex_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
+                                      (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
+        log_3d_result(ok3dt, 0);
+        amd_gpu_log_save();
+        result = 1;
     }
 #endif
     return result;

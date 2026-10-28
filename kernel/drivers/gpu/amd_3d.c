@@ -143,9 +143,72 @@ uint32_t amd_3d_build_vs(uint32_t *code, const Amd3dJob *job)
     return n;
 }
 
+/* ---- the textured rectangle ---- */
+#define E_IMG_DATA_FORMAT_8_8_8_8 10u
+#define E_IMG_NUM_FORMAT_UNORM 0u
+#define E_SQ_RSRC_IMG_2D 9u
+#define E_SQ_SEL_0 0u
+#define E_SQ_SEL_1 1u
+#define E_SQ_SEL_X 4u
+#define E_SQ_SEL_Y 5u
+#define E_SQ_SEL_Z 6u
+
+/* The T# of a linear 8-8-8-8 image (ac_descriptors.c ac_build_gfx6_texture_descriptor() with ac_set_mutable_tex_desc_fields(), the
+ * GFX9 branches). The destination selects put the colour in R, G, B order: the image bytes are B, G, R, X (bgr) or R, G, B, X. */
+void amd_3d_build_tex_desc(uint32_t d[8], const Amd3dJob *job)
+{
+    uint32_t sx = job->bgr ? E_SQ_SEL_Z : E_SQ_SEL_X, sz = job->bgr ? E_SQ_SEL_X : E_SQ_SEL_Z;
+
+    d[0] = (uint32_t)(job->tex_mc >> 8);
+    d[1] = (((uint32_t)(job->tex_mc >> 40) & 0xFFu) << F3D_SQ_IMG_RSRC_WORD1__BASE_ADDRESS_HI) |
+           (E_IMG_DATA_FORMAT_8_8_8_8 << F3D_SQ_IMG_RSRC_WORD1__DATA_FORMAT) | (E_IMG_NUM_FORMAT_UNORM << F3D_SQ_IMG_RSRC_WORD1__NUM_FORMAT);
+    d[2] = ((job->tex_w - 1) << F3D_SQ_IMG_RSRC_WORD2__WIDTH) | ((job->tex_h - 1) << F3D_SQ_IMG_RSRC_WORD2__HEIGHT) |
+           (4u << F3D_SQ_IMG_RSRC_WORD2__PERF_MOD);
+    d[3] = (sx << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_X) | (E_SQ_SEL_Y << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_Y) |
+           (sz << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_Z) | (E_SQ_SEL_1 << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W) | /* alpha: 1 (the X byte is no alpha) */
+           (0u << F3D_SQ_IMG_RSRC_WORD3__SW_MODE) | (E_SQ_RSRC_IMG_2D << F3D_SQ_IMG_RSRC_WORD3__TYPE);   /* SW_MODE 0 = linear; one mip level */
+    d[4] = (0u << F3D_SQ_IMG_RSRC_WORD4__DEPTH) | ((job->tex_pitch_px - 1) << F3D_SQ_IMG_RSRC_WORD4__PITCH); /* EPITCH */
+    d[5] = 0;
+    d[6] = 0;
+    d[7] = 0;
+}
+
+/* The test image: red grows with x, green with y, blue is a diagonal ramp. */
+uint32_t amd_3d_texel(const Amd3dJob *job, uint32_t x, uint32_t y)
+{
+    uint32_t r = (x * 255u) / (job->tex_w - 1u), g = (y * 255u) / (job->tex_h - 1u), b = (x * 5u + y * 9u) & 0xFFu;
+    return job->bgr ? ((r << 16) | (g << 8) | b) : ((b << 16) | (g << 8) | r);
+}
+
+/* Pixel shader of the textured rectangle: the pixel position (v2, v3 = x + 0.5, y + 0.5) minus the rectangle's corner is the texel
+ * (IMAGE_LOAD takes integer coordinates and needs no sampler); the 4 floats go out through FP16 packing as in the solid shader. */
+static uint32_t build_ps_textured(uint32_t *code, const Amd3dJob *job)
+{
+    uint32_t n = 0;
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(2));                /* v_cvt_u32_f32 v4, v2           */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 5, A3D_SRC_VGPR(3));                /* v_cvt_u32_f32 v5, v3           */
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_CO_U32, 4, 4, A3D_SRC_LITERAL);           /* v_subrev_co_u32 v4, vcc, x0, v4 (v4 - x0) */
+    code[n++] = job->x0;
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_CO_U32, 5, 5, A3D_SRC_LITERAL);           /* v_subrev_co_u32 v5, vcc, y0, v5 */
+    code[n++] = job->y0;
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                             /* image_load v[6:9], v[4:5], s[0:7] dmask:0xf */
+    code[n++] = a3d_mimg_1(4, 6, 0, 0);
+    code[n++] = A3D_S_WAITCNT_VM0;                                                /* s_waitcnt vmcnt(0)             */
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 10);                       /* v_cvt_pkrtz_f16_f32 v10, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 11);                       /* v_cvt_pkrtz_f16_f32 v11, v8, v9 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(9), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                      /* exp mrt0 v10, v11 compr done vm */
+    code[n++] = a3d_exp1(10, 11, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
 uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job)
 {
     uint32_t n = 0;
+    if (job->textured)
+        return build_ps_textured(code, job);
     /* RB+ wants FP16_ABGR: the colour goes out as four half floats packed two per VGPR (R low, G high; B low, A high). */
     uint32_t rg = a3d_f16_unorm8(job->r) | (a3d_f16_unorm8(job->g) << 16);
     uint32_t ba = a3d_f16_unorm8(job->b) | (a3d_f16_unorm8(job->a) << 16);
@@ -311,14 +374,27 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
 
     /* 6. the pixel shader: no interpolated inputs, but one perspective VGPR input must be enabled (Mesa: "we need to enable at
      * least one of them, otherwise we hang the GPU"); one MRT, exported as FP16_ABGR */
-    ctx2(&b, R3D_SPI_PS_INPUT_ENA, 1u << F3D_SPI_PS_INPUT_ENA__PERSP_CENTER_ENA, 1u << F3D_SPI_PS_INPUT_ENA__PERSP_CENTER_ENA);
+    uint32_t ps_in = 1u << F3D_SPI_PS_INPUT_ENA__PERSP_CENTER_ENA;
+    if (job->textured)  /* the pixel position, as floats, goes to the VGPRs after the two perspective ones: v2 = x, v3 = y */
+        ps_in |= (1u << F3D_SPI_PS_INPUT_ENA__POS_X_FLOAT_ENA) | (1u << F3D_SPI_PS_INPUT_ENA__POS_Y_FLOAT_ENA);
+    ctx2(&b, R3D_SPI_PS_INPUT_ENA, ps_in, ps_in);
     ctx1(&b, R3D_SPI_PS_IN_CONTROL, 0u << F3D_SPI_PS_IN_CONTROL__NUM_INTERP);
     ctx2(&b, R3D_SPI_SHADER_Z_FORMAT, 0, E_SPI_SHADER_FP16_ABGR);      /* Z: none; colour MRT0: FP16_ABGR */
     sh1(&b, R3D_SPI_SHADER_PGM_LO_PS, (uint32_t)(job->ps_mc >> 8));
     sh1(&b, R3D_SPI_SHADER_PGM_HI_PS, (uint32_t)(job->ps_mc >> 40) & 0xFFu);
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, (0u << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) | (1u << F3D_SPI_SHADER_PGM_RSRC1_PS__SGPRS) |
+    /* VGPRS / SGPRS are counted in blocks of 4 / 8, minus 1: the textured shader uses v0 .. v11 (12) and 8 user SGPRs + the system ones */
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, ((job->textured ? 2u : 0u) << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) |
+                                         ((job->textured ? 2u : 1u) << F3D_SPI_SHADER_PGM_RSRC1_PS__SGPRS) |
                                          (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_PS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_PS__DX10_CLAMP));
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_PS, 0u << F3D_SPI_SHADER_PGM_RSRC2_PS__USER_SGPR);
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_PS, (job->textured ? 8u : 0u) << F3D_SPI_SHADER_PGM_RSRC2_PS__USER_SGPR);
+    if (job->textured) {          /* the image resource goes straight into the pixel shader's user SGPRs s0 .. s7 */
+        uint32_t td[8], k;
+        amd_3d_build_tex_desc(td, job);
+        put(&b, PKT3(OP_SET_SH_REG, 8));
+        put(&b, R3D_SPI_SHADER_USER_DATA_PS_0);
+        for (k = 0; k < 8; k++)
+            put(&b, td[k]);
+    }
 
     /* 7. the vertex shader: window space position (pixels), one position export, no parameters */
     sh1(&b, R3D_SPI_SHADER_PGM_LO_VS, (uint32_t)(job->vs_mc >> 8));
@@ -427,6 +503,17 @@ static char map[16][33];  /* a coarse picture of the offscreen buffer after the 
 
 const char *amd_3d_map_row(int row) { return (row >= 0 && row < 16 && map[row][0]) ? map[row] : 0; }
 
+/* two 8 bit channel triples differ by at most 1 in each channel (the colour goes through half floats and back) */
+static int close_px(uint32_t a, uint32_t b)
+{
+    int s;
+    for (s = 0; s < 24; s += 8) {
+        int d = (int)((a >> s) & 0xFFu) - (int)((b >> s) & 0xFFu);
+        if (d > 1 || d < -1) return 0;
+    }
+    return 1;
+}
+
 static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map)
 {
     uint32_t cx0 = job->x0 > margin ? job->x0 - margin : 0, cy0 = job->y0 > margin ? job->y0 - margin : 0;
@@ -441,6 +528,10 @@ static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uin
     for (y = cy0; y < cy1; y++)
         for (x = cx0; x < cx1; x++)
             amd_gpu_vram_write32(base_off + (y * job->pitch_px + x) * 4u, pattern);
+    if (job->textured)                                         /* the image the pixel shader will read */
+        for (y = 0; y < job->tex_h; y++)
+            for (x = 0; x < job->tex_w; x++)
+                amd_gpu_vram_write32(job->tex_off + (y * job->tex_pitch_px + x) * 4u, amd_3d_texel(job, x, y));
     (void)amd_gpu_vram_read32(base_off);                       /* drain the CPU's write buffers */
 
     val[8] = 2;
@@ -455,7 +546,7 @@ static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uin
             uint32_t v = amd_gpu_vram_read32(base_off + (y * job->pitch_px + x) * 4u) & 0x00FFFFFFu;
             if (x >= job->x0 && x < job->x1 && y >= job->y0 && y < job->y1) {
                 in_total++;
-                if (v == expect) in_good++;
+                if (job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu) : v == expect) in_good++;
                 else if (!first_in) first_in = v | 0x01000000u;
             } else {
                 out_total++;
@@ -470,7 +561,7 @@ static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uin
         for (gy = 0; gy < 16u; gy++) {
             for (gx = 0; gx < 32u; gx++) {
                 uint32_t v = amd_gpu_vram_read32(base_off + ((gy * 4u) * job->pitch_px + gx * 8u) * 4u) & 0x00FFFFFFu;
-                map[gy][gx] = v == expect ? '#' : v == (pattern & 0x00FFFFFFu) ? '.' : '?';
+                map[gy][gx] = (job->textured ? (v != (pattern & 0x00FFFFFFu)) : v == expect) ? '#' : v == (pattern & 0x00FFFFFFu) ? '.' : '?';
             }
             map[gy][32] = 0;
         }
@@ -478,7 +569,8 @@ static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uin
     val[0] = in_good; val[1] = in_total; val[2] = out_bad; val[3] = out_total; val[4] = first_in; val[5] = first_out;
     val[8] = 5;
     if (in_total && in_good == in_total && !out_bad) {
-        status = "3D PASS: the graphics pipeline drew the rectangle (every pixel right, nothing outside touched)";
+        status = job->textured ? "3D PASS: the pixel shader read the image and the rectangle shows it (every texel right, nothing outside touched)"
+                               : "3D PASS: the graphics pipeline drew the rectangle (every pixel right, nothing outside touched)";
         return 1;
     }
     status = in_good == 0 ? "3D FAILED: the GPU ran the draw but the rectangle is not there (see the first wrong pixel)"
@@ -488,7 +580,7 @@ static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uin
 
 int amd_3d_rect_offscreen(void)
 {
-    Amd3dJob job;
+    Amd3dJob job = { 0 };
     if (!amd_gpu_ring_running()) { status = "3D test skipped: the persistent ring is not running"; return 0; }
     job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
     job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
@@ -503,7 +595,7 @@ int amd_3d_rect_offscreen(void)
 
 int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
 {
-    Amd3dJob job;
+    Amd3dJob job = { 0 };
     uint64_t off64;
     if (!amd_gpu_ring_running()) { status = "3D screen test skipped: the persistent ring is not running"; return 0; }
     if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 200 || fb_phys < vram_cpu) {
@@ -520,5 +612,53 @@ int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
     job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
     job.y0 = height - 120; job.y1 = height - 88;
     job.r = 255; job.g = 128; job.b = 0; job.a = 255;
+    return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
+}
+
+/* ---- M2: the rectangle textured from an image in VRAM ---- */
+#define VRAM_TEX_OFF 0x0B200000u
+
+int amd_3d_tex_offscreen(void)
+{
+    Amd3dJob job;
+    if (!amd_gpu_ring_running()) { status = "3D texture test skipped: the persistent ring is not running"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    job.tex_off = VRAM_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 256u * 32u * 4u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D texture test skipped: no MC address for the test memory"; return 0; }
+    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
+    job.bgr = 1;
+    job.x0 = 32; job.y0 = 16; job.x1 = 224; job.y1 = 48;
+    job.r = job.g = job.b = job.a = 0;
+    job.textured = 1;
+    job.tex_w = job.x1 - job.x0; job.tex_h = job.y1 - job.y0; job.tex_pitch_px = 256;
+    return draw_and_check(&job, VRAM_RT_OFF, 256, 0x00112233u, 1);
+}
+
+int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
+{
+    Amd3dJob job;
+    uint64_t off64;
+    if (!amd_gpu_ring_running()) { status = "3D texture screen test skipped: the persistent ring is not running"; return 0; }
+    if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 200 || fb_phys < vram_cpu) {
+        status = "3D texture screen test skipped: bad framebuffer info"; return 0; }
+    off64 = fb_phys - vram_cpu;
+    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_SHADER_OFF) {
+        status = "3D texture screen test skipped: the framebuffer reaches the test memory"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    job.tex_off = VRAM_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 512u * 64u * 4u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D texture screen test skipped: no MC address"; return 0; }
+    job.pitch_px = pitch_bytes / 4u; job.width = width; job.height = height;
+    job.bgr = bgr;
+    job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
+    job.y0 = height - 120; job.y1 = height - 88;
+    job.r = job.g = job.b = job.a = 0;
+    job.textured = 1;
+    job.tex_w = job.x1 - job.x0; job.tex_h = job.y1 - job.y0; job.tex_pitch_px = 512;
     return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
 }

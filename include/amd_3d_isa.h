@@ -98,4 +98,36 @@ static inline uint32_t a3d_f16_unorm8(uint32_t v)
     return ((h - 1u) << 10) | (mant & 0x3FFu); /* value 2^(h-16) .. : half exponent field = (h - 16) + 15 */
 }
 
+/* ---- for the textured rectangle (M2) ----
+ * VOP3A  dword0: [7:0] VDST, [15] CLMP, [25:16] OP, [31:26] = 110100;  dword1: [8:0] SRC0, [17:9] SRC1, [26:18] SRC2, [28:27] OMOD, [31:29] NEG
+ *        (V_CVT_PKRTZ_F16_F32 is VOP3-only on GFX9: opcode 0x296 = 662, Mesa aco_opcodes.py "gfx8=0x296")
+ * MIMG   dword0: [11:8] DMASK, [12] UNRM, [13] GLC, [14] DA, [15] A16, [16] TFE, [17] LWE, [24:18] OP[6:0], [0] OP[7], [25] SLC,
+ *        [31:26] = 111100;  dword1: [7:0] VADDR, [15:8] VDATA, [20:16] SRSRC (SGPR number / 4), [25:21] SSAMP (SGPR number / 4), [31] D16
+ * S_WAITCNT (SOPP op 12): simm16 [3:0] vmcount, [6:4] expcount, [11:8] lgkmcount, [15:14] vmcount upper bits */
+#define A3D_OP1_CVT_U32_F32 7u
+#define A3D_OP2_SUBREV_CO_U32 27u /* D = S1 - S0, carry to VCC (VOP2 opcode 0x1B on GFX9) */
+#define A3D_OP3_CVT_PKRTZ_F16_F32 662u
+#define A3D_MIMG_IMAGE_LOAD 0u
+#define A3D_S_WAITCNT_VM0 0xBF8C0F70u /* s_waitcnt vmcnt(0): expcnt and lgkmcnt left at their maximum (7, 15) */
+
+static inline uint32_t a3d_vop3a_0(uint32_t op, uint32_t vdst)
+{
+    return 0xD0000000u | (op << 16) | vdst;
+}
+
+static inline uint32_t a3d_vop3a_1(uint32_t src0, uint32_t src1, uint32_t src2)
+{
+    return src0 | (src1 << 9) | (src2 << 18);
+}
+
+static inline uint32_t a3d_mimg_0(uint32_t op, uint32_t dmask)
+{
+    return 0xF0000000u | ((op & 0x80u) >> 7) | ((op & 0x7Fu) << 18) | (dmask << 8);
+}
+
+static inline uint32_t a3d_mimg_1(uint32_t vaddr, uint32_t vdata, uint32_t srsrc_sgpr, uint32_t ssamp_sgpr)
+{
+    return vaddr | (vdata << 8) | ((srsrc_sgpr >> 2) << 16) | ((ssamp_sgpr >> 2) << 21);
+}
+
 #endif

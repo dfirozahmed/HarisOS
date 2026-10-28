@@ -57,6 +57,7 @@
 #define R3D_PA_SU_PRIM_FILTER_CNTL                   0x020b
 
 /* SH registers (SET_SH_REG) */
+#define R3D_SPI_SHADER_USER_DATA_PS_0                0x000c
 #define R3D_SPI_SHADER_PGM_LO_PS                     0x0008
 #define R3D_SPI_SHADER_PGM_HI_PS                     0x0009
 #define R3D_SPI_SHADER_PGM_RSRC1_PS                  0x000a
@@ -179,5 +180,27 @@
 #define F3D_SPI_SHADER_PGM_RSRC3_PS__CU_EN                                 0x0
 #define F3D_SPI_SHADER_PGM_RSRC3_PS__WAVE_LIMIT                            0x10
 #define F3D_SPI_SHADER_LATE_ALLOC_VS__LIMIT                                0x0
+#define F3D_SQ_IMG_RSRC_WORD1__BASE_ADDRESS_HI                             0x0
+#define F3D_SQ_IMG_RSRC_WORD1__MIN_LOD                                     0x8
+#define F3D_SQ_IMG_RSRC_WORD1__DATA_FORMAT                                 0x14
+#define F3D_SQ_IMG_RSRC_WORD1__NUM_FORMAT                                  0x1a
+#define F3D_SQ_IMG_RSRC_WORD2__WIDTH                                       0x0
+#define F3D_SQ_IMG_RSRC_WORD2__HEIGHT                                      0xe
+#define F3D_SQ_IMG_RSRC_WORD2__PERF_MOD                                    0x1c
+#define F3D_SQ_IMG_RSRC_WORD3__DST_SEL_X                                   0x0
+#define F3D_SQ_IMG_RSRC_WORD3__DST_SEL_Y                                   0x3
+#define F3D_SQ_IMG_RSRC_WORD3__DST_SEL_Z                                   0x6
+#define F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W                                   0x9
+#define F3D_SQ_IMG_RSRC_WORD3__BASE_LEVEL                                  0xc
+#define F3D_SQ_IMG_RSRC_WORD3__LAST_LEVEL                                  0x10
+#define F3D_SQ_IMG_RSRC_WORD3__SW_MODE                                     0x14
+#define F3D_SQ_IMG_RSRC_WORD3__TYPE                                        0x1c
+#define F3D_SQ_IMG_RSRC_WORD4__DEPTH                                       0x0
+#define F3D_SQ_IMG_RSRC_WORD4__PITCH                                       0xd
+#define F3D_SQ_IMG_RSRC_WORD4__BC_SWIZZLE                                  0x1d
+#define F3D_SQ_IMG_RSRC_WORD5__BASE_ARRAY                                  0x0
+#define F3D_SQ_IMG_RSRC_WORD5__MAX_MIP                                     0x1c
+#define F3D_SPI_PS_INPUT_ENA__POS_X_FLOAT_ENA                              0x8
+#define F3D_SPI_PS_INPUT_ENA__POS_Y_FLOAT_ENA                              0x9
 
 #endif

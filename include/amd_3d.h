@@ -18,15 +18,25 @@ typedef struct
     uint32_t x0, y0, x1, y1; /* the rectangle, pixels: x0 <= x < x1, y0 <= y < y1 */
     uint32_t r, g, b, a;  /* colour, 0 .. 255 */
     uint64_t vs_mc, ps_mc; /* the shader code, 256-byte aligned */
+    /* M2: a textured rectangle. The pixel shader reads texel (x - x0, y - y0) of this image (linear, 8-8-8-8, same byte order as the
+     * colour buffer) and writes it; the colour fields above are then not used. */
+    uint32_t textured;
+    uint64_t tex_mc;       /* the image, 256-byte aligned */
+    uint32_t tex_off;      /* the same place as a VRAM byte offset (for the CPU) */
+    uint32_t tex_pitch_px, tex_w, tex_h;
 } Amd3dJob;
 
 #define AMD_3D_IB_MAX 600 /* dwords amd_3d_build_ib() can write at most */
 #define AMD_3D_VS_MAX 32  /* dwords of the vertex / pixel shader the builders write at most */
-#define AMD_3D_PS_MAX 16
+#define AMD_3D_PS_MAX 32
 
 /* Shader code. Return the number of dwords written. */
 uint32_t amd_3d_build_vs(uint32_t *code, const Amd3dJob *job);
 uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job);
+/* The 8 dwords of the image resource (T#) for job->tex_*; they go to the pixel shader in its user SGPRs s0 .. s7. */
+void amd_3d_build_tex_desc(uint32_t desc[8], const Amd3dJob *job);
+/* The colour of texel (x, y) of the test image, as a memory dword of the colour buffer format (0x00RRGGBB if job->bgr). */
+uint32_t amd_3d_texel(const Amd3dJob *job, uint32_t x, uint32_t y);
 /* The default context state of the GPU (Linux clear-state table), a stream of its own that has to run once before the draw. Returns the
  * number of dwords, 0 if it does not fit in cap. */
 #define AMD_3D_DEFAULT_IB_MAX 1000
@@ -39,6 +49,9 @@ uint32_t amd_3d_build_ib(uint32_t *ib, uint32_t cap, const Amd3dJob *job);
  * real framebuffer (fb_phys is its CPU address, vram_cpu the CPU address of the VRAM aperture). 1 = the pixels are right. */
 int amd_3d_rect_offscreen(void);
 int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
+/* The same two, with the rectangle textured from an image in VRAM (M2). */
+int amd_3d_tex_offscreen(void);
+int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 
 const char *amd_3d_status(void);
 /* After amd_3d_rect_offscreen(): row 0 .. 15 of a 32 x 16 picture of the 256 x 64 buffer (# colour, . untouched, ? other), 0 beyond. */

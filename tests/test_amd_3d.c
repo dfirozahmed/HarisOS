@@ -60,7 +60,7 @@ int main(void)
 {
     static uint32_t ib[AMD_3D_IB_MAX], vs[AMD_3D_VS_MAX], ps[AMD_3D_PS_MAX];
     Amd3dJob job = { 0x4100000000ULL + 0x0E100000ULL, 256, 256, 64, 1, 32, 16, 224, 48, 255, 128, 0, 255,
-                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL };
+                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL, 0, 0, 0, 0, 0, 0 };
     uint32_t i, n, cnt;
     const uint32_t *p;
 
@@ -212,6 +212,42 @@ int main(void)
     check(p && (p[0] & (1u << 16)), "PA_CL_CLIP_CNTL: CLIP_DISABLE (window space positions)");
     p = find_set(ib, n, 0x69, R3D_PA_SC_MODE_CNTL_0, &cnt);
     check(p && (p[0] & 2u), "PA_SC_MODE_CNTL_0: VPORT_SCISSOR_ENABLE");
+
+
+    /* M2: the textured rectangle's pixel shader and image resource */
+    {
+        Amd3dJob tj = job;
+        uint32_t td[8], tps[AMD_3D_PS_MAX], tn, k;
+        tj.textured = 1; tj.tex_mc = 0x4100000000ULL + 0x0B200000ULL; tj.tex_off = 0x0B200000u;
+        tj.tex_w = 192; tj.tex_h = 32; tj.tex_pitch_px = 256;
+        tn = amd_3d_build_ps(tps, &tj);
+        check(tn > 0 && tn <= AMD_3D_PS_MAX && tps[tn - 1] == A3D_S_ENDPGM, "textured pixel shader fits and ends with s_endpgm");
+        check(a3d_mimg_0(0, 0xF) == 0xF0000F00u && a3d_mimg_1(4, 6, 0, 0) == 0x00000604u, "IMAGE_LOAD dmask 0xF v[6:9] <- v[4:5], s[0:7]: 0xF0000F00 0x00000604");
+        check(A3D_S_WAITCNT_VM0 == 0xBF8C0F70u, "s_waitcnt vmcnt(0) = 0xBF8C0F70");
+        check(a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 10) == 0xD296000Au && a3d_vop3a_1(256 + 6, 256 + 7, 0) == 0x00020F06u,
+              "v_cvt_pkrtz_f16_f32 v10, v6, v7 = 0xD296000A 0x00020F06 (opcode 0x296)");
+        {
+            int has_load = 0, has_wait = 0, lits = 0;
+            for (k = 0; k < tn; k++) {
+                if (tps[k] == 0xF0000F00u) has_load++;
+                if (tps[k] == A3D_S_WAITCNT_VM0) has_wait++;
+                if (tps[k] == tj.x0 || tps[k] == tj.y0) lits++;
+            }
+            check(has_load == 1 && has_wait == 1 && lits >= 2, "textured pixel shader: one image_load, one s_waitcnt, the rectangle corner as literals");
+        }
+        amd_3d_build_tex_desc(td, &tj);
+        check(td[0] == (uint32_t)(tj.tex_mc >> 8), "T# word 0: the image address >> 8");
+        check(((td[1] >> F3D_SQ_IMG_RSRC_WORD1__DATA_FORMAT) & 0x3F) == 10 && ((td[1] >> F3D_SQ_IMG_RSRC_WORD1__NUM_FORMAT) & 0xF) == 0,
+              "T# word 1: data format 8_8_8_8, number format UNORM");
+        check(((td[2] >> F3D_SQ_IMG_RSRC_WORD2__WIDTH) & 0x3FFF) == 191 && ((td[2] >> F3D_SQ_IMG_RSRC_WORD2__HEIGHT) & 0x3FFF) == 31,
+              "T# word 2: width - 1, height - 1");
+        check(((td[3] >> F3D_SQ_IMG_RSRC_WORD3__TYPE) & 0xF) == 9 && ((td[3] >> F3D_SQ_IMG_RSRC_WORD3__SW_MODE) & 0x1F) == 0 &&
+              (td[3] & 7) == 6 && ((td[3] >> 6) & 7) == 4,
+              "T# word 3: 2D image, linear, destination select R <- component Z, B <- component X (B,G,R,X memory order)");
+        check(((td[4] >> F3D_SQ_IMG_RSRC_WORD4__PITCH) & 0xFFFF) == 255, "T# word 4: pitch - 1 (in texels)");
+        check(amd_3d_texel(&tj, 0, 0) == 0x00000000u && ((amd_3d_texel(&tj, 191, 31) >> 16) & 0xFF) == 255 && ((amd_3d_texel(&tj, 191, 31) >> 8) & 0xFF) == 255,
+              "the test image: texel (0,0) black, texel (191,31) has full red and green");
+    }
 
     /* the register numbers themselves, against values known from Mesa radeonsi (R_028C60 / 4 - 0xA000, R_00B020 / 4 - 0xB000 / 4, ...) */
     check(R3D_CB_COLOR0_BASE == 0x318 && R3D_SPI_SHADER_PGM_LO_PS == 0x008 && R3D_SPI_SHADER_PGM_LO_VS == 0x048 &&
