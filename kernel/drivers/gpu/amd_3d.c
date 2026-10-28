@@ -39,6 +39,8 @@
 #define E_CB_NORMAL 1u
 #define E_EARLY_Z_THEN_LATE_Z 1u
 #define E_PUNCHOUT_FORCE_OFF 2u
+#define E_X_ROUND_TO_EVEN 2u
+#define E_X_16_8_FIXED_POINT_1_256TH 5u
 #define E_DI_PT_TRISTRIP 6u
 #define E_DI_SRC_SEL_AUTO_INDEX 2u
 #define E_MAX_BLOCK_SIZE_256B 2u
@@ -260,6 +262,36 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
          (job->x1 << F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_X) | (job->y1 << F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_Y));
     ctx2(&b, R3D_PA_SC_VPORT_ZMIN_0, 0, 0x3F800000u); /* depth range 0.0 .. 1.0 */
 
+    /* Clipping, guard band and sub-pixel precision for a vertex shader that writes window space positions (si_state.c
+     * si_emit_clip_regs(): CLIP_DISABLE; si_state_viewport.c si_emit_guardband() with ac_guardband.c ac_compute_guardband(): the
+     * "blit" case, quantisation 16.8 fixed point, the viewport taken to be the whole colour buffer; si_state.c: the rasteriser's
+     * PA_SC_MODE_CNTL_0 always has VPORT_SCISSOR_ENABLE). With the reset values of the guard band registers (and a 1/16 pixel
+     * precision) triangles far from the origin were clipped away. */
+    {
+        uint32_t hx = ((job->width / 2u) > 8176u ? 8176u : (job->width / 2u)) & ~15u;   /* HW screen offset, aligned to 16 */
+        uint32_t hy = ((job->height / 2u) > 8176u ? 8176u : (job->height / 2u)) & ~15u;
+        /* guard band = min(-left, right) with max_range = 65536 / 2, as a ratio num / (width or height), at least 1.0 */
+        uint32_t ax = 65538u + job->width - 2u * hx, bx = 65536u - job->width + 2u * hx;
+        uint32_t ay = 65538u + job->height - 2u * hy, by = 65536u - job->height + 2u * hy;
+        uint32_t nx = ax < bx ? ax : bx, ny = ay < by ? ay : by;
+        uint32_t gbx = nx < job->width ? 0x3F800000u : a3d_f32_ratio(nx, job->width);
+        uint32_t gby = ny < job->height ? 0x3F800000u : a3d_f32_ratio(ny, job->height);
+
+        ctx1(&b, R3D_PA_CL_CLIP_CNTL, (1u << F3D_PA_CL_CLIP_CNTL__CLIP_DISABLE) | (1u << F3D_PA_CL_CLIP_CNTL__DX_LINEAR_ATTR_CLIP_ENA));
+        put(&b, PKT3(OP_SET_CONTEXT_REG, 5));
+        put(&b, R3D_PA_SU_VTX_CNTL);
+        put(&b, (1u << F3D_PA_SU_VTX_CNTL__PIX_CENTER) | (E_X_ROUND_TO_EVEN << F3D_PA_SU_VTX_CNTL__ROUND_MODE) |
+                (E_X_16_8_FIXED_POINT_1_256TH << F3D_PA_SU_VTX_CNTL__QUANT_MODE));
+        put(&b, gby);                              /* PA_CL_GB_VERT_CLIP_ADJ */
+        put(&b, 0x3F800000u);                      /* PA_CL_GB_VERT_DISC_ADJ: discard = 1.0 (+ nothing for the point size) */
+        put(&b, gbx);                              /* PA_CL_GB_HORZ_CLIP_ADJ */
+        put(&b, 0x3F800000u);                      /* PA_CL_GB_HORZ_DISC_ADJ */
+        ctx1(&b, R3D_PA_SU_HARDWARE_SCREEN_OFFSET, ((hx >> 4) << F3D_PA_SU_HARDWARE_SCREEN_OFFSET__HW_SCREEN_OFFSET_X) |
+                                                   ((hy >> 4) << F3D_PA_SU_HARDWARE_SCREEN_OFFSET__HW_SCREEN_OFFSET_Y));
+        ctx1(&b, R3D_PA_SC_MODE_CNTL_0, (1u << F3D_PA_SC_MODE_CNTL_0__VPORT_SCISSOR_ENABLE) |
+                                        (1u << F3D_PA_SC_MODE_CNTL_0__ALTERNATE_RBS_PER_TILE));
+    }
+
     /* 5. colour output: no blending, all four channels, RB+ down-conversion for 8-8-8-8 */
     ctx1(&b, R3D_CB_COLOR_CONTROL, (E_CB_NORMAL << F3D_CB_COLOR_CONTROL__MODE) | (0xCCu << F3D_CB_COLOR_CONTROL__ROP3));
     ctx1(&b, R3D_CB_TARGET_MASK, 0xF);
@@ -329,7 +361,6 @@ static uint32_t val[AMD_3D_VALUES];
 const char *amd_3d_status(void) { return status; }
 uint32_t amd_3d_value(int what) { return (what >= 0 && what < AMD_3D_VALUES) ? val[what] : 0; }
 
-#define R3D_PA_CL_GB_VERT_CLIP_ADJ 0x02FAu /* gc_9_1_offset.h mmPA_CL_GB_VERT_CLIP_ADJ */
 
 /* Submits the command stream now in the IB page and waits for its fence. Returns 0 if the GPU finished it. */
 static int submit_and_wait(uint32_t ndw, const char *what_failed_submit, const char *what_failed_fence)
@@ -392,7 +423,11 @@ static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
 
 /* Fills the colour buffer with `pattern`, runs the job, checks the rectangle (colour) and everything else (unchanged). The area
  * looked at is the rectangle grown by `margin` pixels; the buffer starts at VRAM offset base_off. */
-static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern)
+static char map[16][33];  /* a coarse picture of the offscreen buffer after the draw: # colour, . untouched, ? something else */
+
+const char *amd_3d_map_row(int row) { return (row >= 0 && row < 16 && map[row][0]) ? map[row] : 0; }
+
+static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map)
 {
     uint32_t cx0 = job->x0 > margin ? job->x0 - margin : 0, cy0 = job->y0 > margin ? job->y0 - margin : 0;
     uint32_t cx1 = job->x1 + margin > job->width ? job->width : job->x1 + margin;
@@ -430,6 +465,16 @@ static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uin
                 }
             }
         }
+    if (want_map) {
+        uint32_t gx, gy;
+        for (gy = 0; gy < 16u; gy++) {
+            for (gx = 0; gx < 32u; gx++) {
+                uint32_t v = amd_gpu_vram_read32(base_off + ((gy * 4u) * job->pitch_px + gx * 8u) * 4u) & 0x00FFFFFFu;
+                map[gy][gx] = v == expect ? '#' : v == (pattern & 0x00FFFFFFu) ? '.' : '?';
+            }
+            map[gy][32] = 0;
+        }
+    }
     val[0] = in_good; val[1] = in_total; val[2] = out_bad; val[3] = out_total; val[4] = first_in; val[5] = first_out;
     val[8] = 5;
     if (in_total && in_good == in_total && !out_bad) {
@@ -453,7 +498,7 @@ int amd_3d_rect_offscreen(void)
     job.bgr = 1;
     job.x0 = 32; job.y0 = 16; job.x1 = 224; job.y1 = 48;
     job.r = 255; job.g = 128; job.b = 0; job.a = 255;
-    return draw_and_check(&job, VRAM_RT_OFF, 8, 0x00112233u);
+    return draw_and_check(&job, VRAM_RT_OFF, 256, 0x00112233u, 1); /* the whole 256 x 64 buffer is looked at */
 }
 
 int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
@@ -475,5 +520,5 @@ int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
     job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
     job.y0 = height - 120; job.y1 = height - 88;
     job.r = 255; job.g = 128; job.b = 0; job.a = 255;
-    return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u);
+    return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
 }

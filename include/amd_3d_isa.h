@@ -69,6 +69,20 @@ static inline uint32_t a3d_f32_bits(uint32_t v)
     return ((p + 127u) << 23) | (mant & 0x7FFFFFu);
 }
 
+/* IEEE-754 single precision bits of num / den (num, den < 2^20; truncated). 0 if either is 0. */
+static inline uint32_t a3d_f32_ratio(uint32_t num, uint32_t den)
+{
+    uint64_t q;
+    uint32_t p = 0, mant;
+    if (!num || !den)
+        return 0;
+    q = ((uint64_t)num << 40) / den;
+    while ((q >> (p + 1)) != 0)
+        p++;
+    mant = p >= 23 ? (uint32_t)(q >> (p - 23)) : (uint32_t)(q << (23 - p));
+    return ((p + 127u - 40u) << 23) | (mant & 0x7FFFFFu);
+}
+
 /* IEEE-754 half precision bits of v / 255 (v = 0 .. 255), rounded toward zero like the V_CVT_PKRTZ_F16_F32 instruction. */
 static inline uint32_t a3d_f16_unorm8(uint32_t v)
 {

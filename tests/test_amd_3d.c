@@ -199,6 +199,20 @@ int main(void)
     check(p && cnt == 2 && ((p[0] >> F3D_PA_SC_VPORT_SCISSOR_0_TL__TL_X) & 0x7FFF) == 32 && ((p[1] >> F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_X) & 0x7FFF) == 224,
           "viewport scissor = the rectangle");
 
+
+    /* clipping / guard band for window space positions (Mesa ac_compute_guardband, 16.8 fixed point, the viewport = the buffer) */
+    check(a3d_f32_ratio(65536, 256) == 0x43800000u && a3d_f32_ratio(65536, 64) == 0x44800000u && a3d_f32_ratio(3, 2) == 0x3FC00000u,
+          "float bits of 65536/256 = 256.0, 65536/64 = 1024.0, 3/2 = 1.5");
+    p = find_set(ib, n, 0x69, R3D_PA_SU_VTX_CNTL, &cnt);
+    check(p && cnt == 5 && p[0] == 0x2D && p[1] == 0x44800000u && p[2] == 0x3F800000u && p[3] == 0x43800000u && p[4] == 0x3F800000u,
+          "PA_SU_VTX_CNTL = 0x2D (pixel centre, round to even, 16.8) and the guard band of a 256 x 64 buffer: clip 1024 / 256, discard 1.0");
+    p = find_set(ib, n, 0x69, R3D_PA_SU_HARDWARE_SCREEN_OFFSET, &cnt);
+    check(p && p[0] == (8u | (2u << 16)), "PA_SU_HARDWARE_SCREEN_OFFSET = (128 >> 4, 32 >> 4)");
+    p = find_set(ib, n, 0x69, R3D_PA_CL_CLIP_CNTL, &cnt);
+    check(p && (p[0] & (1u << 16)), "PA_CL_CLIP_CNTL: CLIP_DISABLE (window space positions)");
+    p = find_set(ib, n, 0x69, R3D_PA_SC_MODE_CNTL_0, &cnt);
+    check(p && (p[0] & 2u), "PA_SC_MODE_CNTL_0: VPORT_SCISSOR_ENABLE");
+
     /* the register numbers themselves, against values known from Mesa radeonsi (R_028C60 / 4 - 0xA000, R_00B020 / 4 - 0xB000 / 4, ...) */
     check(R3D_CB_COLOR0_BASE == 0x318 && R3D_SPI_SHADER_PGM_LO_PS == 0x008 && R3D_SPI_SHADER_PGM_LO_VS == 0x048 &&
           R3D_VGT_PRIMITIVE_TYPE == 0x242 && R3D_IA_MULTI_VGT_PARAM == 0x258,

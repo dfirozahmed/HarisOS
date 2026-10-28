@@ -415,6 +415,10 @@ void amd_gpu_bringup_cp(void)
         log_hex("  command stream dwords", amd_3d_value(6));
         log_hex("  fence                ", amd_3d_value(7));
         log_hex("  stage reached        ", amd_3d_value(8));
+        for (int row = 0; row < 16; row++) {
+            const char *m = amd_3d_map_row(row);
+            if (m) { serial_print("  map "); serial_print(m); serial_print("\n"); }
+        }
         serial_print(ok3d ? "3D: offscreen PASS\n" : "3D: offscreen did not pass\n");
         amd_gpu_log_save();
     }
