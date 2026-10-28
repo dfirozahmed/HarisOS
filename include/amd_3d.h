@@ -58,7 +58,12 @@ int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, ui
 void amd_3d_stress(uint32_t bits[3]);
 /* After amd_3d_stress(): of the failed draws of a mode, how many had which marker state; nibble n counts state n (0 neither marker,
  * 1 only the one before the draw, 2 only the one after, 3 both). */
-uint32_t amd_3d_stress_combo(int mode);
+uint32_t amd_3d_stress_combo(int mode); /* mode 3 = D, 4 = E */
+/* After amd_3d_stress(), mode D (pattern written once, colour changes every draw; k = 0 .. 8) and E (same, pattern before every draw; k = 9 .. 17):
+ * k = 0 / 9 bit i = try i right; k = 1 + i / 10 + i the first wrong inside pixel of try i (bit 24 set; 0 if right). */
+uint32_t amd_3d_stress_d(int k);
+/* After amd_3d_stress(), modes 0..2: low byte = failed draws that showed the whole rectangle after the CPU read 1 MiB of other video memory, next byte = after 16 MiB. */
+uint32_t amd_3d_stress_fix(int mode);
 const char *amd_3d_status(void);
 /* After amd_3d_rect_offscreen(): row 0 .. 15 of a 32 x 16 picture of the 256 x 64 buffer (# colour, . untouched, ? other), 0 beyond. */
 const char *amd_3d_map_row(int row);

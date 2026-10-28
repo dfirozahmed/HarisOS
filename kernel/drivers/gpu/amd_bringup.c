@@ -39,6 +39,9 @@ static void log_3d_result(int ok, int with_map)
     log_hex("  first wrong inside   ", amd_3d_value(4));
     log_hex("  first wrong outside  ", amd_3d_value(5));
     log_hex("  right inside 20 ms after a failed draw", amd_3d_value(26));
+    log_hex("  pattern pixels wrong when read back before the draw", amd_3d_value(34));
+    log_hex("  right inside after reading 1 MiB of other VRAM", amd_3d_value(35));
+    log_hex("  right inside after reading 16 MiB of other VRAM", amd_3d_value(36));
     log_hex("  marker before the draw", amd_3d_value(32));
     log_hex("  marker after the draw ", amd_3d_value(33));
     log_hex("  tries (+0x100 if passed)", amd_3d_value(27));
@@ -471,6 +474,15 @@ void amd_gpu_bringup_cp(void)
         log_hex("  failed draws by marker state, mode A (nibble n = state n: 0 none, 1 before only, 2 after only, 3 both)", amd_3d_stress_combo(0));
         log_hex("  mode B                      ", amd_3d_stress_combo(1));
         log_hex("  mode C                      ", amd_3d_stress_combo(2));
+        log_hex("  failed draws that were complete after reading other VRAM (low byte 1 MiB, next byte 16 MiB), mode A", amd_3d_stress_fix(0));
+        log_hex("  mode B                      ", amd_3d_stress_fix(1));
+        log_hex("  mode C                      ", amd_3d_stress_fix(2));
+        log_hex("  mode D (pattern written once, new colour every draw), bit i = try i right", amd_3d_stress_d(0));
+        log_hex("  mode D failed draws by marker state", amd_3d_stress_combo(3));
+        { int k; for (k = 1; k <= 8; k++) log_hex("  mode D first wrong inside pixel, try", amd_3d_stress_d(k)); }
+        log_hex("  mode E (as D, but the pattern is written before every draw), bit i = try i right", amd_3d_stress_d(9));
+        log_hex("  mode E failed draws by marker state", amd_3d_stress_combo(4));
+        { int k; for (k = 10; k <= 17; k++) log_hex("  mode E first wrong inside pixel, try", amd_3d_stress_d(k)); }
         amd_gpu_log_save();
     }
 #endif

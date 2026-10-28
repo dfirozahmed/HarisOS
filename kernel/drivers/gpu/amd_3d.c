@@ -497,6 +497,8 @@ static int submit_and_wait(uint32_t ndw, const char *what_failed_submit, const c
 
 /* Switches of the stress test (amd_3d_stress): leave the shader code in VRAM as it is / wait after writing it. */
 static int skip_shader_write;
+static int skip_pattern_write;
+#define VRAM_THRASH_OFF 0x0C000000u /* only ever read, to push stale lines out of whatever caches the CPU's reads pass through */
 static uint32_t shader_delay_reads;
 
 /* Writes the shaders, runs the default state stream, then the draw stream, waits for the fences and reads some registers back
@@ -618,14 +620,22 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
 
     { uint32_t k; for (k = 0; k < AMD_3D_VALUES; k++) val[k] = 0; }
     val[8] = 1;
-    for (y = cy0; y < cy1; y++)
-        for (x = cx0; x < cx1; x++)
-            amd_gpu_vram_write32(base_off + (y * job->pitch_px + x) * 4u, pattern);
-    if (job->textured)                                         /* the image the pixel shader will read */
+    if (!skip_pattern_write)
+        for (y = cy0; y < cy1; y++)
+            for (x = cx0; x < cx1; x++)
+                amd_gpu_vram_write32(base_off + (y * job->pitch_px + x) * 4u, pattern);
+    if (job->textured)                                       /* the image the pixel shader will read */
         for (y = 0; y < job->tex_h; y++)
             for (x = 0; x < job->tex_w; x++)
                 amd_gpu_vram_write32(job->tex_off + (y * job->tex_pitch_px + x) * 4u, amd_3d_texel(job, x, y));
     amd_gpu_wc_flush();                                        /* drain the CPU's write buffers: pattern and image are in memory */
+    if (!skip_pattern_write) {                                 /* read the pattern back: a CPU write that is still on its way would land AFTER the GPU's pixels */
+        uint32_t bad = 0;
+        for (y = cy0; y < cy1; y++)
+            for (x = cx0; x < cx1; x++)
+                if (amd_gpu_vram_read32(base_off + (y * job->pitch_px + x) * 4u) != pattern) bad++;
+        val[34] = bad;
+    }
 
     val[8] = 2;
     job->marker_mc = amd_native_vram_mc_addr(VRAM_MARK_OFF, 16u);
@@ -672,6 +682,12 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
         uint32_t k;
         for (k = 0; k < 20000u; k++) (void)amd_gpu_vram_read32(0);
         val[26] = inside_good(job, base_off);
+        /* If the CPU's reads were answered from a stale cache on the way (the HDP read cache), reading a lot of OTHER video memory
+         * pushes the stale lines out: val[35] after 1 MiB at a 256-byte stride, val[36] after 16 MiB at a 4 KiB stride. */
+        for (k = 0; k < 4096u; k++) (void)amd_gpu_vram_read32(VRAM_THRASH_OFF + k * 256u);
+        val[35] = inside_good(job, base_off);
+        for (k = 0; k < 4096u; k++) (void)amd_gpu_vram_read32(VRAM_THRASH_OFF + k * 4096u);
+        val[36] = inside_good(job, base_off);
     }
     if (in_total && in_good == in_total && !out_bad) {
         status = job->textured ? "3D PASS: the pixel shader read the image and the rectangle shows it (every texel right, nothing outside touched)"
@@ -773,15 +789,20 @@ int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, ui
  *   mode 0: the shader code is written once, then left alone
  *   mode 1: the shader code is written again before every draw (the normal case)
  *   mode 2: as mode 1, plus a wait of about 20 ms after writing it */
-static uint32_t stress_combo[3];
-uint32_t amd_3d_stress_combo(int mode) { return mode >= 0 && mode < 3 ? stress_combo[mode] : 0; }
+static uint32_t stress_combo[5];
+static uint32_t stress_d[18]; /* modes D (0 .. 8) and E (9 .. 17) */
+static uint32_t stress_fix[3]; /* per mode: low byte = failed draws whose rectangle was complete after reading 1 MiB elsewhere, next byte = after 16 MiB */
+uint32_t amd_3d_stress_fix(int mode) { return mode >= 0 && mode < 3 ? stress_fix[mode] : 0; }
+uint32_t amd_3d_stress_combo(int mode) { return mode >= 0 && mode < 5 ? stress_combo[mode] : 0; }
+uint32_t amd_3d_stress_d(int k) { return k >= 0 && k < 18 ? stress_d[k] : 0; }
 
 void amd_3d_stress(uint32_t bits[3])
 {
     Amd3dJob job = { 0 };
-    uint32_t mode, i;
+    uint32_t mode, i, v;
     bits[0] = bits[1] = bits[2] = 0xFFFFFFFFu;
-    stress_combo[0] = stress_combo[1] = stress_combo[2] = 0;
+    stress_combo[0] = stress_combo[1] = stress_combo[2] = stress_combo[3] = stress_combo[4] = 0;
+    stress_fix[0] = stress_fix[1] = stress_fix[2] = 0;
     if (!amd_gpu_ring_running()) return;
     job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
     job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
@@ -803,11 +824,35 @@ void amd_3d_stress(uint32_t bits[3])
             else {
                 if (val[26] == val[1])         /* failed, but the whole rectangle was there 20 ms later */
                     bits[mode] |= 0x10000u << i;
+                stress_fix[mode] += (val[35] == val[1] ? 1u : 0u) + (val[36] == val[1] ? 0x100u : 0u);
                 /* what the stream did: 0 neither marker, 1 only before the draw, 2 only after, 3 both */
                 stress_combo[mode] += 1u << (4u * ((val[32] == 0x3D3D0001u ? 1u : 0u) | (val[33] == 0x3D3D0002u ? 2u : 0u)));
             }
         }
     }
+    /* mode D: the pattern is written ONCE (try 0) and the colour is different every time, so no CPU write can land late and a draw
+     * that left the old colour (or the pattern) shows which: stress_d[1 + i] = first wrong inside pixel of try i (0 if it was right). */
+    /* mode E: the same colours as D, but the pattern is written before EVERY draw (as in A .. C): if E fails and D does not, a CPU write
+     * into the target just before the draw is what loses the draw; if E passes, it is the colour being the same every time in A .. C. */
+    shader_delay_reads = 0;
+    for (v = 0; v < 2; v++) {
+        uint32_t *d = &stress_d[9u * v];
+        d[0] = 0;
+        for (i = 0; i < 8; i++) {
+            Amd3dJob j = job;
+            j.r = 255u - 30u * i; j.g = 40u + 20u * i; j.b = 10u + 30u * i;
+            skip_shader_write = 0;
+            skip_pattern_write = (v == 0 && i > 0);
+            d[1 + i] = 0;
+            if (draw_once(&j, VRAM_RT_OFF, 8, 0x00112233u, 0))
+                d[0] |= 1u << i;
+            else {
+                d[1 + i] = val[4];
+                stress_combo[3 + v] += 1u << (4u * ((val[32] == 0x3D3D0001u ? 1u : 0u) | (val[33] == 0x3D3D0002u ? 2u : 0u)));
+            }
+        }
+    }
+    skip_pattern_write = 0;
     skip_shader_write = 0;
     shader_delay_reads = 0;
 }
