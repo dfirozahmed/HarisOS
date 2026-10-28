@@ -148,6 +148,8 @@ uint32_t amd_gpu_vram_read32(uint32_t off);
 void     amd_gpu_ib_write32(uint32_t dword_index, uint32_t v);
 void     amd_gpu_ib_flush(void);
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr); /* a register of the GPU by its dword address (read only) */
+void     amd_gpu_wc_flush(void);        /* sfence + a read: the CPU's write-combined VRAM writes are in memory */
+void     amd_gpu_fault_snapshot(void);  /* then read amd_native_fault_gc_status() etc. */
 uint64_t amd_gpu_ib_va(void);
 const char *amd_native_ring_status(void);
 /* V151 GPU draw test */

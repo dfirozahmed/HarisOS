@@ -466,6 +466,8 @@ static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
     for (i = 0; i < 64u; i++) amd_gpu_vram_write32(vs_off + 4u * i, i < nvs ? vs[i] : 0u);
     for (i = 0; i < 64u; i++) amd_gpu_vram_write32(ps_off + 4u * i, i < nps ? ps[i] : 0u);
 
+    amd_gpu_wc_flush();   /* the shader code is in memory before any command that may fetch it */
+
     /* 1. the default context state */
     nib = amd_3d_build_default_ib(ib, AMD_3D_DEFAULT_IB_MAX);
     if (!nib) { status = "3D test skipped: default state stream does not fit"; return 1; }
@@ -525,12 +527,15 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
 static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map)
 {
     int ok = draw_once(job, base_off, margin, pattern, want_map);
-    uint32_t tries = 1;
+    uint32_t tries = 1, f_gc = 0, f_lo = 0, f_hi = 0, f_mm = 0;
     if (!ok && job->textured) {
+        amd_gpu_fault_snapshot();            /* did the first try end in a VM fault? */
+        f_gc = amd_native_fault_gc_status(); f_lo = amd_native_fault_gc_lo(); f_hi = amd_native_fault_gc_hi(); f_mm = amd_native_fault_mm_status();
         ok = draw_once(job, base_off, margin, pattern, want_map);
         tries = 2;
     }
     val[27] = tries | (ok ? 0x100u : 0u);
+    val[28] = f_gc; val[29] = f_lo; val[30] = f_hi; val[31] = f_mm;   /* fault registers after a failed first try */
     return ok;
 }
 
@@ -552,7 +557,7 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
         for (y = 0; y < job->tex_h; y++)
             for (x = 0; x < job->tex_w; x++)
                 amd_gpu_vram_write32(job->tex_off + (y * job->tex_pitch_px + x) * 4u, amd_3d_texel(job, x, y));
-    (void)amd_gpu_vram_read32(base_off);                       /* drain the CPU's write buffers */
+    amd_gpu_wc_flush();                                        /* drain the CPU's write buffers: pattern and image are in memory */
 
     val[8] = 2;
     if (run_job(job, VRAM_SHADER_OFF, VRAM_SHADER_OFF + 0x100u))

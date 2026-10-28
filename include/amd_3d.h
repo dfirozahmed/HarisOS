@@ -57,7 +57,7 @@ const char *amd_3d_status(void);
 /* After amd_3d_rect_offscreen(): row 0 .. 15 of a 32 x 16 picture of the 256 x 64 buffer (# colour, . untouched, ? other), 0 beyond. */
 const char *amd_3d_map_row(int row);
 /* 0 pixels inside right, 1 pixels inside, 2 pixels outside changed, 3 pixels outside, 4 first wrong inside, 5 first wrong outside,
- * 6 draw IB dwords, 7 fence, 8 stage reached, 9 .. 15 registers read back after the draw (see amd_3d.c), 16 .. 23 the pixel shader's user SGPR registers, 24/25 its RSRC1/RSRC2, 27 tries (+0x100 if the last passed) */
+ * 6 draw IB dwords, 7 fence, 8 stage reached, 9 .. 15 registers read back after the draw (see amd_3d.c), 16 .. 23 the pixel shader's user SGPR registers, 24/25 its RSRC1/RSRC2, 27 tries (+0x100 if the last passed), 28 .. 31 VM fault registers read after a failed first try (GC status, address lo, hi; MM status) */
 uint32_t amd_3d_value(int what);
 #define AMD_3D_VALUES 32
 

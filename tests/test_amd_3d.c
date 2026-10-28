@@ -14,6 +14,12 @@ uint32_t amd_gpu_vram_read32(uint32_t off) { (void)off; return 0; }
 void amd_gpu_ib_write32(uint32_t dw, uint32_t v) { (void)dw; (void)v; }
 void amd_gpu_ib_flush(void) {}
 uint64_t amd_gpu_ib_va(void) { return 0; }
+void amd_gpu_wc_flush(void) {}
+void amd_gpu_fault_snapshot(void) {}
+uint32_t amd_native_fault_gc_status(void) { return 0; }
+uint32_t amd_native_fault_gc_lo(void) { return 0; }
+uint32_t amd_native_fault_gc_hi(void) { return 0; }
+uint32_t amd_native_fault_mm_status(void) { return 0; }
 uint32_t amd_gpu_submit_ib(uint64_t va, uint32_t dw) { (void)va; (void)dw; return 0; }
 int amd_gpu_fence_wait(uint32_t seq, uint32_t loops) { (void)seq; (void)loops; return 0; }
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { (void)dword_addr; return 0; }

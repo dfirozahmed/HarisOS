@@ -3182,3 +3182,11 @@ void amd_gpu_ib_flush(void) { (void)vram_rd32(CP_IB_VRAM_OFF); }   /* flush post
 uint64_t amd_gpu_ib_va(void) { return rg_va_ib; }
 int amd_gpu_ring_running(void) { return rg_up && !rg_dead; }
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { return gpu_mmio_read32(rg_mmio, dword_addr << 2); }
+/* Everything the CPU wrote to VRAM (write combined) is out of the CPU's buffers: sfence, then a read. For data the GPU is about to use. */
+void amd_gpu_wc_flush(void)
+{
+    __asm__ volatile("sfence" ::: "memory");
+    (void)vram_rd32(0);
+}
+/* Reads the VM protection-fault registers (read only) into the accessors amd_native_fault_*(). */
+void amd_gpu_fault_snapshot(void) { amd_native_fault_probe(rg_mmio); }

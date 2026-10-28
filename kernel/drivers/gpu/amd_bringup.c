@@ -39,6 +39,10 @@ static void log_3d_result(int ok, int with_map)
     log_hex("  first wrong inside   ", amd_3d_value(4));
     log_hex("  first wrong outside  ", amd_3d_value(5));
     log_hex("  tries (+0x100 if passed)", amd_3d_value(27));
+    log_hex("  fault after try 1: GC status", amd_3d_value(28));
+    log_hex("  fault GC address lo  ", amd_3d_value(29));
+    log_hex("  fault GC address hi  ", amd_3d_value(30));
+    log_hex("  fault MM status      ", amd_3d_value(31));
     for (int k = 0; k < 8; k++) {
         serial_print("  user SGPR "); serial_dec32((uint32_t)k); serial_print(" (read) 0x"); serial_hex32(amd_3d_value(16 + k)); serial_print("\n");
     }
