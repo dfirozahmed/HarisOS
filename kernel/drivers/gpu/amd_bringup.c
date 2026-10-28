@@ -175,11 +175,20 @@ static int writes_allowed(void)
 
 #define LOG_NAME "GPULOG.TXT"
 
+/* Writing the log file is OFF unless the build asks for it (cmake -DHARIS_AMD_GPU_LOG=ON): it unlocks the EFI System Partition and
+ * writes to the boot drive on every boot. Without it nothing is written to any drive; the text still goes to COM1. */
+#ifndef HARIS_AMD_GPU_LOG
+#define HARIS_AMD_GPU_LOG 0
+#endif
+
 /* Writes the log to GPULOG.TXT in the top folder of the boot drive (the one that holds KERNEL.EFI: the EFI System
  * Partition, which is locked against writing; it is unlocked for this one file and locked again). Returns 1 if the file
  * was written. Called before every risky step, so a hang still leaves the last line that was reached. */
 int amd_gpu_log_save(void)
 {
+#if !HARIS_AMD_GPU_LOG
+    return 0;
+#else
     if (!bringup_found)
         return 0;
     int k = exec_find("KERNEL.EFI");
@@ -199,6 +208,7 @@ int amd_gpu_log_save(void)
     if (was_locked)
         vfs_set_locked(vol, 1);
     return ok;
+#endif
 }
 
 /* The register-writing step (GART / VMID0 on both hubs, one PTE). Only when built with HARIS_AMD_GPU_GART. Needs the

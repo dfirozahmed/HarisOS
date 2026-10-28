@@ -11,8 +11,8 @@ int amd_gpu_bringup(void);
 /* One status of the last stage that ran, valid after amd_gpu_bringup(). */
 const char *amd_gpu_bringup_status(void);
 
-/* Saves everything the driver printed to GPULOG.TXT on the boot drive (unlocks it for that one file). 1 = written.
- * Call after volume_mount_all(). */
+/* Saves everything the driver printed to GPULOG.TXT on the boot drive (unlocks it for that one file). 1 = written. Only when the
+ * build has HARIS_AMD_GPU_LOG=ON (cmake -DHARIS_AMD_GPU_LOG=ON); otherwise it does nothing and returns 0. Call after volume_mount_all(). */
 int amd_gpu_log_save(void);
 
 /* The GART / VMID0 step: does something only when built with HARIS_AMD_GPU_GART. Saves the log before it runs. */

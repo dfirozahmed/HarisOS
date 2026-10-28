@@ -57,6 +57,15 @@ if(HARIS_AMD_GPU_PSP_LEVEL GREATER 0)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_PSP_LEVEL=${HARIS_AMD_GPU_PSP_LEVEL})
 endif()
 
+# GPULOG.TXT: the AMD GPU bring-up writes what it did to the top folder of the boot drive (the EFI System Partition: its lock is opened
+# for that one file and closed again), before every step that writes to the GPU, so a hang still leaves the last line reached. OFF by
+# default because it writes to the boot drive on every boot; the text always goes to COM1 as well.
+#   cmake -S . -B build -DHARIS_AMD_GPU_LOG=ON
+option(HARIS_AMD_GPU_LOG "AMD GPU: write the bring-up log to GPULOG.TXT on the boot drive" OFF)
+if(HARIS_AMD_GPU_LOG)
+    list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_LOG=1)
+endif()
+
 # helper: haris_efi_program
 function(haris_efi_program NAME SRC ENTRY OUTNAME)
     set(OBJ ${CMAKE_BINARY_DIR}/${NAME}.obj)
