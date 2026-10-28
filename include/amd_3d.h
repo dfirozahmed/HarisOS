@@ -24,6 +24,7 @@ typedef struct
     uint64_t tex_mc;       /* the image, 256-byte aligned */
     uint32_t tex_off;      /* the same place as a VRAM byte offset (for the CPU) */
     uint32_t tex_pitch_px, tex_w, tex_h;
+    uint64_t marker_mc;    /* 0, or the address of 8 bytes the stream writes a marker to before and after the draw (see amd_3d.c) */
 } Amd3dJob;
 
 #define AMD_3D_IB_MAX 600 /* dwords amd_3d_build_ib() can write at most */
@@ -53,12 +54,17 @@ int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
 int amd_3d_tex_offscreen(void);
 int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 
+/* Eight solid draws in each of three modes (shader code written once / every time / every time with a wait), bit i of bits[m] = try i was right; bit 16+i = it failed but the rectangle was complete 20 ms later. */
+void amd_3d_stress(uint32_t bits[3]);
+/* After amd_3d_stress(): of the failed draws of a mode, how many had which marker state; nibble n counts state n (0 neither marker,
+ * 1 only the one before the draw, 2 only the one after, 3 both). */
+uint32_t amd_3d_stress_combo(int mode);
 const char *amd_3d_status(void);
 /* After amd_3d_rect_offscreen(): row 0 .. 15 of a 32 x 16 picture of the 256 x 64 buffer (# colour, . untouched, ? other), 0 beyond. */
 const char *amd_3d_map_row(int row);
 /* 0 pixels inside right, 1 pixels inside, 2 pixels outside changed, 3 pixels outside, 4 first wrong inside, 5 first wrong outside,
- * 6 draw IB dwords, 7 fence, 8 stage reached, 9 .. 15 registers read back after the draw (see amd_3d.c), 16 .. 23 the pixel shader's user SGPR registers, 24/25 its RSRC1/RSRC2, 27 tries (+0x100 if the last passed), 28 .. 31 VM fault registers read after a failed first try (GC status, address lo, hi; MM status) */
+ * 6 draw IB dwords, 7 fence, 8 stage reached, 9 .. 15 registers read back after the draw (see amd_3d.c), 16 .. 23 the pixel shader's user SGPR registers, 24/25 its RSRC1/RSRC2, 26 right inside pixels 20 ms after a failed draw, 27 tries (+0x100 if the last passed), 32/33 the markers before/after the draw (0x3D3D0001 / 0x3D3D0002 if reached), 28 .. 31 VM fault registers read after a failed first try (GC status, address lo, hi; MM status) */
 uint32_t amd_3d_value(int what);
-#define AMD_3D_VALUES 32
+#define AMD_3D_VALUES 40
 
 #endif

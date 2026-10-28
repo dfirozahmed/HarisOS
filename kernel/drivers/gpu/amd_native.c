@@ -2202,7 +2202,8 @@ uint32_t amd_gpu_submit_ib(uint64_t ib_va, uint32_t ib_dw)
     rg_put(seq);
     rg_put(0u);
     rg_put(0u);
-    (void)cpm_rd(0x1FFCu);                               /* flush posted ring writes */
+    __asm__ volatile("mfence" ::: "memory");             /* the ring words sit in write-combining buffers: drain them, then wait for the posted writes */
+    (void)cpm_rd(0x1FFCu);
     /* V150: write LO *then HI*, as Linux gfx_v9_0_ring_set_wptr_gfx does and
        as every passing test did.  The V149 output showed the register still
        at the previous value (wptr 8, rptr 8) after a LO-only write, i.e. the
@@ -3178,14 +3179,20 @@ uint32_t amd_native_vmdiag(int i) { return (i >= 0 && i < 64) ? vmdiag_val[i] : 
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { vram_wr32(off, v); }
 uint32_t amd_gpu_vram_read32(uint32_t off) { return vram_rd32(off); }
 void amd_gpu_ib_write32(uint32_t dw, uint32_t v) { vram_wr32(CP_IB_VRAM_OFF + 4u * dw, v); }
-void amd_gpu_ib_flush(void) { (void)vram_rd32(CP_IB_VRAM_OFF); }   /* flush posted writes */
+/* The CPU wrote the IB through the write-combined BAR: mfence drains the CPU's buffers (a plain read of one dword does not flush the
+   buffers that hold other lines), then a read waits for the posted writes. The last lines of an IB hold the draw packet. */
+void amd_gpu_ib_flush(void)
+{
+    __asm__ volatile("mfence" ::: "memory");
+    (void)vram_rd32(CP_IB_VRAM_OFF);
+}
 uint64_t amd_gpu_ib_va(void) { return rg_va_ib; }
 int amd_gpu_ring_running(void) { return rg_up && !rg_dead; }
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { return gpu_mmio_read32(rg_mmio, dword_addr << 2); }
 /* Everything the CPU wrote to VRAM (write combined) is out of the CPU's buffers: sfence, then a read. For data the GPU is about to use. */
 void amd_gpu_wc_flush(void)
 {
-    __asm__ volatile("sfence" ::: "memory");
+    __asm__ volatile("mfence" ::: "memory");
     (void)vram_rd32(0);
 }
 /* Reads the VM protection-fault registers (read only) into the accessors amd_native_fault_*(). */

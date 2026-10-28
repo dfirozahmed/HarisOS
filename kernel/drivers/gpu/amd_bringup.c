@@ -38,6 +38,9 @@ static void log_3d_result(int ok, int with_map)
     log_hex("  pixels outside       ", amd_3d_value(3));
     log_hex("  first wrong inside   ", amd_3d_value(4));
     log_hex("  first wrong outside  ", amd_3d_value(5));
+    log_hex("  right inside 20 ms after a failed draw", amd_3d_value(26));
+    log_hex("  marker before the draw", amd_3d_value(32));
+    log_hex("  marker after the draw ", amd_3d_value(33));
     log_hex("  tries (+0x100 if passed)", amd_3d_value(27));
     log_hex("  fault after try 1: GC status", amd_3d_value(28));
     log_hex("  fault GC address lo  ", amd_3d_value(29));
@@ -312,6 +315,7 @@ void amd_gpu_bringup_firmware(void)
  *   4  also amd_gpu_bringup_screen(): the GPU paints into the screen, and a 2D fill / copy benchmark (leaves stripes until the repaint)
  *   5  also the 3D pipeline test (amd_3d.c): one rectangle drawn by vertex + pixel shaders, offscreen first, then on the screen
  *   6  also the same rectangle textured from an image in VRAM (the pixel shader reads it with IMAGE_LOAD)
+ *   7  also a stress test of the solid draw (24 draws), to find out what the occasional empty draws depend on
  * It must run BEFORE the GART step: the PSP is given physical addresses, which stop being valid once VMID0 translates.
  * Every step saves the log first, so a hang leaves the last line that was reached. */
 #ifndef HARIS_AMD_GPU_PSP_LEVEL
@@ -451,6 +455,22 @@ void amd_gpu_bringup_cp(void)
             if (m) { serial_print("  map "); serial_print(m); serial_print("\n"); }
         }
         serial_print(ok3d ? "3D: offscreen PASS\n" : "3D: offscreen did not pass\n");
+        amd_gpu_log_save();
+    }
+#endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 7
+    /* The draws came and went between boots: eight tries each in three modes, to see what the failures depend on. */
+    if (ib_ok) {
+        uint32_t sb[3];
+        serial_print("3D: stress test: 8 solid draws in 3 modes (A shader code written once, B written every time, C written every time + 20 ms wait)\n");
+        amd_gpu_log_save();
+        amd_3d_stress(sb);
+        log_hex("  mode A (bit i = try i right)", sb[0]);
+        log_hex("  mode B                      ", sb[1]);
+        log_hex("  mode C                      ", sb[2]);
+        log_hex("  failed draws by marker state, mode A (nibble n = state n: 0 none, 1 before only, 2 after only, 3 both)", amd_3d_stress_combo(0));
+        log_hex("  mode B                      ", amd_3d_stress_combo(1));
+        log_hex("  mode C                      ", amd_3d_stress_combo(2));
         amd_gpu_log_save();
     }
 #endif
