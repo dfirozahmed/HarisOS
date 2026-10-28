@@ -147,6 +147,7 @@ void     amd_gpu_vram_write32(uint32_t off, uint32_t v);
 uint32_t amd_gpu_vram_read32(uint32_t off);
 void     amd_gpu_ib_write32(uint32_t dword_index, uint32_t v);
 void     amd_gpu_ib_flush(void);
+uint32_t amd_gpu_reg_read32(uint32_t dword_addr); /* a register of the GPU by its dword address (read only) */
 uint64_t amd_gpu_ib_va(void);
 const char *amd_native_ring_status(void);
 /* V151 GPU draw test */

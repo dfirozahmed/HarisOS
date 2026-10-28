@@ -405,6 +405,13 @@ void amd_gpu_bringup_cp(void)
         log_hex("  pixels outside       ", amd_3d_value(3));
         log_hex("  first wrong inside   ", amd_3d_value(4));
         log_hex("  first wrong outside  ", amd_3d_value(5));
+        log_hex("  CB_COLOR0_BASE (read) ", amd_3d_value(9));
+        log_hex("  CB_COLOR0_INFO (read) ", amd_3d_value(10));
+        log_hex("  PA_CL_GB_VERT_CLIP_ADJ", amd_3d_value(11));
+        log_hex("  PGM_LO_PS (read)      ", amd_3d_value(12));
+        log_hex("  PGM_LO_VS (read)      ", amd_3d_value(13));
+        log_hex("  GRBM_STATUS after     ", amd_3d_value(14));
+        log_hex("  PA_CL_VTE_CNTL (read) ", amd_3d_value(15));
         log_hex("  command stream dwords", amd_3d_value(6));
         log_hex("  fence                ", amd_3d_value(7));
         log_hex("  stage reached        ", amd_3d_value(8));
@@ -491,6 +498,13 @@ int amd_gpu_bringup_screen(void)
         log_hex("  pixels outside       ", amd_3d_value(3));
         log_hex("  first wrong inside   ", amd_3d_value(4));
         log_hex("  first wrong outside  ", amd_3d_value(5));
+        log_hex("  CB_COLOR0_BASE (read) ", amd_3d_value(9));
+        log_hex("  CB_COLOR0_INFO (read) ", amd_3d_value(10));
+        log_hex("  PA_CL_GB_VERT_CLIP_ADJ", amd_3d_value(11));
+        log_hex("  PGM_LO_PS (read)      ", amd_3d_value(12));
+        log_hex("  PGM_LO_VS (read)      ", amd_3d_value(13));
+        log_hex("  GRBM_STATUS after     ", amd_3d_value(14));
+        log_hex("  PA_CL_VTE_CNTL (read) ", amd_3d_value(15));
         serial_print(ok3d ? "3D: screen PASS\n" : "3D: screen did not pass\n");
         amd_gpu_log_save();
         result = 1; /* the screen was painted over: the caller redraws the desktop */

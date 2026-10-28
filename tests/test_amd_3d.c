@@ -16,6 +16,7 @@ void amd_gpu_ib_flush(void) {}
 uint64_t amd_gpu_ib_va(void) { return 0; }
 uint32_t amd_gpu_submit_ib(uint64_t va, uint32_t dw) { (void)va; (void)dw; return 0; }
 int amd_gpu_fence_wait(uint32_t seq, uint32_t loops) { (void)seq; (void)loops; return 0; }
+uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { (void)dword_addr; return 0; }
 
 static int ok = 1;
 
@@ -134,10 +135,43 @@ int main(void)
             k += 1 + body;
         }
         check(k == n && !bad, "every packet header is type 3, fits, and every register offset is in range");
-        check(draws == 1 && ((ib[0] >> 8) & 0xFF) == 0x28 && ((ib[n - 3] >> 8) & 0xFF) == 0x2D,
-              "starts with CONTEXT_CONTROL, ends with one DRAW_INDEX_AUTO");
+        check(draws == 1 && ((ib[n - 3] >> 8) & 0xFF) == 0x2D, "ends with one DRAW_INDEX_AUTO");
         printf("%d packets, %d SET_CONTEXT_REG\n", packets, sets);
     }
+
+    /* the default context state: the whole Linux clear-state table, as SET_CONTEXT_REG packets */
+    {
+        static uint32_t dib[AMD_3D_DEFAULT_IB_MAX];
+        uint32_t k = 0, regs = 0, bad = 0, nd = amd_3d_build_default_ib(dib, AMD_3D_DEFAULT_IB_MAX);
+        int clear_state_in_draw = 0;
+        printf("default state stream: %u dwords\n", nd);
+        check(nd > 0 && nd < 1024, "default state stream fits in the 1024 dword IB page");
+        check(amd_3d_build_default_ib(dib, 100) == 0, "a too small buffer for the default state is refused");
+        while (k < nd) {
+            uint32_t h = dib[k], body = ((h >> 16) & 0x3FFF) + 1, op = (h >> 8) & 0xFF;
+            if ((h >> 30) != 3 || k + 1 + body > nd) { bad++; break; }
+            if (op == 0x69) {
+                regs += body - 1;
+                if (dib[k + 1] + (body - 1) > 0x400) bad++;
+            }
+            k += 1 + body;
+        }
+        check(k == nd && !bad && regs == 879, "default state: well-formed packets, 879 context registers (212+282+4+157+2+1+66+155)");
+        p = find_set(dib, nd, 0x69, 0x2FA, &cnt); /* PA_CL_GB_VERT_CLIP_ADJ: inside the table extent that starts at 0x2F5 */
+        check(find_set(dib, nd, 0x69, 0x2F5, &cnt) && cnt == 155, "the extent that holds the guard band registers (0xA2F5 ..) is there");
+        {
+            const uint32_t *e = find_set(dib, nd, 0x69, 0x2F5, &cnt);
+            check(e && e[4] == 5 && e[5] == 0x3F800000u && e[6] == 0x3F800000u && e[7] == 0x3F800000u && e[8] == 0x3F800000u,
+                  "PA_SU_VTX_CNTL = 5 and PA_CL_GB_{VERT,HORZ}_{CLIP,DISC}_ADJ = 1.0 (a guard band of 0 clips every triangle)");
+        }
+        for (k = 0; k + 1 < n; ) {
+            uint32_t h = ib[k], body = ((h >> 16) & 0x3FFF) + 1;
+            if (((h >> 8) & 0xFF) == 0x12) clear_state_in_draw = 1;
+            k += 1 + body;
+        }
+        check(!clear_state_in_draw, "the draw stream has no CLEAR_STATE (it would undo the default state)");
+    }
+
     p = find_set(ib, n, 0x69, R3D_CB_COLOR0_BASE, &cnt);
     check(p && cnt == 15, "colour buffer: 15 registers from CB_COLOR0_BASE (BASE, BASE_EXT, ATTRIB2, VIEW, INFO, ATTRIB, DCC_CONTROL, ...)");
     if (p) {

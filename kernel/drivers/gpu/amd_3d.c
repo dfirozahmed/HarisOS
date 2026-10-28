@@ -21,6 +21,8 @@
 #include "amd_3d.h"
 #include "amd_3d_isa.h"
 #include "amd_3d_regs.h"
+#include "clearstate_defs.h"
+#include "clearstate_gfx9.h"
 #include "amd_native.h"
 #include "gpu_log.h"
 
@@ -156,6 +158,36 @@ uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job)
     return n;
 }
 
+
+/* ---- the default context state ----
+ * Linux gfx_v9_0_cp_gfx_start() writes every context register of the GFX9 clear-state table (clearstate_gfx9.h, 879 registers, the
+ * "gfx9_cs_data" extents) with SET_CONTEXT_REG when it starts the ring. Mesa's radeonsi then relies on that (has_clear_state;
+ * ac_set_tracked_regs_to_clear_state() lists the same values: PA_CL_GB_*_ADJ = 1.0, PA_SU_VTX_CNTL = 5, PA_SC_EDGERULE = 0xAA99AAAA,
+ * VGT_VERTEX_REUSE_BLOCK_CNTL = 0x1E ...). Nothing in HarisOS did it, and with the guard band registers at their reset value (0) every
+ * triangle is clipped away. This writes the table straight into the context, as one command stream. */
+uint32_t amd_3d_build_default_ib(uint32_t *ibp, uint32_t cap)
+{
+    Ib b = { ibp, 0, cap, 0 };
+    const struct cs_section_def *sect;
+    const struct cs_extent_def *ext;
+
+    put(&b, PKT3(OP_CONTEXT_CONTROL, 1));
+    put(&b, 0x80000000u);
+    put(&b, 0x80000000u);
+    for (sect = gfx9_cs_data; sect->section; ++sect) {
+        if (sect->id != SECT_CONTEXT)
+            continue;
+        for (ext = sect->section; ext->extent; ++ext) {
+            uint32_t i;
+            put(&b, PKT3(OP_SET_CONTEXT_REG, ext->reg_count));
+            put(&b, ext->reg_index - 0xA000u); /* PACKET3_SET_CONTEXT_REG_START */
+            for (i = 0; i < ext->reg_count; i++)
+                put(&b, ext->extent[i]);
+        }
+    }
+    return b.over ? 0 : b.n;
+}
+
 /* ---- the command stream ---- */
 uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
 {
@@ -164,12 +196,9 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     /* X8 formats have no alpha: Mesa sets FORCE_DST_ALPHA_1 when the format's 4th swizzle is "1" */
     uint32_t force_a1 = 1;
 
-    /* 1. start of a graphics command stream: CONTEXT_CONTROL (Linux gfx_v9_0_cp_gfx_start sends 0x80000000, 0x80000000), CLEAR_STATE */
-    put(&b, PKT3(OP_CONTEXT_CONTROL, 1));
-    put(&b, 0x80000000u);
-    put(&b, 0x80000000u);
-    put(&b, PKT3(OP_CLEAR_STATE, 0));
-    put(&b, 0);
+    /* 1. The default context state is NOT set up here: amd_3d_build_default_ib() does it first, as a stream of its own, with the
+     * register table of the Linux driver. (CLEAR_STATE would not do: it only restores what the kernel driver put in the clear state
+     * snapshot at start-up, and nothing did that on this GPU.) */
 
     /* 2. the shader code was written by the CPU: invalidate the instruction, scalar and vector caches first */
     put(&b, PKT3(OP_ACQUIRE_MEM, 5));
@@ -295,37 +324,69 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
 #define RT_H 64u
 
 static const char *status = "3D test not run";
-static uint32_t val[9];
+static uint32_t val[AMD_3D_VALUES];
 
 const char *amd_3d_status(void) { return status; }
-uint32_t amd_3d_value(int what) { return (what >= 0 && what < 9) ? val[what] : 0; }
+uint32_t amd_3d_value(int what) { return (what >= 0 && what < AMD_3D_VALUES) ? val[what] : 0; }
 
-/* Writes the shaders and the command stream, runs it, waits for the fence. Returns 0 if the GPU did run it. */
+#define R3D_PA_CL_GB_VERT_CLIP_ADJ 0x02FAu /* gc_9_1_offset.h mmPA_CL_GB_VERT_CLIP_ADJ */
+
+/* Submits the command stream now in the IB page and waits for its fence. Returns 0 if the GPU finished it. */
+static int submit_and_wait(uint32_t ndw, const char *what_failed_submit, const char *what_failed_fence)
+{
+    uint32_t seq = amd_gpu_submit_ib(amd_gpu_ib_va(), ndw);
+    if (!seq) { status = what_failed_submit; return 2; }
+    val[7] = seq;
+    if (!amd_gpu_fence_wait(seq, 8000000u)) { status = what_failed_fence; return 3; }
+    return 0;
+}
+
+/* Writes the shaders, runs the default state stream, then the draw stream, waits for the fences and reads some registers back
+ * (the CP has run SET_CONTEXT_REG / SET_SH_REG for them, so a read shows whether the packets took effect).
+ * Returns 0 if the GPU did run both. */
 static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
 {
     Amd3dJob job = *job_in;
-    static uint32_t ib[AMD_3D_IB_MAX];
+    static uint32_t ib[AMD_3D_DEFAULT_IB_MAX];
     uint32_t vs[AMD_3D_VS_MAX], ps[AMD_3D_PS_MAX];
-    uint32_t i, nvs, nps, nib, seq;
+    uint32_t i, nvs, nps, nib;
+    int rc;
 
     nvs = amd_3d_build_vs(vs, &job);
     nps = amd_3d_build_ps(ps, &job);
-    nib = amd_3d_build_ib(ib, AMD_3D_IB_MAX, &job);
-    if (!nib) { status = "3D test skipped: command stream does not fit"; return 1; }
-    val[6] = nib;
 
     /* shader code, then zero padding (the shader fetch reads ahead of the end) */
     for (i = 0; i < 64u; i++) amd_gpu_vram_write32(vs_off + 4u * i, i < nvs ? vs[i] : 0u);
     for (i = 0; i < 64u; i++) amd_gpu_vram_write32(ps_off + 4u * i, i < nps ? ps[i] : 0u);
+
+    /* 1. the default context state */
+    nib = amd_3d_build_default_ib(ib, AMD_3D_DEFAULT_IB_MAX);
+    if (!nib) { status = "3D test skipped: default state stream does not fit"; return 1; }
     for (i = 0; i < nib; i++) amd_gpu_ib_write32(i, ib[i]);
     amd_gpu_ib_flush();
-
     val[8] = 3;
-    seq = amd_gpu_submit_ib(amd_gpu_ib_va(), nib);
-    if (!seq) { status = "3D test FAILED: the ring did not take the command stream"; return 2; }
-    val[7] = seq;
+    rc = submit_and_wait(nib, "3D test FAILED: the ring did not take the default state stream",
+                         "3D test FAILED: fence timeout in the default state stream");
+    if (rc) return rc;
+
+    /* 2. the draw */
+    nib = amd_3d_build_ib(ib, AMD_3D_IB_MAX, &job);
+    if (!nib) { status = "3D test skipped: command stream does not fit"; return 1; }
+    val[6] = nib;
+    for (i = 0; i < nib; i++) amd_gpu_ib_write32(i, ib[i]);
+    amd_gpu_ib_flush();
     val[8] = 4;
-    if (!amd_gpu_fence_wait(seq, 8000000u)) { status = "3D test FAILED: fence timeout (the GPU did not finish the draw)"; return 3; }
+    rc = submit_and_wait(nib, "3D test FAILED: the ring did not take the command stream",
+                         "3D test FAILED: fence timeout (the GPU did not finish the draw)");
+    if (rc) return rc;
+
+    val[9]  = amd_gpu_reg_read32(0xA000u + R3D_CB_COLOR0_BASE);             /* CB_COLOR0_BASE */
+    val[10] = amd_gpu_reg_read32(0xA000u + R3D_CB_COLOR0_BASE + 4u);        /* CB_COLOR0_INFO */
+    val[11] = amd_gpu_reg_read32(0xA000u + R3D_PA_CL_GB_VERT_CLIP_ADJ);     /* 0x3F800000 once the default state is in */
+    val[12] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_LO_PS);
+    val[13] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_LO_VS);
+    val[14] = amd_gpu_reg_read32(0x2004u);                                  /* GRBM_STATUS */
+    val[15] = amd_gpu_reg_read32(0xA000u + R3D_PA_CL_VTE_CNTL);
     return 0;
 }
 
@@ -340,7 +401,7 @@ static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uin
     uint32_t first_in = 0, first_out = 0;
     uint32_t px_r = job->r, px_g = job->g, px_b = job->b;
 
-    val[0] = val[1] = val[2] = val[3] = val[4] = val[5] = 0;
+    { uint32_t k; for (k = 0; k < AMD_3D_VALUES; k++) val[k] = 0; }
     val[8] = 1;
     for (y = cy0; y < cy1; y++)
         for (x = cx0; x < cx1; x++)

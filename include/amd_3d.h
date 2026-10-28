@@ -27,6 +27,11 @@ typedef struct
 /* Shader code. Return the number of dwords written. */
 uint32_t amd_3d_build_vs(uint32_t *code, const Amd3dJob *job);
 uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job);
+/* The default context state of the GPU (Linux clear-state table), a stream of its own that has to run once before the draw. Returns the
+ * number of dwords, 0 if it does not fit in cap. */
+#define AMD_3D_DEFAULT_IB_MAX 1000
+uint32_t amd_3d_build_default_ib(uint32_t *ib, uint32_t cap);
+
 /* The whole command stream (state, shaders' addresses, the draw). Returns the number of dwords, 0 if it does not fit in cap. */
 uint32_t amd_3d_build_ib(uint32_t *ib, uint32_t cap, const Amd3dJob *job);
 
@@ -37,7 +42,8 @@ int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
 
 const char *amd_3d_status(void);
 /* 0 pixels inside right, 1 pixels inside, 2 pixels outside changed, 3 pixels outside, 4 first wrong inside, 5 first wrong outside,
- * 6 IB dwords, 7 fence, 8 stage reached */
+ * 6 draw IB dwords, 7 fence, 8 stage reached, 9 .. 15 registers read back after the draw (see amd_3d.c) */
 uint32_t amd_3d_value(int what);
+#define AMD_3D_VALUES 16
 
 #endif

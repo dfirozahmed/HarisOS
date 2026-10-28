@@ -3181,3 +3181,4 @@ void amd_gpu_ib_write32(uint32_t dw, uint32_t v) { vram_wr32(CP_IB_VRAM_OFF + 4u
 void amd_gpu_ib_flush(void) { (void)vram_rd32(CP_IB_VRAM_OFF); }   /* flush posted writes */
 uint64_t amd_gpu_ib_va(void) { return rg_va_ib; }
 int amd_gpu_ring_running(void) { return rg_up && !rg_dead; }
+uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { return gpu_mmio_read32(rg_mmio, dword_addr << 2); }
