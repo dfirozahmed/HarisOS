@@ -494,6 +494,10 @@ static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
     val[13] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_LO_VS);
     val[14] = amd_gpu_reg_read32(0x2004u);                                  /* GRBM_STATUS */
     val[15] = amd_gpu_reg_read32(0xA000u + R3D_PA_CL_VTE_CNTL);
+    for (i = 0; i < 8; i++)                                                  /* the image resource in the pixel shader's user SGPRs */
+        val[16 + i] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_USER_DATA_PS_0 + i);
+    val[24] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_RSRC1_PS);
+    val[25] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_RSRC2_PS);
     return 0;
 }
 
@@ -514,7 +518,23 @@ static int close_px(uint32_t a, uint32_t b)
     return 1;
 }
 
+static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map);
+
+/* The first textured draw of a boot got no pixels on one run although the same draw works afterwards: a textured job is run a second
+ * time when the first try failed (val[27] = number of tries, +0x100 if the last one passed). */
 static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map)
+{
+    int ok = draw_once(job, base_off, margin, pattern, want_map);
+    uint32_t tries = 1;
+    if (!ok && job->textured) {
+        ok = draw_once(job, base_off, margin, pattern, want_map);
+        tries = 2;
+    }
+    val[27] = tries | (ok ? 0x100u : 0u);
+    return ok;
+}
+
+static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map)
 {
     uint32_t cx0 = job->x0 > margin ? job->x0 - margin : 0, cy0 = job->y0 > margin ? job->y0 - margin : 0;
     uint32_t cx1 = job->x1 + margin > job->width ? job->width : job->x1 + margin;

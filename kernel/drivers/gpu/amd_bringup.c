@@ -38,6 +38,12 @@ static void log_3d_result(int ok, int with_map)
     log_hex("  pixels outside       ", amd_3d_value(3));
     log_hex("  first wrong inside   ", amd_3d_value(4));
     log_hex("  first wrong outside  ", amd_3d_value(5));
+    log_hex("  tries (+0x100 if passed)", amd_3d_value(27));
+    for (int k = 0; k < 8; k++) {
+        serial_print("  user SGPR "); serial_dec32((uint32_t)k); serial_print(" (read) 0x"); serial_hex32(amd_3d_value(16 + k)); serial_print("\n");
+    }
+    log_hex("  RSRC1_PS (read)      ", amd_3d_value(24));
+    log_hex("  RSRC2_PS (read)      ", amd_3d_value(25));
     if (with_map)
         for (int row = 0; row < 16; row++) {
             const char *m = amd_3d_map_row(row);
