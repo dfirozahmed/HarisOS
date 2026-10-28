@@ -44,6 +44,8 @@ unsigned int gfx_height(void);
 volatile unsigned int *gfx_screen_base(void);
 unsigned int gfx_screen_pitch_bytes(void);
 void gfx_repaint_all(void);
+/* 1: a pixel is 0x00RRGGBB (bytes B, G, R, X in memory), 0: 0x00BBGGRR. */
+int gfx_screen_red_first(void);
 
 /* ---- double buffering ---------------------------------------
  * Draw into a back buffer in ordinary RAM and copy the finished picture to

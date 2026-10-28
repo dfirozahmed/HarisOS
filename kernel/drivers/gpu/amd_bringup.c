@@ -1,6 +1,7 @@
 #include "amd_bringup.h"
 #include "amd_gpu.h"
 #include "amd_native.h"
+#include "amd_3d.h"
 #include "amd_psp.h"
 #include "amd_firmware.h"
 #include "gpu_log.h"
@@ -279,6 +280,7 @@ void amd_gpu_bringup_firmware(void)
  *   2  also LOAD_IP_FW for CE, PFP, ME, MEC1/2, RLC_G, SDMA0 (needs the firmware loaded by amd_gpu_bringup_firmware())
  *   3  (with HARIS_AMD_GPU_GART=ON) the CP tests of amd_gpu_bringup_cp(), which run after the GART step
  *   4  also amd_gpu_bringup_screen(): the GPU paints into the screen, and a 2D fill / copy benchmark (leaves stripes until the repaint)
+ *   5  also the 3D pipeline test (amd_3d.c): one rectangle drawn by vertex + pixel shaders, offscreen first, then on the screen
  * It must run BEFORE the GART step: the PSP is given physical addresses, which stop being valid once VMID0 translates.
  * Every step saves the log first, so a hang leaves the last line that was reached. */
 #ifndef HARIS_AMD_GPU_PSP_LEVEL
@@ -389,6 +391,27 @@ void amd_gpu_bringup_cp(void)
     serial_print("BLIT: "); serial_print(amd_native_blit_status()); serial_print("\n");
     serial_print(ib_ok ? "CP: all IB / ring tests PASSED\n" : "CP: some IB / ring test did not pass\n");
     amd_gpu_log_save();
+
+#if HARIS_AMD_GPU_PSP_LEVEL >= 5
+    /* M1a: the 3D pipeline draws a rectangle into a buffer in VRAM that nothing shows; every pixel is checked afterwards. */
+    if (ib_ok) {
+        serial_print("3D: about to draw a rectangle with the graphics pipeline into an offscreen buffer\n");
+        amd_gpu_log_save();
+        int ok3d = amd_3d_rect_offscreen();
+        serial_print("3D: "); serial_print(amd_3d_status()); serial_print("\n");
+        log_hex("  pixels right inside  ", amd_3d_value(0));
+        log_hex("  pixels inside        ", amd_3d_value(1));
+        log_hex("  pixels changed outside", amd_3d_value(2));
+        log_hex("  pixels outside       ", amd_3d_value(3));
+        log_hex("  first wrong inside   ", amd_3d_value(4));
+        log_hex("  first wrong outside  ", amd_3d_value(5));
+        log_hex("  command stream dwords", amd_3d_value(6));
+        log_hex("  fence                ", amd_3d_value(7));
+        log_hex("  stage reached        ", amd_3d_value(8));
+        serial_print(ok3d ? "3D: offscreen PASS\n" : "3D: offscreen did not pass\n");
+        amd_gpu_log_save();
+    }
+#endif
 #endif
 }
 
@@ -428,9 +451,11 @@ int amd_gpu_bringup_screen(void)
     log_hex("  MC address lo  ", amd_native_fb_value(6));
     log_hex("  VRAM aperture  ", amd_native_fb_value(9));
     amd_gpu_log_save();
-    if (!ok || !amd_gpu2d_ready())
+    if (!ok)
         return 0;
+    int result = 0;
 
+    if (amd_gpu2d_ready()) {
     serial_print("SCREEN: about to run the GPU 2D benchmark (fill / copy on the bottom 128 rows)\n");
     amd_gpu_log_save();
     (void)amd_gpu2d_bench((volatile uint8_t *)fb);
@@ -449,7 +474,29 @@ int amd_gpu_bringup_screen(void)
     log_hex("  flushes        ", amd_gpu2d_value(8));
     log_hex("  failures       ", amd_gpu2d_value(9));
     amd_gpu_log_save();
-    return amd_gpu2d_value(0) == 0x100u;
+    result = amd_gpu2d_value(0) == 0x100u;
+    }
+
+#if HARIS_AMD_GPU_PSP_LEVEL >= 5
+    /* M1b: the 3D pipeline draws a rectangle into the real screen (bottom, centre). */
+    {
+        serial_print("3D: about to draw a rectangle with the graphics pipeline into the screen\n");
+        amd_gpu_log_save();
+        int ok3d = amd_3d_rect_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
+                                      (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
+        serial_print("3D: "); serial_print(amd_3d_status()); serial_print("\n");
+        log_hex("  pixels right inside  ", amd_3d_value(0));
+        log_hex("  pixels inside        ", amd_3d_value(1));
+        log_hex("  pixels changed outside", amd_3d_value(2));
+        log_hex("  pixels outside       ", amd_3d_value(3));
+        log_hex("  first wrong inside   ", amd_3d_value(4));
+        log_hex("  first wrong outside  ", amd_3d_value(5));
+        serial_print(ok3d ? "3D: screen PASS\n" : "3D: screen did not pass\n");
+        amd_gpu_log_save();
+        result = 1; /* the screen was painted over: the caller redraws the desktop */
+    }
+#endif
+    return result;
 #else
     return 0;
 #endif

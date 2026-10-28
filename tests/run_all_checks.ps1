@@ -36,6 +36,7 @@ try {
         @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),
         @('Display adapter tests', 'tests/run_display_tests.sh'),
         @('AMD GPU (GART) tests', 'tests/run_amdgpu_tests.sh'),
+        @('AMD GPU 3D pipeline tests', 'tests/run_amd3d_tests.sh'),
         @('Network protocol tests', 'tests/run_netproto_tests.sh'),
         @('Memory function tests', 'tests/run_mem_tests.sh'),
         @('I/O APIC tests', 'tests/run_ioapic_tests.sh'),

@@ -141,6 +141,13 @@ int      amd_gpu_ring_init(uint64_t mmio);
 uint32_t amd_gpu_submit_ib(uint64_t ib_va, uint32_t ib_dwords);  /* 0 = error, else fence seq */
 int      amd_gpu_fence_wait(uint32_t seq, uint32_t loops);       /* 1 reached, 0 timeout */
 int      amd_gpu_ring_selftest(uint64_t mmio);
+/* The persistent ring is up and not wedged; CPU access to VRAM (byte offset) and to the 4 KiB IB page the ring runs (for amd_3d.c) */
+int      amd_gpu_ring_running(void);
+void     amd_gpu_vram_write32(uint32_t off, uint32_t v);
+uint32_t amd_gpu_vram_read32(uint32_t off);
+void     amd_gpu_ib_write32(uint32_t dword_index, uint32_t v);
+void     amd_gpu_ib_flush(void);
+uint64_t amd_gpu_ib_va(void);
 const char *amd_native_ring_status(void);
 /* V151 GPU draw test */
 int      amd_gpu_draw_test(void);

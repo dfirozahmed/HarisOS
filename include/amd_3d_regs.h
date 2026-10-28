@@ -1,0 +1,165 @@
+/* Register offsets and field positions for the Renoir (GFX9, "GC 9.1") 3D pipeline test (kernel/drivers/gpu/amd_3d.c).
+ *
+ * GENERATED from the AMD register headers gc_9_1_offset.h and gc_9_1_sh_mask.h (MIT licence, Linux
+ * drivers/gpu/drm/amd/include/asic_reg/gc/), by looking every name up: nothing was typed in by hand.
+ * An offset is what a PM4 packet wants: for CONTEXT registers the value of mmNAME, for SH registers mmNAME - 0xC00 (they live
+ * at dword 0x2C00 + offset), for UCONFIG registers mmNAME - 0x2000 (dword 0xC000 + offset). The generator checks BASE_IDX. */
+#ifndef HARIS_AMD_3D_REGS_H
+#define HARIS_AMD_3D_REGS_H
+
+/* CONTEXT registers (SET_CONTEXT_REG) */
+#define R3D_CB_COLOR0_BASE                           0x0318
+#define R3D_CB_COLOR0_DCC_CONTROL                    0x031e
+#define R3D_CB_MRT0_EPITCH                           0x01e8
+#define R3D_CB_COLOR_CONTROL                         0x0202
+#define R3D_CB_TARGET_MASK                           0x008e
+#define R3D_CB_SHADER_MASK                           0x008f
+#define R3D_CB_BLEND0_CONTROL                        0x01e0
+#define R3D_CB_DCC_CONTROL                           0x0109
+#define R3D_SX_PS_DOWNCONVERT                        0x01d5
+#define R3D_SX_BLEND_OPT_EPSILON                     0x01d6
+#define R3D_SX_BLEND_OPT_CONTROL                     0x01d7
+#define R3D_SX_MRT0_BLEND_OPT                        0x01d8
+#define R3D_DB_Z_INFO                                0x000e
+#define R3D_DB_STENCIL_INFO                          0x000f
+#define R3D_DB_DEPTH_CONTROL                         0x0200
+#define R3D_DB_SHADER_CONTROL                        0x0203
+#define R3D_DB_DFSM_CONTROL                          0x0018
+#define R3D_PA_SC_WINDOW_SCISSOR_TL                  0x0081
+#define R3D_PA_SC_WINDOW_SCISSOR_BR                  0x0082
+#define R3D_PA_SC_GENERIC_SCISSOR_TL                 0x0090
+#define R3D_PA_SC_GENERIC_SCISSOR_BR                 0x0091
+#define R3D_PA_SC_VPORT_SCISSOR_0_TL                 0x0094
+#define R3D_PA_SC_VPORT_SCISSOR_0_BR                 0x0095
+#define R3D_PA_SC_VPORT_ZMIN_0                       0x00b4
+#define R3D_PA_SC_VPORT_ZMAX_0                       0x00b5
+#define R3D_PA_CL_VTE_CNTL                           0x0206
+#define R3D_PA_CL_VS_OUT_CNTL                        0x0207
+#define R3D_SPI_SHADER_POS_FORMAT                    0x01c3
+#define R3D_SPI_SHADER_Z_FORMAT                      0x01c4
+#define R3D_SPI_SHADER_COL_FORMAT                    0x01c5
+#define R3D_SPI_PS_INPUT_ENA                         0x01b3
+#define R3D_SPI_PS_INPUT_ADDR                        0x01b4
+#define R3D_SPI_PS_IN_CONTROL                        0x01b6
+#define R3D_SPI_VS_OUT_CONFIG                        0x01b1
+#define R3D_VGT_SHADER_STAGES_EN                     0x02d5
+#define R3D_VGT_GS_MODE                              0x0290
+#define R3D_PA_SC_BINNER_CNTL_1                      0x0312
+#define R3D_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL    0x0313
+#define R3D_PA_SU_PRIM_FILTER_CNTL                   0x020b
+
+/* SH registers (SET_SH_REG) */
+#define R3D_SPI_SHADER_PGM_LO_PS                     0x0008
+#define R3D_SPI_SHADER_PGM_HI_PS                     0x0009
+#define R3D_SPI_SHADER_PGM_RSRC1_PS                  0x000a
+#define R3D_SPI_SHADER_PGM_RSRC2_PS                  0x000b
+#define R3D_SPI_SHADER_PGM_RSRC3_PS                  0x0007
+#define R3D_SPI_SHADER_PGM_LO_VS                     0x0048
+#define R3D_SPI_SHADER_PGM_HI_VS                     0x0049
+#define R3D_SPI_SHADER_PGM_RSRC1_VS                  0x004a
+#define R3D_SPI_SHADER_PGM_RSRC2_VS                  0x004b
+#define R3D_SPI_SHADER_PGM_RSRC3_VS                  0x0046
+#define R3D_SPI_SHADER_LATE_ALLOC_VS                 0x0047
+
+/* UCONFIG registers (SET_UCONFIG_REG) */
+#define R3D_VGT_PRIMITIVE_TYPE                       0x0242
+#define R3D_IA_MULTI_VGT_PARAM                       0x0258
+#define R3D_VGT_MAX_VTX_INDX                         0x0248
+#define R3D_VGT_MIN_VTX_INDX                         0x0249
+#define R3D_VGT_INDX_OFFSET                          0x024a
+#define R3D_VGT_INSTANCE_BASE_ID                     0x025a
+
+/* Field positions (bit number of the lowest bit) */
+#define F3D_CB_COLOR0_INFO__ENDIAN                                         0x0
+#define F3D_CB_COLOR0_INFO__FORMAT                                         0x2
+#define F3D_CB_COLOR0_INFO__NUMBER_TYPE                                    0x8
+#define F3D_CB_COLOR0_INFO__COMP_SWAP                                      0xb
+#define F3D_CB_COLOR0_INFO__FAST_CLEAR                                     0xd
+#define F3D_CB_COLOR0_INFO__COMPRESSION                                    0xe
+#define F3D_CB_COLOR0_INFO__BLEND_CLAMP                                    0xf
+#define F3D_CB_COLOR0_INFO__BLEND_BYPASS                                   0x10
+#define F3D_CB_COLOR0_INFO__SIMPLE_FLOAT                                   0x11
+#define F3D_CB_COLOR0_INFO__ROUND_MODE                                     0x12
+#define F3D_CB_COLOR0_ATTRIB__MIP0_DEPTH                                   0x0
+#define F3D_CB_COLOR0_ATTRIB__NUM_SAMPLES                                  0xc
+#define F3D_CB_COLOR0_ATTRIB__NUM_FRAGMENTS                                0xf
+#define F3D_CB_COLOR0_ATTRIB__FORCE_DST_ALPHA_1                            0x11
+#define F3D_CB_COLOR0_ATTRIB__COLOR_SW_MODE                                0x12
+#define F3D_CB_COLOR0_ATTRIB__FMASK_SW_MODE                                0x17
+#define F3D_CB_COLOR0_ATTRIB__RESOURCE_TYPE                                0x1c
+#define F3D_CB_COLOR0_ATTRIB__RB_ALIGNED                                   0x1e
+#define F3D_CB_COLOR0_ATTRIB__PIPE_ALIGNED                                 0x1f
+#define F3D_CB_COLOR0_ATTRIB2__MIP0_HEIGHT                                 0x0
+#define F3D_CB_COLOR0_ATTRIB2__MIP0_WIDTH                                  0xe
+#define F3D_CB_COLOR0_ATTRIB2__MAX_MIP                                     0x1c
+#define F3D_CB_COLOR0_VIEW__SLICE_START                                    0x0
+#define F3D_CB_COLOR0_VIEW__SLICE_MAX                                      0xd
+#define F3D_CB_COLOR0_VIEW__MIP_LEVEL                                      0x18
+#define F3D_CB_COLOR0_DCC_CONTROL__MAX_UNCOMPRESSED_BLOCK_SIZE             0x2
+#define F3D_CB_COLOR0_DCC_CONTROL__MIN_COMPRESSED_BLOCK_SIZE               0x4
+#define F3D_CB_COLOR0_DCC_CONTROL__INDEPENDENT_64B_BLOCKS                  0x9
+#define F3D_CB_MRT0_EPITCH__EPITCH                                         0x0
+#define F3D_CB_COLOR_CONTROL__MODE                                         0x4
+#define F3D_CB_COLOR_CONTROL__ROP3                                         0x10
+#define F3D_CB_DCC_CONTROL__OVERWRITE_COMBINER_MRT_SHARING_DISABLE         0x1
+#define F3D_CB_DCC_CONTROL__OVERWRITE_COMBINER_WATERMARK                   0x2
+#define F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN                              0x8
+#define F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN                              0x18
+#define F3D_DB_SHADER_CONTROL__Z_ORDER                                     0x4
+#define F3D_DB_Z_INFO__FORMAT                                              0x0
+#define F3D_DB_STENCIL_INFO__FORMAT                                        0x0
+#define F3D_DB_DFSM_CONTROL__PUNCHOUT_MODE                                 0x0
+#define F3D_PA_SC_WINDOW_SCISSOR_TL__TL_X                                  0x0
+#define F3D_PA_SC_WINDOW_SCISSOR_TL__TL_Y                                  0x10
+#define F3D_PA_SC_WINDOW_SCISSOR_TL__WINDOW_OFFSET_DISABLE                 0x1f
+#define F3D_PA_SC_WINDOW_SCISSOR_BR__BR_X                                  0x0
+#define F3D_PA_SC_WINDOW_SCISSOR_BR__BR_Y                                  0x10
+#define F3D_PA_SC_GENERIC_SCISSOR_TL__TL_X                                 0x0
+#define F3D_PA_SC_GENERIC_SCISSOR_TL__TL_Y                                 0x10
+#define F3D_PA_SC_GENERIC_SCISSOR_TL__WINDOW_OFFSET_DISABLE                0x1f
+#define F3D_PA_SC_GENERIC_SCISSOR_BR__BR_X                                 0x0
+#define F3D_PA_SC_GENERIC_SCISSOR_BR__BR_Y                                 0x10
+#define F3D_PA_SC_VPORT_SCISSOR_0_TL__TL_X                                 0x0
+#define F3D_PA_SC_VPORT_SCISSOR_0_TL__TL_Y                                 0x10
+#define F3D_PA_SC_VPORT_SCISSOR_0_TL__WINDOW_OFFSET_DISABLE                0x1f
+#define F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_X                                 0x0
+#define F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_Y                                 0x10
+#define F3D_PA_CL_VTE_CNTL__VTX_XY_FMT                                     0x8
+#define F3D_PA_CL_VTE_CNTL__VTX_Z_FMT                                      0x9
+#define F3D_SPI_SHADER_POS_FORMAT__POS0_EXPORT_FORMAT                      0x0
+#define F3D_SPI_SHADER_POS_FORMAT__POS1_EXPORT_FORMAT                      0x4
+#define F3D_SPI_SHADER_POS_FORMAT__POS2_EXPORT_FORMAT                      0x8
+#define F3D_SPI_SHADER_POS_FORMAT__POS3_EXPORT_FORMAT                      0xc
+#define F3D_SPI_PS_INPUT_ENA__PERSP_SAMPLE_ENA                             0x0
+#define F3D_SPI_PS_INPUT_ENA__PERSP_CENTER_ENA                             0x1
+#define F3D_SPI_PS_INPUT_ENA__PERSP_CENTROID_ENA                           0x2
+#define F3D_SPI_PS_IN_CONTROL__NUM_INTERP                                  0x0
+#define F3D_SPI_PS_IN_CONTROL__PARAM_GEN                                   0x6
+#define F3D_SPI_VS_OUT_CONFIG__VS_EXPORT_COUNT                             0x1
+#define F3D_VGT_SHADER_STAGES_EN__MAX_PRIMGRP_IN_WAVE                      0xf
+#define F3D_IA_MULTI_VGT_PARAM__PRIMGROUP_SIZE                             0x0
+#define F3D_IA_MULTI_VGT_PARAM__EN_INST_OPT_BASIC                          0x15
+#define F3D_IA_MULTI_VGT_PARAM__EN_INST_OPT_ADV                            0x16
+#define F3D_PA_SC_BINNER_CNTL_1__MAX_ALLOC_COUNT                           0x0
+#define F3D_PA_SC_BINNER_CNTL_1__MAX_PRIM_PER_BATCH                        0x10
+#define F3D_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL__NULL_SQUAD_AA_MASK_ENABLE 0x14
+#define F3D_PA_SU_PRIM_FILTER_CNTL__XMAX_RIGHT_EXCLUSION                   0x1e
+#define F3D_PA_SU_PRIM_FILTER_CNTL__YMAX_BOTTOM_EXCLUSION                  0x1f
+#define F3D_SPI_SHADER_PGM_RSRC1_VS__VGPRS                                 0x0
+#define F3D_SPI_SHADER_PGM_RSRC1_VS__SGPRS                                 0x6
+#define F3D_SPI_SHADER_PGM_RSRC1_VS__FLOAT_MODE                            0xc
+#define F3D_SPI_SHADER_PGM_RSRC1_VS__DX10_CLAMP                            0x15
+#define F3D_SPI_SHADER_PGM_RSRC1_VS__VGPR_COMP_CNT                         0x18
+#define F3D_SPI_SHADER_PGM_RSRC2_VS__USER_SGPR                             0x1
+#define F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS                                 0x0
+#define F3D_SPI_SHADER_PGM_RSRC1_PS__SGPRS                                 0x6
+#define F3D_SPI_SHADER_PGM_RSRC1_PS__FLOAT_MODE                            0xc
+#define F3D_SPI_SHADER_PGM_RSRC1_PS__DX10_CLAMP                            0x15
+#define F3D_SPI_SHADER_PGM_RSRC2_PS__USER_SGPR                             0x1
+#define F3D_SPI_SHADER_PGM_RSRC3_VS__CU_EN                                 0x0
+#define F3D_SPI_SHADER_PGM_RSRC3_VS__WAVE_LIMIT                            0x10
+#define F3D_SPI_SHADER_PGM_RSRC3_PS__CU_EN                                 0x0
+#define F3D_SPI_SHADER_PGM_RSRC3_PS__WAVE_LIMIT                            0x10
+#define F3D_SPI_SHADER_LATE_ALLOC_VS__LIMIT                                0x0
+
+#endif

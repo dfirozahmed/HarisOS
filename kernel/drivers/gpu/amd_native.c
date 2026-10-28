@@ -3172,3 +3172,12 @@ void amd_native_vm_diag(uint64_t m)
     for (i = 0; i < 16u; i++) vmdiag_val[40 + i] = gpu_mmio_read32(m, MMHUB_BYTE(0x0680u + i));
 }
 uint32_t amd_native_vmdiag(int i) { return (i >= 0 && i < 64) ? vmdiag_val[i] : 0; }
+
+/* ------------------------------------------------------------------ */
+/* Access for the 3D pipeline test (amd_3d.c): CPU access to VRAM, the IB page of the persistent ring. */
+void amd_gpu_vram_write32(uint32_t off, uint32_t v) { vram_wr32(off, v); }
+uint32_t amd_gpu_vram_read32(uint32_t off) { return vram_rd32(off); }
+void amd_gpu_ib_write32(uint32_t dw, uint32_t v) { vram_wr32(CP_IB_VRAM_OFF + 4u * dw, v); }
+void amd_gpu_ib_flush(void) { (void)vram_rd32(CP_IB_VRAM_OFF); }   /* flush posted writes */
+uint64_t amd_gpu_ib_va(void) { return rg_va_ib; }
+int amd_gpu_ring_running(void) { return rg_up && !rg_dead; }

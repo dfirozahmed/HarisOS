@@ -46,3 +46,8 @@ void gfx_repaint_all(void)
     gfx_internal_mark_dirty(0, 0, W, H);
     gfx_present();
 }
+
+int gfx_screen_red_first(void)
+{
+    return RED_FIRST;
+}
