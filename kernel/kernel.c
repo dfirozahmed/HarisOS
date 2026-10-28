@@ -274,7 +274,10 @@ void kernel_main(const BootInfo *info)
     pci_scan();
     display_init((unsigned long long)info->framebuffer, 0); /* GPUs on PCI; which one shows the framebuffer */
     if (pmm_ok)
+    {
         amd_gpu_bringup(); /* AMD Radeon: read-only checks, results go to COM1 */
+        fault_set_crash_hook(amd_gpu_crash_save); /* a fatal exception writes GPULOG.TXT (does nothing without an AMD GPU) */
+    }
     if (pmm_ok)
         storage_init(); /* NVMe and SATA disks, their partitions */
     devmgr_init(kbd_ok);

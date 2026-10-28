@@ -344,6 +344,10 @@ int fault_stop_others(void)
 unsigned fault_nmi_count(void) { return NMI_COUNT; }
 int fault_nmi_on_own_stack(void) { return NMI_OWN_STACK; }
 
+static FaultCrashHook CRASH_HOOK;
+
+void fault_set_crash_hook(FaultCrashHook hook) { CRASH_HOOK = hook; }
+
 void fault_dispatch(FaultFrame *f)
 {
     /* An expected page fault of a self test (see above): carry on after the probing instruction. */
@@ -471,6 +475,10 @@ void fault_dispatch(FaultFrame *f)
     if (FB)
         screen_text(text);
 
+    /* Last: the report is out already, so a hook that hangs or faults (it writes to a drive) costs nothing but the halt below. */
+    if (CRASH_HOOK)
+        CRASH_HOOK(text);
+
     for (;;)
         __asm__ volatile("cli; hlt");
 }
@@ -484,6 +492,11 @@ void fault_init(void *framebuffer, unsigned width, unsigned height, unsigned pit
     (void)height;
     (void)pitch;
     (void)red_mask_mode;
+}
+
+void fault_set_crash_hook(FaultCrashHook hook)
+{
+    (void)hook;
 }
 
 #endif

@@ -50,6 +50,12 @@ void fault_tss_descriptor(unsigned long long out[2]);
  * running thread's kernel stack. */
 void fault_tss_set_rsp0(unsigned long long rsp0);
 
+/* A driver can ask to be told about a fatal (ring 0) exception, to save what it knows (the AMD GPU bring-up writes its log to a
+ * file). The hook runs after the report is on the serial port and the screen, with the other processors stopped and interrupts as
+ * they were: it is best effort and must not be relied on. If it faults itself the system just halts. */
+typedef void (*FaultCrashHook)(const char *report);
+void fault_set_crash_hook(FaultCrashHook hook);
+
 /* Called by the stub with the saved registers. Returns only in the two cases that are not fatal: a non-maskable
  * interrupt, and a ring 0 page fault that a self test asked for (fault_probe_*); the stub then resumes the interrupted
  * code. Every other exception ends the system (ring 0) or the process (ring 3) here. */

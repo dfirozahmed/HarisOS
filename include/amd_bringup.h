@@ -15,6 +15,10 @@ const char *amd_gpu_bringup_status(void);
  * build has HARIS_AMD_GPU_LOG=ON (cmake -DHARIS_AMD_GPU_LOG=ON); otherwise it does nothing and returns 0. Call after volume_mount_all(). */
 int amd_gpu_log_save(void);
 
+/* For fault_set_crash_hook(): on a fatal kernel exception, writes GPULOG.TXT with the exception report and the AMD log so far. Always
+ * on (HARIS_AMD_GPU_LOG does not matter), best effort, only if an AMD GPU was found. */
+void amd_gpu_crash_save(const char *report);
+
 /* The GART / VMID0 step: does something only when built with HARIS_AMD_GPU_GART. Saves the log before it runs. */
 void amd_gpu_bringup_gart(void);
 

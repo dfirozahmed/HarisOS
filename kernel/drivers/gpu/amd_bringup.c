@@ -181,14 +181,10 @@ static int writes_allowed(void)
 #define HARIS_AMD_GPU_LOG 0
 #endif
 
-/* Writes the log to GPULOG.TXT in the top folder of the boot drive (the one that holds KERNEL.EFI: the EFI System
- * Partition, which is locked against writing; it is unlocked for this one file and locked again). Returns 1 if the file
- * was written. Called before every risky step, so a hang still leaves the last line that was reached. */
-int amd_gpu_log_save(void)
+/* Writes text to GPULOG.TXT in the top folder of the boot drive (the one that holds KERNEL.EFI: the EFI System Partition, which
+ * is locked against writing; it is unlocked for this one file and locked again). Returns 1 if the file was written. */
+static int save_text(const char *text, unsigned len)
 {
-#if !HARIS_AMD_GPU_LOG
-    return 0;
-#else
     if (!bringup_found)
         return 0;
     int k = exec_find("KERNEL.EFI");
@@ -202,13 +198,47 @@ int amd_gpu_log_save(void)
     int was_locked = vi.locked;
     if (was_locked && vfs_set_locked(vol, 0) != 0)
         return 0;
-    unsigned len;
-    const char *text = gpu_log_text(&len);
     int ok = vfs_save(dir, LOG_NAME, text, len) >= 0;
     if (was_locked)
         vfs_set_locked(vol, 1);
     return ok;
+}
+
+/* Saves everything the driver printed to GPULOG.TXT. Called before every risky step, so a hang still leaves the last line that
+ * was reached. Only with HARIS_AMD_GPU_LOG=ON; otherwise nothing is written (a fatal exception still saves, see below). */
+int amd_gpu_log_save(void)
+{
+#if !HARIS_AMD_GPU_LOG
+    return 0;
+#else
+    unsigned len;
+    const char *text = gpu_log_text(&len);
+    return save_text(text, len);
 #endif
+}
+
+/* Fatal kernel exception (see fault_set_crash_hook): GPULOG.TXT gets the exception report followed by what the AMD driver had
+ * logged, whatever HARIS_AMD_GPU_LOG says, so a crash in one of the GPU steps can be read afterwards. Best effort: this runs
+ * inside the crash handler, with the other processors stopped; it only does anything if an AMD GPU was found. */
+void amd_gpu_crash_save(const char *report)
+{
+    static char buf[1536 + 16384 + 64];
+    unsigned n = 0, len;
+    const char *head = "KERNEL EXCEPTION (written by the AMD GPU bring-up)\n";
+    const char *mid = "\n--- AMD GPU log up to the exception ---\n";
+    const char *log = gpu_log_text(&len);
+    if (!bringup_found)
+        return;
+    for (const char *p = head; *p && n < sizeof buf - 1; p++)
+        buf[n++] = *p;
+    for (const char *p = report; *p && n < 1536; p++)
+        buf[n++] = *p;
+    for (const char *p = mid; *p && n < sizeof buf - 1; p++)
+        buf[n++] = *p;
+    for (unsigned i = 0; i < len && n < sizeof buf - 1; i++)
+        buf[n++] = log[i];
+    buf[n] = 0;
+    (void)save_text(buf, n);
 }
 
 /* The register-writing step (GART / VMID0 on both hubs, one PTE). Only when built with HARIS_AMD_GPU_GART. Needs the
