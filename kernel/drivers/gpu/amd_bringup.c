@@ -395,8 +395,9 @@ void amd_gpu_bringup_cp(void)
 /* The GPU draws into the SCREEN (the firmware framebuffer that is in VRAM): the V154 / V155 steps of the FirozOS bring-up.
  *   1. amd_gpu_fb_strip(): the CPU poisons a 256x16 strip at the bottom of the screen, the CP paints four colour bands there with
  *      DMA_DATA packets through the persistent ring, and the CPU reads the pixels back. PASS unlocks the 2D engine.
- *   2. amd_gpu2d_bench(): 128 rows at the bottom: a CPU fill, a GPU fill of the same area, a GPU rectangle fill and a GPU
- *      copy, with the time of each in TSC cycles, and a pixel check of the GPU results.
+ *   2. amd_gpu2d_bench(): 128 rows at the bottom: a CPU fill, a GPU fill of the same area, a GPU rectangle fill, a GPU
+ *      copy and the same copy by the CPU (screen to screen, and RAM to screen like gfx_present), with the time of each in TSC
+ *      cycles, and a pixel check of every result.
  * Both leave coloured stripes on the real screen, so the caller repaints the desktop afterwards. Needs the persistent ring of the
  * CP tests (HARIS_AMD_GPU_PSP_LEVEL 3 ran OK) and HARIS_AMD_GPU_PSP_LEVEL 4. Call after the first desktop frame. Returns 1 if the GPU
  * painted the screen. */
@@ -440,6 +441,9 @@ int amd_gpu_bringup_screen(void)
     log_hex("  cycles GPU fill", amd_gpu2d_value(3));
     log_hex("  cycles GPU copy", amd_gpu2d_value(4));
     log_hex("  cycles CPU fill", amd_gpu2d_value(5));
+    log_hex("  cycles CPU copy (screen to screen)", amd_gpu2d_value(13));
+    log_hex("  cycles CPU copy (RAM to screen)   ", amd_gpu2d_value(14));
+    log_hex("  bytes in one copy ", (gfx_width() - 32u) * 64u * 4u);
     log_hex("  bytes filled   ", amd_gpu2d_value(11));
     log_hex("  packets        ", amd_gpu2d_value(7));
     log_hex("  flushes        ", amd_gpu2d_value(8));

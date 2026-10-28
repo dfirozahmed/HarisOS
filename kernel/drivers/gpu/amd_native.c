@@ -2626,7 +2626,13 @@ uint32_t amd_native_fb_value(int what)
 #define G2_MAX_DW     1000u                      /* of the 1024-dword IB page */
 #define G2_MAX_BYTES  0x001FFFFCu                /* DMA_DATA byte-count limit, dword aligned */
 static uint32_t g2_n, g2_pkts, g2_ops, g2_flushes, g2_fail;
-static uint32_t g2_t_fill, g2_t_copy, g2_t_cpu, g2_bench_state, g2_bench_good, g2_bench_total, g2_area_rows;
+static uint32_t g2_t_fill, g2_t_copy, g2_t_cpu, g2_t_cpucopy, g2_t_cpuram, g2_bench_state, g2_bench_good, g2_bench_total, g2_area_rows;
+
+/* Copies n 32-bit pixels with "rep movsl" (fast strings), as gfx_internal_copy32() does in the graphics code. */
+static inline void g2_copy_row(volatile uint8_t *dst, const volatile uint8_t *src, uint32_t n)
+{
+    __asm__ volatile ("rep movsl" : "+D"(dst), "+S"(src), "+c"(n) : : "memory");
+}
 
 static inline uint32_t g2_tsc(void)
 {
@@ -2765,6 +2771,42 @@ int amd_gpu2d_bench(volatile uint8_t *fb_cpu)
             total++;
             if (*(volatile uint32_t *)(fb_cpu + (y0 + half + i) * g2_pitch + x * 4u) == c2) good++;
         }
+
+    /* The same copy done by the CPU, so the GPU copy has something to be compared with (rect: columns 16 .. w-17, `half` rows).
+       (a) inside the framebuffer, top half -> bottom half: the reads come from the write-combined VRAM mapping.
+       (b) from ordinary RAM into the framebuffer: what gfx_present() does with the back buffer.
+       Both use "rep movsl" like gfx_internal_copy32(); the target is cleared first (not timed) and checked afterwards. */
+    {
+        const uint32_t cw = g2_w - 32u;                      /* pixels per row of the rect */
+        volatile uint8_t *dst0 = fb_cpu + (y0 + half) * g2_pitch + 16u * 4u;
+        const volatile uint8_t *src0 = fb_cpu + y0 * g2_pitch + 16u * 4u;
+        uint32_t r;
+
+        for (r = 0; r < half; r++)
+            for (x = 0; x < cw; x++) *(volatile uint32_t *)(dst0 + r * g2_pitch + x * 4u) = 0u;
+        (void)*(volatile uint32_t *)fb_cpu;
+        t0 = g2_tsc();
+        for (r = 0; r < half; r++) g2_copy_row(dst0 + r * g2_pitch, src0 + r * g2_pitch, cw);
+        (void)*(volatile uint32_t *)fb_cpu;
+        t1 = g2_tsc(); g2_t_cpucopy = t1 - t0;
+        for (r = 0; r < half; r += 3u)
+            for (x = 0; x < cw; x += 16u) { total++; if (*(volatile uint32_t *)(dst0 + r * g2_pitch + x * 4u) == c2) good++; }
+
+        uint32_t *ram = (uint32_t *)kmalloc((uint64_t)cw * half * 4u);
+        if (ram) {
+            for (i = 0; i < cw * half; i++) ram[i] = c2;
+            for (r = 0; r < half; r++)
+                for (x = 0; x < cw; x++) *(volatile uint32_t *)(dst0 + r * g2_pitch + x * 4u) = 0u;
+            (void)*(volatile uint32_t *)fb_cpu;
+            t0 = g2_tsc();
+            for (r = 0; r < half; r++) g2_copy_row(dst0 + r * g2_pitch, (const volatile uint8_t *)(ram + r * cw), cw);
+            (void)*(volatile uint32_t *)fb_cpu;
+            t1 = g2_tsc(); g2_t_cpuram = t1 - t0;
+            for (r = 0; r < half; r += 3u)
+                for (x = 0; x < cw; x += 16u) { total++; if (*(volatile uint32_t *)(dst0 + r * g2_pitch + x * 4u) == c2) good++; }
+            kfree(ram);
+        }
+    }
     g2_bench_good = good; g2_bench_total = total;
     g2_bench_state = (good == total && total) ? 0x100u : 4u;
     return g2_bench_state == 0x100u;
@@ -2777,6 +2819,7 @@ uint32_t amd_gpu2d_value(int what)
         case 6: return g2_ops;         case 7: return g2_pkts;       case 8: return g2_flushes;
         case 9: return g2_fail;        case 10: return g2_active;    case 11: return g2_area_rows * g2_pitch;
         case 12: return g2_pitch;
+        case 13: return g2_t_cpucopy;  case 14: return g2_t_cpuram;
         default: return 0;
     }
 }
