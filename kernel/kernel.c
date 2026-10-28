@@ -635,6 +635,13 @@ void kernel_main(const BootInfo *info)
 
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
+    /* AMD Radeon, opt-in (HARIS_AMD_GPU_PSP_LEVEL=4): the GPU paints stripes into the screen and times its 2D fill / copy against the
+     * CPU; the desktop is drawn again afterwards. Does nothing on other machines. */
+    if (amd_gpu_bringup_screen())
+    {
+        desktop_draw();
+        gfx_repaint_all();
+    }
 
     /* The first user program: INIT.ELF in a Terminal window, if the boot disk has it. It keeps the shell running; closing
      * the window ends it. Opened after the first frame so it is in front of the welcome window and has the keyboard.

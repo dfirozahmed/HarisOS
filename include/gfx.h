@@ -38,6 +38,13 @@ int gfx_ready(void);
 unsigned int gfx_width(void);
 unsigned int gfx_height(void);
 
+/* The screen itself (the firmware framebuffer, not the back buffer): for a driver that draws into it with hardware (AMD GPU).
+ * gfx_screen_pitch_bytes() is the distance between two rows in bytes. gfx_repaint_all() sends the whole back buffer to the screen
+ * again (after something else painted over it); without a back buffer it does nothing - redraw the desktop instead. */
+volatile unsigned int *gfx_screen_base(void);
+unsigned int gfx_screen_pitch_bytes(void);
+void gfx_repaint_all(void);
+
 /* ---- double buffering ---------------------------------------
  * Draw into a back buffer in ordinary RAM and copy the finished picture to
  * the screen in one go with gfx_present(). Screen memory is slow and you

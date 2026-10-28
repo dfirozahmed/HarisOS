@@ -5,6 +5,7 @@
 #include "amd_firmware.h"
 #include "gpu_log.h"
 #include "pci.h"
+#include "gfx.h"
 #include "vfs.h"
 #include "exec.h"
 
@@ -277,6 +278,7 @@ void amd_gpu_bringup_firmware(void)
  *   1  create the KM ring, then one SETUP_TMR (a 4 MiB trusted memory region in VRAM, 192 MiB in)
  *   2  also LOAD_IP_FW for CE, PFP, ME, MEC1/2, RLC_G, SDMA0 (needs the firmware loaded by amd_gpu_bringup_firmware())
  *   3  (with HARIS_AMD_GPU_GART=ON) the CP tests of amd_gpu_bringup_cp(), which run after the GART step
+ *   4  also amd_gpu_bringup_screen(): the GPU paints into the screen, and a 2D fill / copy benchmark (leaves stripes until the repaint)
  * It must run BEFORE the GART step: the PSP is given physical addresses, which stop being valid once VMID0 translates.
  * Every step saves the log first, so a hang leaves the last line that was reached. */
 #ifndef HARIS_AMD_GPU_PSP_LEVEL
@@ -387,5 +389,64 @@ void amd_gpu_bringup_cp(void)
     serial_print("BLIT: "); serial_print(amd_native_blit_status()); serial_print("\n");
     serial_print(ib_ok ? "CP: all IB / ring tests PASSED\n" : "CP: some IB / ring test did not pass\n");
     amd_gpu_log_save();
+#endif
+}
+
+/* The GPU draws into the SCREEN (the firmware framebuffer that is in VRAM): the V154 / V155 steps of the FirozOS bring-up.
+ *   1. amd_gpu_fb_strip(): the CPU poisons a 256x16 strip at the bottom of the screen, the CP paints four colour bands there with
+ *      DMA_DATA packets through the persistent ring, and the CPU reads the pixels back. PASS unlocks the 2D engine.
+ *   2. amd_gpu2d_bench(): 128 rows at the bottom: a CPU fill, a GPU fill of the same area, a GPU rectangle fill and a GPU
+ *      copy, with the time of each in TSC cycles, and a pixel check of the GPU results.
+ * Both leave coloured stripes on the real screen, so the caller repaints the desktop afterwards. Needs the persistent ring of the
+ * CP tests (HARIS_AMD_GPU_PSP_LEVEL 3 ran OK) and HARIS_AMD_GPU_PSP_LEVEL 4. Call after the first desktop frame. Returns 1 if the GPU
+ * painted the screen. */
+int amd_gpu_bringup_screen(void)
+{
+#if HARIS_AMD_GPU_PSP_LEVEL >= 4
+    if (!writes_allowed() || !gfx_ready())
+        return 0;
+    if (!(amd_native_mmhub_ctx0_cntl() & 1u)) {
+        serial_print("SCREEN: skipped: VMID0 translation (GART) is off\n");
+        amd_gpu_log_save();
+        return 0;
+    }
+    volatile unsigned int *fb = gfx_screen_base();
+    uint32_t pitch = gfx_screen_pitch_bytes();
+    serial_print("SCREEN: about to let the GPU paint a strip of the screen\n");
+    log_hex("  screen address ", (uint32_t)(unsigned long long)fb);
+    log_hex("  pitch (bytes)  ", pitch);
+    log_hex("  width x height ", (gfx_width() << 16) | gfx_height());
+    amd_gpu_log_save();
+
+    int ok = amd_gpu_fb_strip((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(), (volatile uint8_t *)fb);
+    serial_print("SCREEN: "); serial_print(amd_native_fb_status()); serial_print("\n");
+    log_hex("  state          ", amd_native_fb_value(0));
+    log_hex("  pixels good    ", amd_native_fb_value(1));
+    log_hex("  pixels total   ", amd_native_fb_value(2));
+    log_hex("  VRAM offset    ", amd_native_fb_value(5));
+    log_hex("  MC address lo  ", amd_native_fb_value(6));
+    log_hex("  VRAM aperture  ", amd_native_fb_value(9));
+    amd_gpu_log_save();
+    if (!ok || !amd_gpu2d_ready())
+        return 0;
+
+    serial_print("SCREEN: about to run the GPU 2D benchmark (fill / copy on the bottom 128 rows)\n");
+    amd_gpu_log_save();
+    (void)amd_gpu2d_bench((volatile uint8_t *)fb);
+    serial_print(amd_gpu2d_value(0) == 0x100u ? "2D: PASS: GPU fill and copy are right\n" : "2D: did not pass\n");
+    log_hex("  bench state    ", amd_gpu2d_value(0));
+    log_hex("  pixels good    ", amd_gpu2d_value(1));
+    log_hex("  pixels total   ", amd_gpu2d_value(2));
+    log_hex("  cycles GPU fill", amd_gpu2d_value(3));
+    log_hex("  cycles GPU copy", amd_gpu2d_value(4));
+    log_hex("  cycles CPU fill", amd_gpu2d_value(5));
+    log_hex("  bytes filled   ", amd_gpu2d_value(11));
+    log_hex("  packets        ", amd_gpu2d_value(7));
+    log_hex("  flushes        ", amd_gpu2d_value(8));
+    log_hex("  failures       ", amd_gpu2d_value(9));
+    amd_gpu_log_save();
+    return amd_gpu2d_value(0) == 0x100u;
+#else
+    return 0;
 #endif
 }

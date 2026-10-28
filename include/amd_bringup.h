@@ -26,6 +26,11 @@ void amd_gpu_bringup_gart(void);
  * HARIS_AMD_GPU_PSP_LEVEL 3 and the GART step (HARIS_AMD_GPU_GART=ON). Call after amd_gpu_bringup_gart(). */
 void amd_gpu_bringup_cp(void);
 
+/* The GPU paints into the screen (see amd_bringup.c): a strip test and a fill / copy benchmark on the bottom rows, with the timings in
+ * the log. Only with HARIS_AMD_GPU_PSP_LEVEL 4 and after the CP tests passed. It leaves coloured stripes on the screen: the caller
+ * redraws the desktop afterwards (gfx_repaint_all()). Call after the first desktop frame. Returns 1 if the GPU painted the screen. */
+int amd_gpu_bringup_screen(void);
+
 /* The PSP steps (KM ring, SETUP_TMR, firmware load): only when built with HARIS_AMD_GPU_PSP_LEVEL 1 or 2. Runs before
  * amd_gpu_bringup_gart(), which has to stay off while the PSP gets physical addresses. */
 void amd_gpu_bringup_psp(void);

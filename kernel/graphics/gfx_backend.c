@@ -28,3 +28,21 @@ unsigned int gfx_height(void)
 {
     return (unsigned int)H;
 }
+
+volatile unsigned int *gfx_screen_base(void)
+{
+    return FB;
+}
+
+unsigned int gfx_screen_pitch_bytes(void)
+{
+    return (unsigned int)PITCH * 4u;
+}
+
+void gfx_repaint_all(void)
+{
+    if (!BACK)
+        return;
+    gfx_internal_mark_dirty(0, 0, W, H);
+    gfx_present();
+}
