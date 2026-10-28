@@ -291,6 +291,7 @@ void kernel_main(const BootInfo *info)
         amd_gpu_log_save();       /* the AMD GPU checks of earlier in the boot, to GPULOG.TXT on the boot drive */
         amd_gpu_bringup_psp();    /* opt-in (HARIS_AMD_GPU_PSP_LEVEL): talks to the PSP, saving the log first; before the GART step */
         amd_gpu_bringup_gart();   /* opt-in (HARIS_AMD_GPU_GART): writes GPU registers, saving the log first */
+        amd_gpu_bringup_cp();     /* opt-in (HARIS_AMD_GPU_PSP_LEVEL=3 and the GART step): CP tests, after the GART is up */
     }
 
     unsigned blk_seen = blk_generation(); /* USB drives plugged in (or out) later change it: see volume_sync() */

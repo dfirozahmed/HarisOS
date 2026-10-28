@@ -17,6 +17,10 @@ int amd_gpu_log_save(void);
 /* The GART / VMID0 step: does something only when built with HARIS_AMD_GPU_GART. Saves the log before it runs. */
 void amd_gpu_bringup_gart(void);
 
+/* The CP tests (pulse, ring matrix, GPU-virtual-address test, IB + fences, persistent ring, draw / fill / blit): only with
+ * HARIS_AMD_GPU_PSP_LEVEL 3 and the GART step (HARIS_AMD_GPU_GART=ON). Call after amd_gpu_bringup_gart(). */
+void amd_gpu_bringup_cp(void);
+
 /* The PSP steps (KM ring, SETUP_TMR, firmware load): only when built with HARIS_AMD_GPU_PSP_LEVEL 1 or 2. Runs before
  * amd_gpu_bringup_gart(), which has to stay off while the PSP gets physical addresses. */
 void amd_gpu_bringup_psp(void);
