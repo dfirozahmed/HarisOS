@@ -39,18 +39,20 @@ if(HARIS_BOOT_SELFTEST)
     list(APPEND EFI_CFLAGS -DHARIS_BOOT_SELFTEST=1)
 endif()
 
-# AMD Radeon GART/VMID0 bring-up: WRITES GPU registers (may blank the screen or hang the machine). Off = read-only probe.
-#   cmake -S . -B build -DHARIS_AMD_GPU_GART=ON
-option(HARIS_AMD_GPU_GART "AMD GPU: enable the GART/VMID0 register-writing bring-up" OFF)
+# AMD Radeon bring-up beyond the read-only probe. Compiled in by default, but at run time the steps that WRITE to the GPU only run
+# on the machine they were developed on (HP 15s-eq1172AU: Renoir 1002:1636, subsystem 103C:87CF, revision C3; amd_gpu_is_target),
+# and not if a file AMDOFF.TXT is in the top folder of a drive (the way out if a boot ever hangs in one of them). Every other
+# AMD GPU gets the read-only checks only. The steps may blank the screen or hang the machine.
+#   HARIS_AMD_GPU_PSP_LEVEL: 0 = no PSP / CP steps, 1 = KM ring + SETUP_TMR, 2 = also load the firmware, 3 = also the CP tests
+#   HARIS_AMD_GPU_GART:      the GART/VMID0 step; level 3 needs it (the CP tests run after it)
+# The PSP steps run before the GART step in the same boot (the PSP is given physical addresses).
+# An existing build folder keeps the values it was configured with; to change them:
+#   cmake -S . -B build -DHARIS_AMD_GPU_PSP_LEVEL=0 -DHARIS_AMD_GPU_GART=OFF      (read-only probe, nothing is written)
+option(HARIS_AMD_GPU_GART "AMD GPU: the GART/VMID0 register-writing step (target machine only)" ON)
 if(HARIS_AMD_GPU_GART)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_GART=1)
 endif()
-
-# AMD Radeon PSP bring-up: WRITES the PSP mailbox registers. 0 = off (read-only), 1 = KM ring + SETUP_TMR, 2 = also load the firmware, 3 = also the CP tests (after the GART step).
-# The PSP steps run before the GART step in the same boot (the PSP is given physical addresses). Level 3 (the CP tests, run after
-# the GART step) needs HARIS_AMD_GPU_GART=ON as well:
-#   cmake -S . -B build-psp -DHARIS_AMD_GPU_PSP_LEVEL=3 -DHARIS_AMD_GPU_GART=ON
-set(HARIS_AMD_GPU_PSP_LEVEL 0 CACHE STRING "AMD GPU: PSP bring-up level (0 off, 1 ring + TMR, 2 + firmware, 3 + CP tests)")
+set(HARIS_AMD_GPU_PSP_LEVEL 3 CACHE STRING "AMD GPU: PSP / CP bring-up level (0 off, 1 ring + TMR, 2 + firmware, 3 + CP tests)")
 if(HARIS_AMD_GPU_PSP_LEVEL GREATER 0)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_PSP_LEVEL=${HARIS_AMD_GPU_PSP_LEVEL})
 endif()

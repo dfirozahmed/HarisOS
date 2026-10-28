@@ -1,6 +1,7 @@
 /* AMD Radeon (Renoir) bring-up: finds the GPU on PCI and runs the driver's checks.
- * By default it only READS: PCI config, the GC / MMHUB / GFXHUB registers and the VM fault registers. The register
- * writing steps (GART / VMID0) are compiled in only with -DHARIS_AMD_GPU_GART=1 (cmake -DHARIS_AMD_GPU_GART=ON). */
+ * Every AMD GPU gets the read-only checks (PCI config, the GC / MMHUB / GFXHUB registers, the VM fault registers). The steps that
+ * WRITE to the GPU (PSP, GART, CP tests; see HARIS_AMD_GPU_PSP_LEVEL and HARIS_AMD_GPU_GART in CMakeLists.txt) run only on the
+ * machine they were developed on (amd_gpu_is_target), and not when a file AMDOFF.TXT is in the top folder of a drive. */
 #ifndef HARIS_AMD_BRINGUP_H
 #define HARIS_AMD_BRINGUP_H
 

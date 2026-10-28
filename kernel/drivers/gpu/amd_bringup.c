@@ -10,6 +10,8 @@
 
 static const char *bringup_status = "AMD GPU not probed";
 static int bringup_ran, bringup_found, bringup_probed; /* for the Device Manager line */
+static int g_target;                                  /* exactly the machine the write steps were developed on (amd_gpu_is_target) */
+static int g_writes = -1;                             /* -1 not decided yet, 0 no, 1 the write steps may run */
 static uint64_t g_mmio;
 static uint32_t g_bar0, g_bar1;
 
@@ -46,6 +48,7 @@ int amd_gpu_bringup(void)
         uint16_t sub_ven = (uint16_t)(subsys & 0xFFFF), sub_dev = (uint16_t)(subsys >> 16);
 
         bringup_found = 1;
+        g_target = amd_gpu_is_target(d->vendor_id, d->device_id, sub_ven, sub_dev, d->revision);
         serial_print("AMD GPU: ");
         serial_print(amd_gpu_name(d->device_id));
         serial_print("\n");
@@ -56,6 +59,8 @@ int amd_gpu_bringup(void)
         log_hex("  BAR1       ", bar1);
         log_hex("  BAR5       ", bar5);
         log_hex("  PCI command", pcicmd);
+        serial_print(g_target ? "  this is the target machine (Renoir 1002:1636, HP 103C:87CF, rev C3)\n"
+                              : "  not the target machine: read-only checks only\n");
 
         if (!amd_gpu_supported(d->vendor_id, d->device_id))
         {
@@ -151,6 +156,23 @@ void amd_gpu_bringup_summary(char *out, int n)
     cat_str(out, n, amd_firmware_staged() ? ", fw staged" : ", no fw");
 }
 
+/* The steps that WRITE to the GPU run only on the machine they were developed and tested on (amd_gpu_is_target), and only if
+ * there is no file AMDOFF.TXT in the top folder of a drive. That file is the way out if a boot ever hangs in one of the steps:
+ * put it on the boot USB stick from another computer and the next boot skips them. Decided once, after the drives are mounted. */
+static int writes_allowed(void)
+{
+    if (g_writes < 0) {
+        if (!g_target || !bringup_probed)
+            g_writes = 0;
+        else if (exec_find("AMDOFF.TXT") >= 0) {
+            serial_print("AMDOFF.TXT found: the steps that write to the GPU are skipped\n");
+            g_writes = 0;
+        } else
+            g_writes = 1;
+    }
+    return g_writes;
+}
+
 #define LOG_NAME "GPULOG.TXT"
 
 /* Writes the log to GPULOG.TXT in the top folder of the boot drive (the one that holds KERNEL.EFI: the EFI System
@@ -184,7 +206,7 @@ int amd_gpu_log_save(void)
 void amd_gpu_bringup_gart(void)
 {
 #if defined(HARIS_AMD_GPU_GART) && HARIS_AMD_GPU_GART
-    if (!bringup_probed || g_bar1 != 0 || !(g_bar0 & 0xFFFFFFF0u))
+    if (!writes_allowed() || g_bar1 != 0 || !(g_bar0 & 0xFFFFFFF0u))
         return;
     serial_print("GART: about to enable VMID0 (writes GPU registers)\n");
     amd_gpu_log_save(); /* if the machine hangs now, this line is the last one in the file */
@@ -203,7 +225,7 @@ void amd_gpu_bringup_gart(void)
 /* Loads the firmware images from the boot drive and logs what was found. Reads only. Needs the drives mounted. */
 void amd_gpu_bringup_firmware(void)
 {
-    if (!bringup_probed)
+    if (!bringup_probed || !g_target)
         return;
     serial_print("Firmware:\n");
     (void)amd_firmware_load();
@@ -226,7 +248,7 @@ void amd_gpu_bringup_firmware(void)
 void amd_gpu_bringup_psp(void)
 {
 #if HARIS_AMD_GPU_PSP_LEVEL >= 1
-    if (!bringup_probed || (amd_native_mmhub_ctx0_cntl() & 1u))
+    if (!writes_allowed() || (amd_native_mmhub_ctx0_cntl() & 1u))
         return; /* not probed, or VMID0 translation is already on */
     serial_print("PSP: about to create the KM ring (writes PSP mailbox registers)\n");
     amd_gpu_log_save();
@@ -280,7 +302,7 @@ void amd_gpu_bringup_psp(void)
 void amd_gpu_bringup_cp(void)
 {
 #if HARIS_AMD_GPU_PSP_LEVEL >= 3
-    if (!bringup_probed || g_bar1 != 0 || !(g_bar0 & 0xFFFFFFF0u))
+    if (!writes_allowed() || g_bar1 != 0 || !(g_bar0 & 0xFFFFFFF0u))
         return;
     uint64_t vram = (uint64_t)(g_bar0 & 0xFFFFFFF0u);
     int fw_ok = amd_psp_fw_job_state(0) == 1 && amd_psp_fw_job_state(1) == 1 && amd_psp_fw_job_state(2) == 1;
