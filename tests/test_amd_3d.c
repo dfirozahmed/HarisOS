@@ -26,11 +26,9 @@ int amd_gpu_fence_wait(uint32_t seq, uint32_t loops) { (void)seq; (void)loops; r
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { (void)dword_addr; return 0; }
 uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n) { (void)dw; (void)n; return 0; }
 void amd_gpu_fault_clear(void) {}
-uint64_t amd_gpu_frame_ib_va(void) { return 0; }
 uint32_t amd_gpu_frame_ib_max_dwords(void) { return 32768; }
 void amd_gpu_frame_ib_write32(uint32_t dw, uint32_t v) { (void)dw; (void)v; }
 uint64_t amd_gpu_frame_ib_mc(void) { return 0; }
-void amd_gpu_frame_ib_ptes(uint32_t out[7]) { (void)out; }
 
 static int ok = 1;
 

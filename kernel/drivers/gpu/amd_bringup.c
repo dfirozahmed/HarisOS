@@ -60,8 +60,8 @@ static void log_3d_result(int ok, int with_map)
 }
 #endif
 #if HARIS_AMD_GPU_PSP_LEVEL >= 8
-/* 0: no compositor frame worked offscreen yet, 1: through the IB page, 2: through the frame IB too (the screen test uses it). */
-static int comp_ib_ok;
+/* 1 when the compositor frame worked offscreen (then it runs on the screen too). */
+static int comp_ok;
 
 /* The result of the last compositor test. */
 static void log_comp_result(int ok)
@@ -497,33 +497,13 @@ void amd_gpu_bringup_cp(void)
 #endif
 #if HARIS_AMD_GPU_PSP_LEVEL >= 8
     /* M4a: the compositor. A background, 3 windows (surfaces the CPU fills) each with a soft shadow, the third partly transparent:
-     * 7 draws in ONE submission (one frame IB through the GART, fixed shaders with their parameters in user SGPRs). */
-    /* Step by step, stopping at the first failure (a frame that hangs the GPU stops the ring for the rest of the boot): through the
-     * 4 KiB IB page of the 3D tests the background alone, then with the shadows, then the whole scene; then the whole scene through
-     * the frame IB (128 KiB through the GART). The first one that fails says what to look at. */
+     * 7 draws in ONE submission (the frame IB by its VRAM MC address, fixed shaders with their parameters in user SGPRs). */
     if (ib_ok) {
-        static const char *const what[4] = { "the background fill (IB page)", "background + 3 shadows (IB page)",
-                                             "background + 3 shadows + 3 windows (IB page)",
-                                             "background + 3 shadows + 3 windows (frame IB by its VRAM MC address)" };
-        for (int step = 0; step < 4; step++) {
-            if (step == 3) {
-                /* The frame IB through its GART pages hung the CP (2026-10-29); the same stream through the IB page ran. Read only:
-                 * the PTEs of the IB page and of the first frame IB pages, to compare. Then the frame IB by its MC address. */
-                uint32_t pte[7];
-                (void)amd_gpu_frame_ib_va();
-                amd_gpu_frame_ib_ptes(pte);
-                serial_print("COMP: GART PTEs (lo, hi): IB page, frame IB page 0, frame IB page 1; GART pages\n");
-                for (int q = 0; q < 7; q++) log_hex("  ", pte[q]);
-            }
-            serial_print("COMP: about to composite into a 512 x 256 buffer in VRAM: "); serial_print(what[step]); serial_print("\n");
-            amd_gpu_log_save();
-            int okc = amd_comp_test_offscreen(step < 3 ? step + 1 : 3, step == 3 ? 2 : 0);
-            log_comp_result(okc);
-            amd_gpu_log_save();
-            if (!okc)
-                break;
-            comp_ib_ok = step == 3 ? 2 : 1;   /* 1: the IB page works, 2: the frame IB works too */
-        }
+        serial_print("COMP: about to composite 3 windows with shadows into a 512 x 256 buffer in VRAM (one submission)\n");
+        amd_gpu_log_save();
+        comp_ok = amd_comp_test_offscreen();
+        log_comp_result(comp_ok);
+        amd_gpu_log_save();
     }
 #endif
 #endif
@@ -619,13 +599,12 @@ int amd_gpu_bringup_screen(void)
     }
 #endif
 #if HARIS_AMD_GPU_PSP_LEVEL >= 8
-    /* M4a on the screen: the composited scene in the top right corner, through whichever IB worked offscreen. */
-    if (comp_ib_ok) {
-        serial_print(comp_ib_ok == 2 ? "COMP: about to composite 3 windows with shadows into the screen (frame IB)\n"
-                                     : "COMP: about to composite 3 windows with shadows into the screen (IB page)\n");
+    /* M4a on the screen: the composited scene in the top right corner (only after it worked offscreen). */
+    if (comp_ok) {
+        serial_print("COMP: about to composite 3 windows with shadows into the screen (one submission)\n");
         amd_gpu_log_save();
         log_comp_result(amd_comp_test_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
-                                             (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first(), comp_ib_ok == 2 ? 2 : 0));
+                                             (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first()));
         amd_gpu_log_save();
         result = 1;
     }

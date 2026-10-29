@@ -255,16 +255,16 @@ static void shadow_rect(uint32_t k, uint32_t *x0, uint32_t *y0, uint32_t *x1, ui
 }
 
 /* What the scene should be at scene pixel (x, y): the background, then every shadow and window "over" it in the painting order. */
-static uint32_t scene_px(uint32_t x, uint32_t y, int bgr, int stage)
+static uint32_t scene_px(uint32_t x, uint32_t y, int bgr)
 {
     uint32_t v = rgb_px(BG_R, BG_G, BG_B, bgr), k;
     for (k = 0; k < 3; k++) {
         Amd3dJob s = { 0 };
         shadow_rect(k, &s.x0, &s.y0, &s.x1, &s.y1);
         s.shadow_r = SHADOW_R; s.a = SHADOW_A;
-        if (stage >= 2 && x >= s.x0 && x < s.x1 && y >= s.y0 && y < s.y1)
+        if (x >= s.x0 && x < s.x1 && y >= s.y0 && y < s.y1)
             v = amd_3d_blend_px(0, v, amd_3d_shadow_alpha(&s, x, y));
-        if (stage >= 3 && x >= win[k].x0 && x < win[k].x1 && y >= win[k].y0 && y < win[k].y1) {
+        if (x >= win[k].x0 && x < win[k].x1 && y >= win[k].y0 && y < win[k].y1) {
             uint32_t t = win_texel(k, x - win[k].x0, y - win[k].y0, bgr);
             v = win[k].opacity >= 255 ? t : amd_3d_blend_px(t, v, win[k].opacity);
         }
@@ -282,12 +282,16 @@ static int near3(uint32_t a, uint32_t b)
     return 1;
 }
 
-/* Composites the scene at (ox, oy) of the target (VRAM offset base_off, GPU address rt_mc) in ONE submission and checks it, with a
- * margin of 8 pixels around it that must stay as the CPU wrote it. stage 1: the background only, 2: and the shadows, 3: and the
- * windows (the whole scene). via_frame_ib 0: the stream goes through the 4 KiB IB page the 3D tests use (it must fit in 1024
- * dwords), 1: through the frame IB (128 KiB) by its GART address, 2: the frame IB by its VRAM MC address. */
-static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32_t width, uint32_t height, int bgr, uint32_t ox, uint32_t oy,
-                    int stage, int via_frame_ib)
+static void keep_fault_registers(void)
+{
+    amd_gpu_fault_snapshot();
+    val[AMD_COMP_V_FAULT_GC] = amd_native_fault_gc_status(); val[AMD_COMP_V_FAULT_GC + 1] = amd_native_fault_gc_lo();
+    val[AMD_COMP_V_FAULT_GC + 2] = amd_native_fault_gc_hi();
+}
+
+/* Composites the scene at (ox, oy) of the target (VRAM offset base_off, GPU address rt_mc) in ONE submission through the frame IB and
+ * checks it, with a margin of 8 pixels around it that must stay as the CPU wrote it. */
+static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32_t width, uint32_t height, int bgr, uint32_t ox, uint32_t oy)
 {
     static uint32_t ib[4096];
     static int shaders_up;
@@ -297,14 +301,13 @@ static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32
     uint32_t cx0 = ox >= 8u ? ox - 8u : 0, cy0 = oy >= 8u ? oy - 8u : 0;
     uint32_t cx1 = ox + SCENE_W + 8u > width ? width : ox + SCENE_W + 8u, cy1 = oy + SCENE_H + 8u > height ? height : oy + SCENE_H + 8u;
     uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
-    uint64_t frame_va = via_frame_ib == 1 ? amd_gpu_frame_ib_va() : via_frame_ib == 2 ? amd_gpu_frame_ib_mc() : amd_gpu_ib_va();
+    uint64_t frame_mc = amd_gpu_frame_ib_mc();
     unsigned long long t0;
     const uint32_t pattern = 0x00112233u;
 
     for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
     if (!amd_gpu_ring_running()) { status = "compositor test skipped: the persistent ring is not running"; return 0; }
-    if (!shader_mc || !sync_mc || !rt_mc) { status = "compositor test skipped: no MC address"; return 0; }
-    if (!frame_va) { status = "compositor test FAILED: the frame IB could not be mapped through the GART"; return 0; }
+    if (!shader_mc || !sync_mc || !rt_mc || !frame_mc) { status = "compositor test skipped: no MC address"; return 0; }
     if (ox + SCENE_W > width || oy + SCENE_H > height) { status = "compositor test skipped: the target is too small"; return 0; }
 
     /* the CPU must reach the target and the surfaces (BAR0 may be smaller than the VRAM): a word written must read back */
@@ -333,36 +336,29 @@ static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32
     amd_gpu_wc_flush();
 
     /* the frame: background, then per window its shadow and the window */
-    cap = via_frame_ib ? (amd_gpu_frame_ib_max_dwords() < 4096u ? amd_gpu_frame_ib_max_dwords() : 4096u) : 1024u;
+    cap = amd_gpu_frame_ib_max_dwords() < 4096u ? amd_gpu_frame_ib_max_dwords() : 4096u;
     amd_comp_begin(&f, ib, cap, rt_mc, pitch_px, width, height, bgr, shader_mc);
     amd_comp_fill(&f, ox, oy, ox + SCENE_W, oy + SCENE_H, BG_R, BG_G, BG_B);
     for (k = 0; k < 3; k++) {
         uint32_t sx0, sy0, sx1, sy1;
         shadow_rect(k, &sx0, &sy0, &sx1, &sy1);
-        if (stage >= 2)
-            amd_comp_shadow(&f, ox + sx0, oy + sy0, ox + sx1, oy + sy1, SHADOW_R, SHADOW_A);
-        if (stage >= 3)
-            amd_comp_image(&f, &surf[k], 0, 0, ox + win[k].x0, oy + win[k].y0, ox + win[k].x1, oy + win[k].y1, win[k].opacity, bgr);
+        amd_comp_shadow(&f, ox + sx0, oy + sy0, ox + sx1, oy + sy1, SHADOW_R, SHADOW_A);
+        amd_comp_image(&f, &surf[k], 0, 0, ox + win[k].x0, oy + win[k].y0, ox + win[k].x1, oy + win[k].y1, win[k].opacity, bgr);
     }
     n = amd_comp_end(&f, sync_mc);
     val[AMD_COMP_V_DWORDS] = n; val[AMD_COMP_V_DRAWS] = f.draws;
     if (!n) { status = "compositor test skipped: the frame does not fit"; return 0; }
 
     if (a3d_default_state()) { status = "compositor test FAILED: the default state stream did not run"; return 0; }
-    for (k = 0; k < n; k++) {
-        if (via_frame_ib) amd_gpu_frame_ib_write32(k, ib[k]);
-        else amd_gpu_ib_write32(k, ib[k]);
-    }
+    for (k = 0; k < n; k++)
+        amd_gpu_frame_ib_write32(k, ib[k]);
     amd_gpu_wc_flush();
-    amd_gpu_ib_flush();
     amd_gpu_fault_clear();
     t0 = comp_tsc();
-    seq = amd_gpu_submit_ib(frame_va, n);
+    seq = amd_gpu_submit_ib(frame_mc, n);
     if (!seq) { status = "compositor test FAILED: the ring did not take the frame"; return 0; }
     if (!amd_gpu_fence_wait(seq, 8000000u)) {
-        amd_gpu_fault_snapshot();
-        val[AMD_COMP_V_FAULT_GC] = amd_native_fault_gc_status(); val[AMD_COMP_V_FAULT_GC + 1] = amd_native_fault_gc_lo();
-        val[AMD_COMP_V_FAULT_GC + 2] = amd_native_fault_gc_hi();
+        keep_fault_registers();
         val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);               /* GRBM_STATUS: which blocks are still busy */
         status = "compositor test FAILED: fence timeout (the GPU did not finish the frame)";
         return 0;
@@ -373,7 +369,7 @@ static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32
         for (x = cx0; x < cx1; x++) {
             uint32_t v = amd_gpu_vram_read32(base_off + (y * pitch_px + x) * 4u) & 0x00FFFFFFu;
             if (x >= ox && x < ox + SCENE_W && y >= oy && y < oy + SCENE_H) {
-                uint32_t want = scene_px(x - ox, y - oy, bgr, stage);
+                uint32_t want = scene_px(x - ox, y - oy, bgr);
                 val[AMD_COMP_V_IN_TOTAL]++;
                 if (near3(v, want)) val[AMD_COMP_V_IN_GOOD]++;
                 else if (!val[AMD_COMP_V_FIRST_IN]) {
@@ -386,27 +382,22 @@ static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32
             }
         }
     if (val[AMD_COMP_V_IN_GOOD] == val[AMD_COMP_V_IN_TOTAL] && !val[AMD_COMP_V_OUT_BAD]) {
-        status = stage == 1 ? "compositor PASS: the background fill, every pixel right"
-               : stage == 2 ? "compositor PASS: background and 3 soft shadows in one submission, every pixel right"
-                            : "compositor PASS: background, 3 shadows and 3 windows (one 63% opaque) in one submission, every pixel right";
+        status = "compositor PASS: background, 3 shadows and 3 windows (one 63% opaque) in one submission, every pixel right";
         return 1;
     }
-    amd_gpu_fault_snapshot();
-    val[AMD_COMP_V_FAULT_GC] = amd_native_fault_gc_status(); val[AMD_COMP_V_FAULT_GC + 1] = amd_native_fault_gc_lo();
-    val[AMD_COMP_V_FAULT_GC + 2] = amd_native_fault_gc_hi();
+    keep_fault_registers();
     status = val[AMD_COMP_V_IN_GOOD] ? "compositor FAILED: some pixels are wrong" : "compositor FAILED: nothing of the scene is there";
     return 0;
 }
 
-int amd_comp_test_offscreen(int stage, int via_frame_ib)
+int amd_comp_test_offscreen(void)
 {
     uint64_t rt_mc = amd_native_vram_mc_addr(VRAM_COMP_RT_OFF, COMP_RT_W * COMP_RT_H * 4u);
-    return comp_run(VRAM_COMP_RT_OFF, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, 16, 16, stage, via_frame_ib);
+    return comp_run(VRAM_COMP_RT_OFF, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, 16, 16);
 }
 
 /* On the screen: the scene in the top right corner, 20 pixels in. */
-int amd_comp_test_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr,
-                         int via_frame_ib)
+int amd_comp_test_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
 {
     uint64_t off64;
     if (!pitch_bytes || (pitch_bytes & 3u) || width < SCENE_W + 40u || height < SCENE_H + 40u || fb_phys < vram_cpu) {
@@ -415,5 +406,5 @@ int amd_comp_test_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width,
     if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_COMP_SHADER_OFF) {
         status = "compositor screen test skipped: the framebuffer reaches the test memory"; return 0; }
     return comp_run((uint32_t)off64, amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height), pitch_bytes / 4u, width, height, bgr,
-                    width - SCENE_W - 20u, 20u, 3, via_frame_ib);
+                    width - SCENE_W - 20u, 20u);
 }
