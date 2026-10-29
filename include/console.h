@@ -54,6 +54,9 @@ void console_wait(int con, int task_id); /* wake task_id (task_wake) when input 
 int console_row(int con, int back, char *out);
 int console_cursor_col(int con); /* column of the cursor on the bottom row, -1 if the console is finished or invalid */
 int console_dirty(int con);      /* 1 once after every change of the screen: the window redraws then */
+/* The same, saying how much: 0 = nothing, 1 = only the row with the cursor changed (typing, a backspace, text on the same
+ * line), 2 = more (a new row: everything moved up). Reading either one clears both. */
+int console_changed(int con);
 const char *console_title(int con);
 
 /* ---- the window (apps/console) ------------------------------- */

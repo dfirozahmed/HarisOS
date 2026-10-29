@@ -32,6 +32,14 @@ static int grid_rows(UiRect body, int *line_h)
     return rows < 1 ? 1 : rows;
 }
 
+/* Mark the bottom text row (the one with the cursor) to be drawn again. */
+static void mark_cursor_row(Window *w)
+{
+    UiRect body = wm_content(w);
+    int line_h, rows = grid_rows(body, &line_h);
+    wm_add_damage(ui_rect(body.x, body.y + PAD + (rows - 1) * line_h, body.w, line_h));
+}
+
 static void draw(Window *w, UiRect body)
 {
     int con = handle_of(w);
@@ -85,13 +93,27 @@ static void on_key(Window *w, const KeyEvent *k)
     else if (k->ch >= 32 && k->ch < 127)
         ch = k->ch;
     if (ch)
-        console_key(handle_of(w), ch); /* the window is redrawn after every key event */
+        console_key(handle_of(w), ch);
+    /* What the key changed (and anything the program printed meanwhile): on the cursor's row only (a typed character, a
+     * backspace) that row is drawn again; when rows moved (Enter) the window manager draws the whole window. */
+    switch (console_changed(handle_of(w)))
+    {
+    case 0:
+        wm_key_partial(); /* nothing to draw */
+        break;
+    case 1:
+        mark_cursor_row(w);
+        wm_key_partial();
+        break;
+    default:
+        break;
+    }
 }
 
 static int on_tick(Window *w)
 {
     int con = handle_of(w);
-    int printed = console_dirty(con); /* the program printed something: the rows may all have moved up */
+    int printed = console_changed(con); /* the program printed: 1 = on the cursor's row only, 2 = rows moved up */
     int blink = (int)((timer_ms() / 500) & 1);
     int *last = &LAST_BLINK[con & 255];
     int cursor = 0;
@@ -100,14 +122,12 @@ static int on_tick(Window *w)
         *last = blink; /* the cursor turns on or off */
         cursor = console_cursor_col(con) >= 0;
     }
-    if (printed)
+    if (printed == 2)
         return 1;
-    if (!cursor)
+    if (!printed && !cursor)
         return 0;
-    /* Only the cursor blinked: it is in the bottom row, so only that row is drawn again (not the whole window). */
-    UiRect body = wm_content(w);
-    int line_h, rows = grid_rows(body, &line_h);
-    wm_add_damage(ui_rect(body.x, body.y + PAD + (rows - 1) * line_h, body.w, line_h));
+    /* Only the cursor's row changed (the cursor blinked, or text on that row): only that row is drawn again. */
+    mark_cursor_row(w);
     return 2;
 }
 

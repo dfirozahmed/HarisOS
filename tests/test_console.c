@@ -272,6 +272,25 @@ int main(void)
     CHECK(strlen(console_title(t)) == CONSOLE_TITLE_MAX - 1);
     console_close(t);
 
+    /* how much changed: 1 = only the cursor's row (the window draws that row), 2 = rows moved (the whole window) */
+    int k = console_open("levels");
+    CHECK(console_changed(k) == 2 && console_changed(k) == 0); /* new: everything; then nothing */
+    CHECK(console_write(k, "abc", 3) == 3 && console_changed(k) == 1);
+    console_key(k, 'x');
+    CHECK(console_changed(k) == 1);
+    console_key(k, '\b');
+    CHECK(console_changed(k) == 1);
+    console_key(k, '\b'); /* nothing typed any more: nothing changes */
+    CHECK(console_changed(k) == 0);
+    console_key(k, 'y');
+    console_key(k, '\n'); /* Enter: a new row, everything moves up */
+    CHECK(console_changed(k) == 2);
+    console_write(k, "a\nb", 3); /* a new row in between: still 2 */
+    CHECK(console_changed(k) == 2 && console_changed(k) == 0);
+    console_write(k, "z", 1);
+    CHECK(console_dirty(k) == 1 && console_changed(k) == 0); /* console_dirty clears it too */
+    console_close(k);
+
     if (fails == 0)
         printf("console tests passed\n");
     return fails ? 1 : 0;

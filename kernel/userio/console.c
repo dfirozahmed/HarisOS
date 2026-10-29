@@ -7,7 +7,7 @@ typedef struct
 {
     char title[CONSOLE_TITLE_MAX];
     int finished;
-    int dirty;
+    int dirty;      /* 0 = nothing new, 1 = only the row with the cursor changed, 2 = more (rows moved): see console_changed */
     unsigned lines; /* rows started so far: the row with the cursor is lines % CONSOLE_ROWS */
     int col;
     char line[CONSOLE_LINE_MAX]; /* the line being typed */
@@ -49,6 +49,7 @@ static void clear_row(Console *c, unsigned row)
 
 static void new_row(Console *c)
 {
+    c->dirty = 2; /* every row moves up one */
     c->lines++;
     c->col = 0;
     clear_row(c, c->lines);
@@ -79,7 +80,8 @@ static void put_char(Console *c, char ch)
             new_row(c);
         *(volatile char *)cell(c, c->col++) = (ch >= 32 && ch < 127) ? ch : '?';
     }
-    c->dirty = 1;
+    if (c->dirty < 1)
+        c->dirty = 1;
 }
 
 static void wake(Console *c)
@@ -125,7 +127,7 @@ int console_open(const char *title)
     {
         T[i].c = c;
         c->finished = 0;
-        c->dirty = 1;
+        c->dirty = 2;
         c->lines = 0;
         c->col = 0;
         c->line_len = 0;
@@ -226,7 +228,8 @@ int console_key(int h, int ch)
             c->col--;
             *(volatile char *)cell(c, c->col) = ' ';
         }
-        c->dirty = 1;
+        if (c->dirty < 1)
+            c->dirty = 1;
         return 1;
     }
     if (ch == '\n')
@@ -323,7 +326,9 @@ int console_cursor_col(int h)
     return !c || c->finished ? -1 : (c->col < CONSOLE_COLS ? c->col : CONSOLE_COLS - 1);
 }
 
-int console_dirty(int h)
+int console_dirty(int h) { return console_changed(h) != 0; }
+
+int console_changed(int h)
 {
     Console *c = get(h);
     if (!c)
