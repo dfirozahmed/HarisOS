@@ -177,6 +177,9 @@ int main(void)
         assert(gfx_scroll_rect(0, 0, SW, SH, 0) == -1);
         for (int y = 0; y < SH; ++y) gfx_fill_rect(0, y, SW, 1, gfx_rgb((unsigned char)(y * 10), 0, 0));
         assert(gfx_scroll_rect(0, 0, SW, SH, -2) == 0);                 /* up by 2 */
+        gfx_backbuffer_detach(1);                                       /* a compositor keeps the pictures elsewhere */
+        assert(gfx_scroll_rect(0, 0, SW, SH, 1) == -1 && back[5] == gfx_rgb(20, 0, 0)); /* refused, nothing moved */
+        gfx_backbuffer_detach(0);
         for (int y = 0; y < SH - 2; ++y) assert(back[y * SW + 5] == gfx_rgb((unsigned char)((y + 2) * 10), 0, 0));
     }
 

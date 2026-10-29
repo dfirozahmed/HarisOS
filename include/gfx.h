@@ -90,6 +90,9 @@ void gfx_cache_restore(int x, int y, int w, int h);
  * scrolled only has to draw the rows that came into view. Returns 0 if done, -1 if there is no back buffer
  * or nothing can be kept (then redraw the whole rectangle). The rows that came into view hold old pixels. */
 int gfx_scroll_rect(int x, int y, int w, int h, int dy);
+/* A compositor that keeps the windows' pictures elsewhere (gfx.h "compositor") says so: while on, the back buffer does not
+ * hold what is on the screen, and gfx_scroll_rect() returns -1. */
+void gfx_backbuffer_detach(int on);
 
 /* ---- layers ---------------------------------------------------
  * Draw something once into its own w*h pixel buffer, then paste it often (a window being dragged).
