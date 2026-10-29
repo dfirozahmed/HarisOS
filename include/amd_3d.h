@@ -27,11 +27,14 @@ typedef struct
     uint64_t marker_mc;    /* 0, or the address of 8 bytes the stream writes a marker to before and after the draw (see amd_3d.c) */
     /* M3: 1 = "over" alpha blending: result = colour * a / 255 + what is in the colour buffer * (255 - a) / 255 */
     uint32_t blend;
+    /* M3: a soft shadow (needs blend = 1): the rectangle is the whole shadow, its alpha a / 255 inside, falling linearly to 0 over
+     * the outer shadow_r pixels of every edge (both axes multiplied, so the corners are round-ish). 0 = no shadow. */
+    uint32_t shadow_r;
 } Amd3dJob;
 
 #define AMD_3D_IB_MAX 600 /* dwords amd_3d_build_ib() can write at most */
 #define AMD_3D_VS_MAX 48  /* dwords of the vertex / pixel shader the builders write at most */
-#define AMD_3D_PS_MAX 32
+#define AMD_3D_PS_MAX 48
 
 /* Shader code. Return the number of dwords written. */
 uint32_t amd_3d_build_vs(uint32_t *code, const Amd3dJob *job);
@@ -76,6 +79,11 @@ int amd_3d_blend_offscreen(void);
 int amd_3d_blend_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 /* "Over" blending of one pixel byte by byte (0x00RRGGBB): src * a / 255 + dst * (255 - a) / 255, rounded. */
 uint32_t amd_3d_blend_px(uint32_t src, uint32_t dst, uint32_t a);
+/* M3: a soft shadow (black, alpha falling to 0 at the edges) "over" a grey background; offscreen and on the screen. */
+int amd_3d_shadow_offscreen(void);
+int amd_3d_shadow_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
+/* The alpha (0 .. 255) the shadow shader gives pixel (x, y) of job (integer version of the shader formula). */
+uint32_t amd_3d_shadow_alpha(const Amd3dJob *job, uint32_t x, uint32_t y);
 int amd_3d_rect_offscreen(void);
 int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 /* The same two, with the rectangle textured from an image in VRAM (M2). */

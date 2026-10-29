@@ -71,7 +71,7 @@ int main(void)
 {
     static uint32_t ib[AMD_3D_IB_MAX], vs[AMD_3D_VS_MAX], ps[AMD_3D_PS_MAX];
     Amd3dJob job = { 0x4100000000ULL + 0x0E100000ULL, 256, 256, 64, 1, 32, 16, 224, 48, 255, 128, 0, 255,
-                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL, 0, 0, 0, 0, 0, 0, 0, 0 };
+                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     uint32_t i, n, cnt;
     const uint32_t *p;
 
@@ -297,9 +297,10 @@ int main(void)
         static uint32_t code[AMD_3D_VS_MAX + AMD_3D_PS_MAX];
         Amd3dJob tj = job;
         int which, bad = 0, walked = 1;
-        for (which = 0; which < 3; which++) {
+        for (which = 0; which < 4; which++) {
             uint32_t cn, k = 0;
             tj.textured = which == 2;
+            tj.shadow_r = which == 3 ? 8u : 0u;
             cn = which == 0 ? amd_3d_build_vs(code, &tj) : amd_3d_build_ps(code, &tj);
             while (k < cn) {
                 uint32_t w = code[k], top6 = w >> 26, src0 = w & 0x1FFu;
@@ -353,6 +354,31 @@ int main(void)
         check(bc && bc[0] == 0, "no blend: CB_BLEND0_CONTROL = 0");
         check(amd_3d_blend_px(0x00FF8000u, 0x00204060u, 128) == 0x00906030u && amd_3d_blend_px(0x00FFFFFFu, 0x00000000u, 255) == 0x00FFFFFFu &&
               amd_3d_blend_px(0x00FFFFFFu, 0x00123456u, 0) == 0x00123456u, "blend_px: 0xFF8000 over 0x204060 at 128 = 0x906030; a 255 / 0");
+    }
+
+    /* M3 soft shadow: the integer alpha the check uses, against the shader's formula done in float on the host, for every pixel */
+    {
+        Amd3dJob sj = job;
+        uint32_t x, y, worst = 0;
+        static uint32_t sps[AMD_3D_PS_MAX];
+        sj.x0 = 24; sj.y0 = 8; sj.x1 = 232; sj.y1 = 56; sj.a = 160; sj.blend = 1; sj.shadow_r = 8;
+        for (y = sj.y0; y < sj.y1; y++)
+            for (x = sj.x0; x < sj.x1; x++) {
+                float px = (float)x + 0.5f, py = (float)y + 0.5f, fx, fy, al;
+                uint32_t want, got = amd_3d_shadow_alpha(&sj, x, y);
+                fx = px - (float)sj.x0 < (float)sj.x1 - px ? px - (float)sj.x0 : (float)sj.x1 - px;
+                fy = py - (float)sj.y0 < (float)sj.y1 - py ? py - (float)sj.y0 : (float)sj.y1 - py;
+                fx /= 8.0f; fy /= 8.0f;
+                if (fx > 1.0f) fx = 1.0f;
+                if (fy > 1.0f) fy = 1.0f;
+                al = 160.0f * fx * fy;
+                want = (uint32_t)(al + 0.5f);
+                if ((got > want ? got - want : want - got) > worst) worst = got > want ? got - want : want - got;
+            }
+        check(worst <= 1, "shadow: integer alpha within 1 of the shader's float formula for every pixel");
+        check(amd_3d_shadow_alpha(&sj, 128, 32) == 160 && amd_3d_shadow_alpha(&sj, 24, 32) == 10 && amd_3d_shadow_alpha(&sj, 24, 8) == 1,
+              "shadow alpha: 160 in the middle, 10 at the left edge, 1 in the corner");
+        check(amd_3d_build_ps(sps, &sj) <= AMD_3D_PS_MAX, "shadow pixel shader fits");
     }
 
     /* PA_SC_RASTER_CONFIG / _1: outside the clear-state table, so the draw stream itself writes both (0, as Mesa's GFX9 default) */

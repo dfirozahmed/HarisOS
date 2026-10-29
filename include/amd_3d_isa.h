@@ -105,6 +105,12 @@ static inline uint32_t a3d_f16_unorm8(uint32_t v)
  *        [31:26] = 111100;  dword1: [7:0] VADDR, [15:8] VDATA, [20:16] SRSRC (SGPR number / 4), [25:21] SSAMP (SGPR number / 4), [31] D16
  * S_WAITCNT (SOPP op 12): simm16 [3:0] vmcount, [6:4] expcount, [11:8] lgkmcount, [15:14] vmcount upper bits */
 #define A3D_OP1_CVT_U32_F32 7u
+/* float VOP2 (Mesa aco_opcodes.py, gfx8 column): V_SUB_F32 2 (S0 - S1), V_SUBREV_F32 3 (S1 - S0), V_MUL_F32 5, V_MIN_F32 0xA, V_MAX_F32 0xB */
+#define A3D_OP2_SUB_F32 2u
+#define A3D_OP2_SUBREV_F32 3u
+#define A3D_OP2_MUL_F32 5u
+#define A3D_OP2_MIN_F32 0xAu
+#define A3D_OP2_MAX_F32 0xBu
 #define A3D_OP2_SUBREV_CO_U32 27u /* D = S1 - S0, carry to VCC (VOP2 opcode 0x1B on GFX9) */
 #define A3D_OP3_CVT_PKRTZ_F16_F32 662u
 #define A3D_MIMG_IMAGE_LOAD 0u

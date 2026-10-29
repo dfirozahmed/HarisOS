@@ -261,7 +261,7 @@ int amd_gpu_log_save(void)
  * inside the crash handler, with the other processors stopped; it only does anything if an AMD GPU was found. */
 void amd_gpu_crash_save(const char *report)
 {
-    static char buf[1536 + 16384 + 64];
+    static char buf[1536 + 65536 + 64];  /* report + the whole log (gpu_log.c LOG_MAX) */
     unsigned n = 0, len;
     const char *head = "KERNEL EXCEPTION (written by the AMD GPU bring-up)\n";
     const char *mid = "\n--- AMD GPU log up to the exception ---\n";
@@ -631,6 +631,15 @@ void amd_gpu_bringup_cp(void)
         log_hex("  expected inside (0x00RRGGBB)", amd_3d_blend_px(0x00FF8000u, 0x00204060u, 128));
         amd_gpu_log_save();
     }
+    /* M3b: a soft shadow. The pixel shader computes the alpha from the distance to the edges (v_sub/v_mul/v_min/v_max on the pixel
+     * position), blended "over" a grey background. */
+    if (ib_ok) {
+        serial_print("3D: about to draw a soft shadow (alpha 160, 8-pixel soft edge) into an offscreen buffer\n");
+        amd_gpu_log_save();
+        int ok3ds = amd_3d_shadow_offscreen();
+        log_3d_result(ok3ds, 1);
+        amd_gpu_log_save();
+    }
 #endif
 #if HARIS_AMD_GPU_PSP_LEVEL >= 7
     /* Shader stores. On 2026-10-29 a vertex shader store to VRAM faulted (WRITE, MAPPING_ERROR) and, with SH_MEM_CONFIG = 0
@@ -782,6 +791,14 @@ int amd_gpu_bringup_screen(void)
         int ok3db = amd_3d_blend_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
                                         (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
         log_3d_result(ok3db, 0);
+        amd_gpu_log_save();
+    }
+    {
+        serial_print("3D: about to draw a soft shadow (12-pixel soft edge) into the screen\n");
+        amd_gpu_log_save();
+        int ok3ds = amd_3d_shadow_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
+                                         (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
+        log_3d_result(ok3ds, 0);
         amd_gpu_log_save();
     }
 #endif

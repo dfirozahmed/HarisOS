@@ -287,6 +287,41 @@ static uint32_t build_ps_textured(uint32_t *code, const Amd3dJob *job)
     return n;
 }
 
+/* M3 soft shadow: alpha = a/255 * fx * fy, fx = clamp(min(px - x0, x1 - px) / R, 0, 1) (fy the same with y), px / py the pixel
+ * centre (POS_X/Y_FLOAT in v2 / v3); colour r, g, b. Every VALU instruction has at most one literal and no VCC (constant bus 1). */
+static void ps_shadow_axis(uint32_t *code, uint32_t *n, uint32_t vpos, uint32_t vout, uint32_t lo, uint32_t hi, uint32_t inv_r)
+{
+    code[(*n)++] = a3d_vop2(A3D_OP2_SUBREV_F32, vout, vpos, A3D_SRC_LITERAL);     /* vout = pos - lo            */
+    code[(*n)++] = a3d_f32_bits(lo);
+    code[(*n)++] = a3d_vop2(A3D_OP2_SUB_F32, 5, vpos, A3D_SRC_LITERAL);           /* v5 = hi - pos              */
+    code[(*n)++] = a3d_f32_bits(hi);
+    code[(*n)++] = a3d_vop2(A3D_OP2_MIN_F32, vout, 5, A3D_SRC_VGPR(vout));        /* vout = min(vout, v5)       */
+    code[(*n)++] = a3d_vop2(A3D_OP2_MUL_F32, vout, vout, A3D_SRC_LITERAL);        /* vout *= 1 / R              */
+    code[(*n)++] = inv_r;
+    code[(*n)++] = a3d_vop2(A3D_OP2_MIN_F32, vout, vout, A3D_SRC_ONE_F);          /* vout = min(1.0, vout)      */
+    code[(*n)++] = a3d_vop2(A3D_OP2_MAX_F32, vout, vout, A3D_SRC_ZERO);           /* vout = max(0.0, vout)      */
+}
+
+static uint32_t build_ps_shadow(uint32_t *code, const Amd3dJob *job)
+{
+    uint32_t n = 0, inv_r = a3d_f32_ratio(1, job->shadow_r);
+    ps_shadow_axis(code, &n, 2, 4, job->x0, job->x1, inv_r);                      /* v4 = fx */
+    ps_shadow_axis(code, &n, 3, 6, job->y0, job->y1, inv_r);                      /* v6 = fy */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 4, 6, A3D_SRC_VGPR(4));                 /* v4 = fx * fy               */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 4, 4, A3D_SRC_LITERAL);                 /* v4 *= a / 255  (the alpha) */
+    code[n++] = a3d_f32_ratio(job->a, 255);
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 0, A3D_SRC_LITERAL);                    /* v0 = (r, g) as two halves  */
+    code[n++] = a3d_f16_unorm8(job->r) | (a3d_f16_unorm8(job->g) << 16);
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 5, A3D_SRC_LITERAL);                    /* v5 = b / 255 (a float)     */
+    code[n++] = a3d_f32_ratio(job->b, 255);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 1);                        /* v1 = (b, alpha) as halves  */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(5), A3D_SRC_VGPR(4), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                      /* exp mrt0 v0, v1 compr done vm */
+    code[n++] = a3d_exp1(0, 1, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
 static uint32_t ps_salt; /* 0 normally; see amd_3d_stress() mode F */
 
 uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job)
@@ -294,6 +329,8 @@ uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job)
     uint32_t n = 0;
     if (job->textured)
         return build_ps_textured(code, job);
+    if (job->shadow_r)
+        return build_ps_shadow(code, job);
     /* RB+ wants FP16_ABGR: the colour goes out as four half floats packed two per VGPR (R low, G high; B low, A high). */
     uint32_t rg = a3d_f16_unorm8(job->r) | (a3d_f16_unorm8(job->g) << 16);
     uint32_t ba = a3d_f16_unorm8(job->b) | (a3d_f16_unorm8(job->a) << 16);
@@ -555,7 +592,7 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     /* 6. the pixel shader: no interpolated inputs, but one perspective VGPR input must be enabled (Mesa: "we need to enable at
      * least one of them, otherwise we hang the GPU"); one MRT, exported as FP16_ABGR */
     uint32_t ps_in = 1u << F3D_SPI_PS_INPUT_ENA__PERSP_CENTER_ENA;
-    if (job->textured)  /* the pixel position, as floats, goes to the VGPRs after the two perspective ones: v2 = x, v3 = y */
+    if (job->textured || job->shadow_r)  /* the pixel position, as floats, goes to the VGPRs after the two perspective ones: v2 = x, v3 = y */
         ps_in |= (1u << F3D_SPI_PS_INPUT_ENA__POS_X_FLOAT_ENA) | (1u << F3D_SPI_PS_INPUT_ENA__POS_Y_FLOAT_ENA);
     ctx2(&b, R3D_SPI_PS_INPUT_ENA, ps_in, ps_in);
     ctx1(&b, R3D_SPI_PS_IN_CONTROL, 0u << F3D_SPI_PS_IN_CONTROL__NUM_INTERP);
@@ -563,7 +600,8 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     sh1(&b, R3D_SPI_SHADER_PGM_LO_PS, (uint32_t)(job->ps_mc >> 8));
     sh1(&b, R3D_SPI_SHADER_PGM_HI_PS, (uint32_t)(job->ps_mc >> 40) & 0xFFu);
     /* VGPRS / SGPRS are counted in blocks of 4 / 8, minus 1: the textured shader uses v0 .. v11 (12) and 8 user SGPRs + the system ones */
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, ((job->textured ? 2u : 0u) << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) |
+    /* the shadow shader uses v0 .. v6 (8 VGPRs) */
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, ((job->textured ? 2u : job->shadow_r ? 1u : 0u) << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) |
                                          ((job->textured ? 2u : 1u) << F3D_SPI_SHADER_PGM_RSRC1_PS__SGPRS) |
                                          (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_PS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_PS__DX10_CLAMP));
     sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_PS, (job->textured ? 8u : 0u) << F3D_SPI_SHADER_PGM_RSRC2_PS__USER_SGPR);
@@ -752,6 +790,23 @@ uint32_t amd_3d_blend_px(uint32_t src, uint32_t dst, uint32_t a)
     return out;
 }
 
+/* The alpha (0 .. 255) the shadow shader gives pixel (x, y) of the job's rectangle, in integers: in half pixels the distance of the
+ * pixel centre to the nearer edge is t = min(2 (x - x0) + 1, 2 (x1 - x) - 1), clamped to 0 .. 2R; alpha = a * tx * ty / (2R)^2. */
+uint32_t amd_3d_shadow_alpha(const Amd3dJob *job, uint32_t x, uint32_t y)
+{
+    int r2 = 2 * (int)job->shadow_r;
+    int tx = 2 * ((int)x - (int)job->x0) + 1, tx2 = 2 * ((int)job->x1 - (int)x) - 1;
+    int ty = 2 * ((int)y - (int)job->y0) + 1, ty2 = 2 * ((int)job->y1 - (int)y) - 1;
+    if (!r2) return job->a;
+    if (tx2 < tx) tx = tx2;
+    if (ty2 < ty) ty = ty2;
+    if (tx < 0) tx = 0;
+    if (tx > r2) tx = r2;
+    if (ty < 0) ty = 0;
+    if (ty > r2) ty = r2;
+    return (uint32_t)(((int)job->a * tx * ty + r2 * r2 / 2) / (r2 * r2));
+}
+
 static int close_px(uint32_t a, uint32_t b)
 {
     int s;
@@ -799,7 +854,7 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
     uint32_t cx0 = job->x0 > margin ? job->x0 - margin : 0, cy0 = job->y0 > margin ? job->y0 - margin : 0;
     uint32_t cx1 = job->x1 + margin > job->width ? job->width : job->x1 + margin;
     uint32_t cy1 = job->y1 + margin > job->height ? job->height : job->y1 + margin;
-    uint32_t x, y, expect, in_good = 0, in_total = 0, out_bad = 0, out_total = 0;
+    uint32_t x, y, expect, colour, in_good = 0, in_total = 0, out_bad = 0, out_total = 0;
     uint32_t first_in = 0, first_out = 0;
     uint32_t px_r = job->r, px_g = job->g, px_b = job->b;
 
@@ -834,6 +889,7 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
     expect = (px_r << 16) | (px_g << 8) | px_b;               /* memory dword 0x00RRGGBB, the X byte is not compared */
     if (!job->bgr)
         expect = (px_b << 16) | (px_g << 8) | px_r;
+    colour = expect;
     if (job->blend)                                           /* M3: what "over" blending onto the pattern gives */
         expect = amd_3d_blend_px(expect, pattern, job->a);
     for (y = cy0; y < cy1; y++)
@@ -842,7 +898,8 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
             if (x >= job->x0 && x < job->x1 && y >= job->y0 && y < job->y1) {
                 in_total++;
                 if (job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu)
-                                  : job->blend ? near_px(v, expect, 2) : v == expect) in_good++;
+                    : job->shadow_r ? near_px(v, amd_3d_blend_px(colour, pattern, amd_3d_shadow_alpha(job, x, y)), 3)
+                    : job->blend ? near_px(v, expect, 2) : v == expect) in_good++;
                 else if (!first_in) first_in = v | 0x01000000u;
             } else {
                 out_total++;
@@ -1154,6 +1211,51 @@ int amd_3d_blend_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, 
     job.r = 255; job.g = 255; job.b = 255; job.a = 64;
     job.blend = 1;
     return draw_and_check(&job, (uint32_t)off64, 8, 0x00204060u, 0);
+}
+
+/* ---- M3: soft shadow ----
+ * A black shadow (alpha 160 inside, falling to 0 over the outer 8 pixels) blended "over" a light grey background. Every pixel inside is
+ * compared with amd_3d_blend_px(black, grey, amd_3d_shadow_alpha()) within 3 per byte; everything outside must stay grey. */
+int amd_3d_shadow_offscreen(void)
+{
+    Amd3dJob job = { 0 };
+    if (!amd_gpu_ring_running()) { status = "3D shadow test skipped: the persistent ring is not running"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc) { status = "3D shadow test skipped: no MC address for the test memory"; return 0; }
+    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
+    job.bgr = 1;
+    job.x0 = 24; job.y0 = 8; job.x1 = 232; job.y1 = 56;
+    job.r = 0; job.g = 0; job.b = 0; job.a = 160;
+    job.blend = 1;
+    job.shadow_r = 8;
+    return draw_and_check(&job, VRAM_RT_OFF, 256, 0x00C0C0C0u, 1);
+}
+
+/* The same on the screen, above the blended rectangle: a 12-pixel soft shadow. */
+int amd_3d_shadow_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
+{
+    Amd3dJob job = { 0 };
+    uint64_t off64;
+    if (!amd_gpu_ring_running()) { status = "3D shadow screen test skipped: the persistent ring is not running"; return 0; }
+    if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 260 || fb_phys < vram_cpu) {
+        status = "3D shadow screen test skipped: bad framebuffer info"; return 0; }
+    off64 = fb_phys - vram_cpu;
+    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_SHADER_OFF) {
+        status = "3D shadow screen test skipped: the framebuffer reaches the test memory"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc) { status = "3D shadow screen test skipped: no MC address"; return 0; }
+    job.pitch_px = pitch_bytes / 4u; job.width = width; job.height = height;
+    job.bgr = bgr;
+    job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
+    job.y0 = height - 240; job.y1 = height - 176;
+    job.r = 0; job.g = 0; job.b = 0; job.a = 192;
+    job.blend = 1;
+    job.shadow_r = 12;
+    return draw_and_check(&job, (uint32_t)off64, 8, 0x00C0C0C0u, 0);
 }
 
 /* ---- M2: the rectangle textured from an image in VRAM ---- */
