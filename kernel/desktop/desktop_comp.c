@@ -155,6 +155,7 @@ static void measure(const GfxCompOps *ops, unsigned long long draw_us, unsigned 
             STATS.busy[i].title[k] = busy[i].title[k];
         STATS.busy[i].redraws = busy[i].redraws;
         STATS.busy[i].pixels = busy[i].pixels;
+        STATS.busy[i].us_max = busy[i].us_max;
     }
     if (ops->report)
         ops->report(&STATS);

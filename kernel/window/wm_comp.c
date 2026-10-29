@@ -4,6 +4,7 @@
  * wm_comp_content_internal). Moving or raising a window changes no surface, only where the GPU puts it. */
 #include "wm_internal.h"
 #include "ui.h"
+#include "timer.h"
 
 #define WMC_MAX 64
 
@@ -16,7 +17,9 @@ typedef struct
     int dirty;           /* content changed inside [dx0,dx1) x [dy0,dy1), relative to the window's corner */
     int dx0, dy0, dx1, dy1;
     int seen;
+    int px, py;                   /* where the window was when its surface was last brought up to date */
     char title[24];               /* for the report */
+    unsigned long long st_us_max; /* the slowest drawing of it */
     unsigned st_n;                /* drawn since wm_comp_busiest(): times, pixels */
     unsigned long long st_px;
 } Wmc;
@@ -53,9 +56,24 @@ void wm_comp_why(unsigned out[WM_WHY_COUNT])
     }
 }
 
-/* A window's surface was drawn (px pixels): counted for wm_comp_busiest(). */
-static void tally(Wmc *c, const Window *w, unsigned long long px)
+/* A window moved without being drawn (the GPU only puts its surface elsewhere). What it remembered while drawing is in
+ * screen coordinates and must move with it: its text boxes (where a click lands, UiEdit.field) and its buttons. */
+static void moved(Window *w, int dx, int dy)
 {
+    for (int k = 0; k < w->edit_count && k < WM_MAX_EDITS; k++)
+        if (w->edits[k].field.w > 0)
+        {
+            w->edits[k].field.x += dx;
+            w->edits[k].field.y += dy;
+        }
+    wm_layout_internal(w);
+}
+
+/* A window's surface was drawn (px pixels, us microseconds): counted for wm_comp_busiest(). */
+static void tally(Wmc *c, const Window *w, unsigned long long px, unsigned long long us)
+{
+    if (us > c->st_us_max)
+        c->st_us_max = us;
     int k = 0;
     for (; k < (int)sizeof c->title - 1 && w->title[k]; k++)
         c->title[k] = w->title[k];
@@ -79,11 +97,13 @@ int wm_comp_busiest(WmBusy *out, int max)
             out[n].title[k] = best->title[k];
         out[n].redraws = best->st_n;
         out[n].pixels = best->st_px;
+        out[n].us_max = best->st_us_max;
         best->st_n = 0; /* taken: the next round finds the next one */
         best->st_px = 0;
+        best->st_us_max = 0;
     }
     for (int i = 0; i < WMC_MAX; i++)
-        WMC[i].st_n = 0, WMC[i].st_px = 0; /* the rest start again too */
+        WMC[i].st_n = 0, WMC[i].st_px = 0, WMC[i].st_us_max = 0; /* the rest start again too */
     return n;
 }
 
@@ -252,6 +272,11 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         c->seen = 1;
         if (w->minimized)
             continue;
+        if (c->surf && (w->r.x != c->px || w->r.y != c->py))
+            moved(w, w->r.x - c->px, w->r.y - c->py);
+        c->px = w->r.x;
+        c->py = w->r.y;
+        unsigned long long t0 = timer_us();
         int m = w->maximized ? 0 : WM_SHADOW_MARGIN;
         int lw = w->r.w + 2 * m, lh = w->r.h + 2 * m;
         if ((unsigned long long)lw * (unsigned long long)lh * 4ULL > bytes)
@@ -279,7 +304,7 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
             if (draw_layer(w, i, top, c, a, b) != 0 || ops->upload(c->surf, a, lw, 0, 0, lw, lh, 0) != 0)
                 return -1;
             DRAWN_FULL++;
-            tally(c, w, (unsigned long long)lw * (unsigned long long)lh * 2ULL); /* two passes */
+            tally(c, w, (unsigned long long)lw * (unsigned long long)lh * 2ULL, timer_us() - t0); /* two passes */
         }
         else if (c->dirty)
         {
@@ -302,7 +327,7 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
                     return -1;
             }
             DRAWN_PART++;
-            tally(c, w, (unsigned long long)(c->dx1 - c->dx0) * (unsigned long long)(c->dy1 - c->dy0));
+            tally(c, w, (unsigned long long)(c->dx1 - c->dx0) * (unsigned long long)(c->dy1 - c->dy0), timer_us() - t0);
         }
         c->sig = sig;
         c->full = 0;

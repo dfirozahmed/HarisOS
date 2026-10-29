@@ -177,6 +177,7 @@ typedef struct
         char title[24];
         unsigned redraws;
         unsigned long long pixels;
+        unsigned long long us_max;
     } busy[3];
 } GfxCompStats;
 typedef struct

@@ -164,6 +164,7 @@ typedef struct
     char title[24];
     unsigned redraws;
     unsigned long long pixels;
+    unsigned long long us_max; /* its slowest drawing */
 } WmBusy;
 int wm_comp_busiest(WmBusy *out, int max);
 int wm_drag_memory(void **a, void **b, unsigned long long *bytes); /* the two buffers of wm_set_drag_memory(); 0 = none */

@@ -34,6 +34,7 @@ static const GfxCompOps OPS = { s_new, s_free, s_upload, s_compose, 0 };
 
 static UiRect LAST_BODY; /* the body rectangle the window was last drawn with: apps remember such places for the clicks */
 static void draw(Window*w,UiRect b){ LAST_BODY = b; ui_text(b.x+16,b.y+16,"Hello",UI_TEXT_HEADING); (void)w; }
+static void draw_edit(Window*w,UiRect b){ ui_edit_draw(ui_rect(b.x+10,b.y+10,120,30),&w->edits[0],"Type",0); }
 
 int main(void){
   int W=1024,H=640; unsigned*fb=calloc(W*H,4);
@@ -118,6 +119,21 @@ int main(void){
     assert(wm_comp_busiest(bz,3)==1 && strcmp(bz[0].title,"One")==0 && bz[0].redraws==1 &&
            bz[0].pixels==(unsigned long long)w->r.w*w->r.h);
     assert(wm_comp_busiest(bz,3)==0);                              /* taken: 0 again */
+  }
+  /* moved without being drawn: where its text box and its buttons are moves with it (clicks land there) */
+  { Window*e=wm_create("Edit",100,120,300,200,draw_edit,0);
+    e->edit_count=1;
+    int bi=wm_add_button(e,"OK",UI_BTN_PRIMARY,ui_rect(20,120,80,30),0,0);
+    assert(bi>=0);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    UiRect f0=e->edits[0].field, b0=e->btn[bi].r;
+    assert(f0.w==120 && f0.x==e->r.x+1+10);
+    int up2=UPLOADS;
+    wm_pointer(e->r.x+150,e->r.y+15,1); wm_pointer(e->r.x+150+70,e->r.y+15+30,1); wm_pointer(e->r.x+150,e->r.y+15,0);
+    assert(e->r.x==170 && e->r.y==150);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up2);   /* not drawn */
+    assert(e->edits[0].field.x==f0.x+70 && e->edits[0].field.y==f0.y+30);
+    assert(e->btn[bi].r.x==b0.x+70 && e->btn[bi].r.y==b0.y+30);
   }
   puts("wm compositor tests passed");
   return 0;

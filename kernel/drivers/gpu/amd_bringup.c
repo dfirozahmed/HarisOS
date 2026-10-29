@@ -147,8 +147,17 @@ static void amd_scene_report(const GfxCompStats *s)
         serial_print("  busy window: "); serial_print(s->busy[i].title); serial_print("\n");
         log_hex("    times drawn         ", s->busy[i].redraws);
         log_hex("    kilopixels drawn    ", (uint32_t)(s->busy[i].pixels / 1000u));
+        log_hex("    slowest drawing us  ", (uint32_t)s->busy[i].us_max);
     }
+    /* writing GPULOG.TXT stops the desktop meanwhile (the pointer too): how long did the last one take? */
+    static unsigned long long last_save;
+    log_hex("  last log save, cycles ", (uint32_t)(last_save > 0xFFFFFFFFull ? 0xFFFFFFFFull : last_save));
+    unsigned lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    unsigned long long t0 = ((unsigned long long)hi << 32) | lo;
     amd_gpu_log_save();
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    last_save = (((unsigned long long)hi << 32) | lo) - t0;
 }
 static const GfxCompOps amd_scene_ops = { amd_comp_surface_new, amd_comp_surface_free, amd_comp_surface_upload, amd_scene_compose,
                                           amd_scene_report };
