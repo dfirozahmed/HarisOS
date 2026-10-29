@@ -282,6 +282,30 @@ int main(void)
         assert(gfx_comp_present(&it, 1, r, 1) == -1 && CMP_CALLS == 2 && gfx_comp() == 0);
     }
 
+    {   /* a layer placed on the screen: drawing in screen coordinates lands in the buffer, cut to it and to the screen's left / top */
+        static unsigned int scr[40 * 30], buf[10 * 8];
+        gfx_init(scr, 40, 30, 40, 1);
+        assert(gfx_layer_begin_at(buf, 12, 6, 10, 8, 0x00FFFFFFu) == 0);
+        assert(gfx_width() == 40 && gfx_height() == 30);              /* the screen is still the screen */
+        gfx_fill_rect(0, 0, 40, 30, gfx_rgb(1, 2, 3));               /* everything: only the buffer gets it */
+        gfx_layer_end();
+        for (int i = 0; i < 10 * 8; ++i) assert(buf[i] == gfx_rgb(1, 2, 3));
+        for (int i = 0; i < 40 * 30; ++i) assert(scr[i] == 0);
+        assert(gfx_layer_begin_at(buf, 12, 6, 10, 8, 0) == 0);
+        gfx_fill_rect(14, 7, 2, 1, gfx_rgb(9, 9, 9));                /* screen (14, 7) is buffer (2, 1) */
+        gfx_layer_end();
+        assert(buf[1 * 10 + 2] == gfx_rgb(9, 9, 9) && buf[1 * 10 + 4] == 0 && buf[0] == 0);
+        assert(gfx_layer_begin_at(buf, -4, -2, 10, 8, 0) == 0);        /* reaching past the left and top edges */
+        gfx_fill_rect(-4, -2, 10, 8, gfx_rgb(5, 5, 5));
+        gfx_layer_end();
+        assert(buf[0] == 0 && buf[2 * 10 + 4] == gfx_rgb(5, 5, 5) && buf[1 * 10 + 9] == 0);
+        assert(gfx_layer_begin_at(buf, 35, 26, 10, 8, 0) == 0);        /* and past the right and bottom ones: kept */
+        gfx_fill_rect(35, 26, 10, 8, gfx_rgb(6, 6, 6));
+        gfx_layer_end();
+        assert(buf[0] == gfx_rgb(6, 6, 6) && buf[7 * 10 + 9] == gfx_rgb(6, 6, 6));
+        assert(gfx_width() == 40 && gfx_height() == 30);
+    }
+
     puts("Graphics regression tests passed.");
     return 0;
 }

@@ -101,7 +101,11 @@ int gfx_scroll_rect(int x, int y, int w, int h, int dy);
  * black, the top byte is how much of the background still shows through (255 = nothing drawn there).
  * gfx_layer_blit() draws the layer at x,y (clipped), over what is already in the picture. */
 int gfx_layer_begin(void *buf, int w, int h, unsigned fill);
-int gfx_layer_begin_keep(void *buf, int w, int h); /* the same, but buf keeps what it holds (no fill) */
+/* The same, but the buffer's pixel (0, 0) is (x, y) of the screen: drawing uses screen coordinates as usual (so what a window
+ * remembers while drawing, such as where its buttons and text boxes are, is right), and only [x, x+w) x [y, y+h) is drawn,
+ * nothing left of or above the screen. _keep: the buffer is not filled first. */
+int gfx_layer_begin_at(void *buf, int x, int y, int w, int h, unsigned fill);
+int gfx_layer_begin_at_keep(void *buf, int x, int y, int w, int h);
 void gfx_layer_end(void);
 void gfx_layer_pack(void *over_black, const void *over_white, int w, int h); /* w*h pixels each; the layer is w wide */
 void gfx_layer_blit(const void *layer, int lw, int lh, int x, int y);

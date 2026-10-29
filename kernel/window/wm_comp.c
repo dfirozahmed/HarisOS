@@ -114,6 +114,12 @@ static unsigned signature(const Window *w, int i, int top)
     MIX((unsigned)(unsigned long long)ui_theme());
     for (const char *s = w->title; *s; s++)
         MIX(*s);
+    /* drawing stops at the screen's left and top edges: while the window reaches past them, where it is matters */
+    int m = w->maximized ? 0 : WM_SHADOW_MARGIN;
+    if (w->r.x - m < 0)
+        MIX(w->r.x - m);
+    if (w->r.y - m < 0)
+        MIX(w->r.y - m);
 #undef MIX
     return h;
 }
@@ -121,18 +127,15 @@ static unsigned signature(const Window *w, int i, int top)
 /* The window drawn at (m, m) of a buffer: once over black and once over white, packed (see gfx_layer_pack). */
 static int draw_layer(Window *w, int i, int top, Wmc *c, void *a, void *b)
 {
-    UiRect real = w->r;
     void *buf[2] = {a, b};
     for (int pass = 0; pass < 2; pass++)
     {
-        if (gfx_layer_begin(buf[pass], c->lw, c->lh, pass ? 0x00FFFFFFu : 0) != 0)
+        /* where the window is: what it remembers while drawing (its buttons, text boxes) stays in screen coordinates */
+        if (gfx_layer_begin_at(buf[pass], w->r.x - c->m, w->r.y - c->m, c->lw, c->lh, pass ? 0x00FFFFFFu : 0) != 0)
             return -1;
-        w->r = ui_rect(c->m, c->m, real.w, real.h);
         wm_draw_window_internal(w, i, top);
         gfx_layer_end();
-        w->r = real;
     }
-    wm_layout_internal(w);
     gfx_layer_pack(a, b, c->lw, c->lh);
     return 0;
 }
@@ -198,15 +201,11 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         {
             /* one pass over whatever the buffer holds, only inside the changed part; that part is opaque */
             int x0 = c->dx0 + m, y0 = c->dy0 + m, cw = c->dx1 - c->dx0, ch = c->dy1 - c->dy0;
-            UiRect real = w->r;
-            if (gfx_layer_begin_keep(a, lw, lh) != 0)
+            if (gfx_layer_begin_at_keep(a, w->r.x - m, w->r.y - m, lw, lh) != 0)
                 return -1;
-            gfx_set_clip(x0, y0, cw, ch);
-            w->r = ui_rect(m, m, real.w, real.h);
+            gfx_clip_intersect(w->r.x + c->dx0, w->r.y + c->dy0, cw, ch);
             wm_draw_window_internal(w, i, top);
             gfx_layer_end();
-            w->r = real;
-            wm_layout_internal(w);
             if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, cw, ch, 1) != 0)
                 return -1;
         }

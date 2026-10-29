@@ -334,6 +334,7 @@ uint32_t amd_vpool_free_bytes(const AmdVPool *p)
 /* ---- running it, and the M4a test ---- */
 #define VRAM_COMP_SHADER_OFF 0x0B004000u   /* 4 KiB: the four shaders at AMD_COMP_*_OFF */
 #define VRAM_COMP_SYNC_OFF 0x0B300040u     /* 4 bytes for the end-of-frame sync */
+#define VRAM_COMP_SYNC2_OFF 0x0B300044u    /* the same for a second frame in one submission (the scene compositor) */
 /* Below 256 MiB: the CPU reaches VRAM only through BAR0, and on this laptop BAR0 covers the first 256 MiB of the 512 MiB (reads at
  * 256 MiB and up gave 0xFFFFFFFF, 2026-10-29). 208 MiB = after the PSP TMR (192 MiB, 4 MiB). */
 #define VRAM_COMP_RT_OFF 0x0D000000u       /* the 512 x 256 offscreen target (512 KiB) */
@@ -381,6 +382,10 @@ static uint32_t frame_submit(const uint32_t *ib, uint32_t n)
         amd_gpu_frame_ib_write32(k, def[k]);
     for (k = 0; k < n; k++)
         amd_gpu_frame_ib_write32(nd + k, ib[k]);
+    /* the frames end by waiting until the sync word holds the value their colour-buffer flush writes: it must not be there already
+     * from an earlier submission, or the wait ends at once (and a second frame would read what the first one has not finished) */
+    amd_gpu_vram_write32(VRAM_COMP_SYNC_OFF, 0);
+    amd_gpu_vram_write32(VRAM_COMP_SYNC2_OFF, 0);
     amd_gpu_wc_flush();                 /* the IB, and whatever the CPU wrote that the frame reads */
     return amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), nd + n);
 }
@@ -977,7 +982,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
         if (cut(&x0, &y0, &x1, &y1, &all, w, h))
             amd_comp_image(&f, &sc.bb, (uint32_t)x0, (uint32_t)y0, (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1, 255, sc.bgr);
     }
-    nb = amd_comp_end(&f, sync_mc);
+    nb = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC2_OFF, 4u));   /* its own sync word */
     if (!nb) return -1;
     seq = frame_submit(ib, na + nb);
     if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) return -1;
@@ -1012,7 +1017,7 @@ int amd_comp_scene_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, 
 }
 
 /* What the scene test should show at (x, y) without the layer. */
-static uint32_t sc_wall(uint32_t x, uint32_t y) { return (x * 3u) | ((y * 2u) << 8) | (0x40u << 16); }
+static uint32_t sc_wall(uint32_t x, uint32_t y) { return ((x * 3u) & 0xFFu) | (((y * 2u) & 0xFFu) << 8) | (0x40u << 16); }
 
 /* M4c check before the compositor is used: a 176 x 124 "wallpaper" and the test layer at (40, 30) put together in two rectangles
  * (the top 60 rows, then the rest) into the offscreen buffer, through the back buffer, every pixel checked. 1 = right. */

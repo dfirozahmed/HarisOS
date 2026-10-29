@@ -42,14 +42,15 @@ static int overlaps(UiRect a, int x0, int y0, int x1, int y1)
 }
 
 /* The taskbar as a packed layer (drawn over black and over white: it is partly see-through). */
-static int taskbar_layer(const GfxCompOps *ops, void *a, void *b, int w, int h)
+static int taskbar_layer(const GfxCompOps *ops, void *a, void *b, int w, int h, int y)
 {
     void *buf[2] = {a, b};
     for (int pass = 0; pass < 2; pass++)
     {
-        if (gfx_layer_begin(buf[pass], w, h, pass ? 0x00FFFFFFu : 0) != 0)
+        /* where the taskbar is on the screen: it remembers where its buttons are while it draws (for the clicks) */
+        if (gfx_layer_begin_at(buf[pass], 0, y, w, h, pass ? 0x00FFFFFFu : 0) != 0)
             return -1;
-        taskbar_draw(); /* inside the layer the "screen" is w x h, so it lands at its top */
+        taskbar_draw();
         gfx_layer_end();
     }
     gfx_layer_pack(a, b, w, h);
@@ -89,7 +90,7 @@ int desktop_comp_frame(const UiRect *areas, int n)
     int bar = full;
     for (int i = 0; i < n && !bar; i++)
         bar = overlaps(areas[i], 0, H - th, W, H);
-    if (bar && taskbar_layer(ops, a, b, W, th) != 0)
+    if (bar && taskbar_layer(ops, a, b, W, th, H - th) != 0)
         goto fail;
     if (wm_comp_update(ops, a, b, bytes) != 0)
         goto fail;

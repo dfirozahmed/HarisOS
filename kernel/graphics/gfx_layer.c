@@ -9,7 +9,9 @@ static struct
     int on;
 } SAVED;
 
-static int layer_begin(void *buf, int w, int h, unsigned fill, int do_fill)
+/* x, y: where the buffer's pixel (0, 0) is in the picture's coordinates. Drawing keeps using those coordinates (so what a
+ * window remembers while it draws, like where its buttons are, stays right); the clip keeps it inside the buffer. */
+static int layer_begin(void *buf, int at, int x, int y, int w, int h, unsigned fill, int do_fill)
 {
     if (SAVED.on || !buf || w <= 0 || h <= 0)
         return -1;
@@ -24,17 +26,27 @@ static int layer_begin(void *buf, int w, int h, unsigned fill, int do_fill)
     volatile unsigned int *p = (volatile unsigned int *)buf;
     for (long long i = 0; do_fill && i < (long long)w * h; i++)
         p[i] = fill;
-    DRAW = p;
+    DRAW = p - ((long long)y * w + x); /* pixel (px, py) is DRAW[py * w + px] = buf[(py - y) * w + (px - x)] */
     DPITCH = w;
-    W = w;
-    H = h;
+    if (at)
+    {
+        W = SAVED.w > x + w ? SAVED.w : x + w; /* the screen stays the screen (gfx_width()), but nothing past it is cut */
+        H = SAVED.h > y + h ? SAVED.h : y + h;
+    }
+    else
+    {
+        W = w;
+        H = h;
+    }
     BACK = 0; /* nothing drawn here may be marked dirty or presented */
     gfx_reset_clip();
+    gfx_set_clip(x, y, w, h); /* left of or above the screen (x, y < 0) is cut: nothing can be drawn there */
     return 0;
 }
 
-int gfx_layer_begin(void *buf, int w, int h, unsigned fill) { return layer_begin(buf, w, h, fill, 1); }
-int gfx_layer_begin_keep(void *buf, int w, int h) { return layer_begin(buf, w, h, 0, 0); }
+int gfx_layer_begin(void *buf, int w, int h, unsigned fill) { return layer_begin(buf, 0, 0, 0, w, h, fill, 1); }
+int gfx_layer_begin_at(void *buf, int x, int y, int w, int h, unsigned fill) { return layer_begin(buf, 1, x, y, w, h, fill, 1); }
+int gfx_layer_begin_at_keep(void *buf, int x, int y, int w, int h) { return layer_begin(buf, 1, x, y, w, h, 0, 0); }
 
 void gfx_layer_end(void)
 {
