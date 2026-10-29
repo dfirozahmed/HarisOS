@@ -149,6 +149,22 @@ static void amd_scene_report(const GfxCompStats *s)
         log_hex("    times drawn         ", s->busy[i].redraws);
         log_hex("    kilopixels drawn    ", (uint32_t)(s->busy[i].pixels / 1000u));
         log_hex("    slowest drawing us  ", (uint32_t)s->busy[i].us_max);
+        /* what asked for it: requests and thousands of pixels, by reason (only the ones that happened) */
+        for (int r = 0; r < 12 && r <= s->nwhy; r++) {
+            if (!s->busy[i].why_n[r])
+                continue;
+            for (int part = 0; part < 2; part++) {
+                char label[40];
+                int k = 0;
+                const char *p = "    ";
+                while (*p) label[k++] = *p++;
+                for (p = s->why_name[r]; *p && k < 18; ) label[k++] = *p++;
+                for (p = part ? " (kpx)" : " (times)"; *p; ) label[k++] = *p++;
+                while (k < 24) label[k++] = ' ';
+                label[k] = 0;
+                log_hex(label, part ? s->busy[i].why_kpx[r] : s->busy[i].why_n[r]);
+            }
+        }
     }
     /* Writing GPULOG.TXT stops the desktop meanwhile (the pointer too: ~0.2 s on the laptop, 2026-10-30), so the reports
      * stay in the log in memory and go to the disk only after the first one and the last one. */

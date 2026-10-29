@@ -166,6 +166,8 @@ typedef struct
     unsigned redraws;
     unsigned long long pixels;
     unsigned long long us_max; /* its slowest drawing */
+    unsigned why_n[WM_WHY_COUNT + 1];          /* requests by reason; [WM_WHY_COUNT]: its look changed (wm_why_name) */
+    unsigned long long why_px[WM_WHY_COUNT + 1]; /* the pixels asked for */
 } WmBusy;
 int wm_comp_busiest(WmBusy *out, int max);
 int wm_drag_memory(void **a, void **b, unsigned long long *bytes); /* the two buffers of wm_set_drag_memory(); 0 = none */

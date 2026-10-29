@@ -140,6 +140,10 @@ int main(void){
     assert(wm_comp_update(&OPS,a,b,bytes)==0);
     assert(wm_comp_busiest(bz,3)==1 && strcmp(bz[0].title,"One")==0 && bz[0].redraws==1 &&
            bz[0].pixels==(unsigned long long)w->r.w*w->r.h);
+    /* and by reason: the app's 10 x 10 part, then everything (invalidate); its look did not change */
+    assert(bz[0].why_n[WM_WHY_AREA]==1 && bz[0].why_px[WM_WHY_AREA]==100);
+    assert(bz[0].why_n[WM_WHY_INVALIDATE]==1 && bz[0].why_px[WM_WHY_INVALIDATE]==(unsigned long long)w->r.w*w->r.h);
+    assert(bz[0].why_n[WM_WHY_KEY]==0 && bz[0].why_n[WM_WHY_COUNT]==0 && strcmp(wm_why_name(WM_WHY_COUNT),"look")==0);
     assert(wm_comp_busiest(bz,3)==0);                              /* taken: 0 again */
   }
   /* moved without being drawn: where its text box and its buttons are moves with it (clicks land there) */

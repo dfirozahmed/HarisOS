@@ -182,6 +182,8 @@ typedef struct
         unsigned redraws;
         unsigned long long pixels;
         unsigned long long us_max;
+        unsigned why_n[12];   /* requests by reason (the names in why_name; the last used one: its look changed) */
+        unsigned why_kpx[12]; /* thousands of pixels asked for */
     } busy[3];
 } GfxCompStats;
 typedef struct

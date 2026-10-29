@@ -23,6 +23,8 @@ typedef struct
     unsigned long long st_us_max; /* the slowest drawing of it */
     unsigned st_n;                /* drawn since wm_comp_busiest(): times, pixels */
     unsigned long long st_px;
+    unsigned wn[WM_WHY_COUNT + 1];         /* requests to draw it, by reason (WM_WHY_*; the last: its look changed) */
+    unsigned long long wpx[WM_WHY_COUNT + 1]; /* and the pixels they asked for */
 } Wmc;
 
 static Wmc WMC[WMC_MAX];
@@ -40,12 +42,29 @@ static unsigned WHY[WM_WHY_COUNT];
 static const char *const WHY_NAME[WM_WHY_COUNT] = {"press", "right press", "drag", "window buttons", "hover left", "hover",
                                                    "tick", "wheel", "key", "app area", "invalidate"};
 
-const char *wm_why_name(int why) { return why >= 0 && why < WM_WHY_COUNT ? WHY_NAME[why] : "?"; }
+const char *wm_why_name(int why)
+{
+    if (why == WM_WHY_COUNT)
+        return "look"; /* not a request: the window's look changed (size, focus, title), the whole layer drawn twice */
+    return why >= 0 && why < WM_WHY_COUNT ? WHY_NAME[why] : "?";
+}
+
+static int WHY_NOW = WM_WHY_AREA; /* the reason of the request being marked now */
 
 void wm_comp_why_internal(int why)
 {
     if (ON && why >= 0 && why < WM_WHY_COUNT)
+    {
         WHY[why]++;
+        WHY_NOW = why;
+    }
+}
+
+/* A request of reason why for a part of px pixels of the window: counted for its report. */
+static void asked(Wmc *c, int why, unsigned long long px)
+{
+    c->wn[why]++;
+    c->wpx[why] += px;
 }
 
 void wm_comp_why(unsigned out[WM_WHY_COUNT])
@@ -99,12 +118,21 @@ int wm_comp_busiest(WmBusy *out, int max)
         out[n].redraws = best->st_n;
         out[n].pixels = best->st_px;
         out[n].us_max = best->st_us_max;
+        for (int r = 0; r <= WM_WHY_COUNT; r++)
+        {
+            out[n].why_n[r] = best->wn[r];
+            out[n].why_px[r] = best->wpx[r];
+        }
         best->st_n = 0; /* taken: the next round finds the next one */
         best->st_px = 0;
         best->st_us_max = 0;
     }
     for (int i = 0; i < WMC_MAX; i++)
-        WMC[i].st_n = 0, WMC[i].st_px = 0, WMC[i].st_us_max = 0; /* the rest start again too */
+    {
+        WMC[i].st_n = 0, WMC[i].st_px = 0, WMC[i].st_us_max = 0; /* everyone starts again */
+        for (int r = 0; r <= WM_WHY_COUNT; r++)
+            WMC[i].wn[r] = 0, WMC[i].wpx[r] = 0;
+    }
     return n;
 }
 
@@ -152,6 +180,7 @@ void wm_comp_content_internal(const Window *w, int x0, int y0, int x1, int y1)
     if (y1 > w->r.h) y1 = w->r.h;
     if (x1 <= x0 || y1 <= y0)
         return;
+    asked(c, WHY_NOW, (unsigned long long)(x1 - x0) * (unsigned long long)(y1 - y0));
     for (int k = 0; k < c->dirty; k++)
         if (x0 >= c->d[k][0] && y0 >= c->d[k][1] && x1 <= c->d[k][2] && y1 <= c->d[k][3])
             return; /* already in */
@@ -195,6 +224,7 @@ void wm_comp_all_internal(void)
         Wmc *c = &WMC[i];
         if (!c->id || c->full || !c->surf)
             continue;
+        asked(c, WM_WHY_INVALIDATE, (unsigned long long)(c->lw - 2 * c->m) * (unsigned long long)(c->lh - 2 * c->m));
         c->dirty = 1;
         c->d[0][0] = c->d[0][1] = 0;
         c->d[0][2] = c->lw - 2 * c->m;
@@ -315,6 +345,7 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
             if (draw_layer(w, i, top, c, a, b) != 0 || ops->upload(c->surf, a, lw, 0, 0, lw, lh, 0) != 0)
                 return -1;
             DRAWN_FULL++;
+            asked(c, WM_WHY_COUNT, (unsigned long long)w->r.w * (unsigned long long)w->r.h); /* its look changed (or a new surface) */
             tally(c, w, (unsigned long long)lw * (unsigned long long)lh * 2ULL, timer_us() - t0); /* two passes */
         }
         else if (c->dirty)

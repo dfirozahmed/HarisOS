@@ -144,9 +144,9 @@ static void measure(const GfxCompOps *ops, unsigned long long draw_us, unsigned 
     WmBusy busy[3];
     wm_comp_why(why);
     STATS.nwhy = WM_WHY_COUNT < 12 ? WM_WHY_COUNT : 12;
-    for (int i = 0; i < STATS.nwhy; i++)
+    for (int i = 0; i < 12; i++) /* names: the reasons, then "look" (per window only) */
     {
-        STATS.why[i] = why[i];
+        STATS.why[i] = i < STATS.nwhy ? why[i] : 0;
         STATS.why_name[i] = wm_why_name(i);
     }
     STATS.nbusy = wm_comp_busiest(busy, 3);
@@ -157,6 +157,11 @@ static void measure(const GfxCompOps *ops, unsigned long long draw_us, unsigned 
         STATS.busy[i].redraws = busy[i].redraws;
         STATS.busy[i].pixels = busy[i].pixels;
         STATS.busy[i].us_max = busy[i].us_max;
+        for (int r = 0; r < 12 && r <= WM_WHY_COUNT; r++)
+        {
+            STATS.busy[i].why_n[r] = busy[i].why_n[r];
+            STATS.busy[i].why_kpx[r] = (unsigned)(busy[i].why_px[r] / 1000u);
+        }
     }
     STATS.first = REPORTS == 0;
     STATS.last = REPORTS + 1 == REPORT_MAX;
