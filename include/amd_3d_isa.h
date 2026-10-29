@@ -111,6 +111,8 @@ static inline uint32_t a3d_f16_unorm8(uint32_t v)
 #define A3D_OP2_MUL_F32 5u
 #define A3D_OP2_MIN_F32 0xAu
 #define A3D_OP2_MAX_F32 0xBu
+#define A3D_OP2_ADD_F32 1u    /* gfx8 column */
+#define A3D_OP2_ADD_U32 0x34u /* GFX9 only: D = S0 + S1, no carry, VCC untouched (Mesa aco_opcodes.py gfx9=0x34) */
 #define A3D_OP2_SUBREV_CO_U32 27u /* D = S1 - S0, carry to VCC (VOP2 opcode 0x1B on GFX9) */
 #define A3D_OP3_CVT_PKRTZ_F16_F32 662u
 #define A3D_MIMG_IMAGE_LOAD 0u

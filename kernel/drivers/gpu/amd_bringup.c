@@ -640,6 +640,14 @@ void amd_gpu_bringup_cp(void)
         log_3d_result(ok3ds, 1);
         amd_gpu_log_save();
     }
+    /* M3c: a 3 x 3 box blur. The pixel shader reads 9 texels of a checkerboard (IMAGE_LOAD), adds them and divides by 9. */
+    if (ib_ok) {
+        serial_print("3D: about to draw a 3 x 3 box-blurred checkerboard into an offscreen buffer\n");
+        amd_gpu_log_save();
+        int ok3dr = amd_3d_blur_offscreen();
+        log_3d_result(ok3dr, 1);
+        amd_gpu_log_save();
+    }
 #endif
 #if HARIS_AMD_GPU_PSP_LEVEL >= 7
     /* Shader stores. On 2026-10-29 a vertex shader store to VRAM faulted (WRITE, MAPPING_ERROR) and, with SH_MEM_CONFIG = 0
@@ -799,6 +807,14 @@ int amd_gpu_bringup_screen(void)
         int ok3ds = amd_3d_shadow_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
                                          (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
         log_3d_result(ok3ds, 0);
+        amd_gpu_log_save();
+    }
+    {
+        serial_print("3D: about to draw a 3 x 3 box-blurred checkerboard into the screen\n");
+        amd_gpu_log_save();
+        int ok3dr = amd_3d_blur_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
+                                       (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
+        log_3d_result(ok3dr, 0);
         amd_gpu_log_save();
     }
 #endif

@@ -71,7 +71,7 @@ int main(void)
 {
     static uint32_t ib[AMD_3D_IB_MAX], vs[AMD_3D_VS_MAX], ps[AMD_3D_PS_MAX];
     Amd3dJob job = { 0x4100000000ULL + 0x0E100000ULL, 256, 256, 64, 1, 32, 16, 224, 48, 255, 128, 0, 255,
-                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     uint32_t i, n, cnt;
     const uint32_t *p;
 
@@ -297,10 +297,12 @@ int main(void)
         static uint32_t code[AMD_3D_VS_MAX + AMD_3D_PS_MAX];
         Amd3dJob tj = job;
         int which, bad = 0, walked = 1;
-        for (which = 0; which < 4; which++) {
+        for (which = 0; which < 5; which++) {
             uint32_t cn, k = 0;
             tj.textured = which == 2;
             tj.shadow_r = which == 3 ? 8u : 0u;
+            tj.blur_r = which == 4 ? 1u : 0u;
+            if (which == 4) { tj.textured = 1; tj.tex_w = 194; tj.tex_h = 34; tj.tex_pitch_px = 256; }
             cn = which == 0 ? amd_3d_build_vs(code, &tj) : amd_3d_build_ps(code, &tj);
             while (k < cn) {
                 uint32_t w = code[k], top6 = w >> 26, src0 = w & 0x1FFu;
@@ -379,6 +381,19 @@ int main(void)
         check(amd_3d_shadow_alpha(&sj, 128, 32) == 160 && amd_3d_shadow_alpha(&sj, 24, 32) == 10 && amd_3d_shadow_alpha(&sj, 24, 8) == 1,
               "shadow alpha: 160 in the middle, 10 at the left edge, 1 in the corner");
         check(amd_3d_build_ps(sps, &sj) <= AMD_3D_PS_MAX, "shadow pixel shader fits");
+    }
+
+    /* M3 blur: the expected value inside one checker cell, and across a cell edge (3 texels of one colour, 6 of the other per 3 x 3) */
+    {
+        Amd3dJob rj = job;
+        static uint32_t rps[AMD_3D_PS_MAX];
+        uint32_t rn;
+        rj.x0 = 32; rj.y0 = 16; rj.x1 = 224; rj.y1 = 48; rj.bgr = 1;
+        rj.textured = 1; rj.blur_r = 1; rj.tex_w = 194; rj.tex_h = 34; rj.tex_pitch_px = 256;
+        check(amd_3d_blur_px(&rj, 33, 17) == 0x002060E0u, "blur: inside one checker cell = the cell colour 0x2060E0");
+        check(amd_3d_blur_px(&rj, 35, 17) == 0x00A07560u, "blur: across a cell edge = (3 x 0x2060E0 + 6 x 0xE08020) / 9 = 0xA07560");
+        rn = amd_3d_build_ps(rps, &rj);
+        check(rn > 0 && rn <= AMD_3D_PS_MAX && rps[rn - 1] == A3D_S_ENDPGM, "blur pixel shader fits and ends with s_endpgm");
     }
 
     /* PA_SC_RASTER_CONFIG / _1: outside the clear-state table, so the draw stream itself writes both (0, as Mesa's GFX9 default) */

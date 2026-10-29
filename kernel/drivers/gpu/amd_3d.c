@@ -260,7 +260,66 @@ void amd_3d_build_tex_desc(uint32_t d[8], const Amd3dJob *job)
 uint32_t amd_3d_texel(const Amd3dJob *job, uint32_t x, uint32_t y)
 {
     uint32_t r = (x * 255u) / (job->tex_w - 1u), g = (y * 255u) / (job->tex_h - 1u), b = (x * 5u + y * 9u) & 0xFFu;
+    if (job->blur_r) {          /* M3 blur: a 4 x 4 checkerboard of orange and blue, so the blur is plain to see (and to check) */
+        int on = ((x >> 2) + (y >> 2)) & 1;
+        r = on ? 0xE0u : 0x20u; g = on ? 0x80u : 0x60u; b = on ? 0x20u : 0xE0u;
+    }
     return job->bgr ? ((r << 16) | (g << 8) | b) : ((b << 16) | (g << 8) | r);
+}
+
+/* What the blur shader gives pixel (x, y) of the rectangle: per byte, the rounded average of the (2R+1)^2 texels around texel
+ * (x - x0 + R, y - y0 + R). */
+uint32_t amd_3d_blur_px(const Amd3dJob *job, uint32_t x, uint32_t y)
+{
+    uint32_t R = job->blur_r, n = (2u * R + 1u) * (2u * R + 1u), s, dx, dy, out = 0;
+    uint32_t tx = x - job->x0, ty = y - job->y0;
+    for (s = 0; s < 24; s += 8) {
+        uint32_t sum = 0;
+        for (dy = 0; dy <= 2u * R; dy++)
+            for (dx = 0; dx <= 2u * R; dx++)
+                sum += (amd_3d_texel(job, tx + dx, ty + dy) >> s) & 0xFFu;
+        out |= ((sum + n / 2u) / n) << s;
+    }
+    return out;
+}
+
+/* M3 blur: texel coordinates from the pixel position (v4 = x - x0, v5 = y - y0 as integers, as in the textured shader), then for every
+ * tap (i, j) in 0 .. 2R: IMAGE_LOAD texel (v4 + i, v5 + j) into v8 .. v11, add it to v12 .. v15; at the end multiply by 1 / N and export.
+ * The image is 2R bigger than the rectangle, so texel (v4 + i) is the pixel's own texel shifted by i - R. One read at a time
+ * (s_waitcnt after each): simple, and fast enough for a test. V_ADD_U32 leaves VCC alone; no instruction has two scalar operands. */
+static uint32_t build_ps_blur(uint32_t *code, const Amd3dJob *job)
+{
+    uint32_t n = 0, R = job->blur_r, i, j, c, first = 1, inv_n = a3d_f32_ratio(1, (2u * R + 1u) * (2u * R + 1u));
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(2));                /* v_cvt_u32_f32 v4, v2           */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 5, A3D_SRC_VGPR(3));                /* v_cvt_u32_f32 v5, v3           */
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_CO_U32, 4, 4, A3D_SRC_LITERAL);           /* v4 = v4 - x0                   */
+    code[n++] = job->x0;
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_CO_U32, 5, 5, A3D_SRC_LITERAL);           /* v5 = v5 - y0                   */
+    code[n++] = job->y0;
+    for (j = 0; j <= 2u * R; j++)
+        for (i = 0; i <= 2u * R; i++) {
+            code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 6, 4, A3D_SRC_INT(i));          /* v6 = v4 + i                    */
+            code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 7, 5, A3D_SRC_INT(j));          /* v7 = v5 + j                    */
+            code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                     /* image_load v[8:11], v[6:7], s[0:7] */
+            code[n++] = a3d_mimg_1(6, 8, 0, 0);
+            code[n++] = A3D_S_WAITCNT_VM0;
+            for (c = 0; c < 4; c++)
+                code[n++] = first ? a3d_vop1(A3D_OP1_MOV_B32, 12 + c, A3D_SRC_VGPR(8 + c))           /* v12+c = v8+c  */
+                                  : a3d_vop2(A3D_OP2_ADD_F32, 12 + c, 12 + c, A3D_SRC_VGPR(8 + c));   /* v12+c += v8+c */
+            first = 0;
+        }
+    for (c = 0; c < 4; c++) {
+        code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 12 + c, 12 + c, A3D_SRC_LITERAL);    /* v12+c *= 1 / N                 */
+        code[n++] = inv_n;
+    }
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 0);                        /* v0 = (v12, v13) as halves      */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(12), A3D_SRC_VGPR(13), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 1);                        /* v1 = (v14, v15) as halves      */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(14), A3D_SRC_VGPR(15), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                      /* exp mrt0 v0, v1 compr done vm  */
+    code[n++] = a3d_exp1(0, 1, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
 }
 
 /* Pixel shader of the textured rectangle: the pixel position (v2, v3 = x + 0.5, y + 0.5) minus the rectangle's corner is the texel
@@ -327,6 +386,8 @@ static uint32_t ps_salt; /* 0 normally; see amd_3d_stress() mode F */
 uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job)
 {
     uint32_t n = 0;
+    if (job->blur_r)
+        return build_ps_blur(code, job);
     if (job->textured)
         return build_ps_textured(code, job);
     if (job->shadow_r)
@@ -600,8 +661,8 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     sh1(&b, R3D_SPI_SHADER_PGM_LO_PS, (uint32_t)(job->ps_mc >> 8));
     sh1(&b, R3D_SPI_SHADER_PGM_HI_PS, (uint32_t)(job->ps_mc >> 40) & 0xFFu);
     /* VGPRS / SGPRS are counted in blocks of 4 / 8, minus 1: the textured shader uses v0 .. v11 (12) and 8 user SGPRs + the system ones */
-    /* the shadow shader uses v0 .. v6 (8 VGPRs) */
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, ((job->textured ? 2u : job->shadow_r ? 1u : 0u) << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) |
+    /* the shadow shader uses v0 .. v6 (8 VGPRs), the blur shader v0 .. v15 (16) */
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, ((job->blur_r ? 3u : job->textured ? 2u : job->shadow_r ? 1u : 0u) << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) |
                                          ((job->textured ? 2u : 1u) << F3D_SPI_SHADER_PGM_RSRC1_PS__SGPRS) |
                                          (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_PS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_PS__DX10_CLAMP));
     sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_PS, (job->textured ? 8u : 0u) << F3D_SPI_SHADER_PGM_RSRC2_PS__USER_SGPR);
@@ -718,7 +779,7 @@ static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
     if (!skip_shader_write) {
         /* shader code, then zero padding (the shader fetch reads ahead of the end) */
         for (i = 0; i < 64u; i++) amd_gpu_vram_write32(vs_off + 4u * i, i < nvs ? vs[i] : 0u);
-        for (i = 0; i < 64u; i++) amd_gpu_vram_write32(ps_off + 4u * i, i < nps ? ps[i] : 0u);
+        for (i = 0; i < 64u || i < nps + 16u; i++) amd_gpu_vram_write32(ps_off + 4u * i, i < nps ? ps[i] : 0u); /* the blur shader is longer */
 
         amd_gpu_wc_flush();   /* the shader code is in memory before any command that may fetch it */
         for (i = 0; i < shader_delay_reads; i++)
@@ -897,7 +958,8 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
             uint32_t v = amd_gpu_vram_read32(base_off + (y * job->pitch_px + x) * 4u) & 0x00FFFFFFu;
             if (x >= job->x0 && x < job->x1 && y >= job->y0 && y < job->y1) {
                 in_total++;
-                if (job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu)
+                if (job->blur_r ? near_px(v, amd_3d_blur_px(job, x, y), 2)
+                    : job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu)
                     : job->shadow_r ? near_px(v, amd_3d_blend_px(colour, pattern, amd_3d_shadow_alpha(job, x, y)), 3)
                     : job->blend ? near_px(v, expect, 2) : v == expect) in_good++;
                 else if (!first_in) first_in = v | 0x01000000u;
@@ -1256,6 +1318,56 @@ int amd_3d_shadow_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width,
     job.blend = 1;
     job.shadow_r = 12;
     return draw_and_check(&job, (uint32_t)off64, 8, 0x00C0C0C0u, 0);
+}
+
+/* ---- M3: box blur ----
+ * The textured rectangle with a 3 x 3 box blur of a 4 x 4 checkerboard: every pixel inside is compared with amd_3d_blur_px() (within 2
+ * per byte). The image (in VRAM_TEX_OFF, defined below) is 2 pixels bigger than the rectangle each way. */
+#define VRAM_BLUR_TEX_OFF 0x0B200000u /* = VRAM_TEX_OFF */
+int amd_3d_blur_offscreen(void)
+{
+    Amd3dJob job = { 0 };
+    if (!amd_gpu_ring_running()) { status = "3D blur test skipped: the persistent ring is not running"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x300u);
+    job.tex_off = VRAM_BLUR_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_BLUR_TEX_OFF, 256u * 64u * 4u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D blur test skipped: no MC address for the test memory"; return 0; }
+    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
+    job.bgr = 1;
+    job.x0 = 32; job.y0 = 16; job.x1 = 224; job.y1 = 48;
+    job.textured = 1;
+    job.blur_r = 1;
+    job.tex_w = job.x1 - job.x0 + 2u; job.tex_h = job.y1 - job.y0 + 2u; job.tex_pitch_px = 256;
+    return draw_and_check(&job, VRAM_RT_OFF, 256, 0x00112233u, 1);
+}
+
+/* The same on the screen, above the shadow: the blurred checkerboard, 400 x 32. */
+int amd_3d_blur_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
+{
+    Amd3dJob job = { 0 };
+    uint64_t off64;
+    if (!amd_gpu_ring_running()) { status = "3D blur screen test skipped: the persistent ring is not running"; return 0; }
+    if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 320 || fb_phys < vram_cpu) {
+        status = "3D blur screen test skipped: bad framebuffer info"; return 0; }
+    off64 = fb_phys - vram_cpu;
+    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_SHADER_OFF) {
+        status = "3D blur screen test skipped: the framebuffer reaches the test memory"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x300u);
+    job.tex_off = VRAM_BLUR_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_BLUR_TEX_OFF, 512u * 64u * 4u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D blur screen test skipped: no MC address"; return 0; }
+    job.pitch_px = pitch_bytes / 4u; job.width = width; job.height = height;
+    job.bgr = bgr;
+    job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
+    job.y0 = height - 300; job.y1 = height - 268;
+    job.textured = 1;
+    job.blur_r = 1;
+    job.tex_w = job.x1 - job.x0 + 2u; job.tex_h = job.y1 - job.y0 + 2u; job.tex_pitch_px = 512;
+    return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
 }
 
 /* ---- M2: the rectangle textured from an image in VRAM ---- */

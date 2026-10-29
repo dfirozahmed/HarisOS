@@ -30,11 +30,14 @@ typedef struct
     /* M3: a soft shadow (needs blend = 1): the rectangle is the whole shadow, its alpha a / 255 inside, falling linearly to 0 over
      * the outer shadow_r pixels of every edge (both axes multiplied, so the corners are round-ish). 0 = no shadow. */
     uint32_t shadow_r;
+    /* M3: a box blur (needs textured = 1): every pixel is the average of the (2 blur_r + 1)^2 texels around its own one. The image is
+     * 2 blur_r bigger than the rectangle each way (tex_w = x1 - x0 + 2 blur_r ...), so no read falls outside it. 0 = no blur. */
+    uint32_t blur_r;
 } Amd3dJob;
 
 #define AMD_3D_IB_MAX 600 /* dwords amd_3d_build_ib() can write at most */
 #define AMD_3D_VS_MAX 48  /* dwords of the vertex / pixel shader the builders write at most */
-#define AMD_3D_PS_MAX 48
+#define AMD_3D_PS_MAX 128 /* the blur shader: 9 texel reads */
 
 /* Shader code. Return the number of dwords written. */
 uint32_t amd_3d_build_vs(uint32_t *code, const Amd3dJob *job);
@@ -84,6 +87,11 @@ int amd_3d_shadow_offscreen(void);
 int amd_3d_shadow_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 /* The alpha (0 .. 255) the shadow shader gives pixel (x, y) of job (integer version of the shader formula). */
 uint32_t amd_3d_shadow_alpha(const Amd3dJob *job, uint32_t x, uint32_t y);
+/* M3: a 3 x 3 box blur of a checkerboard image (the pixel shader reads 9 texels); offscreen and on the screen. */
+int amd_3d_blur_offscreen(void);
+int amd_3d_blur_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
+/* What the blur gives pixel (x, y) of job: per byte the rounded average of the (2 blur_r + 1)^2 texels around it. */
+uint32_t amd_3d_blur_px(const Amd3dJob *job, uint32_t x, uint32_t y);
 int amd_3d_rect_offscreen(void);
 int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 /* The same two, with the rectangle textured from an image in VRAM (M2). */
