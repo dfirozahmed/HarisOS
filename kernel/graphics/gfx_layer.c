@@ -5,12 +5,14 @@ static struct
 {
     volatile unsigned int *draw;
     int dpitch, w, h, back;
+    int bx0, by0, bx1, by1; /* the hard bounds of drawing */
     GfxClip clip;
     int on;
 } SAVED;
 
 /* x, y: where the buffer's pixel (0, 0) is in the picture's coordinates. Drawing keeps using those coordinates (so what a
- * window remembers while it draws, like where its buttons are, stays right); the clip keeps it inside the buffer. */
+ * window remembers while it draws, like where its buttons are, stays right); the hard bounds of drawing become the buffer,
+ * also where it reaches past the screen's left or top edge (x, y < 0): a window there is still drawn whole. */
 static int layer_begin(void *buf, int at, int x, int y, int w, int h, unsigned fill, int do_fill)
 {
     if (SAVED.on || !buf || w <= 0 || h <= 0)
@@ -20,6 +22,10 @@ static int layer_begin(void *buf, int at, int x, int y, int w, int h, unsigned f
     SAVED.w = W;
     SAVED.h = H;
     SAVED.back = BACK;
+    SAVED.bx0 = BX0;
+    SAVED.by0 = BY0;
+    SAVED.bx1 = BX1;
+    SAVED.by1 = BY1;
     SAVED.clip = gfx_get_clip();
     SAVED.on = 1;
 
@@ -28,19 +34,17 @@ static int layer_begin(void *buf, int at, int x, int y, int w, int h, unsigned f
         p[i] = fill;
     DRAW = p - ((long long)y * w + x); /* pixel (px, py) is DRAW[py * w + px] = buf[(py - y) * w + (px - x)] */
     DPITCH = w;
-    if (at)
-    {
-        W = SAVED.w > x + w ? SAVED.w : x + w; /* the screen stays the screen (gfx_width()), but nothing past it is cut */
-        H = SAVED.h > y + h ? SAVED.h : y + h;
-    }
-    else
+    if (!at) /* a plain layer: its own "screen" */
     {
         W = w;
         H = h;
-    }
+    } /* else the screen stays the screen (gfx_width()) */
+    BX0 = x;
+    BY0 = y;
+    BX1 = x + w;
+    BY1 = y + h;
     BACK = 0; /* nothing drawn here may be marked dirty or presented */
-    gfx_reset_clip();
-    gfx_set_clip(x, y, w, h); /* left of or above the screen (x, y < 0) is cut: nothing can be drawn there */
+    gfx_reset_clip(); /* the whole buffer */
     return 0;
 }
 
@@ -57,6 +61,10 @@ void gfx_layer_end(void)
     W = SAVED.w;
     H = SAVED.h;
     BACK = SAVED.back;
+    BX0 = SAVED.bx0;
+    BY0 = SAVED.by0;
+    BX1 = SAVED.bx1;
+    BY1 = SAVED.by1;
     SAVED.on = 0;
     gfx_restore_clip(SAVED.clip);
 }

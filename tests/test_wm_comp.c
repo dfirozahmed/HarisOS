@@ -208,20 +208,21 @@ int main(void){
     assert(wm_comp_update(&OPS,a,b,bytes)==0); wm_comp_counts(&cf,&cp);
     assert(cf==0 && cp==1);
   }
-  /* "look" split by what changed: a new window, its place past the screen's left edge, its focus */
+  /* "look" split by what changed: a new window; moved past the screen's left edge it is not drawn again */
   { WmBusy bz[3]; wm_comp_busiest(bz,3);
     Window*n=wm_create("Look",300,200,200,150,draw,0);
     assert(wm_comp_update(&OPS,a,b,bytes)==0);
     int nb=wm_comp_busiest(bz,3), k=0;
     for (; k<nb && strcmp(bz[k].title,"Look"); k++) {}
-    assert(k<nb && bz[k].look_n[WM_LOOK_NEW]==1 && bz[k].look_n[WM_LOOK_EDGE]==0);
-    wm_pointer(n->r.x+100,n->r.y+15,1); wm_pointer(n->r.x+100-280,n->r.y+15,1); wm_pointer(0,0,0);   /* x 20: its shadow past the edge */
+    assert(k<nb && bz[k].look_n[WM_LOOK_NEW]==1 && bz[k].look_n[WM_LOOK_SIZE]==0);
+    int up3=UPLOADS;
+    wm_pointer(n->r.x+100,n->r.y+15,1); wm_pointer(n->r.x+100-280,n->r.y+15,1); wm_pointer(0,0,0);   /* x 20: its shadow past the left edge */
     assert(n->r.x==20);
     assert(wm_comp_update(&OPS,a,b,bytes)==0);
     nb=wm_comp_busiest(bz,3);
     for (k=0; k<nb && strcmp(bz[k].title,"Look"); k++) {}
-    assert(k<nb && bz[k].look_n[WM_LOOK_EDGE]==1 && bz[k].look_n[WM_LOOK_NEW]==0 && bz[k].look_n[WM_LOOK_SIZE]==0);
-    assert(strcmp(wm_look_name(WM_LOOK_EDGE),"screen edge")==0 && strcmp(wm_look_name(42),"?")==0);
+    assert(UPLOADS==up3 && (k==nb || bz[k].look_n[WM_LOOK_OTHER]==0));   /* past the left edge: not drawn again (the layer holds it whole) */
+    assert(strcmp(wm_look_name(WM_LOOK_SIZE),"size")==0 && strcmp(wm_look_name(42),"?")==0);
   }
   puts("wm compositor tests passed");
   return 0;

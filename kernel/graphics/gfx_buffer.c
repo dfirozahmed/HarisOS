@@ -19,6 +19,9 @@ void gfx_internal_buffer_init(void *framebuffer, int width, int height, int pitc
     FB = (volatile unsigned int *)framebuffer;
     W = width;
     H = height;
+    BX0 = BY0 = 0;
+    BX1 = width;
+    BY1 = height;
     PITCH = pitch;
     DRAW = FB;
     DPITCH = PITCH;

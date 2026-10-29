@@ -46,7 +46,7 @@ static const char *const WHY_NAME[WM_WHY_COUNT] = {"press", "right press", "drag
 
 const char *wm_look_name(int part)
 {
-    static const char *const NAME[WM_LOOK_COUNT] = {"new", "size", "focus", "title", "theme", "screen edge", "other"};
+    static const char *const NAME[WM_LOOK_COUNT] = {"new", "size", "focus", "title", "theme", "other"};
     return part >= 0 && part < WM_LOOK_COUNT ? NAME[part] : "?";
 }
 
@@ -258,14 +258,8 @@ static void look_of(const Window *w, int i, int top, unsigned part[WM_LOOK_COUNT
     for (const char *s = w->title; *s; s++)
         MIX(*s);
     part[WM_LOOK_TITLE] = h;
-    /* drawing stops at the screen's left and top edges: while the window reaches past them, where it is matters */
-    int m = w->maximized ? 0 : WM_SHADOW_MARGIN;
-    h = 2166136261u;
-    if (w->r.x - m < 0)
-        MIX(w->r.x - m);
-    if (w->r.y - m < 0)
-        MIX(w->r.y - m);
-    part[WM_LOOK_EDGE] = h;
+    /* not where it is: a layer is drawn whole also where it reaches past the screen's edges (gfx_layer_begin_at), so a
+     * window moved there is not drawn again */
     part[WM_LOOK_OTHER] = (unsigned)w->maximized * 4u + (unsigned)w->dialog * 2u + (unsigned)w->fixed_size;
 #undef MIX
 }

@@ -160,7 +160,7 @@ enum
 /* For "look" (the whole layer drawn twice): which part of the window's look changed. */
 enum
 {
-    WM_LOOK_NEW, WM_LOOK_SIZE, WM_LOOK_FOCUS, WM_LOOK_TITLE, WM_LOOK_THEME, WM_LOOK_EDGE, WM_LOOK_OTHER, WM_LOOK_COUNT
+    WM_LOOK_NEW, WM_LOOK_SIZE, WM_LOOK_FOCUS, WM_LOOK_TITLE, WM_LOOK_THEME, WM_LOOK_OTHER, WM_LOOK_COUNT
 };
 const char *wm_look_name(int part);
 const char *wm_why_name(int why);

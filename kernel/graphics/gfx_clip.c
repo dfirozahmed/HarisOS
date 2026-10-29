@@ -3,19 +3,25 @@
  */
 #include "gfx_internal.h"
 
-static int clamp_coord(long long value, int limit)
+/* The hard bounds of drawing: the screen, or the buffer of a layer (which may reach past the screen's left and top edges, see
+ * gfx_layer_begin_at). No clip ever leaves them. */
+int BX0, BY0, BX1, BY1;
+
+static int clamp_coord(long long value, int lo, int hi)
 {
-    if (value < 0) return 0;
-    if (value > limit) return limit;
+    if (value < lo) return lo;
+    if (value > hi) return hi;
     return (int)value;
 }
+#define CLAMP_X(v) clamp_coord((v), BX0, BX1 > BX0 ? BX1 : BX0)
+#define CLAMP_Y(v) clamp_coord((v), BY0, BY1 > BY0 ? BY1 : BY0)
 
 void gfx_reset_clip(void)
 {
-    CX0 = 0;
-    CY0 = 0;
-    CX1 = W > 0 ? W : 0;
-    CY1 = H > 0 ? H : 0;
+    CX0 = BX0;
+    CY0 = BY0;
+    CX1 = BX1 > BX0 ? BX1 : BX0;
+    CY1 = BY1 > BY0 ? BY1 : BY0;
 }
 
 void gfx_set_clip(int x, int y, int w, int h)
@@ -23,19 +29,19 @@ void gfx_set_clip(int x, int y, int w, int h)
     long long right = (long long)x + (long long)w;
     long long bottom = (long long)y + (long long)h;
 
-    if (w <= 0 || h <= 0 || W <= 0 || H <= 0)
+    if (w <= 0 || h <= 0 || BX1 <= BX0 || BY1 <= BY0)
     {
-        CX0 = clamp_coord(x, W > 0 ? W : 0);
-        CY0 = clamp_coord(y, H > 0 ? H : 0);
+        CX0 = CLAMP_X(x);
+        CY0 = CLAMP_Y(y);
         CX1 = CX0;
         CY1 = CY0;
         return;
     }
 
-    CX0 = clamp_coord(x, W);
-    CY0 = clamp_coord(y, H);
-    CX1 = clamp_coord(right, W);
-    CY1 = clamp_coord(bottom, H);
+    CX0 = CLAMP_X(x);
+    CY0 = CLAMP_Y(y);
+    CX1 = CLAMP_X(right);
+    CY1 = CLAMP_Y(bottom);
     if (CX1 < CX0) CX1 = CX0;
     if (CY1 < CY0) CY1 = CY0;
 }
@@ -44,10 +50,10 @@ void gfx_clip_intersect(int x, int y, int w, int h)
 {
     long long right = (long long)x + (long long)w;
     long long bottom = (long long)y + (long long)h;
-    int x0 = clamp_coord(x, W > 0 ? W : 0);
-    int y0 = clamp_coord(y, H > 0 ? H : 0);
-    int x1 = clamp_coord(right, W > 0 ? W : 0);
-    int y1 = clamp_coord(bottom, H > 0 ? H : 0);
+    int x0 = CLAMP_X(x);
+    int y0 = CLAMP_Y(y);
+    int x1 = CLAMP_X(right);
+    int y1 = CLAMP_Y(bottom);
 
     if (w <= 0 || h <= 0)
     {
@@ -72,10 +78,10 @@ void gfx_restore_clip(GfxClip clip)
 {
     /* Clamp restored coordinates so an invalid external struct cannot
        expand drawing beyond the framebuffer. Normal saved clips are unchanged. */
-    CX0 = clamp_coord(clip.x0, W > 0 ? W : 0);
-    CY0 = clamp_coord(clip.y0, H > 0 ? H : 0);
-    CX1 = clamp_coord(clip.x1, W > 0 ? W : 0);
-    CY1 = clamp_coord(clip.y1, H > 0 ? H : 0);
+    CX0 = CLAMP_X(clip.x0);
+    CY0 = CLAMP_Y(clip.y0);
+    CX1 = CLAMP_X(clip.x1);
+    CY1 = CLAMP_Y(clip.y1);
     if (CX1 < CX0) CX1 = CX0;
     if (CY1 < CY0) CY1 = CY0;
 }

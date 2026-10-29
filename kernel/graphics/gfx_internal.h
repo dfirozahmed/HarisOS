@@ -95,6 +95,7 @@ void gfx_internal_overlay_stage(const volatile unsigned int *row, int y, int x0,
 int gfx_internal_overlay_paste(int *x0, int *y0, int *x1, int *y1);
 
 extern int CX0, CY0, CX1, CY1;
+extern int BX0, BY0, BX1, BY1; /* hard bounds of drawing (gfx_clip.c): the screen, or a layer's buffer */
 
 /* Clips [x0,x1) x [y0,y1) to the active clip rectangle.
  * Returns non-zero only when a drawable area remains.
