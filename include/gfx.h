@@ -198,6 +198,7 @@ typedef struct
     /* may be 0: moves the rows of [x, x+w) x [y, y+h) of a surface by dy (+ down), inside that rectangle; 0 = done */
     int (*scroll)(int id, int x, int y, int w, int h, int dy);
     void (*report)(const GfxCompStats *s); /* may be 0: every few hundred frames, what the desktop measured */
+    void (*dim)(int scale); /* may be 0: the screen's brightness, 0 .. 256 (256 = full), for the copies to the screen */
 } GfxCompOps;
 void gfx_comp_driver(const GfxCompOps *ops); /* 0: none */
 const GfxCompOps *gfx_comp(void);            /* the driver, 0 when there is none (or it failed) */

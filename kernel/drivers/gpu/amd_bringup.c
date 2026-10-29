@@ -195,7 +195,7 @@ static void amd_scene_report(const GfxCompStats *s)
 /* scroll stays 0 unless amd_comp_scroll_test() passed */
 static GfxCompOps amd_scene_ops = { .surface_new = amd_comp_surface_new, .surface_free = amd_comp_surface_free,
                                     .upload = amd_comp_surface_upload, .compose = amd_scene_compose, .scroll = 0,
-                                    .report = amd_scene_report };
+                                    .report = amd_scene_report, .dim = amd_comp_set_dim };
 #endif
 
 /* The result of the last compositor test. */

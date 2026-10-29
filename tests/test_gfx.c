@@ -187,6 +187,12 @@ int main(void)
         assert(gfx_scroll_rect(0, 0, SW, SH, -2) == 0);                 /* up by 2 */
         gfx_backbuffer_detach(1);                                       /* a compositor keeps the pictures elsewhere */
         assert(gfx_scroll_rect(0, 0, SW, SH, 1) == -1 && back[5] == gfx_rgb(20, 0, 0)); /* refused, nothing moved */
+        for (int i = 0; i < SW * SH; ++i) fb[i] = 0x00ABCDEFu;
+        assert(gfx_set_brightness(50) == 0 && gfx_brightness() == 50);  /* remembered ... */
+        for (int i = 0; i < SW * SH; ++i) assert(fb[i] == 0x00ABCDEFu); /* ... but the screen is the compositor's: untouched */
+        gfx_backbuffer_detach(0);
+        assert(gfx_set_brightness(GFX_BRIGHTNESS_MAX) == 0);
+        gfx_backbuffer_detach(1);
         gfx_backbuffer_detach(0);
         for (int y = 0; y < SH - 2; ++y) assert(back[y * SW + 5] == gfx_rgb((unsigned char)((y + 2) * 10), 0, 0));
     }
@@ -281,7 +287,7 @@ int main(void)
     }
 
     {   /* compositor: present calls the driver; a failure drops it */
-        static const GfxCompOps cops = {c_new, c_free, c_up, c_compose, 0, 0};
+        static const GfxCompOps cops = {c_new, c_free, c_up, c_compose, 0, 0, 0};
         static unsigned int scr[16 * 8];
         GfxCompItem it = {1, 0, 0, 16, 8, 0};
         const int r[4] = {0, 0, 16, 8};

@@ -77,7 +77,10 @@ static void pointer_changed(int x, int y, int w, int h)
     NPRECT++;
 }
 
-int desktop_comp_pointer_pending(void) { return ON && NPRECT > 0; }
+static int DIM_UP = -1; /* the brightness the driver was given (0 .. 256), -1 = none yet */
+static int dim_now(void) { return gfx_brightness() * 256 / GFX_BRIGHTNESS_MAX; }
+
+int desktop_comp_pointer_pending(void) { return ON && (NPRECT > 0 || dim_now() != DIM_UP); }
 
 /* Back to the CPU: the back buffer does not hold the windows' latest pictures, so draw everything once. */
 static void leave(void)
@@ -88,6 +91,7 @@ static void leave(void)
     gfx_backbuffer_detach(0); /* the CPU draws into it again (all of it, below) */
     gfx_scroll_hook(0);
     gfx_cursor_external(0); /* the CPU draws the pointer again (gfx_present below) */
+    DIM_UP = -1;
     const GfxCompOps *ops = gfx_comp();
     wm_comp_drop(ops);
     if (ops && WALL_SURF)
@@ -240,6 +244,14 @@ int desktop_comp_frame(const UiRect *areas, int n)
             goto fail;
         WALL_UP = WALL_GEN;
         full = 1;
+    }
+    int dim = dim_now(); /* the screen's brightness: the driver scales the colours on the way to the screen */
+    if (dim != DIM_UP)
+    {
+        if (ops->dim)
+            ops->dim(dim);
+        DIM_UP = dim;
+        full = 1; /* all of the screen in the new brightness */
     }
     if (wm_comp_update(ops, a, b, bytes) != 0)
         goto fail;

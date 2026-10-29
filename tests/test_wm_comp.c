@@ -45,7 +45,7 @@ static int s_scroll(int id, int x, int y, int w, int h, int dy)
   SCROLLS++; SC_ID = id; SC_X = x; SC_Y = y; SC_W = w; SC_H = h; SC_DY = dy;
   return 0;
 }
-static const GfxCompOps OPS = { s_new, s_free, s_upload, s_compose, s_scroll, 0 };
+static const GfxCompOps OPS = { s_new, s_free, s_upload, s_compose, s_scroll, 0, 0 };
 
 static UiRect LAST_BODY; /* the body rectangle the window was last drawn with: apps remember such places for the clicks */
 static void draw(Window*w,UiRect b){ LAST_BODY = b; ui_text(b.x+16,b.y+16,"Hello",UI_TEXT_HEADING); (void)w; }

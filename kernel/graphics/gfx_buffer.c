@@ -79,6 +79,8 @@ int gfx_set_brightness(int percent)
     if (percent == BRIGHT)
         return 0;
     BRIGHT = percent;
+    if (gfx_backbuffer_detached())
+        return 0; /* a compositor draws the screen: it dims it on its next frame (the back buffer is not the picture) */
     gfx_internal_mark_dirty(0, 0, W, H);
     gfx_present();
     return 0;

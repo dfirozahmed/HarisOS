@@ -558,6 +558,19 @@ int main(void)
         cn = amd_comp_build_ps_under(code);
         check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_UNDER_OFF + 0x200u <= 0x1000u,
               "under shader: no VCC + literal / SGPR, fits in its slot inside the 4 KiB");
+        cn = amd_comp_build_ps_dim(code);
+        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_DIM_OFF + 0x200u <= 0x1000u,
+              "dim shader: no VCC + literal / SGPR, fits in its slot inside the 4 KiB");
+        {
+            AmdSurface s3 = { 0x4100000000ULL + 0x01000000ULL, 0x01000000u, 1920, 1080, 1920 };
+            amd_comp_begin(&f, fib, 1024, 0x4100000000ULL, 1920, 1920, 1080, 1, 0x4100000000ULL + 0x0B004000ULL);
+            amd_comp_dim(&f, &s3, 10, 20, 10, 20, 400, 300, 128, 1);
+            nf = amd_comp_end(&f, 0x4100000000ULL + 0x0B300040ULL);
+            cb = find_set(fib, nf, 0x69, R3D_CB_BLEND0_CONTROL, &cnt);
+            ud = find_set(fib, nf, 0x76, R3D_SPI_SHADER_USER_DATA_PS_0, &ucnt);
+            check(nf > 0 && cb && cb[0] == 0 && ud && ucnt == 11 && ud[10] == 0x3F000000u && ud[8] == 0 && ud[9] == 0,
+                  "dim draw: no blending, s10 = 0.5 for brightness 128 / 256, texel = pixel");
+        }
         {
             AmdSurface s2 = { 0x4100000000ULL + 0x0E000000ULL, 0x0E000000u, 300, 400, 320 };
             amd_comp_begin(&f, fib, 1024, 0x4100000000ULL, 1920, 1920, 1080, 1, 0x4100000000ULL + 0x0B004000ULL);
