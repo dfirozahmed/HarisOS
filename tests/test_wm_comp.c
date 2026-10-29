@@ -20,6 +20,13 @@ void *krealloc(void *p, unsigned long long n){ return realloc(p, (size_t)n); }
 static int NEXT_ID = 1, LIVE, FREED_ID;
 static int SW[100], SH[100];
 static int UPLOADS, UP_ID, UP_X, UP_Y, UP_W, UP_H, UP_OPAQUE;
+static int LOG_X[16], LOG_Y[16], LOG_W[16], LOG_H[16], LOG_ID[16]; /* the last uploads */
+static int uploaded(int id, int x, int y, int w, int h)
+{
+  for (int k = 0; k < 16; k++)
+    if (LOG_ID[k] == id && LOG_X[k] == x && LOG_Y[k] == y && LOG_W[k] == w && LOG_H[k] == h) return 1;
+  return 0;
+}
 static int s_new(int w, int h){ int id = NEXT_ID++; SW[id] = w; SH[id] = h; LIVE++; return id; }
 static void s_free(int id){ FREED_ID = id; LIVE--; }
 static int s_upload(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque)
@@ -27,6 +34,7 @@ static int s_upload(int id, const void *px, int pitch, int x, int y, int w, int 
   (void)px; (void)pitch;
   assert(x >= 0 && y >= 0 && x + w <= SW[id] && y + h <= SH[id]);
   UPLOADS++; UP_ID = id; UP_X = x; UP_Y = y; UP_W = w; UP_H = h; UP_OPAQUE = opaque;
+  LOG_X[UPLOADS % 16] = x; LOG_Y[UPLOADS % 16] = y; LOG_W[UPLOADS % 16] = w; LOG_H[UPLOADS % 16] = h; LOG_ID[UPLOADS % 16] = id;
   return 0;
 }
 static int s_compose(const GfxCompItem *it, int n, const int *r, int nr){ (void)it; (void)n; (void)r; (void)nr; return 0; }
@@ -171,12 +179,16 @@ int main(void){
     assert(SCROLLS==2 && SC_DY==-16 && SC_W==90);
     assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up+2 && UP_W==10 && UP_H==80);
     wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1);
-    /* a part changed but not drawn yet where the rows are: no, the window draws them all */
-    wm_add_damage(ui_rect(sx+5,sy+5,10,10));
-    assert(gfx_scroll_rect(sx,sy,100,80,-16)==-1 && SCROLLS==2);
+    /* a part changed but not drawn yet where the rows are (a hover highlight): its old pixels moved with the rows, so it is
+     * drawn where it was and where they went */
+    wm_add_damage(ui_rect(sx+5,sy+40,10,10));
+    assert(gfx_scroll_rect(sx,sy,100,80,-16)==0 && SCROLLS==3);
+    memset(LOG_ID,0,sizeof LOG_ID);
     assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    { int n=wm_comp_items(items,8), s=items[n-1].surface;   /* the top window */
+      assert(uploaded(s, 25+M, 100+M, 10, 10) && uploaded(s, 25+M, 100-16+M, 10, 10)); }
     /* nothing there: no window holds the rectangle */
-    assert(gfx_scroll_rect(1000,630,10,5,2)==-1 && SCROLLS==2);
+    assert(gfx_scroll_rect(1000,630,10,5,2)==-1 && SCROLLS==3);
     gfx_scroll_hook(0); gfx_backbuffer_detach(0);
   }
   puts("wm compositor tests passed");

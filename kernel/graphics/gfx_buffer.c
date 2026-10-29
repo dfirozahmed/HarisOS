@@ -213,6 +213,7 @@ void gfx_cache_restore(int x, int y, int w, int h)
 /* ---- scrolling ----------------------------------------------- */
 static int DETACHED; /* the back buffer does not hold what is on the screen (a compositor draws it) */
 void gfx_backbuffer_detach(int on) { DETACHED = on; }
+int gfx_backbuffer_detached(void) { return DETACHED; }
 static int (*SCROLL_HOOK)(int x, int y, int w, int h, int dy);
 void gfx_scroll_hook(int (*fn)(int x, int y, int w, int h, int dy)) { SCROLL_HOOK = fn; }
 

@@ -93,6 +93,7 @@ int gfx_scroll_rect(int x, int y, int w, int h, int dy);
 /* A compositor that keeps the windows' pictures elsewhere (gfx.h "compositor") says so: while on, the back buffer does not
  * hold what is on the screen, and gfx_scroll_rect() returns -1. */
 void gfx_backbuffer_detach(int on);
+int gfx_backbuffer_detached(void); /* 1 while detached */
 /* While detached, gfx_scroll_rect() asks this instead (the compositor moves the rows inside the window's surface); 0: none */
 void gfx_scroll_hook(int (*fn)(int x, int y, int w, int h, int dy));
 

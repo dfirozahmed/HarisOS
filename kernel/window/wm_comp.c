@@ -388,7 +388,7 @@ void wm_comp_drop(const GfxCompOps *ops)
 /* gfx_scroll_rect() while the compositor is on (gfx_scroll_hook): the rows of a screen rectangle inside one window move by
  * dy. The window's surface holds them: the GPU moves them there, and only the screen is marked (the window marks the rows that
  * came into view itself). -1 (the caller draws the whole rectangle) when that is not sure to be right: no such window, no
- * driver for it, or parts of the window not drawn yet where the rows are. */
+ * driver for it, or the window not drawn yet. Callers do it for their own window while it is on top (File Explorer). */
 int wm_comp_scroll(int x, int y, int w, int h, int dy)
 {
     if (!ON || !OPS || !OPS->scroll || w <= 0 || h <= 0)
@@ -401,13 +401,27 @@ int wm_comp_scroll(int x, int y, int w, int h, int dy)
         Wmc *c = entry(win, 0);
         if (!c || !c->surf || c->full || win->r.x != c->px || win->r.y != c->py)
             return -1;
-        for (int k = 0; k < c->dirty; k++) /* a changed part not drawn yet would move with the rows, half updated */
-            if (c->d[k][0] < x - win->r.x + w && c->d[k][2] > x - win->r.x && c->d[k][1] < y - win->r.y + h &&
-                c->d[k][3] > y - win->r.y)
-                return -1;
         int lx = x - win->r.x + c->m, ly = y - win->r.y + c->m; /* in the layer */
         if (OPS->scroll(c->surf, lx, ly, w, h, dy) != 0)
             return -1;
+        /* A changed part not drawn yet (a hover highlight, say) moved with the rows: its old pixels are now dy lower. It stays
+         * marked where it was, and is marked where its pixels went too (inside the rectangle): both are drawn. */
+        int rx0 = x - win->r.x, ry0 = y - win->r.y, rx1 = rx0 + w, ry1 = ry0 + h, n = c->dirty, moved_parts[WMC_PARTS][4], nm = 0;
+        for (int k = 0; k < n; k++)
+        {
+            int x0 = c->d[k][0] > rx0 ? c->d[k][0] : rx0, x1 = c->d[k][2] < rx1 ? c->d[k][2] : rx1;
+            int y0 = (c->d[k][1] > ry0 ? c->d[k][1] : ry0) + dy, y1 = (c->d[k][3] < ry1 ? c->d[k][3] : ry1) + dy;
+            if (y0 < ry0) y0 = ry0;
+            if (y1 > ry1) y1 = ry1;
+            if (x0 < x1 && y0 < y1)
+            {
+                moved_parts[nm][0] = x0; moved_parts[nm][1] = y0; moved_parts[nm][2] = x1; moved_parts[nm][3] = y1;
+                nm++;
+            }
+        }
+        for (int k = 0; k < nm; k++)
+            wm_comp_content_internal(win, win->r.x + moved_parts[k][0], win->r.y + moved_parts[k][1], win->r.x + moved_parts[k][2],
+                                     win->r.y + moved_parts[k][3]);
         wm_damage_internal(x, y, x + w, y + h); /* the screen there changed; the surface already shows it */
         return 0;
     }

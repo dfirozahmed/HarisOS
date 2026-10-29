@@ -254,10 +254,11 @@ int ex_wheel(Window *w, int steps)
 
     /* Only the rows and the scrollbar (inside l.list) change. The rows that stay visible just moved, so move
      * their pixels and draw only the rows that came into view. That is valid while this window is on top
-     * (nothing over the list to be moved with it) and the list does not reach the taskbar. */
+     * (nothing over the list to be moved with it) and the list does not reach the taskbar. With a GPU compositor (the back
+     * buffer detached) the rows move inside this window's own picture, where there is no taskbar. */
     UiRect li = l.list;
     int dy = -rows * ROW_H, moved_w = li.w - 12; /* the scrollbar column is redrawn, not moved */
-    if (wm_top() == w && li.y + li.h <= (int)gfx_height() - TASKBAR_HEIGHT &&
+    if (wm_top() == w && (gfx_backbuffer_detached() || li.y + li.h <= (int)gfx_height() - TASKBAR_HEIGHT) &&
         gfx_scroll_rect(li.x, li.y, moved_w, li.h, dy) == 0)
     {
         if (dy < 0)
