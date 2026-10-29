@@ -37,6 +37,12 @@ static UiRect menu_rect(void)
         y = 4;
     return ui_rect(x, y, MENU_W, h);
 }
+/* Everything the open menu draws, its shadow included (the same area its redraws mark). */
+UiRect appmenu_bounds(void)
+{
+    UiRect m = menu_rect();
+    return ui_rect(m.x - 36, m.y - 30, m.w + 72, m.h + 80);
+}
 
 static UiRect row_rect(int i)
 {

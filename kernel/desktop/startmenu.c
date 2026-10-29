@@ -129,6 +129,13 @@ static UiRect menu_rect(void)
     return ui_rect(MARGIN, y, w, h);
 }
 
+/* Everything the open menu draws, its shadow included (the same area its redraws mark). */
+UiRect startmenu_bounds(void)
+{
+    UiRect m = menu_rect();
+    return ui_rect(m.x - 36, m.y - 30, m.w + 72, m.h + 80);
+}
+
 static UiRect search_rect(void)
 {
     UiRect m = menu_rect();

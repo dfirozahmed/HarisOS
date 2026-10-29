@@ -17,5 +17,6 @@ void appmenu_close(void);
 int appmenu_pointer(int x, int y, unsigned buttons);
 int appmenu_key(const KeyEvent *k);
 void appmenu_draw(void); /* after the windows, before the taskbar */
+UiRect appmenu_bounds(void); /* everything the open menu draws, its shadow included */
 
 #endif

@@ -32,5 +32,7 @@ void startmenu_tick(int caret_flipped);
 
 /* Draw the menu (does nothing when closed). Call after the windows, before the taskbar. */
 void startmenu_draw(void);
+/* Everything the open menu draws, its shadow included (for the compositor: the menu's surface). */
+UiRect startmenu_bounds(void);
 
 #endif
