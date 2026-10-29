@@ -84,6 +84,16 @@ static inline void gfx_internal_copy_fb_done(void)
 
 int gfx_internal_brightness_scale(void); /* 0..256: factor for pixels written straight to the screen */
 
+/* The overlay (gfx_layer.c), for gfx_present(). prepare: the part of the layer inside the dirty box is the paste
+ * box (1 when there is one). In its rows, cols gives the columns [x0,x1) that go to the driver's buffer (the
+ * picture below the layer) instead of the screen, and stage copies them there. paste has the driver write the
+ * finished pixels of the box onto the screen; it returns 1 when the driver failed and the CPU pasted the layer
+ * into the back buffer instead: the caller must copy that box (*x0..) to the screen. */
+int gfx_internal_overlay_prepare(int x0, int y0, int x1, int y1);
+int gfx_internal_overlay_cols(int y, int *x0, int *x1);
+void gfx_internal_overlay_stage(const volatile unsigned int *row, int y, int x0, int x1);
+int gfx_internal_overlay_paste(int *x0, int *y0, int *x1, int *y1);
+
 extern int CX0, CY0, CX1, CY1;
 
 /* Clips [x0,x1) x [y0,y1) to the active clip rectangle.

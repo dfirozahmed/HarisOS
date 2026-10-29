@@ -162,3 +162,165 @@ void gfx_layer_blit(const void *layer, int lw, int lh, int x, int y)
     }
     gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
+
+/* ---- overlay: a driver pastes the layer (see include/gfx.h) ---- */
+static const GfxOverlayOps *OV_OPS;
+static struct
+{
+    const void *layer;
+    int lw, lh, x, y, inset;
+    int on;
+} OV;
+static int AREA_SET, AX0, AY0, AX1, AY1; /* not set: the whole screen */
+
+void gfx_overlay_driver(const GfxOverlayOps *ops)
+{
+    OV_OPS = ops;
+    OV.on = 0;
+}
+
+void gfx_overlay_area(int x, int y, int w, int h)
+{
+    AREA_SET = 1;
+    AX0 = x;
+    AY0 = y;
+    AX1 = w > 0 ? x + w : x;
+    AY1 = h > 0 ? y + h : y;
+}
+
+void gfx_overlay_hide(void)
+{
+    OV.on = 0;
+}
+
+/* [x0,x1) x [y0,y1) cut down to the screen and the overlay area; 1 when something is left */
+static int area_box(int *x0, int *y0, int *x1, int *y1)
+{
+    int ax0 = AREA_SET ? AX0 : 0, ay0 = AREA_SET ? AY0 : 0, ax1 = AREA_SET ? AX1 : W, ay1 = AREA_SET ? AY1 : H;
+    if (ax0 < 0) ax0 = 0;
+    if (ay0 < 0) ay0 = 0;
+    if (ax1 > W) ax1 = W;
+    if (ay1 > H) ay1 = H;
+    if (*x0 < ax0) *x0 = ax0;
+    if (*y0 < ay0) *y0 = ay0;
+    if (*x1 > ax1) *x1 = ax1;
+    if (*y1 > ay1) *y1 = ay1;
+    return *x1 > *x0 && *y1 > *y0;
+}
+
+int gfx_overlay_show(const void *layer, int lw, int lh, int x, int y, int changed, int inset)
+{
+    int ax0 = 0, ay0 = 0, ax1 = W, ay1 = H;
+    if (!OV_OPS || !BACK || !layer || lw <= 0 || lh <= 0 || gfx_brightness() < GFX_BRIGHTNESS_MAX ||
+        !area_box(&ax0, &ay0, &ax1, &ay1))
+    {
+        OV.on = 0;
+        return 0;
+    }
+    if (changed || !OV.on || OV.layer != layer || OV.lw != lw || OV.lh != lh)
+        if (OV_OPS->upload(layer, lw, lh) != 0)
+        {
+            OV.on = 0;
+            return 0;
+        }
+    OV.layer = layer;
+    OV.lw = lw;
+    OV.lh = lh;
+    OV.x = x;
+    OV.y = y;
+    OV.inset = inset < 0 ? 0 : inset;
+    OV.on = 1;
+    int x0 = x, y0 = y, x1 = x + lw, y1 = y + lh;
+    if (gfx_internal_clip_box(&x0, &y0, &x1, &y1))
+        gfx_internal_mark_dirty(x0, y0, x1, y1); /* so gfx_present() pastes it here */
+    return 1;
+}
+
+/* The paste of the present being made: the part of the layer inside the dirty box, and where the picture below it goes. */
+static int PB_ON, PBX0, PBY0, PBX1, PBY1, STAGE_PITCH;
+static volatile unsigned int *STAGE;
+
+/* The CPU pastes the layer into the back buffer inside the box (the overlay is off from now on). */
+static void cpu_paste(int x0, int y0, int x1, int y1)
+{
+    OV.on = 0;
+    GfxClip saved = gfx_get_clip();
+    gfx_set_clip(x0, y0, x1 - x0, y1 - y0);
+    gfx_layer_blit(OV.layer, OV.lw, OV.lh, OV.x, OV.y);
+    gfx_restore_clip(saved);
+}
+
+int gfx_internal_overlay_prepare(int x0, int y0, int x1, int y1)
+{
+    PB_ON = 0;
+    if (!OV.on)
+        return 0;
+    if (x0 < OV.x) x0 = OV.x;
+    if (y0 < OV.y) y0 = OV.y;
+    if (x1 > OV.x + OV.lw) x1 = OV.x + OV.lw;
+    if (y1 > OV.y + OV.lh) y1 = OV.y + OV.lh;
+    if (!area_box(&x0, &y0, &x1, &y1))
+        return 0;
+    if (gfx_brightness() < GFX_BRIGHTNESS_MAX) /* the screen copy is scaled, a GPU paste would not be */
+    {
+        cpu_paste(x0, y0, x1, y1);
+        return 0;
+    }
+    STAGE = OV_OPS ? OV_OPS->below(&STAGE_PITCH) : 0;
+    if (!STAGE)
+    {
+        OV_OPS = 0; /* the driver failed: never again */
+        cpu_paste(x0, y0, x1, y1);
+        return 0;
+    }
+    PB_ON = 1;
+    PBX0 = x0;
+    PBY0 = y0;
+    PBX1 = x1;
+    PBY1 = y1;
+    return 1;
+}
+
+int gfx_internal_overlay_cols(int y, int *x0, int *x1)
+{
+    if (!PB_ON || y < PBY0 || y >= PBY1)
+        return 0;
+    *x0 = PBX0;
+    *x1 = PBX1;
+    return 1;
+}
+
+void gfx_internal_overlay_stage(const volatile unsigned int *row, int y, int x0, int x1)
+{
+    volatile unsigned int *dst = STAGE + (long long)(y - OV.y) * STAGE_PITCH; /* layer column c is screen x = OV.x + c */
+    if (y >= OV.y + OV.inset && y < OV.y + OV.lh - OV.inset)
+    {
+        /* the opaque inside hides the picture below: leave it out */
+        int s0 = OV.x + OV.inset, s1 = OV.x + OV.lw - OV.inset;
+        if (s0 < x0) s0 = x0;
+        if (s1 > x1) s1 = x1;
+        if (s1 > s0)
+        {
+            gfx_internal_copy_fb(dst + (x0 - OV.x), row + x0, s0 - x0);
+            gfx_internal_copy_fb(dst + (s1 - OV.x), row + s1, x1 - s1);
+            return;
+        }
+    }
+    gfx_internal_copy_fb(dst + (x0 - OV.x), row + x0, x1 - x0);
+}
+
+int gfx_internal_overlay_paste(int *x0, int *y0, int *x1, int *y1)
+{
+    if (!PB_ON)
+        return 0;
+    PB_ON = 0;
+    *x0 = PBX0;
+    *y0 = PBY0;
+    *x1 = PBX1;
+    *y1 = PBY1;
+    if (OV_OPS && OV_OPS->draw(OV.x, OV.y, PBX0, PBY0, PBX1, PBY1) == 0)
+        return 0;
+    OV_OPS = 0; /* the driver failed: never again. The caller copies the box to the screen. */
+    cpu_paste(PBX0, PBY0, PBX1, PBY1);
+    return 1;
+}

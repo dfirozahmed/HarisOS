@@ -98,6 +98,24 @@ static void copy_row(volatile unsigned int *dst, volatile unsigned int *src, int
     }
 }
 
+/* One row of the dirty box to the screen; under an overlay, to the overlay driver instead (it writes those
+ * pixels finished, so the screen never shows the picture without the layer). */
+static void present_row(int y)
+{
+    volatile unsigned int *dst = FB + (long long)y * PITCH, *src = DRAW + (long long)y * DPITCH;
+    int c0, c1;
+    if (gfx_internal_overlay_cols(y, &c0, &c1))
+    {
+        if (c0 > DX0)
+            copy_row(dst, src, DX0, c0);
+        if (c1 < DX1)
+            copy_row(dst, src, c1, DX1);
+        gfx_internal_overlay_stage(src, y, c0, c1);
+        return;
+    }
+    copy_row(dst, src, DX0, DX1);
+}
+
 void gfx_present(void)
 {
     if (!BACK || DX1 <= DX0 || DY1 <= DY0)
@@ -106,17 +124,26 @@ void gfx_present(void)
     int cy0 = 0, cy1 = 0; /* screen rows covered by the pointer */
     if (CUR_DRAWN)
         gfx_internal_cursor_y_range(&cy0, &cy1);
+    gfx_internal_overlay_prepare(DX0, DY0, DX1, DY1); /* may paste with the CPU into the back buffer first */
     for (int y = DY0; y < DY1; y++)
     {
         if (y >= cy0 && y < cy1)
             continue;
-        copy_row(FB + (long long)y * PITCH, DRAW + (long long)y * DPITCH, DX0, DX1);
+        present_row(y);
     }
     gfx_internal_copy_fb_done();
     gfx_internal_cursor_restore();
     for (int y = DY0 > cy0 ? DY0 : cy0; y < (DY1 < cy1 ? DY1 : cy1); y++)
-        copy_row(FB + (long long)y * PITCH, DRAW + (long long)y * DPITCH, DX0, DX1);
+        present_row(y);
     gfx_internal_copy_fb_done();
+    /* the overlay goes over the copied picture and under the pointer */
+    int ox0 = DX0, oy0 = DY0, ox1 = DX1, oy1 = DY1;
+    if (gfx_internal_overlay_paste(&ox0, &oy0, &ox1, &oy1))
+    {
+        for (int y = oy0; y < oy1; y++)
+            copy_row(FB + (long long)y * PITCH, DRAW + (long long)y * DPITCH, ox0, ox1);
+        gfx_internal_copy_fb_done();
+    }
     DX0 = DY0 = DX1 = DY1 = 0;
     gfx_internal_cursor_paint();
 }

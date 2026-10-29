@@ -40,6 +40,17 @@ int desktop_finish_input(int bar_changed)
     if (n == 0)
         return 0;
 
+    /* A window pasted by the GPU (gfx overlay) lands after everything else is on the screen, so it must stay
+     * out of what is drawn over the windows: the taskbar always, everything while a menu is open. */
+    {
+        int bx, by, bw, bh;
+        taskbar_bounds(&bx, &by, &bw, &bh);
+        if (startmenu_is_open() || appmenu_is_open())
+            gfx_overlay_area(0, 0, 0, 0);
+        else
+            gfx_overlay_area(0, 0, (int)gfx_width(), by);
+    }
+
     /* With a back buffer the scene is drawn in RAM and gfx_present() handles the
      * pointer, so it stays visible the whole time (no flicker). Without one we
      * draw straight to the screen and must hide the pointer meanwhile. */

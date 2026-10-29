@@ -10,6 +10,49 @@ static void expect_rgb(GfxColor c, unsigned char er, unsigned char eg, unsigned 
     assert(r == er && g == eg && b == eb);
 }
 
+/* a pretend GPU for the overlay test: writes layer + the picture below it (from its own buffer) onto the screen */
+static const unsigned int *OV_LAYER;
+static unsigned int *OV_FB;
+static unsigned int OV_BELOW[20 * 16];
+static int OV_LW, OV_PITCH, OV_UPLOADS, OV_DRAWS, OV_FAIL, OV_BOX[4];
+static unsigned int OV_SENTINEL;
+static int OV_UNTOUCHED; /* at the paste, the screen inside the box still held OV_SENTINEL */
+static unsigned int ov_px(unsigned int p, unsigned int below)
+{
+    unsigned int t = p >> 24, v = 0;
+    for (int s = 0; s < 24; s += 8) {
+        unsigned int c = ((p >> s) & 0xFF) + (((below >> s) & 0xFF) * t + 127) / 255;
+        v |= (c > 255 ? 255 : c) << s;
+    }
+    return v;
+}
+static int ov_upload(const void *layer, int lw, int lh)
+{
+    assert(layer == OV_LAYER && lw == OV_LW && lw * lh <= 20 * 16);
+    OV_UPLOADS++;
+    return 0;
+}
+static volatile unsigned int *ov_below(int *pitch)
+{
+    *pitch = OV_LW;
+    return OV_FAIL == 2 ? 0 : OV_BELOW;
+}
+static int ov_draw(int x, int y, int x0, int y0, int x1, int y1)
+{
+    if (OV_FAIL)
+        return -1;
+    OV_DRAWS++;
+    OV_BOX[0] = x0; OV_BOX[1] = y0; OV_BOX[2] = x1; OV_BOX[3] = y1;
+    OV_UNTOUCHED = 1;
+    for (int yy = y0; yy < y1; ++yy)
+        for (int xx = x0; xx < x1; ++xx) {
+            int i = (yy - y) * OV_LW + (xx - x);
+            if (OV_FB[yy * OV_PITCH + xx] != OV_SENTINEL) OV_UNTOUCHED = 0;
+            OV_FB[yy * OV_PITCH + xx] = ov_px(OV_LAYER[i], OV_BELOW[i]);
+        }
+    return 0;
+}
+
 int main(void)
 {
     enum { WIDTH = 4, HEIGHT = 3, PITCH = 6 };
@@ -151,6 +194,72 @@ int main(void)
         gfx_put_pixels(0, 0, px, 4);                     /* the clip rectangle applies */
         assert(scr[3] == gfx_rgb(0xAA, 0xBB, 0xCC) && scr[0] == 0xDEADBEEFu && scr[2] == gfx_rgb(0x11, 0x22, 0x33));
         gfx_reset_clip();
+    }
+
+    /* overlay: a driver pastes a layer at gfx_present(), after the copy and without copying the layer's opaque inside */
+    {
+        enum { SW = 60, SH = 40, LW = 20, LH = 16, LX = 10, LY = 8, IN = 4 };
+        static unsigned int fb[SW * SH], back[SW * SH], lay[LW * LH];
+        static const GfxOverlayOps ops = {ov_upload, ov_below, ov_draw};
+        for (int y = 0; y < LH; ++y)
+            for (int x = 0; x < LW; ++x) {
+                int edge = x < IN || y < IN || x >= LW - IN || y >= LH - IN;
+                lay[y * LW + x] = edge ? (0x80000000u | 0x00101010u) : 0x00AA3300u; /* half see-through edge, opaque inside */
+            }
+        OV_LAYER = lay;
+        OV_LW = LW;
+        OV_FB = fb;
+        OV_PITCH = SW;
+        gfx_init(fb, SW, SH, SW, 1);
+        assert(gfx_enable_backbuffer(back) == 0);
+        gfx_fill_rect(0, 0, SW, SH, gfx_rgb(0x20, 0x40, 0x60));
+        gfx_present();
+        unsigned int below = fb[0];
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 1, IN) == 0);   /* no driver: the caller blits */
+
+        gfx_overlay_driver(&ops);
+        OV_SENTINEL = 0x00777777u;
+        for (int i = 0; i < SW * SH; ++i) fb[i] = OV_SENTINEL;           /* to see what the copy wrote */
+        gfx_fill_rect(0, 0, SW, SH, gfx_rgb(0x20, 0x40, 0x60));
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 1, IN) == 1 && OV_UPLOADS == 1);
+        gfx_present();
+        assert(OV_DRAWS == 1 && OV_BOX[0] == LX && OV_BOX[1] == LY && OV_BOX[2] == LX + LW && OV_BOX[3] == LY + LH);
+        assert(OV_UNTOUCHED);                                           /* nothing under the layer was copied to the screen */
+        assert(OV_BELOW[0] == below && OV_BELOW[8 * LW + 10] == 0);    /* the picture below went to the driver, not the inside */
+        OV_SENTINEL = 0xFFFFFFFFu;
+        assert(fb[0] == below && fb[(LY + LH) * SW + LX] == below);     /* around the layer: the back buffer */
+        assert(fb[(LY + 8) * SW + LX + 10] == 0x00AA3300u);             /* the inside: the layer */
+        assert(fb[LY * SW + LX] == ov_px(lay[0], below));               /* the edge: blended over the back buffer */
+        assert(back[(LY + 8) * SW + LX + 10] == below);                 /* the layer never went into the back buffer */
+
+        assert(gfx_overlay_show(lay, LW, LH, LX + 5, LY, 0, IN) == 1 && OV_UPLOADS == 1);  /* moved: no new upload */
+        gfx_overlay_area(0, 0, SW, LY + 4);                             /* a "taskbar" below row LY + 4 */
+        gfx_present();
+        assert(OV_DRAWS == 2 && OV_BOX[0] == LX + 5 && OV_BOX[3] == LY + 4);
+        assert(gfx_set_brightness(50) == 0);
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 0, IN) == 0);      /* dimmed: the GPU picture would not be */
+        assert(gfx_set_brightness(GFX_BRIGHTNESS_MAX) == 0);
+        gfx_overlay_area(0, 0, 0, 0);
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 0, IN) == 0);      /* nowhere to show it */
+        gfx_overlay_area(0, 0, SW, SH);
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 0, IN) == 1 && OV_UPLOADS == 2);   /* shown again: uploaded again */
+        gfx_overlay_hide();
+        gfx_fill_rect(0, 0, SW, SH, gfx_rgb(0x20, 0x40, 0x60));
+        gfx_present();
+        assert(OV_DRAWS == 2 && fb[(LY + 8) * SW + LX + 10] == below);  /* hidden: not pasted */
+
+        OV_FAIL = 1;                                                    /* the driver fails: the CPU pastes it, and from then on */
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 1, IN) == 1);
+        gfx_present();
+        assert(fb[(LY + 8) * SW + LX + 10] == 0x00AA3300u && back[(LY + 8) * SW + LX + 10] == 0x00AA3300u);
+        assert(fb[LY * SW + LX] != below);                              /* the edge is blended */
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 1, IN) == 0);      /* no driver any more */
+        gfx_overlay_driver(&ops);                                      /* again, and now its buffer cannot be had */
+        OV_FAIL = 2;
+        assert(gfx_overlay_show(lay, LW, LH, LX, LY, 1, IN) == 1);
+        gfx_present();
+        assert(fb[(LY + 8) * SW + LX + 10] == 0x00AA3300u && gfx_overlay_show(lay, LW, LH, LX, LY, 1, IN) == 0);
+        gfx_disable_backbuffer();
     }
 
     puts("Graphics regression tests passed.");

@@ -104,6 +104,34 @@ void gfx_layer_end(void);
 void gfx_layer_pack(void *over_black, const void *over_white, int w, int h); /* w*h pixels each; the layer is w wide */
 void gfx_layer_blit(const void *layer, int lw, int lh, int x, int y);
 
+/* ---- overlay: a GPU pastes a layer ----------------------------
+ * A driver that can paste a packed layer onto the screen registers itself with gfx_overlay_driver(). While an
+ * overlay is shown, every gfx_present() copies the back buffer to the screen except where the layer is: there
+ * the picture goes to the driver's buffer (below), and the driver writes layer + picture, finished, onto the
+ * screen, before the pointer is drawn. So the screen never shows the picture without the layer (it would
+ * flicker at the edges while dragging), the layer is never in the back buffer, and the CPU never blends it.
+ * The layer's opaque inside is left out of the copy. If the driver fails once, the CPU pastes the layer
+ * itself from then on.
+ *   upload(layer, lw, lh)        a new picture of the layer: copy it; 0 = done
+ *   below(&pitch)                where the picture below the layer goes: lw x lh pixels in layer coordinates,
+ *                                pitch pixels per row; 0 = failed
+ *   draw(x, y, x0, y0, x1, y1)   with the layer's corner at x,y, write layer + below onto the screen, only
+ *                                inside the box [x0,x1) x [y0,y1); 0 = done and finished
+ * gfx_overlay_area(): where an overlay may be seen; things drawn later (a taskbar, menus) are outside it.
+ * gfx_overlay_show() returns 1 when the layer will be pasted, 0 when the caller must gfx_layer_blit() it
+ * (no driver, no back buffer, dimmed screen, or the upload failed). changed: the picture is new. inset: the
+ * layer is opaque everywhere at least this far from its edges. */
+typedef struct
+{
+    int (*upload)(const void *layer, int lw, int lh);
+    volatile unsigned int *(*below)(int *pitch);
+    int (*draw)(int x, int y, int x0, int y0, int x1, int y1);
+} GfxOverlayOps;
+void gfx_overlay_driver(const GfxOverlayOps *ops); /* 0: none */
+void gfx_overlay_area(int x, int y, int w, int h);   /* w or h <= 0: nowhere */
+int gfx_overlay_show(const void *layer, int lw, int lh, int x, int y, int changed, int inset);
+void gfx_overlay_hide(void);
+
 /* ---- mouse pointer ------------------------------------------
  * A smooth arrow drawn on top of everything, directly on the screen (never in
  * the back buffer), so moving it does not need a redraw of the scene.

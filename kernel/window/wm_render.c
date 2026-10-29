@@ -114,12 +114,16 @@ void wm_draw(void)
     {
         int ready = LAYER_WIN == moving && LAYER_W == moving->r.w + 2 * WM_SHADOW_MARGIN &&
                     LAYER_H == moving->r.h + 2 * WM_SHADOW_MARGIN;
+        int fresh = 0;
         if (!ready)
-            ready = layer_capture(moving, top, top);
+            ready = fresh = layer_capture(moving, top, top);
         if (ready)
         {
             GfxClip base = gfx_get_clip();
             int m = ui_theme()->radius_l + 2; /* the rounded corners are not opaque */
+            /* With a GPU driver the layer is not blended here: gfx_present() has the GPU paste it onto the screen */
+            int gpu = gfx_overlay_show(LAYER_A, LAYER_W, LAYER_H, moving->r.x - WM_SHADOW_MARGIN,
+                                       moving->r.y - WM_SHADOW_MARGIN, fresh, WM_SHADOW_MARGIN + m);
             int cx0 = moving->r.x + m, cy0 = moving->r.y + m;
             int cx1 = moving->r.x + moving->r.w - m, cy1 = moving->r.y + moving->r.h - m;
             if (cx1 > cx0 && cy1 > cy0)
@@ -156,9 +160,11 @@ void wm_draw(void)
             }
             else
                 draw_windows(moving, top);
-            gfx_layer_blit(LAYER_A, LAYER_W, LAYER_H, moving->r.x - WM_SHADOW_MARGIN, moving->r.y - WM_SHADOW_MARGIN);
+            if (!gpu)
+                gfx_layer_blit(LAYER_A, LAYER_W, LAYER_H, moving->r.x - WM_SHADOW_MARGIN, moving->r.y - WM_SHADOW_MARGIN);
             return;
         }
     }
+    gfx_overlay_hide(); /* no drag (any more): the window is drawn normally again */
     draw_windows(0, top);
 }

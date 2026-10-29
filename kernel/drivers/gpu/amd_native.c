@@ -2061,6 +2061,26 @@ unmap:
 #define RG_SLOTS          16u
 #define RG_MARKER_OFF     0x100u      /* markers: fence page + 0x100 + 4*k  */
 static uint64_t rg_mmio, rg_va_ib, rg_va_fence;
+
+/* HDP (host data path): the CPU's BAR0 accesses to VRAM go through it, and it keeps a write buffer and a read cache of its own. Before
+   the GPU uses what the CPU wrote, Linux flushes it: nbio_v7_0_hdp_flush() (v4.19; Renoir is an APU, so nbio_v7_0 in soc15.c) writes 0
+   to NBIO mmHDP_MEM_COHERENCY_FLUSH_CNTL (nbio_7_0_offset.h 0x00f7, BASE_IDX 2; renoir_ip_offset.h NBIF0 seg 2 = 0x0D20). Before the CPU
+   reads what the GPU wrote, hdp_v4_0_invalidate_hdp() writes 1 to mmHDP_READ_CACHE_INVALIDATE (hdp_4_0_offset.h 0x00d1, BASE_IDX 0;
+   HDP seg 0 = 0x0F20). (On x86-64 APUs Linux skips both: it reaches the carve-out by its system address, not through BAR0.) */
+#define R_HDP_MEM_COHERENCY_FLUSH_CNTL ((0x0D20u + 0x00F7u) << 2)
+#define R_HDP_READ_CACHE_INVALIDATE    ((0x0F20u + 0x00D1u) << 2)
+static void hdp_flush(void)
+{
+    if (!gpu_mmio_can_access(rg_mmio)) return;
+    gpu_mmio_write32(rg_mmio, R_HDP_MEM_COHERENCY_FLUSH_CNTL, 0);
+    (void)gpu_mmio_read32(rg_mmio, R_HDP_MEM_COHERENCY_FLUSH_CNTL);  /* hdp_v4_0 (later kernels) reads it back the same way */
+}
+static void hdp_invalidate(void)
+{
+    if (!gpu_mmio_can_access(rg_mmio)) return;
+    gpu_mmio_write32(rg_mmio, R_HDP_READ_CACHE_INVALIDATE, 1);
+    (void)gpu_mmio_read32(rg_mmio, R_HDP_READ_CACHE_INVALIDATE);
+}
 static volatile uint32_t *rg_fence;   /* kernel-RAM fence page (virt==phys) */
 static uint32_t rg_w, rg_seq, rg_up, rg_dead, rg_wraps, rg_timeouts, rg_full;
 static uint32_t rg_submits, rg_step, rg_pass, rg_a_ok, rg_b_ok, rg_last_fence;
@@ -2168,7 +2188,7 @@ int amd_gpu_fence_wait(uint32_t seq, uint32_t loops)
     for (i = 0; i < loops; i++) {
         uint32_t v = rg_fence_read(0);
         rg_last_fence = v;
-        if ((int32_t)(v - seq) >= 0) return 1;
+        if ((int32_t)(v - seq) >= 0) { hdp_invalidate(); return 1; }   /* the CPU may read what the GPU wrote now */
     }
     rg_timeouts++;
     rg_capture();
@@ -2204,6 +2224,7 @@ uint32_t amd_gpu_submit_ib(uint64_t ib_va, uint32_t ib_dw)
     rg_put(0u);
     __asm__ volatile("mfence" ::: "memory");             /* the ring words sit in write-combining buffers: drain them, then wait for the posted writes */
     (void)cpm_rd(0x1FFCu);
+    hdp_flush();                                         /* and out of the HDP, before the CP reads them (and what the IB uses) */
     /* V150: write LO *then HI*, as Linux gfx_v9_0_ring_set_wptr_gfx does and
        as every passing test did.  The V149 output showed the register still
        at the previous value (wptr 8, rptr 8) after a LO-only write, i.e. the
@@ -2240,6 +2261,7 @@ uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n)
     rg_put(0u);
     __asm__ volatile("mfence" ::: "memory");
     (void)cpm_rd(0x1FFCu);
+    hdp_flush();
     gpu_mmio_write32(rg_mmio, R_CP_RB0_WPTR, rg_w & (RG_DW - 1u));
     gpu_mmio_write32(rg_mmio, R_CP_RB0_WPTR_HI, 0u);
     rg_submits++;
@@ -3224,6 +3246,12 @@ uint32_t amd_native_vmdiag(int i) { return (i >= 0 && i < 64) ? vmdiag_val[i] : 
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { vram_wr32(off, v); }
 uint32_t amd_gpu_vram_read32(uint32_t off) { return vram_rd32(off); }
 /* n dwords from RAM to VRAM at off, one plain store each (no call per dword): write-combining merges them into bursts. */
+/* A CPU pointer to VRAM at off (through BAR0), 0 when there is none. */
+volatile uint32_t *amd_gpu_vram_ptr(uint32_t off)
+{
+    volatile uint8_t *base = gpu_mmio_ptr(g_cpu_vram);
+    return base ? (volatile uint32_t *)(base + off) : 0;
+}
 void amd_gpu_vram_write_span(uint32_t off, const uint32_t *src, uint32_t n)
 {
     volatile uint8_t *base = gpu_mmio_ptr(g_cpu_vram);
@@ -3240,15 +3268,18 @@ void amd_gpu_ib_flush(void)
 {
     __asm__ volatile("mfence" ::: "memory");
     (void)vram_rd32(CP_IB_VRAM_OFF);
+    hdp_flush();
 }
 uint64_t amd_gpu_ib_va(void) { return rg_va_ib; }
 int amd_gpu_ring_running(void) { return rg_up && !rg_dead; }
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { return gpu_mmio_read32(rg_mmio, dword_addr << 2); }
-/* Everything the CPU wrote to VRAM (write combined) is out of the CPU's buffers: sfence, then a read. For data the GPU is about to use. */
+/* Everything the CPU wrote to VRAM (write combined) is out of the CPU's buffers (mfence, then a read) and out of the HDP. For data the
+   GPU is about to use. */
 void amd_gpu_wc_flush(void)
 {
     __asm__ volatile("mfence" ::: "memory");
     (void)vram_rd32(0);
+    hdp_flush();
 }
 /* Reads the VM protection-fault registers (read only) into the accessors amd_native_fault_*(). */
 void amd_gpu_fault_snapshot(void) { amd_native_fault_probe(rg_mmio); }

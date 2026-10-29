@@ -13,6 +13,7 @@ int amd_gpu_ring_running(void) { return 0; }
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { (void)off; (void)v; }
 uint32_t amd_gpu_vram_read32(uint32_t off) { (void)off; return 0; }
 void amd_gpu_vram_write_span(uint32_t off, const uint32_t *src, uint32_t n) { (void)off; (void)src; (void)n; }
+volatile uint32_t *amd_gpu_vram_ptr(uint32_t off) { (void)off; return 0; }
 void amd_gpu_ib_write32(uint32_t dw, uint32_t v) { (void)dw; (void)v; }
 void amd_gpu_ib_flush(void) {}
 uint64_t amd_gpu_ib_va(void) { return 0; }
@@ -527,6 +528,47 @@ int main(void)
         check(vp.n == 1 && vp.b[0].off == 0x10000u && vp.b[0].size == 0x20000u, "pool: offset 0 is never handed out");
         amd_vpool_init(&vp, 0x1234u, 0x8000u);
         check(vp.n == 0 && amd_vpool_alloc(&vp, 4) == 0, "pool: a range smaller than a granule is empty");
+    }
+
+    /* M4b-2: the layer draw (blend mode 2) and the pixel it should give */
+    {
+        static uint32_t code[AMD_COMP_SHADER_MAX], fib[1024];
+        AmdCompFrame f;
+        AmdSurface s = { 0x4100000000ULL + 0x0E000000ULL, 0x0E000000u, 300, 200, 320 };
+        uint32_t cn, nf, cnt = 0, ucnt = 0;
+        const uint32_t *cb, *sx, *ud;
+        cn = amd_comp_build_ps_layer(code);
+        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_LAYER_OFF + 0x200u <= 0x1000u,
+              "layer shader: no VCC + literal / SGPR, fits in its slot inside the 4 KiB");
+        amd_comp_begin(&f, fib, 1024, 0x4100000000ULL, 1920, 1920, 1080, 1, 0x4100000000ULL + 0x0B004000ULL);
+        amd_comp_layer(&f, &s, 20, 10, 120, 110, 400, 300, 1);
+        nf = amd_comp_end(&f, 0x4100000000ULL + 0x0B300040ULL);
+        cb = find_set(fib, nf, 0x69, R3D_CB_BLEND0_CONTROL, &cnt);
+        sx = find_set(fib, nf, 0x69, R3D_SX_MRT0_BLEND_OPT, &cnt);
+        ud = find_set(fib, nf, 0x76, R3D_SPI_SHADER_USER_DATA_PS_0, &ucnt);
+        /* gfx9.json: CB_BLEND0_CONTROL SRCBLEND [0,4], DESTBLEND [8,12], ENABLE 30; BLEND_ONE 1, BLEND_SRC_ALPHA 4.
+         * SX_MRT0_BLEND_OPT: src opt [0,2], dst opt [4,6], comb [8,10], alpha at +16; PRESERVE_ALL_IGNORE_NONE 1, PRESERVE_A1_IGNORE_A0 4 */
+        check(nf > 0 && f.draws == 1 && cb && cb[0] == 0x40000401u, "layer draw: CB_BLEND0_CONTROL = ENABLE, ONE * src + SRC_ALPHA * dst");
+        check(sx && sx[0] == 0x01410141u, "layer draw: SX_MRT0_BLEND_OPT as radeonsi gives ONE / SRC_ALPHA / ADD");
+        check(ud && ucnt == 10 && ((ud[3] >> 9) & 7u) == 7u && ud[8] == (uint32_t)(20 - 120) && ud[9] == (uint32_t)(10 - 110),
+              "layer draw: 10 PS user SGPRs, alpha from the 4th byte (DST_SEL_W = SQ_SEL_W 7), texel offset s8 / s9");
+        check(amd_comp_layer_px(0x00123456u, 0x00ABCDEFu) == 0x00123456u && amd_comp_layer_px(0xFF000000u, 0x00ABCDEFu) == 0x00ABCDEFu &&
+              amd_comp_layer_px(0x80102030u, 0x00FFFFFFu) == 0x0090A0B0u && amd_comp_layer_px(0x80F0F0F0u, 0x00FFFFFFu) == 0x00FFFFFFu,
+              "layer pixel: opaque keeps the colour, see-through keeps what is below, half adds half of it (clamped at 255)");
+        cn = amd_comp_build_ps_under(code);
+        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_UNDER_OFF + 0x200u <= 0x1000u,
+              "under shader: no VCC + literal / SGPR, fits in its slot inside the 4 KiB");
+        {
+            AmdSurface s2 = { 0x4100000000ULL + 0x0E000000ULL, 0x0E000000u, 300, 400, 320 };
+            amd_comp_begin(&f, fib, 1024, 0x4100000000ULL, 1920, 1920, 1080, 1, 0x4100000000ULL + 0x0B004000ULL);
+            amd_comp_layer_under(&f, &s2, 20, 10, 200, 120, 110, 400, 300, 1);
+            nf = amd_comp_end(&f, 0x4100000000ULL + 0x0B300040ULL);
+            cb = find_set(fib, nf, 0x69, R3D_CB_BLEND0_CONTROL, &cnt);
+            ud = find_set(fib, nf, 0x76, R3D_SPI_SHADER_USER_DATA_PS_0, &ucnt);
+            check(nf > 0 && f.draws == 1 && cb && cb[0] == 0 && ud && ucnt == 11 && ((ud[3] >> 9) & 7u) == 7u && ud[10] == 200u &&
+                  ud[8] == (uint32_t)(20 - 120) && ud[9] == (uint32_t)(10 - 110),
+                  "under draw: no blending (the shader writes the finished pixel), 11 user SGPRs, alpha from the 4th byte, below 200 rows down");
+        }
     }
 
     printf("\nAMD 3D TEST %s\n", ok ? "PASSED" : "FAILED");

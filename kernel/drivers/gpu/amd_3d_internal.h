@@ -18,7 +18,7 @@ typedef struct
 typedef struct
 {
     uint32_t x0, y0, x1, y1;
-    int blend;                  /* 1: "over" alpha blending (SRC_ALPHA / ONE_MINUS_SRC_ALPHA) */
+    int blend;                  /* 1: "over" alpha blending (SRC_ALPHA / ONE_MINUS_SRC_ALPHA); 2: premultiplied layer (ONE / SRC_ALPHA) */
     uint64_t ps_mc;
     int ps_pos;                 /* 1: the pixel shader gets the pixel position in v2 / v3 (POS_X/Y_FLOAT_ENA) */
     uint32_t ps_vgprs, ps_sgprs; /* SPI_SHADER_PGM_RSRC1_PS fields: (VGPRs / 4) - 1, (SGPRs / 8) - 1 */

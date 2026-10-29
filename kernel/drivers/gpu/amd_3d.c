@@ -46,6 +46,8 @@
 #define E_COMB_DST_PLUS_SRC 0u
 #define E_BLEND_SRC_ALPHA 4u
 #define E_BLEND_ONE_MINUS_SRC_ALPHA 5u
+#define E_BLEND_ONE 1u
+#define E_BLEND_OPT_PRESERVE_ALL_IGNORE_NONE 1u
 #define E_CB_NORMAL 1u
 #define E_EARLY_Z_THEN_LATE_Z 1u
 #define E_PUNCHOUT_FORCE_OFF 2u
@@ -579,7 +581,21 @@ void a3d_emit_draw(Ib *bp, const A3dDraw *d)
     /* blending: "over", result = src * src_alpha + dst * (1 - src_alpha), as radeonsi si_create_blend_state_mode() sets it for
      * PIPE_BLENDFACTOR_SRC_ALPHA / INV_SRC_ALPHA / PIPE_BLEND_ADD (alpha the same, so no SEPARATE_ALPHA_BLEND). RB+: SX_MRT0_BLEND_OPT
      * from si_translate_blend_opt_factor() / _function(). Enum values: Mesa gfx9.json. */
-    if (d->blend) {
+    if (d->blend == 2) {
+        /* a premultiplied layer (gfx_layer_pack): result = src * 1 + dst * src_alpha, where the "alpha" is how much of dst shows
+         * through. PIPE_BLENDFACTOR_ONE / SRC_ALPHA / ADD in the same functions: ONE -> PRESERVE_ALL_IGNORE_NONE, SRC_ALPHA ->
+         * PRESERVE_A1_IGNORE_A0; ONE does not use dst, so the dst option stays. */
+        ctx1(&b, R3D_CB_BLEND0_CONTROL, (1u << F3D_CB_BLEND0_CONTROL__ENABLE) |
+                                        (E_COMB_DST_PLUS_SRC << F3D_CB_BLEND0_CONTROL__COLOR_COMB_FCN) |
+                                        (E_BLEND_ONE << F3D_CB_BLEND0_CONTROL__COLOR_SRCBLEND) |
+                                        (E_BLEND_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_DESTBLEND));
+        ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_BLEND_OPT_PRESERVE_ALL_IGNORE_NONE << F3D_SX_MRT0_BLEND_OPT__COLOR_SRC_OPT) |
+                                        (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__COLOR_DST_OPT) |
+                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
+                                        (E_BLEND_OPT_PRESERVE_ALL_IGNORE_NONE << F3D_SX_MRT0_BLEND_OPT__ALPHA_SRC_OPT) |
+                                        (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__ALPHA_DST_OPT) |
+                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
+    } else if (d->blend) {
         ctx1(&b, R3D_CB_BLEND0_CONTROL, (1u << F3D_CB_BLEND0_CONTROL__ENABLE) |
                                         (E_COMB_DST_PLUS_SRC << F3D_CB_BLEND0_CONTROL__COLOR_COMB_FCN) |
                                         (E_BLEND_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_SRCBLEND) |

@@ -8,6 +8,7 @@
 #include "amd_3d.h"
 #include "amd_3d_isa.h"
 #include "amd_3d_internal.h"
+#include "amd_3d_regs.h"
 #include "amd_native.h"
 
 #define SGPR(n) ((uint32_t)(n)) /* source operand code of SGPR n */
@@ -75,6 +76,60 @@ uint32_t amd_comp_build_ps_image(uint32_t *code)
     return n;
 }
 
+/* A packed layer (gfx_layer_pack): the same load as the image, but the texel keeps its own alpha (the 4th byte: how much of what is
+ * below shows through), for blend mode 2 (ONE / SRC_ALPHA). */
+uint32_t amd_comp_build_ps_layer(uint32_t *code)
+{
+    uint32_t n = 0;
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(2));               /* v_cvt_u32_f32 v4, v2 (x)   */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 5, A3D_SRC_VGPR(3));               /* v_cvt_u32_f32 v5, v3 (y)   */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 4, 4, SGPR(8));                        /* v_add_u32 v4, s8, v4       */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 5, 5, SGPR(9));                        /* v_add_u32 v5, s9, v5       */
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[6:9], v[4:5], s[0:7] dmask:0xf */
+    code[n++] = a3d_mimg_1(4, 6, 0, 0);
+    code[n++] = A3D_S_WAITCNT_VM0;                                               /* s_waitcnt vmcnt(0)         */
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 10);                      /* v_cvt_pkrtz_f16_f32 v10, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 11);                      /* v_cvt_pkrtz_f16_f32 v11, v8, v9 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(9), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v10, v11 compr done vm */
+    code[n++] = a3d_exp1(10, 11, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
+/* The window being dragged, finished in one pass: the layer (s0..s7, texel = pixel + (s8, s9)) and the picture below it, which the CPU
+ * put s10 rows further down in the same surface. out = layer colour + below * layer alpha (what blend mode 2 gives over the screen), so
+ * the screen gets the final pixel in one write and never shows the picture without the layer. The second load uses its own address
+ * VGPRs (v14, v15). */
+uint32_t amd_comp_build_ps_under(uint32_t *code)
+{
+    uint32_t n = 0, c;
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(2));               /* v_cvt_u32_f32 v4, v2 (x)   */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 5, A3D_SRC_VGPR(3));               /* v_cvt_u32_f32 v5, v3 (y)   */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 4, 4, SGPR(8));                        /* v_add_u32 v4, s8, v4       */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 5, 5, SGPR(9));                        /* v_add_u32 v5, s9, v5       */
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 14, A3D_SRC_VGPR(4));                  /* v_mov_b32 v14, v4          */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 15, 5, SGPR(10));                      /* v_add_u32 v15, s10, v5     */
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[6:9], v[4:5], s[0:7] (layer) */
+    code[n++] = a3d_mimg_1(4, 6, 0, 0);
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[10:13], v[14:15], s[0:7] (below) */
+    code[n++] = a3d_mimg_1(14, 10, 0, 0);
+    code[n++] = A3D_S_WAITCNT_VM0;                                               /* s_waitcnt vmcnt(0)         */
+    for (c = 0; c < 3; c++) {
+        code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 10 + c, 10 + c, A3D_SRC_VGPR(9));  /* v10+c = alpha * below      */
+        code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 6 + c, 10 + c, A3D_SRC_VGPR(6 + c)); /* v6+c = layer + v10+c     */
+    }
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 16);                      /* v_cvt_pkrtz_f16_f32 v16, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 17);                      /* v_cvt_pkrtz_f16_f32 v17, v8, v9 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(9), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v16, v17 compr done vm */
+    code[n++] = a3d_exp1(16, 17, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
 /* One axis of the soft shadow: vout = clamp(min(pos - lo, hi - pos) * (1 / r), 0, 1); lo / hi / 1/r in SGPRs, v5 is scratch. */
 static void shadow_axis(uint32_t *code, uint32_t *n, uint32_t vpos, uint32_t vout, uint32_t s_lo, uint32_t s_hi)
 {
@@ -116,6 +171,8 @@ void amd_comp_begin(AmdCompFrame *f, uint32_t *ib, uint32_t cap, uint64_t rt_mc,
     f->ps_fill_mc = shader_mc + AMD_COMP_PS_FILL_OFF;
     f->ps_image_mc = shader_mc + AMD_COMP_PS_IMAGE_OFF;
     f->ps_shadow_mc = shader_mc + AMD_COMP_PS_SHADOW_OFF;
+    f->ps_layer_mc = shader_mc + AMD_COMP_PS_LAYER_OFF;
+    f->ps_under_mc = shader_mc + AMD_COMP_PS_UNDER_OFF;
     f->draws = 0;
     a3d_emit_head(&b, rt_mc, pitch_px, width, height, bgr);
     f->n = b.n; f->over = b.over;
@@ -173,6 +230,36 @@ void amd_comp_shadow(AmdCompFrame *f, uint32_t x0, uint32_t y0, uint32_t x1, uin
     u[4] = a3d_f32_ratio(1, r ? r : 1);
     u[5] = a3d_f32_ratio(alpha, 255);
     comp_draw(f, x0, y0, x1, y1, 1, f->ps_shadow_mc, 1, 1, u, 6);
+}
+
+/* SQ_SEL_W (Mesa gfx9.json SQ_SEL_XYZW01): the image's 4th byte as alpha, where amd_3d_build_tex_desc() gives 1. */
+#define E_SQ_SEL_W 7u
+
+void amd_comp_layer(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
+                    int bgr)
+{
+    Amd3dJob t = { 0 };
+    uint32_t u[10];
+    t.tex_mc = s->mc; t.tex_w = s->w; t.tex_h = s->h; t.tex_pitch_px = s->pitch_px; t.bgr = bgr;
+    amd_3d_build_tex_desc(u, &t);
+    u[3] = (u[3] & ~(7u << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W)) | (E_SQ_SEL_W << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W);
+    u[8] = sx - x0;
+    u[9] = sy - y0;
+    comp_draw(f, x0, y0, x1, y1, 2, f->ps_layer_mc, 1, 2, u, 10);
+}
+
+void amd_comp_layer_under(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t below_dy, uint32_t x0, uint32_t y0,
+                          uint32_t x1, uint32_t y1, int bgr)
+{
+    Amd3dJob t = { 0 };
+    uint32_t u[11];
+    t.tex_mc = s->mc; t.tex_w = s->w; t.tex_h = s->h; t.tex_pitch_px = s->pitch_px; t.bgr = bgr;
+    amd_3d_build_tex_desc(u, &t);
+    u[3] = (u[3] & ~(7u << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W)) | (E_SQ_SEL_W << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W);
+    u[8] = sx - x0;
+    u[9] = sy - y0;
+    u[10] = below_dy;
+    comp_draw(f, x0, y0, x1, y1, 0, f->ps_under_mc, 1, 4, u, 11);   /* v0 .. v17: 20 VGPRs */
 }
 
 uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc)
@@ -265,14 +352,15 @@ static unsigned long long comp_tsc(void)
     return ((unsigned long long)hi << 32) | lo;
 }
 
-/* Writes the four shaders to VRAM, each padded with zeros (the shader fetch reads ahead). */
+/* Writes the six shaders to VRAM, each padded with zeros (the shader fetch reads ahead). */
 static void upload_shaders(void)
 {
-    static const uint32_t off[4] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF };
+    static const uint32_t off[6] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF,
+                                     AMD_COMP_PS_LAYER_OFF, AMD_COMP_PS_UNDER_OFF };
     uint32_t code[AMD_COMP_SHADER_MAX], k, i, n;
-    for (k = 0; k < 4; k++) {
+    for (k = 0; k < 6; k++) {
         n = k == 0 ? amd_comp_build_vs(code) : k == 1 ? amd_comp_build_ps_fill(code) : k == 2 ? amd_comp_build_ps_image(code)
-                                                                                      : amd_comp_build_ps_shadow(code);
+          : k == 3 ? amd_comp_build_ps_shadow(code) : k == 4 ? amd_comp_build_ps_layer(code) : amd_comp_build_ps_under(code);
         for (i = 0; i < 0x200u / 4u; i++)
             amd_gpu_vram_write32(VRAM_COMP_SHADER_OFF + off[k] + 4u * i, i < n ? code[i] : 0u);
     }
@@ -332,15 +420,16 @@ static uint32_t scene_px(uint32_t x, uint32_t y, int bgr)
     return v & 0x00FFFFFFu;
 }
 
-static int near3(uint32_t a, uint32_t b)
+static int near_n(uint32_t a, uint32_t b, int tol)
 {
     int s;
     for (s = 0; s < 24; s += 8) {
         int d = (int)((a >> s) & 0xFFu) - (int)((b >> s) & 0xFFu);
-        if (d > 3 || d < -3) return 0;
+        if (d > tol || d < -tol) return 0;
     }
     return 1;
 }
+static int near3(uint32_t a, uint32_t b) { return near_n(a, b, 3); }
 
 static void keep_fault_registers(void)
 {
@@ -534,4 +623,235 @@ int amd_comp_upload_test(void)
     uval[AMD_COMP_U_POOL_FREE] = amd_vpool_free_bytes(&pool);
     status = bad ? "upload FAILED: words read back wrong" : "upload PASS: 1 MiB RAM -> VRAM surface, every word right";
     return !bad;
+}
+
+/* ---- M4b-2: the window being dragged, pasted by the GPU (the gfx overlay driver, see include/gfx.h) ---- */
+static struct
+{
+    int up;
+    uint64_t rt_mc;
+    uint32_t pitch_px, width, height;
+    int bgr;
+    AmdSurface s;                       /* the last uploaded layer, and the picture below it in rows lh .. 2 lh - 1 */
+    uint32_t lh;                        /* the layer's height */
+} ov;
+static uint32_t oval[AMD_COMP_OV_VALUES];
+uint32_t amd_comp_overlay_value(int what) { return (what >= 0 && what < AMD_COMP_OV_VALUES) ? oval[what] : 0; }
+
+int amd_comp_overlay_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
+{
+    uint64_t off64;
+    ov.up = 0;
+    if (!amd_gpu_ring_running() || !pitch_bytes || (pitch_bytes & 3u) || !width || !height || fb_phys < vram_cpu) return 0;
+    off64 = fb_phys - vram_cpu;
+    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_COMP_SHADER_OFF) return 0;
+    ov.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
+    if (!ov.rt_mc || !amd_gpu_frame_ib_mc() || !amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u)) return 0;
+    ov.pitch_px = pitch_bytes / 4u; ov.width = width; ov.height = height; ov.bgr = bgr;
+    upload_shaders();
+    amd_gpu_wc_flush();
+    ov.up = 1;
+    return 1;
+}
+
+int amd_comp_overlay_upload(const void *layer, int lw, int lh)
+{
+    unsigned long long t0 = comp_tsc();
+    if (!ov.up || !layer || lw <= 0 || lh <= 0) return -1;
+    if (ov.s.off && (ov.s.w != (uint32_t)lw || ov.lh != (uint32_t)lh))
+        amd_surface_free(&ov.s);
+    /* one surface twice as high: the layer in rows 0 .. lh-1, the picture below it (written each frame by gfx_present) under it */
+    if (!ov.s.off && !amd_surface_alloc(&ov.s, (uint32_t)lw, 2u * (uint32_t)lh)) { oval[AMD_COMP_OV_FAILS]++; return -1; }
+    ov.lh = (uint32_t)lh;
+    amd_surface_upload(&ov.s, (const uint32_t *)layer, (uint32_t)lw, 0, 0, (uint32_t)lw, (uint32_t)lh);
+    amd_gpu_wc_flush();
+    oval[AMD_COMP_OV_UPLOADS]++;
+    oval[AMD_COMP_OV_UPLOAD_CYCLES] = (uint32_t)(comp_tsc() - t0);
+    return 0;
+}
+
+volatile unsigned int *amd_comp_overlay_below(int *pitch)
+{
+    if (!ov.up || !ov.s.off) return 0;
+    *pitch = (int)ov.s.pitch_px;
+    return (volatile unsigned int *)amd_gpu_vram_ptr(ov.s.off + ov.lh * ov.s.pitch_px * 4u);
+}
+
+int amd_comp_overlay_draw(int x, int y, int x0, int y0, int x1, int y1)
+{
+    static uint32_t ib[1024];
+    AmdCompFrame f;
+    uint32_t k, n, seq;
+    unsigned long long t0 = comp_tsc();
+    if (!ov.up || !ov.s.off || !amd_gpu_ring_running()) { oval[AMD_COMP_OV_FAILS]++; return -1; }
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)ov.width) x1 = (int)ov.width;
+    if (y1 > (int)ov.height) y1 = (int)ov.height;
+    if (x0 < x) x0 = x;
+    if (y0 < y) y0 = y;
+    if (x1 > x + (int)ov.s.w) x1 = x + (int)ov.s.w;
+    if (y1 > y + (int)ov.lh) y1 = y + (int)ov.lh;
+    if (x0 >= x1 || y0 >= y1) return 0;  /* nothing of the layer in the box */
+
+    amd_comp_begin(&f, ib, 1024, ov.rt_mc, ov.pitch_px, ov.width, ov.height, ov.bgr,
+                   amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u));
+    amd_comp_layer_under(&f, &ov.s, (uint32_t)(x0 - x), (uint32_t)(y0 - y), ov.lh, (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
+                         (uint32_t)y1, ov.bgr);
+    n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
+    if (!n || n > amd_gpu_frame_ib_max_dwords()) { oval[AMD_COMP_OV_FAILS]++; return -1; }
+    if (a3d_default_state()) { oval[AMD_COMP_OV_FAILS]++; return -1; }
+    for (k = 0; k < n; k++)
+        amd_gpu_frame_ib_write32(k, ib[k]);
+    amd_gpu_wc_flush();                 /* the frame, and the picture below the layer the CPU just wrote */
+    seq = amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), n);
+    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) { oval[AMD_COMP_OV_FAILS]++; return -1; }
+    oval[AMD_COMP_OV_DRAWS]++;
+    oval[AMD_COMP_OV_DRAW_CYCLES] = (uint32_t)(comp_tsc() - t0);
+    return 0;
+}
+
+/* What blend mode 2 should give for one pixel: colour + below * t / 255, per byte (t = the layer's 4th byte). */
+uint32_t amd_comp_layer_px(uint32_t layer, uint32_t below)
+{
+    uint32_t t = layer >> 24, v = 0, s;
+    for (s = 0; s < 24; s += 8) {
+        uint32_t c = ((layer >> s) & 0xFFu) + (((below >> s) & 0xFFu) * t + 127u) / 255u;
+        v |= (c > 255u ? 255u : c) << s;
+    }
+    return v;
+}
+
+/* The 96 x 64 test layer: opaque inside, a fading edge 16 pixels wide, a corner nothing was drawn in; packed as gfx_layer_pack() does. */
+static void test_layer(uint32_t *lay)
+{
+    uint32_t x, y;
+    for (y = 0; y < 64u; y++)
+        for (x = 0; x < 96u; x++) {
+            uint32_t e = x < y ? x : y, t = e >= 16u ? 0u : 255u - e * 16u;   /* see-through at the edge, opaque inside */
+            uint32_t c = (x * 2u) | ((y * 3u) << 8) | (0x30u << 16);
+            if (x >= 80u && y < 16u) { t = 255u; c = 0; }                       /* a corner nothing was drawn in */
+            c = (((c & 0xFFu) * (255u - t) / 255u)) | ((((c >> 8) & 0xFFu) * (255u - t) / 255u) << 8) |
+                ((((c >> 16) & 0xFFu) * (255u - t) / 255u) << 16);              /* premultiplied */
+            lay[y * 96u + x] = c | (t << 24);
+        }
+}
+
+/* The M4b-2 check before the overlay is used: a 96 x 64 layer (opaque middle, a fading edge, a see-through corner) pasted with blend
+ * mode 2 onto a pattern in the offscreen buffer; every pixel within 2 of amd_comp_layer_px(). 1 = right. */
+int amd_comp_layer_test(void)
+{
+    static uint32_t lay[96u * 64u];
+    AmdSurface s;
+    AmdCompFrame f;
+    static uint32_t ib[1024];
+    uint32_t x, y, n, seq, bad = 0, k;
+    const uint32_t ox = 40, oy = 30, pattern = 0x00406080u;
+    uint64_t rt_mc = amd_native_vram_mc_addr(VRAM_COMP_RT_OFF, COMP_RT_W * COMP_RT_H * 4u);
+    for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
+    if (!amd_gpu_ring_running() || !rt_mc) { status = "layer test skipped: no ring / no MC address"; return 0; }
+    test_layer(lay);
+    upload_shaders();
+    if (!amd_surface_alloc(&s, 96, 64)) { status = "layer test skipped: no surface"; return 0; }
+    amd_surface_upload(&s, lay, 96, 0, 0, 96, 64);
+    for (y = 0; y < 64u + 2u * oy; y++)
+        for (x = 0; x < 96u + 2u * ox; x++)
+            amd_gpu_vram_write32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u, pattern);
+    amd_gpu_wc_flush();
+    amd_comp_begin(&f, ib, 1024, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u));
+    amd_comp_layer(&f, &s, 0, 0, ox, oy, ox + 96u, oy + 64u, 1);
+    n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
+    if (!n || a3d_default_state()) { amd_surface_free(&s); status = "layer test FAILED: the frame / default state"; return 0; }
+    for (k = 0; k < n; k++)
+        amd_gpu_frame_ib_write32(k, ib[k]);
+    amd_gpu_wc_flush();
+    amd_gpu_fault_clear();
+    seq = amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), n);
+    if (!seq || !amd_gpu_fence_wait(seq, 8000000u)) {
+        keep_fault_registers();
+        val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
+        amd_surface_free(&s);
+        status = "layer test FAILED: fence timeout";
+        return 0;
+    }
+    for (y = 0; y < 64u + 2u * oy; y++)
+        for (x = 0; x < 96u + 2u * ox; x++) {
+            uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = pattern;
+            int in = x >= ox && x < ox + 96u && y >= oy && y < oy + 64u;
+            if (in) want = amd_comp_layer_px(lay[(y - oy) * 96u + (x - ox)], pattern);
+            if (in) val[AMD_COMP_V_IN_TOTAL]++; else val[AMD_COMP_V_OUT_TOTAL]++;
+            if (in ? near_n(v, want, 2) : v == pattern) { if (in) val[AMD_COMP_V_IN_GOOD]++; continue; }
+            if (!in) val[AMD_COMP_V_OUT_BAD]++;
+            if (!bad++) {
+                val[AMD_COMP_V_FIRST_IN] = v | 0x01000000u; val[AMD_COMP_V_FIRST_IN + 1] = want;
+                val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16);
+            }
+        }
+    amd_surface_free(&s);
+    val[AMD_COMP_V_DWORDS] = n; val[AMD_COMP_V_DRAWS] = f.draws;
+    if (bad) { keep_fault_registers(); status = "layer FAILED: blend mode 2 (ONE / SRC_ALPHA) pixels are wrong"; return 0; }
+    status = "layer PASS: a premultiplied layer pasted with blend mode 2, every pixel right";
+    return 1;
+}
+
+/* The window drag as the overlay does it, as a test: 8 rounds of "the CPU writes the picture below the layer fast (one row at a time,
+ * like gfx_present()) into the rows under the layer, the GPU writes layer + below in one pass (amd_comp_layer_under), the CPU reads it
+ * back", each round a different picture, so an old pixel shows. Around the layer the target must keep what the CPU wrote there.
+ * Returns the number of wrong pixels (0 = right), ~0u = could not run; amd_comp_value(AMD_COMP_V_IN_TOTAL) = pixels checked. */
+uint32_t amd_comp_drag_test(void)
+{
+    static uint32_t lay[96u * 64u], row[176u];
+    static uint32_t ib[1024];
+    AmdSurface s;
+    AmdCompFrame f;
+    uint32_t x, y, n = 0, seq, k, round, bad = 0;
+    const uint32_t ox = 40, oy = 30, w = 96u + 2u * 40u, h = 64u + 2u * 30u, around = 0x00C0A080u;
+    uint64_t rt_mc = amd_native_vram_mc_addr(VRAM_COMP_RT_OFF, COMP_RT_W * COMP_RT_H * 4u);
+    for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
+    if (!amd_gpu_ring_running() || !rt_mc) { status = "drag test skipped: no ring / no MC address"; return ~0u; }
+    test_layer(lay);
+    upload_shaders();
+    if (!amd_surface_alloc(&s, 96, 128)) { status = "drag test skipped: no surface"; return ~0u; }
+    amd_surface_upload(&s, lay, 96, 0, 0, 96, 64);
+    for (round = 0; round < 8u; round++) {
+        uint32_t pattern = ((0x00102030u * (round + 1u)) ^ (round & 1u ? 0x00FF00FFu : 0u)) & 0x00FFFFFFu;
+        for (x = 0; x < w; x++) row[x] = around;
+        for (y = 0; y < h; y++)                                           /* the screen: the old frame */
+            amd_gpu_vram_write_span(VRAM_COMP_RT_OFF + y * COMP_RT_W * 4u, row, w);
+        for (x = 0; x < 96u; x++) row[x] = pattern;
+        for (y = 0; y < 64u; y++)                                         /* the picture below the layer, fast */
+            amd_gpu_vram_write_span(s.off + (64u + y) * s.pitch_px * 4u, row, 96u);
+        __asm__ volatile("sfence" ::: "memory");
+        amd_comp_begin(&f, ib, 1024, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u));
+        amd_comp_layer_under(&f, &s, 0, 0, 64u, ox, oy, ox + 96u, oy + 64u, 1);
+        n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
+        if (!n || a3d_default_state()) { bad = ~0u; status = "drag test FAILED: the frame / default state"; break; }
+        for (k = 0; k < n; k++)
+            amd_gpu_frame_ib_write32(k, ib[k]);
+        amd_gpu_wc_flush();
+        amd_gpu_fault_clear();
+        seq = amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), n);
+        if (!seq || !amd_gpu_fence_wait(seq, 8000000u)) {
+            keep_fault_registers();
+            val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
+            bad = ~0u; status = "drag test FAILED: fence timeout"; break;
+        }
+        for (y = 0; y < h; y++)
+            for (x = 0; x < w; x++) {
+                uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = around;
+                int in = x >= ox && x < ox + 96u && y >= oy && y < oy + 64u;
+                if (in) want = amd_comp_layer_px(lay[(y - oy) * 96u + (x - ox)], pattern);
+                val[AMD_COMP_V_IN_TOTAL]++;
+                if (in ? near_n(v, want, 2) : v == want) { val[AMD_COMP_V_IN_GOOD]++; continue; }
+                if (!bad++) {
+                    val[AMD_COMP_V_FIRST_IN] = v | 0x01000000u; val[AMD_COMP_V_FIRST_IN + 1] = want;
+                    val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16) | (round << 28);
+                }
+            }
+    }
+    val[AMD_COMP_V_DWORDS] = n; val[AMD_COMP_V_DRAWS] = 1;
+    amd_surface_free(&s);
+    if (bad == 0) status = "drag PASS: 8 rounds of layer + picture below written in one pass, every pixel right";
+    else if (bad != ~0u) { keep_fault_registers(); status = "drag FAILED: pixels are wrong"; }
+    return bad;
 }

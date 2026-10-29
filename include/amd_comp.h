@@ -26,7 +26,7 @@ typedef struct
     uint64_t rt_mc;
     uint32_t pitch_px, width, height;
     int bgr;
-    uint64_t vs_mc, ps_fill_mc, ps_image_mc, ps_shadow_mc;  /* the shaders (amd_comp_build_*), 256-byte aligned */
+    uint64_t vs_mc, ps_fill_mc, ps_image_mc, ps_shadow_mc, ps_layer_mc, ps_under_mc;  /* the shaders (amd_comp_build_*), 256-byte aligned */
     uint32_t draws;
 } AmdCompFrame;
 
@@ -36,6 +36,8 @@ uint32_t amd_comp_build_vs(uint32_t *code);         /* rectangle from user SGPRs
 uint32_t amd_comp_build_ps_fill(uint32_t *code);    /* s0 = (r, g), s1 = (b, a) as halves */
 uint32_t amd_comp_build_ps_image(uint32_t *code);   /* s0..s7 = image resource, s8 / s9 = surface x / y minus screen x / y, s10 = opacity */
 uint32_t amd_comp_build_ps_shadow(uint32_t *code);  /* s0..s3 = x0, y0, x1, y1, s4 = 1 / r, s5 = alpha (floats) */
+uint32_t amd_comp_build_ps_layer(uint32_t *code);   /* s0..s7 = image resource (alpha from the 4th byte), s8 / s9 as for the image */
+uint32_t amd_comp_build_ps_under(uint32_t *code);   /* as layer, plus the picture below it s10 rows further down: out = layer + below * alpha */
 
 /* Building a frame: begin (the target), any number of fills / images / shadows (painted in that order), end. end returns the number
  * of dwords, 0 if the stream did not fit. sync_mc: 4 bytes in VRAM for the end-of-frame colour buffer sync. */
@@ -47,11 +49,13 @@ void amd_comp_image(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t 
                     uint32_t opacity, int bgr);
 void amd_comp_shadow(AmdCompFrame *f, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, uint32_t r, uint32_t alpha);
 uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
-/* The shader offsets inside the 4 KiB at shader_mc that amd_comp_begin() assumes. */
+/* The shader offsets inside the 4 KiB at shader_mc that amd_comp_begin() assumes (0x200 bytes each). */
 #define AMD_COMP_VS_OFF 0x000u
 #define AMD_COMP_PS_FILL_OFF 0x200u
 #define AMD_COMP_PS_IMAGE_OFF 0x400u
 #define AMD_COMP_PS_SHADOW_OFF 0x600u
+#define AMD_COMP_PS_LAYER_OFF 0x800u
+#define AMD_COMP_PS_UNDER_OFF 0xA00u
 
 /* M4a test: three "windows" (surfaces the CPU fills) with soft shadows over a background, the third half transparent, composited in
  * ONE submission into a 512 x 256 buffer in VRAM / into the screen, every pixel checked against a CPU-made reference. 1 = right.
@@ -87,6 +91,33 @@ int amd_comp_upload_test(void);
 #define AMD_COMP_U_POOL_FREE 4   /* free pool bytes after it was freed again */
 #define AMD_COMP_U_VALUES 5
 uint32_t amd_comp_upload_value(int what);
+
+/* A packed gfx layer (gfx_layer_pack: colour premultiplied, 4th byte = how much of what is below shows through): result = colour +
+ * below * that / 255 (blend mode 2, ONE / SRC_ALPHA). The surface's pixel (sx, sy) lands on (x0, y0). */
+void amd_comp_layer(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
+                    int bgr);
+/* The same finished in one pass, no blending: the picture below is in the same surface below_dy rows down (amd_comp_build_ps_under). */
+void amd_comp_layer_under(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t below_dy, uint32_t x0, uint32_t y0,
+                          uint32_t x1, uint32_t y1, int bgr);
+
+/* M4b-2: the gfx overlay driver (GfxOverlayOps in gfx.h) that pastes the window being dragged onto the screen. init after the
+ * compositor worked on the screen; 1 = ready. upload / draw return 0 when done (draw waits for the GPU), -1 on a failure. */
+int amd_comp_overlay_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
+int amd_comp_overlay_upload(const void *layer, int lw, int lh);
+volatile unsigned int *amd_comp_overlay_below(int *pitch);
+int amd_comp_overlay_draw(int x, int y, int x0, int y0, int x1, int y1);
+#define AMD_COMP_OV_UPLOADS 0
+#define AMD_COMP_OV_DRAWS 1
+#define AMD_COMP_OV_FAILS 2
+#define AMD_COMP_OV_UPLOAD_CYCLES 3  /* the last one */
+#define AMD_COMP_OV_DRAW_CYCLES 4    /* the last one, from building the frame to the fence */
+#define AMD_COMP_OV_VALUES 5
+uint32_t amd_comp_overlay_value(int what);
+/* M4b-2 check before the overlay is used (offscreen, amd_comp_value() / amd_comp_status() like the M4a test): 1 = right */
+int amd_comp_layer_test(void);
+uint32_t amd_comp_layer_px(uint32_t layer, uint32_t below);  /* what blend mode 2 gives for one pixel */
+/* The overlay's path as a test (8 rounds of the picture below written fast, then layer + below in one pass): wrong pixels, ~0u = did not run */
+uint32_t amd_comp_drag_test(void);
 #define AMD_COMP_V_IN_GOOD 0     /* pixels of the scene that are right */
 #define AMD_COMP_V_IN_TOTAL 1
 #define AMD_COMP_V_OUT_BAD 2     /* pixels around the scene that changed */

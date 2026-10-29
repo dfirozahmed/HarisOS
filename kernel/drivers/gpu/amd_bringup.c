@@ -63,6 +63,30 @@ static void log_3d_result(int ok, int with_map)
 #if HARIS_AMD_GPU_PSP_LEVEL >= 8
 /* 1 when the compositor frame worked offscreen (then it runs on the screen too). */
 static int comp_ok;
+#if HARIS_AMD_GPU_PSP_LEVEL >= 9
+static int layer_ok; /* the premultiplied layer blend worked offscreen */
+
+/* The overlay's draw, with GPULOG.TXT written once after the first paste and once after a failure (on the screen both look the same:
+ * after a failure the CPU pastes the window). */
+static int amd_overlay_draw(int x, int y, int x0, int y0, int x1, int y1)
+{
+    static int logged_ok, logged_fail;
+    int rc = amd_comp_overlay_draw(x, y, x0, y0, x1, y1);
+    if (rc == 0 ? logged_ok : logged_fail)
+        return rc;
+    if (rc == 0) logged_ok = 1; else logged_fail = 1;
+    serial_print(rc == 0 ? "OVERLAY: first window paste by the GPU done\n"
+                         : "OVERLAY: the GPU paste FAILED: the CPU pastes the window from now on\n");
+    log_hex("  uploads               ", amd_comp_overlay_value(AMD_COMP_OV_UPLOADS));
+    log_hex("  pastes                ", amd_comp_overlay_value(AMD_COMP_OV_DRAWS));
+    log_hex("  failures              ", amd_comp_overlay_value(AMD_COMP_OV_FAILS));
+    log_hex("  CPU cycles last upload", amd_comp_overlay_value(AMD_COMP_OV_UPLOAD_CYCLES));
+    log_hex("  CPU cycles last paste ", amd_comp_overlay_value(AMD_COMP_OV_DRAW_CYCLES));
+    amd_gpu_log_save();
+    return rc;
+}
+static const GfxOverlayOps amd_overlay_ops = { amd_comp_overlay_upload, amd_comp_overlay_below, amd_overlay_draw };
+#endif
 
 /* The result of the last compositor test. */
 static void log_comp_result(int ok)
@@ -539,6 +563,36 @@ void amd_gpu_bringup_cp(void)
             amd_gpu_log_save();
         }
     }
+#if HARIS_AMD_GPU_PSP_LEVEL >= 9
+    /* M4b-2: the window being dragged will be a premultiplied layer pasted by the GPU (blend ONE / SRC_ALPHA, new here): check
+     * that blend offscreen first; the overlay is only used after this passed. */
+    if (comp_ok) {
+        serial_print("LAYER: about to paste a premultiplied layer (blend mode 2) into the offscreen buffer\n");
+        amd_gpu_log_save();
+        layer_ok = amd_comp_layer_test();
+        log_comp_result(layer_ok);
+        amd_gpu_log_save();
+    }
+    /* The overlay's own path: the CPU writes the picture below the window into VRAM next to the layer, the GPU writes layer + below
+     * onto the target in one pass (the screen never shows the picture without the window: no torn edges while dragging). */
+    if (layer_ok) {
+        serial_print("DRAG: 8 rounds of picture-below + layer written in one pass into the offscreen buffer\n");
+        amd_gpu_log_save();
+        uint32_t bad = amd_comp_drag_test();
+        serial_print("DRAG: "); serial_print(amd_comp_status()); serial_print("\n");
+        log_hex("  wrong pixels          ", bad);
+        log_hex("  pixels checked        ", amd_comp_value(AMD_COMP_V_IN_TOTAL));
+        if (bad) {
+            log_hex("  first wrong pixel     ", amd_comp_value(AMD_COMP_V_FIRST_IN));
+            log_hex("  it should be          ", amd_comp_value(AMD_COMP_V_FIRST_IN + 1));
+            log_hex("  at x | y<<16 | round<<28", amd_comp_value(AMD_COMP_V_FIRST_IN + 2));
+            log_hex("  VM fault: GC status   ", amd_comp_value(AMD_COMP_V_FAULT_GC));
+            log_hex("  GRBM_STATUS (timeout) ", amd_comp_value(AMD_COMP_V_GRBM));
+            layer_ok = 0;               /* the CPU pastes the window */
+        }
+        amd_gpu_log_save();
+    }
+#endif
 #endif
 #endif
 }
@@ -637,10 +691,22 @@ int amd_gpu_bringup_screen(void)
     if (comp_ok) {
         serial_print("COMP: about to composite 3 windows with shadows into the screen (one submission)\n");
         amd_gpu_log_save();
-        log_comp_result(amd_comp_test_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
-                                             (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first()));
+        int comp_screen_ok = amd_comp_test_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
+                                                  (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
+        log_comp_result(comp_screen_ok);
         amd_gpu_log_save();
         result = 1;
+#if HARIS_AMD_GPU_PSP_LEVEL >= 9
+        /* M4b-2: from now on gfx_present() lets the GPU paste the window being dragged (the CPU does it if the GPU ever fails) */
+        if (comp_screen_ok && layer_ok &&
+            amd_comp_overlay_init((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(), (uint64_t)(g_bar0 & 0xFFFFFFF0u),
+                                  gfx_screen_red_first())) {
+            gfx_overlay_driver(&amd_overlay_ops);
+            serial_print("OVERLAY: the GPU pastes the window being dragged\n");
+        } else
+            serial_print("OVERLAY: not used (a check did not pass): the CPU pastes the window being dragged\n");
+        amd_gpu_log_save();
+#endif
     }
 #endif
     return result;
