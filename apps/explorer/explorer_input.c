@@ -46,6 +46,7 @@ int ex_press(Window *w, int x, int y)
     int tip_was_shown = EX_TIP_SHOWN;
     EX_TIP_BTN = -1; /* a click hides the tooltip until the pointer moves again */
     EX_TIP_SHOWN = 0;
+    int tip_marked = tip_was_shown && ex_tip_mark(w, 0); /* its box is drawn again (the whole window if not known) */
     if (EX_MENU.open) /* a click on an item runs it; a click anywhere else only closes the menu */
     {
         int hit = ex_menu_hit(x, y);
@@ -144,8 +145,8 @@ int ex_press(Window *w, int x, int y)
     }
     /* A plain selection: only the row that lost it, the row that got it and the status bar (it names the selection)
      * look different; the toolbar too when Cut / Copy / Rename / Delete become usable or not. The whole window is
-     * drawn again only when the list scrolled or a tooltip was showing (the click hid it). */
-    if (EX_SCROLL != old_scroll || tip_was_shown)
+     * drawn again only when the list scrolled (a tooltip the click hid: only its box, marked above). */
+    if (EX_SCROLL != old_scroll || (tip_was_shown && !tip_marked))
         return 1;
     mark_row(&l, old_sel);
     mark_row(&l, row);
@@ -248,10 +249,13 @@ int ex_hover(Window *w, int x, int y)
             EX_HOVER_PLACE = p < ex_place_count() ? p : -1;
         }
     }
-    if (old_menu != EX_MENU.hover || was_shown != EX_TIP_SHOWN || old_crumb != EX_HOVER_CRUMB)
-        return 1; /* menu, tooltip and path bar: rare, redraw the whole window */
+    if (old_menu != EX_MENU.hover || old_crumb != EX_HOVER_CRUMB)
+        return 1; /* menu and path bar: rare, redraw the whole window */
+    int tip_gone = was_shown && !EX_TIP_SHOWN;
+    if (tip_gone && !ex_tip_mark(w, 0)) /* the pointer left the button: only the tooltip's box is drawn again */
+        return 1;
     if (old_row == EX_HOVER_ROW && old_place == EX_HOVER_PLACE)
-        return 0;
+        return tip_gone ? 2 : 0;
 
     /* Only the highlight of a row or sidebar entry moved: redraw just those. A row's pixels are where the row is
      * now, also after the list scrolled (they moved with it). */

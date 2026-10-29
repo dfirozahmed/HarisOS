@@ -229,6 +229,8 @@ int ex_crumb_at(const Layout *l, int x, int y);         /* folder of the path ba
 void ex_start_addr_edit(void);                          /* turn the path bar into a text field */
 int ex_end_addr(int commit);                            /* Enter (1) / Escape (0); 0 = path refused, field stays */
 void ex_tip_draw(const Window *w, UiRect body, const UiTheme *t);
+/* The tooltip appears (show = 1, for EX_TIP_BTN) or goes away (0): marks only its box; 0 = not known, draw everything */
+int ex_tip_mark(const Window *w, int show);
 int ex_tick(Window *w);
 int ex_cursor(Window *w, int x, int y);
 

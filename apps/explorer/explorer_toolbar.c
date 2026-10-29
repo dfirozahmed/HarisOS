@@ -289,17 +289,19 @@ void ex_draw_toolbar(const Layout *l, const UiTheme *t)
 }
 
 /* tooltip: a small label under the toolbar button the pointer rests on (above it near the bottom) */
-void ex_tip_draw(const Window *w, UiRect body, const UiTheme *t)
+static const char *const TIPS[BTN_COUNT] = {"Back (Alt+Left)", "Forward (Alt+Right)", "Up one level (Alt+Up)",
+                                            "Refresh (F5)", "New folder (Ctrl+Shift+N)", "New text file",
+                                            "Cut (Ctrl+X)", "Copy (Ctrl+C)", "Paste (Ctrl+V)", "Rename (F2)",
+                                            "Delete (Del)", "Sort by"};
+#define TIP_SHADOW 12 /* how far the tooltip's shadow reaches past it (blur 8, 3 down) */
+
+/* Where the tooltip of toolbar button btn goes (without its shadow); 0 if there is none. */
+static int tip_box(const Window *w, UiRect body, int btn, UiRect *out)
 {
-    static const char *const TIPS[BTN_COUNT] = {"Back (Alt+Left)", "Forward (Alt+Right)", "Up one level (Alt+Up)",
-                                                "Refresh (F5)", "New folder (Ctrl+Shift+N)", "New text file",
-                                                "Cut (Ctrl+X)", "Copy (Ctrl+C)", "Paste (Ctrl+V)", "Rename (F2)",
-                                                "Delete (Del)", "Sort by"};
-    if (EX_TIP_BTN < 0 || EX_TIP_BTN >= BTN_COUNT || EX_TIP_BTN >= w->btn_count)
-        return;
-    const char *s = TIPS[EX_TIP_BTN];
-    UiRect b = w->btn[EX_TIP_BTN].r;
-    int tw = ui_text_width(s, UI_TEXT_SMALL) + 22, th = 26;
+    if (btn < 0 || btn >= BTN_COUNT || btn >= w->btn_count)
+        return 0;
+    UiRect b = w->btn[btn].r;
+    int tw = ui_text_width(TIPS[btn], UI_TEXT_SMALL) + 22, th = 26;
     int x = b.x + b.w / 2 - tw / 2, y = b.y + b.h + 6;
     if (x + tw > body.x + body.w - 4)
         x = body.x + body.w - 4 - tw;
@@ -307,6 +309,32 @@ void ex_tip_draw(const Window *w, UiRect body, const UiTheme *t)
         x = body.x + 4;
     if (y + th > body.y + body.h - 4)
         y = b.y - th - 6;
+    *out = ui_rect(x, y, tw, th);
+    return 1;
+}
+
+static int TIP_UP = -1; /* whose tooltip is on the window now (the pointer may already rest on another button) */
+
+/* The tooltip appears (show = 1, for EX_TIP_BTN) or goes away (show = 0): only its box and shadow are drawn again.
+ * Returns 0 when that cannot be told (no such button): then the caller has the whole window drawn. */
+int ex_tip_mark(const Window *w, int show)
+{
+    UiRect r;
+    int btn = show ? EX_TIP_BTN : TIP_UP;
+    TIP_UP = show ? EX_TIP_BTN : -1;
+    if (!tip_box(w, wm_content(w), btn, &r))
+        return 0;
+    wm_add_damage(ui_inset(r, -TIP_SHADOW));
+    return 1;
+}
+
+void ex_tip_draw(const Window *w, UiRect body, const UiTheme *t)
+{
+    UiRect r;
+    if (!tip_box(w, body, EX_TIP_BTN, &r))
+        return;
+    const char *s = TIPS[EX_TIP_BTN];
+    int x = r.x, y = r.y, tw = r.w, th = r.h;
     gfx_shadow(x, y, tw, th, t->radius_s, 8, 0, 3, 110);
     gfx_fill_round_rect(x, y, tw, th, t->radius_s, ui_color(t->titlebar));
     gfx_round_rect(x, y, tw, th, t->radius_s, 1, ui_color(t->border));
@@ -341,7 +369,9 @@ int ex_tick(Window *w)
     if (want == EX_TIP_SHOWN)
         return drives;
     EX_TIP_SHOWN = want;
-    return 1;
+    if (drives || !ex_tip_mark(w, want))
+        return 1; /* the drives changed too, or the tooltip's place is not known: everything */
+    return 2;     /* only the tooltip appeared or went away */
 }
 
 /* Add the toolbar buttons to the new window, in the order of the BTN_* ids (ex_sync_buttons and
