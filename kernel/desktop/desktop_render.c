@@ -32,13 +32,17 @@ int desktop_finish_input(int bar_changed)
     {
         int bx, by, bw, bh;
         taskbar_bounds(&bx, &by, &bw, &bh);
-        wm_add_damage(ui_rect(bx, by, bw, bh));
+        wm_add_screen_damage(ui_rect(bx, by, bw, bh));
     }
 
     UiRect areas[WM_DAMAGE_MAX];
     int n = wm_take_damage_rects(areas, WM_DAMAGE_MAX);
     if (n == 0)
         return 0;
+
+    /* With a GPU compositor the changed areas are put together from the surfaces (desktop_comp.c) */
+    if (desktop_comp_frame(areas, n))
+        return 1;
 
     /* A window pasted by the GPU (gfx overlay) lands after everything else is on the screen, so it must stay
      * out of what is drawn over the windows: the taskbar always, everything while a menu is open. */

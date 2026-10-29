@@ -176,28 +176,28 @@ static UiRect power_tip_rect(int hover)
 static void dmg_all(void)
 {
     UiRect m = menu_rect();
-    wm_add_damage(ui_rect(m.x - 36, m.y - 30, m.w + 72, m.h + 80)); /* the shadow reaches past the panel */
+    wm_add_screen_damage(ui_rect(m.x - 36, m.y - 30, m.w + 72, m.h + 80)); /* the shadow reaches past the panel */
 }
 
 static void dmg_row(int i)
 {
     if (i >= 0 && i < VN)
-        wm_add_damage(row_rect(i));
+        wm_add_screen_damage(row_rect(i));
 }
 
 static void dmg_power(int hover)
 {
     if (hover <= 0)
         return;
-    wm_add_damage(power_btn_rect(hover - 1));
+    wm_add_screen_damage(power_btn_rect(hover - 1));
     UiRect t = power_tip_rect(hover);
-    wm_add_damage(ui_rect(t.x - 2, t.y - 2, t.w + 4, t.h + 4));
+    wm_add_screen_damage(ui_rect(t.x - 2, t.y - 2, t.w + 4, t.h + 4));
 }
 
 static void dmg_search(void)
 {
     UiRect s = search_rect();
-    wm_add_damage(ui_inset(s, -3));
+    wm_add_screen_damage(ui_inset(s, -3));
 }
 
 /* ---- search filter ---- */

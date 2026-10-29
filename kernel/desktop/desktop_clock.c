@@ -68,13 +68,13 @@ int desktop_tick(void)
     {
         int bx, by, bw, bh;
         taskbar_bounds(&bx, &by, &bw, &bh);
-        wm_add_damage(ui_rect(bx, by, bw, bh));
+        wm_add_screen_damage(ui_rect(bx, by, bw, bh));
     }
     if (flipped && top && top->caret && top->edit_count > 0)
     {
         UiRect f = top->edits[top->focus].field;
         if (f.w > 0)
-            wm_add_damage(f);
+            wm_add_screen_damage(f);
     }
     if (!clock_changed && !flipped && !ticked)
         return 0;

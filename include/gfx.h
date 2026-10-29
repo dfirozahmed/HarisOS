@@ -80,6 +80,7 @@ int gfx_brightness(void);
  */
 int gfx_cache_enable(void *memory); /* 0 = ok, -1 = no back buffer */
 int gfx_cache_valid(void);          /* 1 = saved and usable */
+const unsigned int *gfx_cache_pixels(void); /* the saved picture (W x H, W pixels per row), 0 when not valid */
 void gfx_cache_invalidate(void);
 void gfx_cache_save(void); /* copy the whole back buffer into the cache */
 void gfx_cache_restore(int x, int y, int w, int h);
@@ -100,6 +101,7 @@ int gfx_scroll_rect(int x, int y, int w, int h, int dy);
  * black, the top byte is how much of the background still shows through (255 = nothing drawn there).
  * gfx_layer_blit() draws the layer at x,y (clipped), over what is already in the picture. */
 int gfx_layer_begin(void *buf, int w, int h, unsigned fill);
+int gfx_layer_begin_keep(void *buf, int w, int h); /* the same, but buf keeps what it holds (no fill) */
 void gfx_layer_end(void);
 void gfx_layer_pack(void *over_black, const void *over_white, int w, int h); /* w*h pixels each; the layer is w wide */
 void gfx_layer_blit(const void *layer, int lw, int lh, int x, int y);
@@ -131,6 +133,36 @@ void gfx_overlay_driver(const GfxOverlayOps *ops); /* 0: none */
 void gfx_overlay_area(int x, int y, int w, int h);   /* w or h <= 0: nowhere */
 int gfx_overlay_show(const void *layer, int lw, int lh, int x, int y, int changed, int inset);
 void gfx_overlay_hide(void);
+
+/* ---- compositor: a GPU puts the whole scene together ----------
+ * Every part of the scene lives in its own picture in the GPU's memory (a "surface"): the wallpaper, each window
+ * (a packed layer with its shadow), the taskbar. For the parts of the screen that changed, the driver puts the
+ * listed items together, back to front, and writes the result onto the screen in one go (no half-finished
+ * picture is ever shown). The back buffer is not used for them; the CPU only draws what changed inside a surface.
+ *   surface_new(w, h)             a new surface; its id (> 0), 0 = none
+ *   surface_free(id)
+ *   upload(id, px, pitch, x, y, w, h, opaque)  w x h pixels (pitch pixels per row) to (x, y) of the surface;
+ *                                 opaque: they cover what is below (the top byte is ignored); else a packed layer
+ *   compose(items, n, rects, nr)  put items[0..n-1] together inside each of the nr rectangles (x0, y0, x1, y1
+ *                                 each, screen pixels) and write that onto the screen; 0 = done and finished
+ * gfx_comp_present() wraps compose with the pointer (taken off the screen before, drawn again after). */
+typedef struct
+{
+    int surface;  /* id */
+    int x, y;     /* where its pixel (0, 0) is on the screen */
+    int w, h;
+    int layer;    /* 1 = packed layer (blended), 0 = opaque picture */
+} GfxCompItem;
+typedef struct
+{
+    int (*surface_new)(int w, int h);
+    void (*surface_free)(int id);
+    int (*upload)(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque);
+    int (*compose)(const GfxCompItem *items, int n, const int *rects, int nr);
+} GfxCompOps;
+void gfx_comp_driver(const GfxCompOps *ops); /* 0: none */
+const GfxCompOps *gfx_comp(void);            /* the driver, 0 when there is none (or it failed) */
+int gfx_comp_present(const GfxCompItem *items, int n, const int *rects, int nr); /* 0 = done; on a failure the driver is dropped */
 
 /* ---- mouse pointer ------------------------------------------
  * A smooth arrow drawn on top of everything, directly on the screen (never in

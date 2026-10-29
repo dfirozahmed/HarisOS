@@ -70,8 +70,16 @@ void wm_damage_window_internal(const Window *w)
            w->r.x + w->r.w + WM_SHADOW_MARGIN, w->r.y + w->r.h + WM_SHADOW_MARGIN);
 }
 
+/* the window looks different (a handler said so): its surface is drawn again, and the screen there */
+void wm_damage_content_internal(const Window *w)
+{
+    wm_comp_content_internal(w, w->r.x, w->r.y, w->r.x + w->r.w, w->r.y + w->r.h);
+    wm_damage_window_internal(w);
+}
+
 void wm_invalidate(void)
 {
+    wm_comp_all_internal(); /* apps ask with this for their own window to be drawn again */
     wm_damage_internal(0, 0, (int)gfx_width(), (int)gfx_height());
 }
 
@@ -110,7 +118,14 @@ int wm_take_damage(UiRect *out)
 }
 
 
+/* a part of the screen that is not inside a window changed (taskbar, clock, menus): no window surface is drawn again */
+void wm_add_screen_damage(UiRect r)
+{
+    wm_damage_internal(r.x, r.y, r.x + r.w, r.y + r.h);
+}
+
 void wm_add_damage(UiRect r)
 {
+    wm_comp_content_screen_internal(r.x, r.y, r.x + r.w, r.y + r.h); /* what a window shows there changed */
     wm_damage_internal(r.x, r.y, r.x + r.w, r.y + r.h);
 }

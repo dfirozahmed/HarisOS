@@ -75,7 +75,7 @@ uint32_t amd_vpool_alloc(AmdVPool *p, uint32_t bytes);           /* the VRAM off
 int amd_vpool_free(AmdVPool *p, uint32_t off);                    /* 1 freed, 0 not the start of a used block */
 uint32_t amd_vpool_free_bytes(const AmdVPool *p);
 
-/* Surfaces from the compositor's pool (the 32 MiB at 224 MiB of VRAM). The pitch is rounded up to 64 pixels (256 bytes). */
+/* Surfaces from the compositor's pool (VRAM 16 MiB .. 127 MiB). The pitch is rounded up to 64 pixels (256 bytes). */
 int amd_surface_alloc(AmdSurface *s, uint32_t w, uint32_t h);    /* 1 = done */
 void amd_surface_free(AmdSurface *s);
 /* Copies a w x h rectangle of a RAM picture (src points at its pixel (0, 0), src_pitch_px pixels per row) to (x, y) of the surface.
@@ -130,5 +130,23 @@ uint32_t amd_comp_drag_test(void);
 #define AMD_COMP_V_GRBM 13       /* after a fence timeout: GRBM_STATUS */
 #define AMD_COMP_VALUES 14
 uint32_t amd_comp_value(int what);
+
+/* M4c: the scene compositor, the gfx compositor driver (GfxCompOps in gfx.h). init after the compositor and the overlay worked on
+ * the screen (1 = ready); then amd_comp_scene_test() (offscreen, amd_comp_value() / amd_comp_status() as above) before it is used. */
+#include "gfx.h"
+int amd_comp_scene_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
+int amd_comp_scene_test(void);
+int amd_comp_surface_new(int w, int h);
+void amd_comp_surface_free(int id);
+int amd_comp_surface_upload(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque);
+int amd_comp_compose(const GfxCompItem *items, int n, const int *rects, int nr);
+#define AMD_COMP_SC_FRAMES 0     /* composes done */
+#define AMD_COMP_SC_FAILS 1
+#define AMD_COMP_SC_UPLOADS 2
+#define AMD_COMP_SC_DRAWS 3      /* the last compose: draws into the back buffer */
+#define AMD_COMP_SC_DWORDS 4     /* its stream */
+#define AMD_COMP_SC_CYCLES 5     /* CPU cycles from building it to the fence */
+#define AMD_COMP_SC_VALUES 6
+uint32_t amd_comp_scene_value(int what);
 
 #endif

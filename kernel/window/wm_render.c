@@ -19,10 +19,19 @@ void wm_set_drag_memory(void *a, void *b, unsigned long long bytes)
     LAYER_WIN = 0;
 }
 
+int wm_drag_memory(void **a, void **b, unsigned long long *bytes)
+{
+    *a = LAYER_A;
+    *b = LAYER_B;
+    *bytes = LAYER_BYTES;
+    LAYER_WIN = 0; /* whoever borrows them draws over the drag picture */
+    return LAYER_BYTES != 0;
+}
+
 /* ---- drawing ------------------------------------------------- */
 
 /* One window: frame, content, buttons and size grip. i is its place in WM_Z. */
-static void draw_window(Window *w, int i, int top)
+void wm_draw_window_internal(Window *w, int i, int top)
 {
     GfxClip saved = gfx_get_clip();
     ui_window_button_state(wm_titlebtn_hover(w), wm_titlebtn_pressed(w));
@@ -70,7 +79,7 @@ static int layer_capture(Window *w, int i, int top)
             return 0;
         }
         w->r = ui_rect(WM_SHADOW_MARGIN, WM_SHADOW_MARGIN, real.w, real.h);
-        draw_window(w, i, top);
+        wm_draw_window_internal(w, i, top);
         gfx_layer_end();
     }
     w->r = real;
@@ -96,7 +105,7 @@ static void draw_windows(const Window *skip, int top)
         if (w->r.x - WM_SHADOW_MARGIN >= saved.x1 || w->r.x + w->r.w + WM_SHADOW_MARGIN <= saved.x0 ||
             w->r.y - WM_SHADOW_MARGIN >= saved.y1 || w->r.y + w->r.h + WM_SHADOW_MARGIN <= saved.y0)
             continue;
-        draw_window(w, i, top);
+        wm_draw_window_internal(w, i, top);
     }
 }
 

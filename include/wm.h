@@ -138,6 +138,18 @@ int wm_list(Window **out, int max);
 int wm_dragging(void); /* 1 while a window is being dragged or resized */
 /* Mark a screen rectangle as needing a redraw (e.g. the taskbar). */
 void wm_add_damage(UiRect r);
+void wm_add_screen_damage(UiRect r); /* the same for what is not inside a window (taskbar, clock, menus): with the compositor no window is drawn again */
+
+/* Compositor (gfx.h "compositor"): each visible window in a surface of its own. wm_comp_set(1) starts tracking what
+ * each window shows; wm_comp_update() draws again the surfaces of the windows that changed (a and b: two drawing
+ * buffers of bytes each), 0 = done, -1 = it cannot (a window too big, no surface): draw without the compositor.
+ * wm_comp_items() lists the windows back to front, wm_comp_drop() frees every surface and stops. */
+void wm_comp_set(int on);
+int wm_comp_on(void);
+int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long bytes);
+int wm_comp_items(GfxCompItem *out, int max);
+void wm_comp_drop(const GfxCompOps *ops);
+int wm_drag_memory(void **a, void **b, unsigned long long *bytes); /* the two buffers of wm_set_drag_memory(); 0 = none */
 
 /* Call often (every main-loop pass): lets windows react to time passing (on_tick). Returns 1 when some
  * window changed, then call wm_take_damage() and redraw. */

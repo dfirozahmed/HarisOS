@@ -31,6 +31,7 @@ try {
         @('Reader-writer lock / spinlock tests', 'tests/run_rwlock_tests.sh'),
         @('Notepad tests', 'tests/run_notepad_tests.sh'),
         @('Window manager tests', 'tests/run_wm_tests.sh'),
+        @('Window compositor tests', 'tests/run_wm_comp_tests.sh'),
         @('Power tests', 'tests/run_power_tests.sh'),
         @('I2C-HID discovery tests', 'tests/run_i2chid_tests.sh'),
         @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),

@@ -48,13 +48,13 @@ static UiRect row_rect(int i)
 static void dmg_all(void)
 {
     UiRect m = menu_rect();
-    wm_add_damage(ui_rect(m.x - 36, m.y - 30, m.w + 72, m.h + 80));
+    wm_add_screen_damage(ui_rect(m.x - 36, m.y - 30, m.w + 72, m.h + 80));
 }
 
 static void dmg_row(int i)
 {
     if (i >= 0 && i < ROWS)
-        wm_add_damage(row_rect(i));
+        wm_add_screen_damage(row_rect(i));
 }
 
 /* ---- open / close ---- */

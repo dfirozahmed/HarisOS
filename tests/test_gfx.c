@@ -53,6 +53,13 @@ static int ov_draw(int x, int y, int x0, int y0, int x1, int y1)
     return 0;
 }
 
+/* a pretend compositor driver: compose fails when CMP_FAIL is set */
+static int CMP_CALLS, CMP_FAIL;
+static int c_new(int w, int h){ (void)w; (void)h; return 1; }
+static void c_free(int id){ (void)id; }
+static int c_up(int id, const void *p, int pitch, int x, int y, int w, int h, int o){ (void)id; (void)p; (void)pitch; (void)x; (void)y; (void)w; (void)h; (void)o; return 0; }
+static int c_compose(const GfxCompItem *it, int n, const int *r, int nr){ (void)it; (void)n; (void)r; (void)nr; CMP_CALLS++; return CMP_FAIL ? -1 : 0; }
+
 int main(void)
 {
     enum { WIDTH = 4, HEIGHT = 3, PITCH = 6 };
@@ -260,6 +267,19 @@ int main(void)
         gfx_present();
         assert(fb[(LY + 8) * SW + LX + 10] == 0x00AA3300u && gfx_overlay_show(lay, LW, LH, LX, LY, 1, IN) == 0);
         gfx_disable_backbuffer();
+    }
+
+    {   /* compositor: present calls the driver; a failure drops it */
+        static const GfxCompOps cops = {c_new, c_free, c_up, c_compose};
+        static unsigned int scr[16 * 8];
+        GfxCompItem it = {1, 0, 0, 16, 8, 0};
+        const int r[4] = {0, 0, 16, 8};
+        gfx_init(scr, 16, 8, 16, 1);
+        assert(gfx_comp() == 0 && gfx_comp_present(&it, 1, r, 1) == -1);
+        gfx_comp_driver(&cops);
+        assert(gfx_comp() == &cops && gfx_comp_present(&it, 1, r, 1) == 0 && CMP_CALLS == 1);
+        CMP_FAIL = 1;
+        assert(gfx_comp_present(&it, 1, r, 1) == -1 && CMP_CALLS == 2 && gfx_comp() == 0);
     }
 
     puts("Graphics regression tests passed.");

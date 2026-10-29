@@ -9,7 +9,7 @@ static struct
     int on;
 } SAVED;
 
-int gfx_layer_begin(void *buf, int w, int h, unsigned fill)
+static int layer_begin(void *buf, int w, int h, unsigned fill, int do_fill)
 {
     if (SAVED.on || !buf || w <= 0 || h <= 0)
         return -1;
@@ -22,7 +22,7 @@ int gfx_layer_begin(void *buf, int w, int h, unsigned fill)
     SAVED.on = 1;
 
     volatile unsigned int *p = (volatile unsigned int *)buf;
-    for (long long i = 0; i < (long long)w * h; i++)
+    for (long long i = 0; do_fill && i < (long long)w * h; i++)
         p[i] = fill;
     DRAW = p;
     DPITCH = w;
@@ -32,6 +32,9 @@ int gfx_layer_begin(void *buf, int w, int h, unsigned fill)
     gfx_reset_clip();
     return 0;
 }
+
+int gfx_layer_begin(void *buf, int w, int h, unsigned fill) { return layer_begin(buf, w, h, fill, 1); }
+int gfx_layer_begin_keep(void *buf, int w, int h) { return layer_begin(buf, w, h, 0, 0); }
 
 void gfx_layer_end(void)
 {

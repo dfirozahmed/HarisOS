@@ -18,6 +18,7 @@ int MOUSE_PRESENT;
 Window *WELCOME; /* the welcome window (NULL once the user closes it) */
 int DARK = 1;
 int WALL_VALID; /* 1 = the wallpaper is in gfx's cache and matches the current theme */
+unsigned WALL_GEN; /* counts full redraws: the saved wallpaper may be a new one (desktop_comp.c) */
 
 void desktop_set_status(const char *line) { STATUS_LINE = line; }
 
@@ -136,6 +137,7 @@ void desktop_draw(void)
     ui_background();
     gfx_cache_save(); /* does nothing without a cache */
     WALL_VALID = gfx_cache_valid();
+    WALL_GEN++;
     wm_draw();
     gfx_reset_clip();
     desktop_refresh_taskbar();

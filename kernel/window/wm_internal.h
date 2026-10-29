@@ -14,6 +14,11 @@ extern int WM_HAS_DMG;
 Window *wm_moving_window_internal(void); /* the window being dragged by its title bar once it has really moved, or 0 */
 void wm_damage_internal(int x0, int y0, int x1, int y1);
 void wm_damage_window_internal(const Window *w);
+void wm_damage_content_internal(const Window *w); /* the same, and what the window shows changed (its compositor surface) */
+/* compositor (wm_comp.c): what a window shows changed in a screen rectangle; in every window under one; in all of them */
+void wm_comp_content_internal(const Window *w, int x0, int y0, int x1, int y1);
+void wm_comp_content_screen_internal(int x0, int y0, int x1, int y1);
+void wm_comp_all_internal(void);
 
 /* CPU accounting per window (Window.cpu_us): run a handler of the window and add the time it took. `call` is an expression; its value is the
  * value of the macro. A handler may close its window; the slot is only cleared, never freed meanwhile (wm_tick reclaims chunks). */
@@ -26,6 +31,7 @@ Window *wm_blocker_internal(const Window *w);
 Window *wm_window_at_internal(int x, int y);
 void wm_input_forget_window(Window *w);
 void wm_layout_internal(Window *w);
+void wm_draw_window_internal(Window *w, int i, int top); /* frame, content, buttons and grip at w->r; i = its place in WM_Z */
 void wm_reclaim_internal(void); /* main loop only: gives back unused window memory */
 /* window-button state for drawing: 0 close, 1 minimize, 2 maximize, -1 none */
 int wm_titlebtn_hover(const Window *w);   /* the pointer is on this button */

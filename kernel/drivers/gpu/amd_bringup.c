@@ -87,6 +87,30 @@ static int amd_overlay_draw(int x, int y, int x0, int y0, int x1, int y1)
 }
 static const GfxOverlayOps amd_overlay_ops = { amd_comp_overlay_upload, amd_comp_overlay_below, amd_overlay_draw };
 #endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 10
+/* The compositor's compose, with GPULOG.TXT written once after the first one and once after a failure (then the CPU draws). */
+static int amd_scene_compose(const GfxCompItem *items, int n, const int *rects, int nr)
+{
+    static int logged_ok, logged_fail;
+    int rc = amd_comp_compose(items, n, rects, nr);
+    if (rc == 0 ? logged_ok : logged_fail)
+        return rc;
+    if (rc == 0) logged_ok = 1; else logged_fail = 1;
+    serial_print(rc == 0 ? "SCENE: first desktop frame composed by the GPU\n"
+                         : "SCENE: a compose FAILED: the CPU draws the desktop from now on\n");
+    log_hex("  items                 ", (uint32_t)n);
+    log_hex("  rectangles            ", (uint32_t)nr);
+    log_hex("  composes              ", amd_comp_scene_value(AMD_COMP_SC_FRAMES));
+    log_hex("  failures              ", amd_comp_scene_value(AMD_COMP_SC_FAILS));
+    log_hex("  uploads               ", amd_comp_scene_value(AMD_COMP_SC_UPLOADS));
+    log_hex("  draws (last)          ", amd_comp_scene_value(AMD_COMP_SC_DRAWS));
+    log_hex("  stream dwords (last)  ", amd_comp_scene_value(AMD_COMP_SC_DWORDS));
+    log_hex("  CPU cycles (last)     ", amd_comp_scene_value(AMD_COMP_SC_CYCLES));
+    amd_gpu_log_save();
+    return rc;
+}
+static const GfxCompOps amd_scene_ops = { amd_comp_surface_new, amd_comp_surface_free, amd_comp_surface_upload, amd_scene_compose };
+#endif
 
 /* The result of the last compositor test. */
 static void log_comp_result(int ok)
@@ -706,6 +730,24 @@ int amd_gpu_bringup_screen(void)
             serial_print("OVERLAY: the GPU pastes the window being dragged\n");
         } else
             serial_print("OVERLAY: not used (a check did not pass): the CPU pastes the window being dragged\n");
+        amd_gpu_log_save();
+#endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 10
+        /* M4c: the whole desktop through the GPU (wallpaper, every window, the taskbar as surfaces), after an offscreen check */
+        if (comp_screen_ok && layer_ok &&
+            amd_comp_scene_init((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(), (uint64_t)(g_bar0 & 0xFFFFFFF0u),
+                                gfx_screen_red_first())) {
+            serial_print("SCENE: about to put a wallpaper and a layer together through the back buffer (offscreen)\n");
+            amd_gpu_log_save();
+            int scene_ok = amd_comp_scene_test();
+            log_comp_result(scene_ok);
+            if (scene_ok) {
+                gfx_comp_driver(&amd_scene_ops);
+                serial_print("SCENE: the GPU composes the desktop\n");
+            } else
+                serial_print("SCENE: not used: the CPU draws the desktop\n");
+        } else
+            serial_print("SCENE: not set up (a check did not pass, or the screen reaches the surface pool): the CPU draws the desktop\n");
         amd_gpu_log_save();
 #endif
     }

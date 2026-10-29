@@ -232,3 +232,26 @@ int gfx_scroll_rect(int x, int y, int w, int h, int dy)
     gfx_internal_mark_dirty(x0, y0, x1, y1);
     return 0;
 }
+
+const unsigned int *gfx_cache_pixels(void)
+{
+    return gfx_cache_valid() ? (const unsigned int *)CACHE : 0;
+}
+
+/* ---- compositor (see include/gfx.h) --------------------------- */
+static const GfxCompOps *COMP;
+
+void gfx_comp_driver(const GfxCompOps *ops) { COMP = ops; }
+const GfxCompOps *gfx_comp(void) { return COMP; }
+
+int gfx_comp_present(const GfxCompItem *items, int n, const int *rects, int nr)
+{
+    if (!COMP || !FB)
+        return -1;
+    gfx_internal_cursor_restore(); /* the driver writes the screen: the pointer comes off first ... */
+    int rc = COMP->compose(items, n, rects, nr);
+    gfx_internal_cursor_paint();   /* ... and goes back on top of the new picture */
+    if (rc != 0)
+        COMP = 0;                  /* failed: the caller draws with the CPU from now on */
+    return rc;
+}

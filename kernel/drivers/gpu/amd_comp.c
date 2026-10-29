@@ -10,6 +10,7 @@
 #include "amd_3d_internal.h"
 #include "amd_3d_regs.h"
 #include "amd_native.h"
+#include "gfx.h"
 
 #define SGPR(n) ((uint32_t)(n)) /* source operand code of SGPR n */
 
@@ -577,8 +578,11 @@ int amd_comp_test_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width,
 }
 
 /* ---- M4b: surfaces in the pool, uploads ---- */
-#define VRAM_COMP_POOL_OFF 0x0E000000u     /* 224 MiB .. 256 MiB: the end of what BAR0 reaches */
-#define VRAM_COMP_POOL_BYTES 0x02000000u
+/* 16 MiB .. 127 MiB: after the screen (the firmware's frame buffer at VRAM 0, 8 MiB at 1920 x 1080), before the GART page
+ * directory (127 MiB); nothing else of HarisOS is there. The scene compositor needs room: a screen-size back buffer and
+ * wallpaper, and every window. */
+#define VRAM_COMP_POOL_OFF 0x01000000u
+#define VRAM_COMP_POOL_BYTES 0x06F00000u
 static AmdVPool pool;
 static int pool_up;
 
@@ -868,4 +872,197 @@ uint32_t amd_comp_drag_test(void)
     if (bad == 0) status = "drag PASS: 8 rounds of layer + picture below written in one pass, every pixel right";
     else if (bad != ~0u) { keep_fault_registers(); status = "drag FAILED: pixels are wrong"; }
     return bad;
+}
+
+/* ---- M4c: the scene compositor (the gfx compositor driver, see include/gfx.h) ----
+ * Surfaces by id (index + 1). A compose puts the items together in a screen-size back buffer in VRAM (frame 1), then copies the
+ * changed rectangles from it onto the screen (frame 2): the screen gets each pixel once, finished. Both frames, after the default
+ * state stream, go in one submission (frame_submit). */
+#define SC_MAX 64
+#define SC_IB_MAX 24000u
+static AmdSurface sc_surf[SC_MAX];
+static struct
+{
+    int up;
+    uint64_t fb_mc;
+    uint32_t fb_pitch_px, width, height;
+    int bgr;
+    AmdSurface bb;                      /* the back buffer */
+} sc;
+static uint32_t scval[AMD_COMP_SC_VALUES];
+uint32_t amd_comp_scene_value(int what) { return (what >= 0 && what < AMD_COMP_SC_VALUES) ? scval[what] : 0; }
+
+int amd_comp_surface_new(int w, int h)
+{
+    for (int i = 0; i < SC_MAX; i++)
+        if (!sc_surf[i].off)
+            return amd_surface_alloc(&sc_surf[i], (uint32_t)w, (uint32_t)h) ? i + 1 : 0;
+    return 0;
+}
+
+void amd_comp_surface_free(int id)
+{
+    if (id >= 1 && id <= SC_MAX)
+        amd_surface_free(&sc_surf[id - 1]);
+}
+
+int amd_comp_surface_upload(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque)
+{
+    static uint32_t row[16384];
+    const AmdSurface *s;
+    if (id < 1 || id > SC_MAX || !px || w <= 0 || h <= 0 || x < 0 || y < 0) return -1;
+    s = &sc_surf[id - 1];
+    if (!s->off || (uint32_t)(x + w) > s->w || (uint32_t)(y + h) > s->h || w > 16384) return -1;
+    for (int r = 0; r < h; r++) {
+        const uint32_t *src = (const uint32_t *)px + (long long)r * pitch;
+        uint32_t off = s->off + ((uint32_t)(y + r) * s->pitch_px + (uint32_t)x) * 4u;
+        if (opaque) {                   /* in a layer the top byte is how much shows through: 0 */
+            for (int k = 0; k < w; k++) row[k] = src[k] & 0x00FFFFFFu;
+            amd_gpu_vram_write_span(off, row, (uint32_t)w);
+        } else
+            amd_gpu_vram_write_span(off, src, (uint32_t)w);
+    }
+    scval[AMD_COMP_SC_UPLOADS]++;
+    return 0;
+}
+
+/* [x0,x1) x [y0,y1) cut down to the item and to w x h; 1 when something is left */
+static int cut(int *x0, int *y0, int *x1, int *y1, const GfxCompItem *it, uint32_t w, uint32_t h)
+{
+    if (*x0 < it->x) *x0 = it->x;
+    if (*y0 < it->y) *y0 = it->y;
+    if (*x1 > it->x + it->w) *x1 = it->x + it->w;
+    if (*y1 > it->y + it->h) *y1 = it->y + it->h;
+    if (*x0 < 0) *x0 = 0;
+    if (*y0 < 0) *y0 = 0;
+    if (*x1 > (int)w) *x1 = (int)w;
+    if (*y1 > (int)h) *y1 = (int)h;
+    return *x0 < *x1 && *y0 < *y1;
+}
+
+/* The compose into a target (the screen, or the test buffer): rt_mc, its pitch and size. */
+static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t h, const GfxCompItem *items, int n,
+                      const int *rects, int nr)
+{
+    static uint32_t ib[SC_IB_MAX];
+    AmdCompFrame f;
+    uint32_t na, nb, seq;
+    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
+    unsigned long long t0 = comp_tsc();
+    if (!sc.up || !amd_gpu_ring_running() || w > sc.bb.w || h > sc.bb.h) return -1;
+
+    amd_comp_begin(&f, ib, SC_IB_MAX, sc.bb.mc, sc.bb.pitch_px, w, h, sc.bgr, shader_mc);   /* 1: the scene into the back buffer */
+    for (int r = 0; r < nr; r++)
+        for (int i = 0; i < n; i++) {
+            const GfxCompItem *it = &items[i];
+            int x0 = rects[4 * r], y0 = rects[4 * r + 1], x1 = rects[4 * r + 2], y1 = rects[4 * r + 3];
+            const AmdSurface *s;
+            if (it->surface < 1 || it->surface > SC_MAX || !sc_surf[it->surface - 1].off) return -1;
+            if (!cut(&x0, &y0, &x1, &y1, it, w, h)) continue;
+            s = &sc_surf[it->surface - 1];
+            if (it->layer)
+                amd_comp_layer(&f, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1,
+                               sc.bgr);
+            else
+                amd_comp_image(&f, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
+                               (uint32_t)y1, 255, sc.bgr);
+        }
+    scval[AMD_COMP_SC_DRAWS] = f.draws;
+    na = amd_comp_end(&f, sync_mc);
+    if (!na) return -1;
+    amd_comp_begin(&f, ib + na, SC_IB_MAX - na, rt_mc, rt_pitch_px, w, h, sc.bgr, shader_mc);   /* 2: the changed parts onto the target */
+    for (int r = 0; r < nr; r++) {
+        GfxCompItem all = { 0, 0, 0, (int)w, (int)h, 0 };
+        int x0 = rects[4 * r], y0 = rects[4 * r + 1], x1 = rects[4 * r + 2], y1 = rects[4 * r + 3];
+        if (cut(&x0, &y0, &x1, &y1, &all, w, h))
+            amd_comp_image(&f, &sc.bb, (uint32_t)x0, (uint32_t)y0, (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1, 255, sc.bgr);
+    }
+    nb = amd_comp_end(&f, sync_mc);
+    if (!nb) return -1;
+    seq = frame_submit(ib, na + nb);
+    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) return -1;
+    scval[AMD_COMP_SC_FRAMES]++;
+    scval[AMD_COMP_SC_DWORDS] = na + nb;
+    scval[AMD_COMP_SC_CYCLES] = (uint32_t)(comp_tsc() - t0);
+    return 0;
+}
+
+int amd_comp_compose(const GfxCompItem *items, int n, const int *rects, int nr)
+{
+    int rc = compose_to(sc.fb_mc, sc.fb_pitch_px, sc.width, sc.height, items, n, rects, nr);
+    if (rc) scval[AMD_COMP_SC_FAILS]++;
+    return rc;
+}
+
+int amd_comp_scene_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
+{
+    uint64_t off64;
+    sc.up = 0;
+    if (!amd_gpu_ring_running() || !pitch_bytes || (pitch_bytes & 3u) || !width || !height || fb_phys < vram_cpu) return 0;
+    off64 = fb_phys - vram_cpu;
+    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_COMP_POOL_OFF) return 0;   /* the screen must end before the pool */
+    sc.fb_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
+    if (!sc.fb_mc || !amd_gpu_frame_ib_mc() || !amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u)) return 0;
+    if (!sc.bb.off && !amd_surface_alloc(&sc.bb, width, height)) return 0;
+    sc.fb_pitch_px = pitch_bytes / 4u; sc.width = width; sc.height = height; sc.bgr = bgr;
+    upload_shaders();
+    amd_gpu_wc_flush();
+    sc.up = 1;
+    return 1;
+}
+
+/* What the scene test should show at (x, y) without the layer. */
+static uint32_t sc_wall(uint32_t x, uint32_t y) { return (x * 3u) | ((y * 2u) << 8) | (0x40u << 16); }
+
+/* M4c check before the compositor is used: a 176 x 124 "wallpaper" and the test layer at (40, 30) put together in two rectangles
+ * (the top 60 rows, then the rest) into the offscreen buffer, through the back buffer, every pixel checked. 1 = right. */
+int amd_comp_scene_test(void)
+{
+    static uint32_t lay[96u * 64u], wall[176u * 124u];
+    GfxCompItem items[2];
+    const int rects[8] = { 0, 0, 176, 60, 0, 60, 176, 124 };
+    uint32_t x, y, k, bad = 0;
+    int ws, ls;
+    uint64_t rt_mc = amd_native_vram_mc_addr(VRAM_COMP_RT_OFF, COMP_RT_W * COMP_RT_H * 4u);
+    for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
+    if (!sc.up || !rt_mc) { status = "scene test skipped: the compositor is not set up"; return 0; }
+    test_layer(lay);
+    for (y = 0; y < 124u; y++)
+        for (x = 0; x < 176u; x++) wall[y * 176u + x] = sc_wall(x, y);
+    ws = amd_comp_surface_new(176, 124);
+    ls = amd_comp_surface_new(96, 64);
+    if (!ws || !ls) { amd_comp_surface_free(ws); amd_comp_surface_free(ls); status = "scene test skipped: no surfaces"; return 0; }
+    if (amd_comp_surface_upload(ws, wall, 176, 0, 0, 176, 124, 1) || amd_comp_surface_upload(ls, lay, 96, 0, 0, 96, 64, 0)) {
+        amd_comp_surface_free(ws); amd_comp_surface_free(ls); status = "scene test FAILED: upload"; return 0;
+    }
+    items[0] = (GfxCompItem){ ws, 0, 0, 176, 124, 0 };
+    items[1] = (GfxCompItem){ ls, 40, 30, 96, 64, 1 };
+    amd_gpu_fault_clear();
+    if (compose_to(rt_mc, COMP_RT_W, 176, 124, items, 2, rects, 2) != 0) {
+        keep_fault_registers();
+        val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
+        amd_comp_surface_free(ws); amd_comp_surface_free(ls);
+        status = "scene test FAILED: the compose did not finish";
+        return 0;
+    }
+    for (y = 0; y < 124u; y++)
+        for (x = 0; x < 176u; x++) {
+            uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = sc_wall(x, y);
+            int in = x >= 40u && x < 136u && y >= 30u && y < 94u;
+            if (in) want = amd_comp_layer_px(lay[(y - 30u) * 96u + (x - 40u)], want);
+            val[AMD_COMP_V_IN_TOTAL]++;
+            if (in ? near_n(v, want, 2) : v == want) { val[AMD_COMP_V_IN_GOOD]++; continue; }
+            if (!bad++) {
+                val[AMD_COMP_V_FIRST_IN] = v | 0x01000000u; val[AMD_COMP_V_FIRST_IN + 1] = want;
+                val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16);
+            }
+        }
+    val[AMD_COMP_V_DRAWS] = scval[AMD_COMP_SC_DRAWS]; val[AMD_COMP_V_DWORDS] = scval[AMD_COMP_SC_DWORDS];
+    val[AMD_COMP_V_CYCLES] = scval[AMD_COMP_SC_CYCLES];
+    amd_comp_surface_free(ws);
+    amd_comp_surface_free(ls);
+    scval[AMD_COMP_SC_FRAMES] = scval[AMD_COMP_SC_UPLOADS] = 0;
+    if (bad) { status = "scene FAILED: pixels are wrong"; return 0; }
+    status = "scene PASS: wallpaper + layer through the back buffer in 2 rectangles, every pixel right";
+    return 1;
 }
