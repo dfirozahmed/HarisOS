@@ -138,7 +138,7 @@ static inline uint32_t a3d_mimg_1(uint32_t vaddr, uint32_t vdata, uint32_t srsrc
     return vaddr | (vdata << 8) | ((srsrc_sgpr >> 2) << 16) | ((ssamp_sgpr >> 2) << 21);
 }
 
-/* ---- for the diagnostic store from the vertex shader ----
+/* ---- shader stores to memory (proven on the laptop from a vertex shader into VRAM and into system RAM through the GART) ----
  * GLOBAL (FLAT format, GFX9, Mesa aco_assembler.cpp emit_flatlike_instruction):
  *   dword0: [12:0] OFFSET (signed), [13] LDS, [15:14] SEG (2 = global), [16] GLC, [17] SLC, [24:18] OP, [31:26] = 110111
  *   dword1: [7:0] ADDR (VGPR pair, 64-bit address), [15:8] DATA (VGPR), [22:16] SADDR (0x7F = none), [23] NV, [31:24] VDST

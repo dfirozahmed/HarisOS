@@ -25,9 +25,6 @@ int amd_gpu_fence_wait(uint32_t seq, uint32_t loops) { (void)seq; (void)loops; r
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { (void)dword_addr; return 0; }
 uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n) { (void)dw; (void)n; return 0; }
 void amd_gpu_fault_clear(void) {}
-uint64_t amd_gpu_scratch_va(void) { return 0; }
-void amd_gpu_scratch_write32(uint32_t off, uint32_t v) { (void)off; (void)v; }
-uint32_t amd_gpu_scratch_read32(uint32_t off) { (void)off; return 0; }
 
 static int ok = 1;
 
@@ -261,28 +258,24 @@ int main(void)
     }
 
 
-    /* with a marker address the stream writes a marker just before and just after the draw */
+    /* with a sync address the stream ends, after the draw, with the colour buffer sync (Mesa SYNC_AND_INV_CB): EVENT_WRITE CB_META (2),
+     * RELEASE_MEM FLUSH_AND_INV_CB_DATA_TS writing 0x3D3D0003 there (8), WAIT_REG_MEM for it (7) */
     {
         static uint32_t mib[AMD_3D_IB_MAX];
         Amd3dJob mj = job;
-        uint32_t k = 0, nm, pos[3], np = 0, wd = 0, tail = 0, tail_ops[3] = { 0, 0, 0 };
-        mj.marker_mc = 0x4100000000ULL + 0x0B300000ULL;
+        uint32_t k = 0, nm, tail = 0, tail_ops[3] = { 0, 0, 0 }, draw_at = 0;
+        mj.sync_mc = 0x4100000000ULL + 0x0B300000ULL;
         nm = amd_3d_build_ib(mib, AMD_3D_IB_MAX, &mj);
         while (k < nm) {
             uint32_t h = mib[k], body = ((h >> 16) & 0x3FFF) + 1, op = (h >> 8) & 0xFF;
-            if (op == 0x37) { wd++; if (np < 3) pos[np++] = op; }
-            if (op == 0x2D) { if (np < 3) pos[np++] = op; }
+            if (op == 0x2D) draw_at = k;
             if ((op == 0x46 || op == 0x49 || op == 0x3C) && tail < 3) tail_ops[tail++] = op;
             k += 1 + body;
         }
-        /* 5 + 5 dwords of markers, and the colour buffer sync (EVENT_WRITE 2 + RELEASE_MEM 8 + WAIT_REG_MEM 7 = 17) before the state and after the draw */
-        check(nm == n + 10 + 17 + 17 && wd == 2 && np == 3 && pos[0] == 0x37 && pos[1] == 0x2D && pos[2] == 0x37,
-              "marker: WRITE_DATA before and after the DRAW_INDEX_AUTO (5 dwords each)");
-        check(mib[nm - 17 - 5 + 4] == 0x3D3D0002u && mib[nm - 17 - 5 + 2] == (uint32_t)(mj.marker_mc + 4u), "marker after the draw: 0x3D3D0002 at marker + 4");
-        check(tail == 3 && tail_ops[0] == 0x46 && tail_ops[1] == 0x49 && tail_ops[2] == 0x3C &&
+        check(nm == n + 17 && draw_at == nm - 17 - 3 && tail == 3 && tail_ops[0] == 0x46 && tail_ops[1] == 0x49 && tail_ops[2] == 0x3C &&
               mib[nm - 16] == 46u && (mib[nm - 14] & 0x3Fu) == 45u && mib[nm - 10] == 0x3D3D0003u &&
-              mib[nm - 5] == (uint32_t)(mj.marker_mc + 8u) && mib[nm - 3] == 0x3D3D0003u,
-              "the colour buffer is flushed (CB_META event, RELEASE_MEM CB_DATA_TS) and waited for at marker + 8");
+              mib[nm - 5] == (uint32_t)mj.sync_mc && mib[nm - 3] == 0x3D3D0003u,
+              "after the draw the colour buffer is flushed (CB_META event, RELEASE_MEM CB_DATA_TS) and waited for at sync_mc");
     }
 
     /* the register numbers themselves, against values known from Mesa radeonsi (R_028C60 / 4 - 0xA000, R_00B020 / 4 - 0xB000 / 4, ...) */

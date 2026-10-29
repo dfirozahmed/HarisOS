@@ -153,9 +153,6 @@ void     amd_gpu_wc_flush(void);        /* mfence + a read: the CPU's write-comb
 void     amd_gpu_fault_snapshot(void);  /* then read amd_native_fault_gc_status() etc. */
 void     amd_gpu_fault_clear(void);     /* clears the GC VM fault status (Linux gmc_v9_0_process_interrupt) */
 void     amd_gpu_reg_write32(uint32_t dword_addr, uint32_t v);  /* WRITES a GPU register by its dword address */
-uint64_t amd_gpu_scratch_va(void);     /* GPU (GART) address of 2 KiB of system-RAM scratch, 0 if none */
-void     amd_gpu_scratch_write32(uint32_t off, uint32_t v);
-uint32_t amd_gpu_scratch_read32(uint32_t off);
 uint64_t amd_gpu_ib_va(void);
 const char *amd_native_ring_status(void);
 /* V151 GPU draw test */

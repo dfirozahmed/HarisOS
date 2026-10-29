@@ -3239,14 +3239,3 @@ void amd_gpu_fault_clear(void)
 }
 /* A register of the GPU by its dword address. WRITES the GPU: only for the few registers the 3D code sets directly. */
 void amd_gpu_reg_write32(uint32_t dword_addr, uint32_t v) { gpu_mmio_write32(rg_mmio, dword_addr << 2, v); }
-/* 2 KiB of scratch in the fence page (system RAM, GART page RG_FENCE_IDX, offsets 0x800 .. 0xFFF): the GPU address, and CPU access. */
-uint64_t amd_gpu_scratch_va(void) { return (rg_fence && rg_va_fence) ? rg_va_fence + 0x800u : 0; }
-void amd_gpu_scratch_write32(uint32_t off, uint32_t v)
-{
-    volatile uint32_t *p;
-    if (!rg_fence || off >= 0x800u) return;
-    p = &rg_fence[(0x800u + off) >> 2];
-    *p = v;
-    cache_flush_line(p);
-}
-uint32_t amd_gpu_scratch_read32(uint32_t off) { return (rg_fence && off < 0x800u) ? rg_fence_read(0x800u + off) : 0xFFFFFFFFu; }

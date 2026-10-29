@@ -1,4 +1,4 @@
-/* AMD Renoir (GFX9) 3D pipeline, first step (M1): one coloured rectangle drawn by the graphics pipeline.
+/* AMD Renoir (GFX9) 3D pipeline: rectangles drawn by the graphics pipeline (M1 solid, M2 textured, M3 blended / shadow / blur).
  * See include/amd_3d.h.
  *
  * Where the values come from (the user's copy of the sources is in D:\temp\mesa-main and D:\temp\New folder (2)):
@@ -9,7 +9,10 @@
  *     si_state.c gfx6_emit_framebuffer_state(): 15 consecutive registers from CB_COLOR0_BASE, then CB_MRT0_EPITCH;
  *   - RB+ (Renoir has it): ac_formats.c ac_set_sx_downconvert_state_for_mrt() and ac_shader_util.c ac_choose_spi_color_formats():
  *     an 8-8-8-8 UNORM target is exported as FP16_ABGR (compressed export) with SX_PS_DOWNCONVERT = SX_RT_EXPORT_8_8_8_8;
- *   - blending off: si_state.c si_create_blend_state_mode(): CB_COLOR_CONTROL mode NORMAL, ROP3 0xCC, SX_MRT0_BLEND_OPT disabled;
+ *   - blending: si_state.c si_create_blend_state_mode(): CB_COLOR_CONTROL mode NORMAL, ROP3 0xCC; off: SX_MRT0_BLEND_OPT disabled,
+ *     on (M3): SRC_ALPHA / ONE_MINUS_SRC_ALPHA with the RB+ SX_MRT0_BLEND_OPT radeonsi computes for it;
+ *   - GFX9 shader rule: at most ONE scalar operand (SGPR, literal, or the VCC V_CNDMASK reads) per VALU instruction (Mesa
+ *     aco_validate.cpp const_bus_limit 1). Breaking it gives undefined results, not an error: see amd_3d_build_vs();
  *   - shader registers: si_state_shaders.cpp si_shader_vs_legacy() / si_shader_ps(): PGM_LO/HI, RSRC1/2/3, SPI_PS_INPUT_ENA, the
  *     VS "window space position" mode (PA_CL_VTE_CNTL VTX_XY_FMT / VTX_Z_FMT: positions are pixel coordinates, no viewport);
  *   - the draw: si_state_draw.cpp: VGT_SHADER_STAGES_EN = MAX_PRIMGRP_IN_WAVE(2), IA_MULTI_VGT_PARAM (GFX9: a UCONFIG
@@ -68,31 +71,14 @@
 #define OP_SET_SH_REG 0x76u
 #define OP_SET_UCONFIG_REG 0x79u
 
-/* CP_COHER_CNTL bits (gc_9_1_sh_mask.h): the shader code and constants are fetched through the instruction / scalar caches. */
+/* CP_COHER_CNTL bits (gc_9_1_sh_mask.h). The draw stream starts with the cache sync Linux gfx_v9_0_emit_mem_sync() does: write back
+ * and invalidate L2 (TC_WB, TC), invalidate the vector L1 (TCL1), the scalar (KCACHE) and the instruction (ICACHE) caches. The CPU
+ * writes shader code, images and patterns before every draw, so nothing the GPU kept from an earlier one may be used. */
+#define COHER_TC_WB (1u << 18)
 #define COHER_TCL1 (1u << 22)
 #define COHER_TC (1u << 23)
 #define COHER_KCACHE (1u << 27)
 #define COHER_ICACHE (1u << 29)
-#define COHER_NO_PFP_SYNC (1u << 31) /* Mesa: "don't sync pfp, i.e. execute the sync in ME" */
-#define COHER_TCL1_VOL (1u << 15)
-#define COHER_TC_WB (1u << 18)
-#define COHER_KCACHE_VOL (1u << 28)
-
-/* The draw stream starts with a heavy cache write-back + invalidate (what Linux gfx_v9_0_emit_mem_sync does: write back L2, invalidate L2,
- * vector, scalar and instruction caches, with the PFP synced). The stress test sets this to run the old, light stream as a control. */
-static int light_inval;
-
-/* Pipeline statistics around the draw (0 = off). SAMPLE_PIPELINESTAT writes 64-bit counters, in the order of Mesa
- * si_query_pipestat_dw_offset(): PS invocations, C primitives, C invocations, VS invocations, GS invocations, GS primitives,
- * IA primitives, IA vertices, HS, DS, CS. Before the draw at stat_mc, after it at stat_mc + 0x80. Event numbers: gfx9.json V_028A90. */
-#define E_EVENT_PIPELINESTAT_START 25u
-#define E_EVENT_SAMPLE_PIPELINESTAT 30u
-static uint64_t stat_mc;
-
-/* Diagnostic (0 = off): the vertex shader also stores what it computed, 32 bytes per vertex at vs_store_mc + 32 * (v0 & 3):
- * x, y, z, w (the position it exports) and then v0 (the vertex number the hardware gave it). The address uses only v0 & 3, so a
- * wrong v0 can never make the GPU write outside those 128 bytes. */
-static uint64_t vs_store_mc;
 
 typedef struct
 {
@@ -129,16 +115,6 @@ static void sh1(Ib *b, uint32_t reg, uint32_t v)
 {
     put(b, PKT3(OP_SET_SH_REG, 1));
     put(b, reg);
-    put(b, v);
-}
-
-/* WRITE_DATA to memory (DST_SEL 5, with a write confirm), as the CP tests do */
-static void write_data(Ib *b, uint64_t mc, uint32_t v)
-{
-    put(b, PKT3(0x37u, 3));
-    put(b, (5u << 8) | (1u << 20));
-    put(b, (uint32_t)mc);
-    put(b, (uint32_t)(mc >> 32));
     put(b, v);
 }
 
@@ -183,8 +159,9 @@ uint32_t amd_3d_build_vs(uint32_t *code, const Amd3dJob *job)
      * bit 0 of the number picks x, bit 1 picks y. The coordinates are literals, the position is in window space (pixels). */
     /* GFX9 allows ONE scalar operand (an SGPR or a literal) per VALU instruction ("constant bus" limit). V_CNDMASK_B32 already reads
      * VCC, so its other operands must be VGPRs: x0 / y0 go into v7 first. (Until 2026-10-29 this shader had "v_cndmask_b32 v3, x0, v2,
-     * vcc" with x0 as a literal: two scalar reads, so the result was undefined. The diagnostic store showed it: its v_addc_co_u32 with a
-     * literal gave the VCC value instead of the sum.) */
+     * vcc" with x0 as a literal: two scalar reads, so the result was undefined, and the first ~20 draws of every boot got lost: the
+     * vertex positions were wrong. A shader store showed it: a v_addc_co_u32 with a literal gave the VCC value instead of the sum.
+     * tests/test_amd_3d.c walks every shader and checks the rule.) */
     code[n++] = a3d_vop2(A3D_OP2_AND_B32, 1, 0, A3D_SRC_INT(1));                 /* v_and_b32 v1, 1, v0        */
     code[n++] = a3d_vopc(A3D_OPC_CMP_NE_U32, 1, A3D_SRC_ZERO);                   /* v_cmp_ne_u32 vcc, 0, v1    */
     code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 2, A3D_SRC_LITERAL);                   /* v_mov_b32 v2, x1           */
@@ -202,20 +179,6 @@ uint32_t amd_3d_build_vs(uint32_t *code, const Amd3dJob *job)
     code[n++] = a3d_vop2(A3D_OP2_CNDMASK_B32, 4, 2, A3D_SRC_VGPR(7));            /* v_cndmask_b32 v4, v7, v2, vcc */
     code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 5, A3D_SRC_ZERO);                      /* v_mov_b32 v5, 0.0   (z)    */
     code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 6, A3D_SRC_ONE_F);                     /* v_mov_b32 v6, 1.0   (w)    */
-    if (vs_store_mc) {                  /* diagnostic: store v3..v6 and v0 (see vs_store_mc) */
-        /* the address: lo | (v0 & 3) * 32 (the store area is 128-byte aligned, so no carry), hi as it is. No VCC, one literal each. */
-        code[n++] = a3d_vop2(A3D_OP2_AND_B32, 7, 0, A3D_SRC_INT(3));             /* v_and_b32 v7, 3, v0        */
-        code[n++] = a3d_vop2(A3D_OP2_LSHLREV_B32, 7, 7, A3D_SRC_INT(5));         /* v_lshlrev_b32 v7, 5, v7    */
-        code[n++] = a3d_vop2(A3D_OP2_OR_B32, 8, 7, A3D_SRC_LITERAL);             /* v_or_b32 v8, lo, v7        */
-        code[n++] = (uint32_t)vs_store_mc;
-        code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 9, A3D_SRC_LITERAL);               /* v_mov_b32 v9, hi           */
-        code[n++] = (uint32_t)(vs_store_mc >> 32);
-        code[n++] = a3d_global_0(A3D_GLOBAL_STORE_DWORDX4, 0);                   /* global_store_dwordx4 v[8:9], v[3:6], off */
-        code[n++] = a3d_global_1(8, 3);
-        code[n++] = a3d_global_0(A3D_GLOBAL_STORE_DWORD, 16);                    /* global_store_dword v[8:9], v0, off offset:16 */
-        code[n++] = a3d_global_1(8, 0);
-        code[n++] = A3D_S_WAITCNT_VM0;                                           /* s_waitcnt vmcnt(0)         */
-    }
     /* A vertex shader has to export at least one parameter (Mesa si_shader_vs_legacy: "VS is required to export at least one param");
      * nothing reads it, SPI_VS_OUT_CONFIG says there is one. */
     code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_PARAM0, 0, 0, 0);                   /* exp param0 v3, v4, v5, v6   */
@@ -381,8 +344,6 @@ static uint32_t build_ps_shadow(uint32_t *code, const Amd3dJob *job)
     return n;
 }
 
-static uint32_t ps_salt; /* 0 normally; see amd_3d_stress() mode F */
-
 uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job)
 {
     uint32_t n = 0;
@@ -400,10 +361,6 @@ uint32_t amd_3d_build_ps(uint32_t *code, const Amd3dJob *job)
     code[n++] = rg;
     code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 1, A3D_SRC_LITERAL);                   /* v_mov_b32 v1, (b, a)       */
     code[n++] = ba;
-    if (ps_salt) {                      /* stress test mode F: a harmless extra instruction, only to make the code differ from the last draw's */
-        code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 2, A3D_SRC_LITERAL);               /* v_mov_b32 v2, salt         */
-        code[n++] = ps_salt;
-    }
     code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v0, v1 compr done vm */
     code[n++] = a3d_exp1(0, 1, 0, 0);
     code[n++] = A3D_S_ENDPGM;
@@ -496,33 +453,14 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
      * register table of the Linux driver. (CLEAR_STATE would not do: it only restores what the kernel driver put in the clear state
      * snapshot at start-up, and nothing did that on this GPU.) */
 
-    /* 2. the shader code was written by the CPU: invalidate the instruction, scalar and vector caches first */
+    /* 2. the CPU wrote shader code, image and target: write back and invalidate the GPU caches first (see COHER_*) */
     put(&b, PKT3(OP_ACQUIRE_MEM, 5));
-    put(&b, COHER_ICACHE | COHER_KCACHE | COHER_TCL1 | COHER_TC | COHER_NO_PFP_SYNC); /* CP_COHER_CNTL */
+    put(&b, COHER_TC_WB | COHER_TC | COHER_TCL1 | COHER_KCACHE | COHER_ICACHE);         /* CP_COHER_CNTL */
     put(&b, 0xFFFFFFFFu);                                                              /* CP_COHER_SIZE */
     put(&b, 0x000000FFu);                                                              /* CP_COHER_SIZE_HI */
     put(&b, 0);                                                                        /* CP_COHER_BASE */
     put(&b, 0);                                                                        /* CP_COHER_BASE_HI */
     put(&b, 0x0000000Au);                                                              /* POLL_INTERVAL */
-
-    if (!light_inval) {
-        uint32_t k;
-        for (k = 0; k < 2; k++) {
-            put(&b, PKT3(OP_ACQUIRE_MEM, 5));
-            put(&b, COHER_TC_WB | COHER_TC | COHER_TCL1 | COHER_TCL1_VOL | COHER_KCACHE | COHER_KCACHE_VOL | COHER_ICACHE); /* PFP synced too */
-            put(&b, 0xFFFFFFFFu);
-            put(&b, 0x000000FFu);
-            put(&b, 0);
-            put(&b, 0);
-            put(&b, 0x0000000Au);
-        }
-    }
-
-    /* 2b. the CPU wrote the target's memory (and got the same colour drawn into it before): drop whatever the colour buffer's caches
-     * still hold of it before drawing. Found with the stress test: the same colour drawn again over a CPU-rewritten target got lost
-     * about every other time, a different colour never did. */
-    if (job->marker_mc)
-        cb_sync(&b, job->marker_mc + 12u, 0x3D3D0004u);
 
     /* 3. GFX9 start-up registers (ac_cmdbuf.c, GFX9 branch). CLEAR_STATE does not restore the generic scissor. */
     ctx2(&b, R3D_PA_SC_GENERIC_SCISSOR_TL, 1u << F3D_PA_SC_GENERIC_SCISSOR_TL__WINDOW_OFFSET_DISABLE,
@@ -678,7 +616,7 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     /* 7. the vertex shader: window space position (pixels), one position export, no parameters */
     sh1(&b, R3D_SPI_SHADER_PGM_LO_VS, (uint32_t)(job->vs_mc >> 8));
     sh1(&b, R3D_SPI_SHADER_PGM_HI_VS, (uint32_t)(job->vs_mc >> 40) & 0xFFu);
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_VS, ((vs_store_mc ? 2u : 1u) << F3D_SPI_SHADER_PGM_RSRC1_VS__VGPRS) | (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__SGPRS) |
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_VS, (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__VGPRS) | (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__SGPRS) |
                                          (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_VS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__DX10_CLAMP) |
                                          (0u << F3D_SPI_SHADER_PGM_RSRC1_VS__VGPR_COMP_CNT)); /* only the vertex number in v0 */
     sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_VS, 0u << F3D_SPI_SHADER_PGM_RSRC2_VS__USER_SGPR);
@@ -691,19 +629,7 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     ctx1(&b, R3D_VGT_GS_MODE, 0);                  /* GS_OFF */
     ctx1(&b, R3D_VGT_SHADER_STAGES_EN, 2u << F3D_VGT_SHADER_STAGES_EN__MAX_PRIMGRP_IN_WAVE);
 
-    /* 8. the draw: 4 vertices, triangle strip, vertex numbers generated by the hardware. With a marker address the stream writes
-     * 0x3D3D0001 there just before the draw and 0x3D3D0002 (4 bytes on) just after it: the CPU can then tell a stream that never ran
-     * from a draw that ran and drew nothing. */
-    if (job->marker_mc)
-        write_data(&b, job->marker_mc, 0x3D3D0001u);
-    if (stat_mc) {                                 /* pipeline statistics before the draw (Mesa si_query.c, PIPE_QUERY_PIPELINE_STATISTICS) */
-        put(&b, PKT3(OP_EVENT_WRITE, 0));
-        put(&b, E_EVENT_PIPELINESTAT_START);
-        put(&b, PKT3(OP_EVENT_WRITE, 2));
-        put(&b, E_EVENT_SAMPLE_PIPELINESTAT | (2u << 8));
-        put(&b, (uint32_t)stat_mc);
-        put(&b, (uint32_t)(stat_mc >> 32));
-    }
+    /* 8. the draw: 4 vertices, triangle strip, vertex numbers generated by the hardware */
     uc1(&b, R3D_IA_MULTI_VGT_PARAM, (127u << F3D_IA_MULTI_VGT_PARAM__PRIMGROUP_SIZE) | (1u << F3D_IA_MULTI_VGT_PARAM__EN_INST_OPT_BASIC) |
                                     (1u << F3D_IA_MULTI_VGT_PARAM__EN_INST_OPT_ADV));
     uc1(&b, R3D_VGT_PRIMITIVE_TYPE, E_DI_PT_TRISTRIP);
@@ -712,21 +638,12 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     put(&b, PKT3(OP_DRAW_INDEX_AUTO, 1));
     put(&b, 4);                                    /* vertex count */
     put(&b, E_DI_SRC_SEL_AUTO_INDEX);              /* VGT_DRAW_INITIATOR */
-    if (job->marker_mc)
-        write_data(&b, job->marker_mc + 4u, 0x3D3D0002u);
 
     /* 9. flush the colour buffer and WAIT for it, as Mesa does (ac_barrier.c, SYNC_AND_INV_CB: EVENT_WRITE FLUSH_AND_INV_CB_META, then
      * a RELEASE_MEM with FLUSH_AND_INV_CB_DATA_TS, then WAIT_REG_MEM on what it wrote). The fence of amd_gpu_submit_ib() comes right
-     * after this stream and is only a generic event: a write the colour buffer still holds in its cache, or a fence that fires
-     * before the pixels are out, would look exactly like "the draw ran and drew nothing". */
-    if (job->marker_mc)
-        cb_sync(&b, job->marker_mc + 8u, 0x3D3D0003u);
-    if (stat_mc) {                                 /* and after it, once the pixels are out */
-        put(&b, PKT3(OP_EVENT_WRITE, 2));
-        put(&b, E_EVENT_SAMPLE_PIPELINESTAT | (2u << 8));
-        put(&b, (uint32_t)(stat_mc + 0x80u));
-        put(&b, (uint32_t)((stat_mc + 0x80u) >> 32));
-    }
+     * after this stream and is only a generic event: the CPU reads the pixels as soon as it fires. */
+    if (job->sync_mc)
+        cb_sync(&b, job->sync_mc, 0x3D3D0003u);
 
     return b.over ? 0 : b.n;
 }
@@ -734,7 +651,8 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
 /* ---- running it ---- */
 #define VRAM_SHADER_OFF 0x0B000000u /* 176 MiB: between the CP ring (160 MiB) and the PSP TMR (192 MiB); the CPU already reaches 160 MiB */
 #define VRAM_RT_OFF 0x0B100000u
-#define VRAM_MARK_OFF 0x0B300000u
+#define VRAM_TEX_OFF 0x0B200000u   /* the image of the textured and the blurred rectangle */
+#define VRAM_SYNC_OFF 0x0B300000u   /* 4 bytes the end-of-draw colour buffer sync writes and waits for (cb_sync) */
 #define RT_W 256u
 #define RT_H 64u
 
@@ -744,27 +662,17 @@ static uint32_t val[AMD_3D_VALUES];
 const char *amd_3d_status(void) { return status; }
 uint32_t amd_3d_value(int what) { return (what >= 0 && what < AMD_3D_VALUES) ? val[what] : 0; }
 
-
 /* Submits the command stream now in the IB page and waits for its fence. Returns 0 if the GPU finished it. */
 static int submit_and_wait(uint32_t ndw, const char *what_failed_submit, const char *what_failed_fence)
 {
     uint32_t seq = amd_gpu_submit_ib(amd_gpu_ib_va(), ndw);
     if (!seq) { status = what_failed_submit; return 2; }
-    val[7] = seq;
+    val[AMD_3D_V_FENCE] = seq;
     if (!amd_gpu_fence_wait(seq, 8000000u)) { status = what_failed_fence; return 3; }
     return 0;
 }
 
-/* Switches of the stress test (amd_3d_stress): leave the shader code in VRAM as it is / wait after writing it. */
-static int skip_shader_write;
-static int skip_pattern_write;
-static uint32_t shader_slot; /* added to the shader addresses written by run_job (stress mode G: a fresh address for every draw) */
-#define VRAM_THRASH_OFF 0x0C000000u /* only ever read, to push stale lines out of whatever caches the CPU's reads pass through */
-static uint32_t shader_delay_reads;
-
-/* Writes the shaders, runs the default state stream, then the draw stream, waits for the fences and reads some registers back
- * (the CP has run SET_CONTEXT_REG / SET_SH_REG for them, so a read shows whether the packets took effect).
- * Returns 0 if the GPU did run both. */
+/* Writes the shaders, runs the default state stream, then the draw stream, and waits for the fences. Returns 0 if the GPU did both. */
 static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
 {
     Amd3dJob job = *job_in;
@@ -776,22 +684,17 @@ static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
     nvs = amd_3d_build_vs(vs, &job);
     nps = amd_3d_build_ps(ps, &job);
 
-    if (!skip_shader_write) {
-        /* shader code, then zero padding (the shader fetch reads ahead of the end) */
-        for (i = 0; i < 64u; i++) amd_gpu_vram_write32(vs_off + 4u * i, i < nvs ? vs[i] : 0u);
-        for (i = 0; i < 64u || i < nps + 16u; i++) amd_gpu_vram_write32(ps_off + 4u * i, i < nps ? ps[i] : 0u); /* the blur shader is longer */
-
-        amd_gpu_wc_flush();   /* the shader code is in memory before any command that may fetch it */
-        for (i = 0; i < shader_delay_reads; i++)
-            (void)amd_gpu_vram_read32(0);
-    }
+    /* shader code, then zero padding (the shader fetch reads ahead of the end) */
+    for (i = 0; i < 64u; i++) amd_gpu_vram_write32(vs_off + 4u * i, i < nvs ? vs[i] : 0u);
+    for (i = 0; i < 64u || i < nps + 16u; i++) amd_gpu_vram_write32(ps_off + 4u * i, i < nps ? ps[i] : 0u); /* the blur shader is longer */
+    amd_gpu_wc_flush();   /* the shader code is in memory before any command that may fetch it */
 
     /* 1. the default context state */
     nib = amd_3d_build_default_ib(ib, AMD_3D_DEFAULT_IB_MAX);
     if (!nib) { status = "3D test skipped: default state stream does not fit"; return 1; }
     for (i = 0; i < nib; i++) amd_gpu_ib_write32(i, ib[i]);
     amd_gpu_ib_flush();
-    val[8] = 3;
+    val[AMD_3D_V_STAGE] = 3;
     rc = submit_and_wait(nib, "3D test FAILED: the ring did not take the default state stream",
                          "3D test FAILED: fence timeout in the default state stream");
     if (rc) return rc;
@@ -799,36 +702,22 @@ static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
     /* 2. the draw */
     nib = amd_3d_build_ib(ib, AMD_3D_IB_MAX, &job);
     if (!nib) { status = "3D test skipped: command stream does not fit"; return 1; }
-    val[6] = nib;
+    val[AMD_3D_V_DWORDS] = nib;
     for (i = 0; i < nib; i++) amd_gpu_ib_write32(i, ib[i]);
     amd_gpu_ib_flush();
-    val[8] = 4;
+    val[AMD_3D_V_STAGE] = 4;
     rc = submit_and_wait(nib, "3D test FAILED: the ring did not take the command stream",
                          "3D test FAILED: fence timeout (the GPU did not finish the draw)");
     if (rc) return rc;
-
-    val[9]  = amd_gpu_reg_read32(0xA000u + R3D_CB_COLOR0_BASE);             /* CB_COLOR0_BASE */
-    val[10] = amd_gpu_reg_read32(0xA000u + R3D_CB_COLOR0_BASE + 4u);        /* CB_COLOR0_INFO */
-    val[11] = amd_gpu_reg_read32(0xA000u + R3D_PA_CL_GB_VERT_CLIP_ADJ);     /* 0x3F800000 once the default state is in */
-    val[12] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_LO_PS);
-    val[13] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_LO_VS);
-    val[14] = amd_gpu_reg_read32(0x2004u);                                  /* GRBM_STATUS */
-    val[15] = amd_gpu_reg_read32(0xA000u + R3D_PA_CL_VTE_CNTL);
-    for (i = 0; i < 8; i++)                                                  /* the image resource in the pixel shader's user SGPRs */
-        val[16 + i] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_USER_DATA_PS_0 + i);
-    val[24] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_RSRC1_PS);
-    val[25] = amd_gpu_reg_read32(0x2C00u + R3D_SPI_SHADER_PGM_RSRC2_PS);
+    val[AMD_3D_V_GRBM] = amd_gpu_reg_read32(0x2004u);                       /* GRBM_STATUS */
     return 0;
 }
 
-/* Fills the colour buffer with `pattern`, runs the job, checks the rectangle (colour) and everything else (unchanged). The area
- * looked at is the rectangle grown by `margin` pixels; the buffer starts at VRAM offset base_off. */
-static char map[16][33];  /* a coarse picture of the offscreen buffer after the draw: # colour, . untouched, ? something else */
+static char map[16][33];  /* a coarse picture of the offscreen buffer after the draw: # drawn, . untouched, ? something else */
 
 const char *amd_3d_map_row(int row) { return (row >= 0 && row < 16 && map[row][0]) ? map[row] : 0; }
 
-/* two 8 bit channel triples differ by at most 1 in each channel (the colour goes through half floats and back) */
-/* Every colour byte of a and b within tol of each other (the X byte is not compared). */
+/* Every colour byte of a and b within tol of each other (the X byte is not compared): the colour goes through half floats and back. */
 static int near_px(uint32_t a, uint32_t b, int tol)
 {
     int s;
@@ -868,90 +757,49 @@ uint32_t amd_3d_shadow_alpha(const Amd3dJob *job, uint32_t x, uint32_t y)
     return (uint32_t)(((int)job->a * tx * ty + r2 * r2 / 2) / (r2 * r2));
 }
 
-static int close_px(uint32_t a, uint32_t b)
+static void keep_fault_registers(void)
 {
-    int s;
-    for (s = 0; s < 24; s += 8) {
-        int d = (int)((a >> s) & 0xFFu) - (int)((b >> s) & 0xFFu);
-        if (d > 1 || d < -1) return 0;
-    }
-    return 1;
+    amd_gpu_fault_snapshot();
+    val[AMD_3D_V_FAULT_GC] = amd_native_fault_gc_status(); val[AMD_3D_V_FAULT_GC + 1] = amd_native_fault_gc_lo();
+    val[AMD_3D_V_FAULT_GC + 2] = amd_native_fault_gc_hi(); val[AMD_3D_V_FAULT_GC + 3] = amd_native_fault_mm_status();
 }
 
-static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map);
-
-/* How many pixels inside the rectangle are right now (the colour for a solid job, the texel for a textured one). */
-static uint32_t inside_good(const Amd3dJob *job, uint32_t base_off)
-{
-    uint32_t x, y, good = 0;
-    uint32_t solid = job->bgr ? ((job->r << 16) | (job->g << 8) | job->b) : ((job->b << 16) | (job->g << 8) | job->r);
-    for (y = job->y0; y < job->y1; y++)
-        for (x = job->x0; x < job->x1; x++) {
-            uint32_t v = amd_gpu_vram_read32(base_off + (y * job->pitch_px + x) * 4u) & 0x00FFFFFFu;
-            if (job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu) : v == solid) good++;
-        }
-    return good;
-}
-
-/* The first textured draw of a boot got no pixels on one run although the same draw works afterwards: a textured job is run a second
- * time when the first try failed (val[27] = number of tries, +0x100 if the last one passed). */
+/* Fills the colour buffer with `pattern` (and the image, for a textured job), runs the job, then checks every pixel of the rectangle
+ * grown by `margin`: inside it must be what the job draws (exact for a solid colour, within 1 .. 3 per byte where half floats or
+ * blending round), outside it must still be the pattern. The buffer starts at VRAM offset base_off. On a failure the VM fault
+ * registers are kept too (with SH_MEM_CONFIG.RETRY_DISABLE a bad shader memory access ends in a fault, not in a hang). */
 static int draw_and_check(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map)
-{
-    int ok = draw_once(job, base_off, margin, pattern, want_map);
-    uint32_t tries = 1, f_gc = 0, f_lo = 0, f_hi = 0, f_mm = 0;
-    if (!ok) {
-        amd_gpu_fault_snapshot();            /* did the first try end in a VM fault? */
-        f_gc = amd_native_fault_gc_status(); f_lo = amd_native_fault_gc_lo(); f_hi = amd_native_fault_gc_hi(); f_mm = amd_native_fault_mm_status();
-        ok = draw_once(job, base_off, margin, pattern, want_map);
-        tries = 2;
-    }
-    val[27] = tries | (ok ? 0x100u : 0u);
-    val[28] = f_gc; val[29] = f_lo; val[30] = f_hi; val[31] = f_mm;   /* fault registers after a failed first try */
-    return ok;
-}
-
-static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t pattern, int want_map)
 {
     uint32_t cx0 = job->x0 > margin ? job->x0 - margin : 0, cy0 = job->y0 > margin ? job->y0 - margin : 0;
     uint32_t cx1 = job->x1 + margin > job->width ? job->width : job->x1 + margin;
     uint32_t cy1 = job->y1 + margin > job->height ? job->height : job->y1 + margin;
     uint32_t x, y, expect, colour, in_good = 0, in_total = 0, out_bad = 0, out_total = 0;
     uint32_t first_in = 0, first_out = 0;
-    uint32_t px_r = job->r, px_g = job->g, px_b = job->b;
 
     { uint32_t k; for (k = 0; k < AMD_3D_VALUES; k++) val[k] = 0; }
-    val[8] = 1;
-    if (!skip_pattern_write)
-        for (y = cy0; y < cy1; y++)
-            for (x = cx0; x < cx1; x++)
-                amd_gpu_vram_write32(base_off + (y * job->pitch_px + x) * 4u, pattern);
+    val[AMD_3D_V_STAGE] = 1;
+    for (y = cy0; y < cy1; y++)
+        for (x = cx0; x < cx1; x++)
+            amd_gpu_vram_write32(base_off + (y * job->pitch_px + x) * 4u, pattern);
     if (job->textured)                                       /* the image the pixel shader will read */
         for (y = 0; y < job->tex_h; y++)
             for (x = 0; x < job->tex_w; x++)
                 amd_gpu_vram_write32(job->tex_off + (y * job->tex_pitch_px + x) * 4u, amd_3d_texel(job, x, y));
+    job->sync_mc = amd_native_vram_mc_addr(VRAM_SYNC_OFF, 4u);
+    amd_gpu_vram_write32(VRAM_SYNC_OFF, 0);
     amd_gpu_wc_flush();                                        /* drain the CPU's write buffers: pattern and image are in memory */
-    if (!skip_pattern_write) {                                 /* read the pattern back: a CPU write that is still on its way would land AFTER the GPU's pixels */
-        uint32_t bad = 0;
-        for (y = cy0; y < cy1; y++)
-            for (x = cx0; x < cx1; x++)
-                if (amd_gpu_vram_read32(base_off + (y * job->pitch_px + x) * 4u) != pattern) bad++;
-        val[34] = bad;
+    amd_gpu_fault_clear();                                     /* a VM fault reported afterwards is this test's */
+
+    val[AMD_3D_V_STAGE] = 2;
+    if (run_job(job, VRAM_SHADER_OFF, VRAM_SHADER_OFF + 0x100u)) {
+        keep_fault_registers();
+        return 0;
     }
 
-    val[8] = 2;
-    job->marker_mc = amd_native_vram_mc_addr(VRAM_MARK_OFF, 16u);
-    amd_gpu_vram_write32(VRAM_MARK_OFF, 0); amd_gpu_vram_write32(VRAM_MARK_OFF + 4u, 0); amd_gpu_vram_write32(VRAM_MARK_OFF + 8u, 0); amd_gpu_vram_write32(VRAM_MARK_OFF + 12u, 0);
-    amd_gpu_wc_flush();
-    if (run_job(job, VRAM_SHADER_OFF + shader_slot, VRAM_SHADER_OFF + shader_slot + 0x100u))
-        return 0;
-    val[32] = amd_gpu_vram_read32(VRAM_MARK_OFF);          /* 0x3D3D0001 if the stream got to the draw */
-    val[33] = amd_gpu_vram_read32(VRAM_MARK_OFF + 4u);     /* 0x3D3D0002 if it got past it */
-
-    expect = (px_r << 16) | (px_g << 8) | px_b;               /* memory dword 0x00RRGGBB, the X byte is not compared */
-    if (!job->bgr)
-        expect = (px_b << 16) | (px_g << 8) | px_r;
+    expect = job->bgr ? ((job->r << 16) | (job->g << 8) | job->b)       /* memory dword 0x00RRGGBB, the X byte is not compared */
+                      : ((job->b << 16) | (job->g << 8) | job->r);
     colour = expect;
-    if (job->blend)                                           /* M3: what "over" blending onto the pattern gives */
+    if (job->blend)                                           /* what "over" blending onto the pattern gives */
         expect = amd_3d_blend_px(expect, pattern, job->a);
     for (y = cy0; y < cy1; y++)
         for (x = cx0; x < cx1; x++) {
@@ -959,7 +807,7 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
             if (x >= job->x0 && x < job->x1 && y >= job->y0 && y < job->y1) {
                 in_total++;
                 if (job->blur_r ? near_px(v, amd_3d_blur_px(job, x, y), 2)
-                    : job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu)
+                    : job->textured ? near_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu, 1)
                     : job->shadow_r ? near_px(v, amd_3d_blend_px(colour, pattern, amd_3d_shadow_alpha(job, x, y)), 3)
                     : job->blend ? near_px(v, expect, 2) : v == expect) in_good++;
                 else if (!first_in) first_in = v | 0x01000000u;
@@ -976,31 +824,19 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
         for (gy = 0; gy < 16u; gy++) {
             for (gx = 0; gx < 32u; gx++) {
                 uint32_t v = amd_gpu_vram_read32(base_off + ((gy * 4u) * job->pitch_px + gx * 8u) * 4u) & 0x00FFFFFFu;
-                map[gy][gx] = (job->textured ? (v != (pattern & 0x00FFFFFFu)) : v == expect) ? '#' : v == (pattern & 0x00FFFFFFu) ? '.' : '?';
+                map[gy][gx] = v == (pattern & 0x00FFFFFFu) ? '.' : (job->textured || job->blend || v == expect) ? '#' : '?';
             }
             map[gy][32] = 0;
         }
     }
-    val[0] = in_good; val[1] = in_total; val[2] = out_bad; val[3] = out_total; val[4] = first_in; val[5] = first_out;
-    val[8] = 5;
-    if (!(in_total && in_good == in_total && !out_bad)) {
-        /* Failed. Wait about 20 ms and count again, with nothing redrawn: if the rectangle is there by now, the GPU's pixels reached
-         * memory later than the fence said (val[26] = right inside pixels at that time); if not, they never came or were overwritten. */
-        uint32_t k;
-        for (k = 0; k < 20000u; k++) (void)amd_gpu_vram_read32(0);
-        val[26] = inside_good(job, base_off);
-        /* If the CPU's reads were answered from a stale cache on the way (the HDP read cache), reading a lot of OTHER video memory
-         * pushes the stale lines out: val[35] after 1 MiB at a 256-byte stride, val[36] after 16 MiB at a 4 KiB stride. */
-        for (k = 0; k < 4096u; k++) (void)amd_gpu_vram_read32(VRAM_THRASH_OFF + k * 256u);
-        val[35] = inside_good(job, base_off);
-        for (k = 0; k < 4096u; k++) (void)amd_gpu_vram_read32(VRAM_THRASH_OFF + k * 4096u);
-        val[36] = inside_good(job, base_off);
-    }
+    val[AMD_3D_V_IN_GOOD] = in_good; val[AMD_3D_V_IN_TOTAL] = in_total; val[AMD_3D_V_OUT_BAD] = out_bad; val[AMD_3D_V_OUT_TOTAL] = out_total;
+    val[AMD_3D_V_FIRST_IN] = first_in; val[AMD_3D_V_FIRST_OUT] = first_out;
+    val[AMD_3D_V_STAGE] = 5;
     if (in_total && in_good == in_total && !out_bad) {
-        status = job->textured ? "3D PASS: the pixel shader read the image and the rectangle shows it (every texel right, nothing outside touched)"
-                               : "3D PASS: the graphics pipeline drew the rectangle (every pixel right, nothing outside touched)";
+        status = "3D PASS: every pixel inside is what the job draws, nothing outside touched";
         return 1;
     }
+    keep_fault_registers();
     status = in_good == 0 ? "3D FAILED: the GPU ran the draw but the rectangle is not there (see the first wrong pixel)"
                           : "3D FAILED: some pixels are wrong";
     return 0;
@@ -1013,186 +849,14 @@ int amd_3d_ring_start(void)
     uint32_t n, seq;
     if (!amd_gpu_ring_running()) { status = "ring start skipped: the persistent ring is not running"; return 0; }
     n = amd_3d_build_ring_start(rs, sizeof rs / sizeof rs[0]);
-    val[6] = n;
+    val[AMD_3D_V_DWORDS] = n;
     if (!n) { status = "ring start skipped: the packets do not fit"; return 0; }
     seq = amd_gpu_submit_raw(rs, n);
     if (!seq) { status = "ring start FAILED: the ring did not take the packets (too long for the ring?)"; return 0; }
-    val[7] = seq;
+    val[AMD_3D_V_FENCE] = seq;
     if (!amd_gpu_fence_wait(seq, 8000000u)) { status = "ring start FAILED: fence timeout (the CP did not get through the packets)"; return 0; }
     status = "ring start done: PREAMBLE + clear state + CLEAR_STATE + SET_BASE + VGT_INDEX_TYPE went through the ring";
     return 1;
-}
-
-/* Throw-away draws right after bring-up. On the real Renoir laptop the first ~20-24 draws of every boot were randomly lost (the stream ran
- * to its end, no fault, no pixels); after them, and after the GPU had been idle for seconds, not one of 72 draws was. Nobody found the
- * cause yet (the Linux golden registers were tried, HARIS_AMD_GPU_GOLDEN: no help), so the driver does these first.
- * The draws are TINY (8 x 8 pixels, a 24 x 24 area filled and checked by the CPU: about 2 ms each instead of about 30 ms for the big
- * rectangle), so they also tell whether the failures stop after a NUMBER of draws (then they end after about 20 of these too) or after
- * some TIME (about 0.7 s: then they go on for hundreds). Each draw has its own colour, so a lost one is always seen.
- * bits[k] bit i = draw 32k + i right (draws 0 .. 383). info[0] = index of the last failed draw + 1 (0: none), info[1] = failed draws,
- * info[2] = CPU cycles / 2^20 for all n draws, info[3] = CPU cycles / 2^20 from the first draw to the last failed one.
- * Returns how many of the n draws were right. */
-static unsigned long long wu_tsc(void)
-{
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((unsigned long long)hi << 32) | lo;
-}
-
-/* Pipeline statistics of the warm-up (see stat_mc): which stage a lost draw stops at.
- *   [0 .. 5]   the first right draw: IA vertices, IA primitives, VS invocations, C invocations, C primitives, PS invocations (after - before)
- *   [6 .. 11]  the same for the first lost draw
- *   [12 .. 17] lost draws with that counter 0 (IA vertices, IA primitives, VS, C invocations, C primitives, PS)
- *   [18]       draws whose samples were not written (still 0xFFFFFFFF)
- *   [19 .. 24] the same as [12 .. 17] for the right draws (should all stay 0) */
-#define WU_STAT_N 25
-static uint32_t wu_stat[WU_STAT_N];
-uint32_t amd_3d_warmup_stat(int k) { return k >= 0 && k < WU_STAT_N ? wu_stat[k] : 0; }
-
-/* dword offsets of the counters used here, in a SAMPLE_PIPELINESTAT block (Mesa si_query_pipestat_dw_offset) */
-static const uint32_t wu_ctr_dw[6] = { 14, 12, 6, 4, 2, 0 };  /* IA vertices, IA primitives, VS, C invocations, C primitives, PS */
-
-/* What the vertex shader stored (see vs_store_mc), per warm-up draw:
- *   [0 .. 11]  the first right draw: for vertex slot 0 .. 3: v0, x, y
- *   [12 .. 23] the same for the first lost draw
- *   [24 .. 26] lost draws with: a slot not written / a v0 that is not the slot number / an x, y, z or w that is not the expected one
- *   [27 .. 29] the same for the right draws
- *   [30 .. 33] after the last draw: VM fault GC status, GC address lo, hi, MM status; [34] 1 = the ring still ran afterwards */
-#define WU_VS_N 35
-static uint32_t wu_vs[WU_VS_N];
-uint32_t amd_3d_warmup_vs(int k) { return k >= 0 && k < WU_VS_N ? wu_vs[k] : 0; }
-#define VRAM_VS_STORE_OFF (VRAM_MARK_OFF + 0x400u)
-
-int amd_3d_warmup(int n, uint32_t bits[AMD_3D_WARMUP_WORDS], uint32_t info[4], int vs_store)
-{
-    Amd3dJob job = { 0 };
-    int i, right = 0, have_good = 0, have_bad = 0, vs_have_good = 0, vs_have_bad = 0;
-    unsigned long long t0;
-    uint32_t k;
-    for (i = 0; i < AMD_3D_WARMUP_WORDS; i++) bits[i] = 0;
-    for (k = 0; k < WU_STAT_N; k++) wu_stat[k] = 0;
-    info[0] = info[1] = info[2] = info[3] = 0;
-    if (!amd_gpu_ring_running()) { status = "3D warm-up skipped: the persistent ring is not running"; return 0; }
-    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
-    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
-    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
-    if (!job.rt_mc || !job.vs_mc || !job.ps_mc) { status = "3D warm-up skipped: no MC address for the test memory"; return 0; }
-    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
-    job.bgr = 1;
-    job.x0 = 32; job.y0 = 16; job.x1 = 40; job.y1 = 24;  /* 8 x 8 */
-    job.a = 255;
-    stat_mc = amd_native_vram_mc_addr(VRAM_MARK_OFF + 0x100u, 0x100u);
-    vs_store_mc = vs_store ? amd_native_vram_mc_addr(VRAM_VS_STORE_OFF, 0x80u) : 0;
-    for (k = 0; k < WU_VS_N; k++) wu_vs[k] = 0;
-    t0 = wu_tsc();
-    for (i = 0; i < n; i++) {
-        Amd3dJob j = job;
-        uint32_t d[6], unwritten = 0;
-        int ok;
-        j.r = (uint32_t)(37 * i) & 0xFFu; j.g = (uint32_t)(255 - 11 * i) & 0xFFu; j.b = (uint32_t)(91 + 29 * i) & 0xFFu;
-        if (stat_mc)
-            for (k = 0; k < 0x100u; k += 4)            /* 0xFFFFFFFF = not written by the GPU */
-                amd_gpu_vram_write32(VRAM_MARK_OFF + 0x100u + k, 0xFFFFFFFFu);
-        if (vs_store_mc)
-            for (k = 0; k < 0x80u; k += 4)
-                amd_gpu_vram_write32(VRAM_VS_STORE_OFF + k, 0xFFFFFFFFu);
-        if (!amd_gpu_ring_running())                   /* a draw hung the CP: the rest would only fail the same way */
-            break;
-        ok = draw_once(&j, VRAM_RT_OFF, 8, 0x00112233u, 0);
-        for (k = 0; k < 6; k++) {
-            uint32_t before = amd_gpu_vram_read32(VRAM_MARK_OFF + 0x100u + 4u * wu_ctr_dw[k]);
-            uint32_t after = amd_gpu_vram_read32(VRAM_MARK_OFF + 0x180u + 4u * wu_ctr_dw[k]);
-            if (before == 0xFFFFFFFFu || after == 0xFFFFFFFFu) unwritten = 1;
-            d[k] = after - before;                     /* low 32 bits of the 64-bit counters are enough for one draw */
-        }
-        if (unwritten) wu_stat[18]++;
-        if (vs_store_mc) {
-            uint32_t s, vs_unw = 0, vs_badid = 0, vs_badpos = 0, rec[12];
-            for (s = 0; s < 4; s++) {
-                uint32_t base = VRAM_VS_STORE_OFF + 32u * s;
-                uint32_t x = amd_gpu_vram_read32(base), y = amd_gpu_vram_read32(base + 4u);
-                uint32_t z = amd_gpu_vram_read32(base + 8u), w = amd_gpu_vram_read32(base + 12u);
-                uint32_t id = amd_gpu_vram_read32(base + 16u);
-                if (x == 0xFFFFFFFFu || id == 0xFFFFFFFFu) vs_unw = 1;
-                if (id != s) vs_badid = 1;
-                if (x != a3d_f32_bits((s & 1u) ? j.x1 : j.x0) || y != a3d_f32_bits((s & 2u) ? j.y1 : j.y0) || z != 0 || w != 0x3F800000u)
-                    vs_badpos = 1;
-                rec[3 * s] = id; rec[3 * s + 1] = x; rec[3 * s + 2] = y;
-            }
-            if (ok) {
-                if (!vs_have_good) { vs_have_good = 1; for (s = 0; s < 12; s++) wu_vs[s] = rec[s]; }
-                wu_vs[27] += vs_unw; wu_vs[28] += vs_badid; wu_vs[29] += vs_badpos;
-            } else {
-                if (!vs_have_bad) { vs_have_bad = 1; for (s = 0; s < 12; s++) wu_vs[12 + s] = rec[s]; }
-                wu_vs[24] += vs_unw; wu_vs[25] += vs_badid; wu_vs[26] += vs_badpos;
-            }
-        }
-        if (ok) {
-            right++;
-            if (i < 32 * AMD_3D_WARMUP_WORDS) bits[i >> 5] |= 1u << (i & 31);
-            if (!have_good) { have_good = 1; for (k = 0; k < 6; k++) wu_stat[k] = d[k]; }
-            for (k = 0; k < 6; k++) if (!d[k]) wu_stat[19 + k]++;
-        } else {
-            info[0] = (uint32_t)i + 1u;
-            info[1]++;
-            info[3] = (uint32_t)((wu_tsc() - t0) >> 20);
-            if (!have_bad) { have_bad = 1; for (k = 0; k < 6; k++) wu_stat[6 + k] = d[k]; }
-            for (k = 0; k < 6; k++) if (!d[k]) wu_stat[12 + k]++;
-        }
-    }
-    stat_mc = 0;
-    vs_store_mc = 0;
-    amd_gpu_fault_snapshot();                          /* did a draw end in a VM fault? (read only) */
-    wu_vs[30] = amd_native_fault_gc_status(); wu_vs[31] = amd_native_fault_gc_lo();
-    wu_vs[32] = amd_native_fault_gc_hi();     wu_vs[33] = amd_native_fault_mm_status();
-    wu_vs[34] = amd_gpu_ring_running() ? 1u : 0u;
-    info[2] = (uint32_t)((wu_tsc() - t0) >> 20);
-    status = "3D warm-up done";
-    return right;
-}
-
-/* Does a SHADER store reach memory? One tiny draw whose vertex shader stores x, y, z, w and v0 per vertex (see vs_store_mc).
- * target 0: 128 bytes of system-RAM scratch through the GART page table (the CP already writes its fences there);
- * target 1: VRAM at its MC address (through the system aperture), which faulted on 2026-10-29 (a WRITE, MAPPING_ERROR).
- * The fault status is cleared before and read after. Call with SH_MEM_CONFIG.RETRY_DISABLE set, or a fault hangs the GPU.
- * out: [0 .. 11] slot 0 .. 3: v0, x, y (0xFFFFFFFF = not written); [12] 1 = the draw was right; [13 .. 16] VM fault GC status,
- * GC address lo, hi, MM status; [17] 1 = the ring still ran afterwards; [18] the store address lo, [19] hi. */
-int amd_3d_vs_store_probe(int target, uint32_t out[20])
-{
-    Amd3dJob job = { 0 };
-    uint32_t k, s;
-    uint64_t addr = target ? amd_native_vram_mc_addr(VRAM_VS_STORE_OFF, 0x80u) : amd_gpu_scratch_va();
-    for (k = 0; k < 20; k++) out[k] = 0;
-    if (!amd_gpu_ring_running()) { status = "store probe skipped: the persistent ring is not running"; return 0; }
-    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
-    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
-    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
-    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !addr) { status = "store probe skipped: no address"; return 0; }
-    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
-    job.bgr = 1;
-    job.x0 = 32; job.y0 = 16; job.x1 = 40; job.y1 = 24;
-    job.r = 200; job.g = 100; job.b = 50; job.a = 255;
-    out[18] = (uint32_t)addr; out[19] = (uint32_t)(addr >> 32);
-    for (k = 0; k < 0x80u; k += 4) {                   /* 0xFFFFFFFF = not written by the GPU */
-        if (target) amd_gpu_vram_write32(VRAM_VS_STORE_OFF + k, 0xFFFFFFFFu);
-        else amd_gpu_scratch_write32(k, 0xFFFFFFFFu);
-    }
-    amd_gpu_fault_clear();
-    vs_store_mc = addr;
-    out[12] = (uint32_t)draw_once(&job, VRAM_RT_OFF, 8, 0x00112233u, 0);
-    vs_store_mc = 0;
-    for (s = 0; s < 4; s++) {
-        uint32_t base = 32u * s;
-        out[3 * s]     = target ? amd_gpu_vram_read32(VRAM_VS_STORE_OFF + base + 16u) : amd_gpu_scratch_read32(base + 16u);
-        out[3 * s + 1] = target ? amd_gpu_vram_read32(VRAM_VS_STORE_OFF + base) : amd_gpu_scratch_read32(base);
-        out[3 * s + 2] = target ? amd_gpu_vram_read32(VRAM_VS_STORE_OFF + base + 4u) : amd_gpu_scratch_read32(base + 4u);
-    }
-    amd_gpu_fault_snapshot();
-    out[13] = amd_native_fault_gc_status(); out[14] = amd_native_fault_gc_lo();
-    out[15] = amd_native_fault_gc_hi();     out[16] = amd_native_fault_mm_status();
-    out[17] = amd_gpu_ring_running() ? 1u : 0u;
-    status = "store probe done";
-    return (int)out[12];
 }
 
 int amd_3d_rect_offscreen(void)
@@ -1232,6 +896,52 @@ int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
     return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
 }
 
+/* ---- M2: the rectangle textured from an image in VRAM ---- */
+
+int amd_3d_tex_offscreen(void)
+{
+    Amd3dJob job = { 0 };
+    if (!amd_gpu_ring_running()) { status = "3D texture test skipped: the persistent ring is not running"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    job.tex_off = VRAM_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 256u * 32u * 4u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D texture test skipped: no MC address for the test memory"; return 0; }
+    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
+    job.bgr = 1;
+    job.x0 = 32; job.y0 = 16; job.x1 = 224; job.y1 = 48;
+    job.r = job.g = job.b = job.a = 0;
+    job.textured = 1;
+    job.tex_w = job.x1 - job.x0; job.tex_h = job.y1 - job.y0; job.tex_pitch_px = 256;
+    return draw_and_check(&job, VRAM_RT_OFF, 256, 0x00112233u, 1);
+}
+
+int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
+{
+    Amd3dJob job = { 0 };
+    uint64_t off64;
+    if (!amd_gpu_ring_running()) { status = "3D texture screen test skipped: the persistent ring is not running"; return 0; }
+    if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 200 || fb_phys < vram_cpu) {
+        status = "3D texture screen test skipped: bad framebuffer info"; return 0; }
+    off64 = fb_phys - vram_cpu;
+    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_SHADER_OFF) {
+        status = "3D texture screen test skipped: the framebuffer reaches the test memory"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    job.tex_off = VRAM_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 512u * 64u * 4u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D texture screen test skipped: no MC address"; return 0; }
+    job.pitch_px = pitch_bytes / 4u; job.width = width; job.height = height;
+    job.bgr = bgr;
+    job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
+    job.y0 = height - 120; job.y1 = height - 88;
+    job.r = job.g = job.b = job.a = 0;
+    job.textured = 1;
+    job.tex_w = job.x1 - job.x0; job.tex_h = job.y1 - job.y0; job.tex_pitch_px = 512;
+    return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
+}
 /* ---- M3: alpha blending ----
  * The same solid rectangle, but half transparent (a = 128) over a background the CPU wrote: every pixel inside must be
  * colour * 128/255 + background * 127/255 (within 2 per byte), every pixel outside the untouched background. */
@@ -1322,8 +1032,7 @@ int amd_3d_shadow_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width,
 
 /* ---- M3: box blur ----
  * The textured rectangle with a 3 x 3 box blur of a 4 x 4 checkerboard: every pixel inside is compared with amd_3d_blur_px() (within 2
- * per byte). The image (in VRAM_TEX_OFF, defined below) is 2 pixels bigger than the rectangle each way. */
-#define VRAM_BLUR_TEX_OFF 0x0B200000u /* = VRAM_TEX_OFF */
+ * per byte). The image (at VRAM_TEX_OFF) is 2 pixels bigger than the rectangle each way. */
 int amd_3d_blur_offscreen(void)
 {
     Amd3dJob job = { 0 };
@@ -1331,8 +1040,8 @@ int amd_3d_blur_offscreen(void)
     job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
     job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
     job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x300u);
-    job.tex_off = VRAM_BLUR_TEX_OFF;
-    job.tex_mc = amd_native_vram_mc_addr(VRAM_BLUR_TEX_OFF, 256u * 64u * 4u);
+    job.tex_off = VRAM_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 256u * 64u * 4u);
     if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D blur test skipped: no MC address for the test memory"; return 0; }
     job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
     job.bgr = 1;
@@ -1357,8 +1066,8 @@ int amd_3d_blur_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
     job.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
     job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
     job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x300u);
-    job.tex_off = VRAM_BLUR_TEX_OFF;
-    job.tex_mc = amd_native_vram_mc_addr(VRAM_BLUR_TEX_OFF, 512u * 64u * 4u);
+    job.tex_off = VRAM_TEX_OFF;
+    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 512u * 64u * 4u);
     if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D blur screen test skipped: no MC address"; return 0; }
     job.pitch_px = pitch_bytes / 4u; job.width = width; job.height = height;
     job.bgr = bgr;
@@ -1370,210 +1079,3 @@ int amd_3d_blur_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
     return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
 }
 
-/* ---- M2: the rectangle textured from an image in VRAM ---- */
-#define VRAM_TEX_OFF 0x0B200000u
-
-int amd_3d_tex_offscreen(void)
-{
-    Amd3dJob job = { 0 };
-    if (!amd_gpu_ring_running()) { status = "3D texture test skipped: the persistent ring is not running"; return 0; }
-    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
-    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
-    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
-    job.tex_off = VRAM_TEX_OFF;
-    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 256u * 32u * 4u);
-    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D texture test skipped: no MC address for the test memory"; return 0; }
-    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
-    job.bgr = 1;
-    job.x0 = 32; job.y0 = 16; job.x1 = 224; job.y1 = 48;
-    job.r = job.g = job.b = job.a = 0;
-    job.textured = 1;
-    job.tex_w = job.x1 - job.x0; job.tex_h = job.y1 - job.y0; job.tex_pitch_px = 256;
-    return draw_and_check(&job, VRAM_RT_OFF, 256, 0x00112233u, 1);
-}
-
-int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
-{
-    Amd3dJob job = { 0 };
-    uint64_t off64;
-    if (!amd_gpu_ring_running()) { status = "3D texture screen test skipped: the persistent ring is not running"; return 0; }
-    if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 200 || fb_phys < vram_cpu) {
-        status = "3D texture screen test skipped: bad framebuffer info"; return 0; }
-    off64 = fb_phys - vram_cpu;
-    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_SHADER_OFF) {
-        status = "3D texture screen test skipped: the framebuffer reaches the test memory"; return 0; }
-    job.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
-    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
-    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
-    job.tex_off = VRAM_TEX_OFF;
-    job.tex_mc = amd_native_vram_mc_addr(VRAM_TEX_OFF, 512u * 64u * 4u);
-    if (!job.rt_mc || !job.vs_mc || !job.ps_mc || !job.tex_mc) { status = "3D texture screen test skipped: no MC address"; return 0; }
-    job.pitch_px = pitch_bytes / 4u; job.width = width; job.height = height;
-    job.bgr = bgr;
-    job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
-    job.y0 = height - 120; job.y1 = height - 88;
-    job.r = job.g = job.b = job.a = 0;
-    job.textured = 1;
-    job.tex_w = job.x1 - job.x0; job.tex_h = job.y1 - job.y0; job.tex_pitch_px = 512;
-    return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
-}
-
-/* A stress test for the failures that came and went between boots (a draw that ends with no pixels at all, no fault). Every mode is
- * 8 tries of one solid rectangle, one try each (a retry would hide exactly what is being measured). Run order:
- *   L1  the OLD light stream (control)                         D  pattern written once, a new colour every draw
- *   E   as D, the pattern written before every draw            F  same colour every draw, pixel shader code differs every draw
- *   G   same colour and code, a new shader address every draw  A  shader code written once, then left alone
- *   B   shader code written again before every draw            C  as B, plus about 20 ms after writing it
- *   L2  the OLD light stream again (control)
- * Until the log of 2026-10-29 the modes ran in the order A B C D E F G: every mode that "passed" ran late, every one that failed ran
- * early. The order is turned round here, and every draw is timed, to tell "what the mode does" from "when it runs". */
-static uint32_t stress_combo[9];
-static uint32_t stress_d[54]; /* modes D (0 .. 8), E (9 .. 17), F (18 .. 26), G (27 .. 35), L2 (36 .. 44), L1 (45 .. 53) */
-static uint32_t stress_fix[3]; /* per mode: low byte = failed draws whose rectangle was complete after reading 1 MiB elsewhere, next byte = after 16 MiB */
-uint32_t amd_3d_stress_fix(int mode) { return mode >= 0 && mode < 3 ? stress_fix[mode] : 0; }
-uint32_t amd_3d_stress_combo(int mode) { return mode >= 0 && mode < 9 ? stress_combo[mode] : 0; }
-uint32_t amd_3d_stress_d(int k) { return k >= 0 && k < 54 ? stress_d[k] : 0; }
-
-/* Every draw of the stress test in run order (72): bit n of st_info[0 .. 2] = draw n was right. Then the times in ms and the RLC power /
- * clock gating registers (gc_9_1_offset.h, BASE_IDX 1 = 0xA000 + offset) at the start, at the first failed draw and at the end. */
-#define ST_RLC_N 5
-static const uint32_t st_rlc_reg[ST_RLC_N] = {
-    0xA000u + 0x4C04u, /* RLC_STAT */
-    0xA000u + 0x4C40u, /* RLC_GPM_STAT */
-    0xA000u + 0x4C43u, /* RLC_PG_CNTL */
-    0xA000u + 0x4C49u, /* RLC_CGCG_CGLS_CTRL */
-    0x2000u + 0x0002u, /* GRBM_STATUS2 (BASE_IDX 0) */
-};
-static uint32_t st_info[7 + 3 * ST_RLC_N + 2]; /* + [22] TSC/2^20 of the idle wait, [23] index of the last failed draw */
-static uint32_t st_n;
-static unsigned long long st_t0;
-static unsigned long long st_tsc(void) { uint32_t lo, hi; __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi)); return ((unsigned long long)hi << 32) | lo; }
-uint32_t amd_3d_stress_info(int k) { return k >= 0 && k < (int)(sizeof st_info / sizeof st_info[0]) ? st_info[k] : 0; }
-
-static void st_rlc(uint32_t *out)
-{
-    uint32_t k;
-    for (k = 0; k < ST_RLC_N; k++)
-        out[k] = amd_gpu_reg_read32(st_rlc_reg[k]);
-}
-
-static int stress_draw(Amd3dJob *j)
-{
-    int ok = draw_once(j, VRAM_RT_OFF, 8, 0x00112233u, 0);
-    if (ok && st_n < 96u)
-        st_info[st_n >> 5] |= 1u << (st_n & 31u);
-    if (!ok) {
-        uint32_t t = (uint32_t)((st_tsc() - st_t0) >> 20);     /* CPU cycles / 2^20 (about 0.5 ms at 2 GHz) */
-        if (st_info[4] == 0xFFFFFFFFu) { st_info[4] = t; st_rlc(&st_info[7 + ST_RLC_N]); }
-        st_info[5] = t;
-        st_info[23] = st_n;
-    }
-    st_n++;
-    return ok;
-}
-
-/* 8 draws as mode B (same colour, shader and pattern written before every draw) with the OLD light stream: the control. d[0] = bits. */
-static void stress_control(const Amd3dJob *job, uint32_t *d, uint32_t *combo)
-{
-    uint32_t i;
-    ps_salt = 0; shader_slot = 0; skip_shader_write = 0; skip_pattern_write = 0; shader_delay_reads = 0;
-    light_inval = 1;
-    d[0] = 0;
-    for (i = 0; i < 8; i++) {
-        Amd3dJob j = *job;
-        if (stress_draw(&j))
-            d[0] |= 1u << i;
-        else
-            *combo += 1u << (4u * ((val[32] == 0x3D3D0001u ? 1u : 0u) | (val[33] == 0x3D3D0002u ? 2u : 0u)));
-    }
-    light_inval = 0;
-}
-
-void amd_3d_stress(uint32_t bits[3])
-{
-    Amd3dJob job = { 0 };
-    uint32_t mode, i, v, k;
-    bits[0] = bits[1] = bits[2] = 0xFFFFFFFFu;
-    for (k = 0; k < 9; k++) stress_combo[k] = 0;
-    stress_fix[0] = stress_fix[1] = stress_fix[2] = 0;
-    for (k = 0; k < sizeof st_info / sizeof st_info[0]; k++) st_info[k] = 0;
-    st_info[4] = 0xFFFFFFFFu;  /* no failed draw yet */
-    st_n = 0;
-    if (!amd_gpu_ring_running()) return;
-    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
-    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
-    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
-    if (!job.rt_mc || !job.vs_mc || !job.ps_mc) return;
-    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
-    job.bgr = 1;
-    job.x0 = 32; job.y0 = 16; job.x1 = 224; job.y1 = 48;
-    job.r = 255; job.g = 128; job.b = 0; job.a = 255;
-    st_t0 = st_tsc();
-    st_info[3] = (uint32_t)(st_t0 >> 20);                          /* CPU cycles / 2^20 since the CPU started */
-    st_rlc(&st_info[7]);
-
-    /* W: 24 warm-up draws (draws 0 .. 23 of the run), then the GPU is left idle for about 2 s (2 million reads of one VRAM dword).
-     * The failures so far stopped after about the first 24 draws of a boot. If the stress test after the wait has none, it is a
-     * one-off settling (after N draws / some time after start-up); if they come back, it is something that returns when the GPU
-     * goes idle (clock or power state). */
-    {
-        uint32_t wd[1], wc = 0;
-        unsigned long long tw;
-        for (k = 0; k < 3; k++)
-            stress_control(&job, wd, &wc);
-        light_inval = 0;
-        tw = st_tsc();
-        for (k = 0; k < 2000000u; k++)
-            (void)amd_gpu_vram_read32(0);
-        st_info[22] = (uint32_t)((st_tsc() - tw) >> 20);
-    }
-
-    stress_control(&job, &stress_d[45], &stress_combo[8]);        /* L1 */
-    for (v = 0; v < 4; v++) {                                      /* D E F G */
-        uint32_t *d = &stress_d[9u * v];
-        d[0] = 0;
-        for (i = 0; i < 8; i++) {
-            Amd3dJob j = job;
-            if (v < 2) { j.r = 255u - 30u * i; j.g = 40u + 20u * i; j.b = 10u + 30u * i; }
-            ps_salt = v == 2 ? 0x1000u + i : 0;
-            shader_slot = v == 3 ? 0x400u * i : 0;
-            j.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + shader_slot, 0x200u);
-            j.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + shader_slot + 0x100u, 0x100u);
-            skip_shader_write = 0;
-            skip_pattern_write = (v == 0 && i > 0);
-            d[1 + i] = 0;
-            if (stress_draw(&j))
-                d[0] |= 1u << i;
-            else {
-                d[1 + i] = val[4];
-                stress_combo[3 + v] += 1u << (4u * ((val[32] == 0x3D3D0001u ? 1u : 0u) | (val[33] == 0x3D3D0002u ? 2u : 0u)));
-            }
-        }
-    }
-    ps_salt = 0;
-    shader_slot = 0;
-    skip_pattern_write = 0;
-    for (mode = 0; mode < 3; mode++) {                             /* A B C */
-        bits[mode] = 0;
-        shader_delay_reads = mode == 2 ? 20000u : 0u;
-        for (i = 0; i < 8; i++) {
-            Amd3dJob j = job;
-            skip_shader_write = (mode == 0 && i > 0);
-            if (stress_draw(&j))
-                bits[mode] |= 1u << i;
-            else {
-                if (val[26] == val[1])         /* failed, but the whole rectangle was there 20 ms later */
-                    bits[mode] |= 0x10000u << i;
-                stress_fix[mode] += (val[35] == val[1] ? 1u : 0u) + (val[36] == val[1] ? 0x100u : 0u);
-                /* what the stream did: 0 neither marker, 1 only before the draw, 2 only after, 3 both */
-                stress_combo[mode] += 1u << (4u * ((val[32] == 0x3D3D0001u ? 1u : 0u) | (val[33] == 0x3D3D0002u ? 2u : 0u)));
-            }
-        }
-    }
-    skip_shader_write = 0;
-    shader_delay_reads = 0;
-    stress_control(&job, &stress_d[36], &stress_combo[7]);        /* L2 */
-
-    st_info[6] = (uint32_t)((st_tsc() - st_t0) >> 20);
-    st_rlc(&st_info[7 + 2 * ST_RLC_N]);
-}
