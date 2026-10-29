@@ -440,9 +440,11 @@ int wm_comp_items(GfxCompItem *out, int max)
         {
             int blur, dy, strength;
             ui_window_shadow(i == top, &blur, &dy, &strength);
-            out[n++] = (GfxCompItem){blur, w->r.x - blur / 2, w->r.y + dy - blur / 2, w->r.w + blur, w->r.h + blur, 2, strength};
+            int r = ui_theme()->radius_l + 2; /* the hole: the window's middle, opaque for sure (away from its round corners) */
+            out[n++] = (GfxCompItem){blur, w->r.x - blur / 2, w->r.y + dy - blur / 2, w->r.w + blur, w->r.h + blur, 2, strength,
+                                     {w->r.x + r, w->r.y + r, w->r.x + w->r.w - r, w->r.y + w->r.h - r}};
         }
-        out[n++] = (GfxCompItem){c->surf, w->r.x - c->m, w->r.y - c->m, c->lw, c->lh, 1, 0};
+        out[n++] = (GfxCompItem){c->surf, w->r.x - c->m, w->r.y - c->m, c->lw, c->lh, 1, 0, {0, 0, 0, 0}};
     }
     return n;
 }

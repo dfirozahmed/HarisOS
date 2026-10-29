@@ -83,7 +83,8 @@ int main(void){
   assert((CORNER_PX >> 24) == 255 && (CORNER_PX & 0xFFFFFFu) == 0);   /* outside the round corner: see-through, no shadow baked in */
   { int blur, dy, st; ui_window_shadow(1, &blur, &dy, &st);   /* its shadow first: drawn by the GPU, from the same numbers as ui_window */
     assert(items[0].layer==2 && items[0].surface==blur && items[0].alpha==st && items[0].x==200-blur/2 && items[0].y==100+dy-blur/2 &&
-           items[0].w==400+blur && items[0].h==300+blur); }
+           items[0].w==400+blur && items[0].h==300+blur);
+    assert(items[0].hole[0]==200+R && items[0].hole[1]==100+R && items[0].hole[2]==600-R && items[0].hole[3]==400-R); }   /* not under the window's opaque middle */
   /* nothing changed: nothing is drawn */
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==1);
   /* moved by its title bar: no drawing, only the place */

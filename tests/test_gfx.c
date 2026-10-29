@@ -289,7 +289,7 @@ int main(void)
     {   /* compositor: present calls the driver; a failure drops it */
         static const GfxCompOps cops = {c_new, c_free, c_up, c_compose, 0, 0, 0};
         static unsigned int scr[16 * 8];
-        GfxCompItem it = {1, 0, 0, 16, 8, 0, 0};
+        GfxCompItem it = {1, 0, 0, 16, 8, 0, 0, {0, 0, 0, 0}};
         const int r[4] = {0, 0, 16, 8};
         gfx_init(scr, 16, 8, 16, 1);
         assert(gfx_comp() == 0 && gfx_comp_present(&it, 1, r, 1) == -1);

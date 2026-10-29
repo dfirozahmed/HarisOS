@@ -1023,9 +1023,24 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
             const AmdSurface *s;
             if (it->layer == 2) /* a soft shadow: no surface; `surface` is its blur */
             {
-                if (cut(&x0, &y0, &x1, &y1, it, w, h))
-                    amd_comp_shadow_part(&f, it->x, it->y, it->x + it->w, it->y + it->h, (uint32_t)it->surface, (uint32_t)it->alpha,
-                                         (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1);
+                if (!cut(&x0, &y0, &x1, &y1, it, w, h))
+                    continue;
+                /* not where the opaque window covers it (its hole): only the frame around it, in up to 4 pieces */
+                int hx0 = it->hole[0], hy0 = it->hole[1], hx1 = it->hole[2], hy1 = it->hole[3];
+                int part[4][4], np = 0;
+                if (hx1 <= hx0 || hy1 <= hy0 || hx1 <= x0 || hx0 >= x1 || hy1 <= y0 || hy0 >= y1) {
+                    part[np][0] = x0; part[np][1] = y0; part[np][2] = x1; part[np][3] = y1; np++;
+                } else {
+                    int my0 = hy0 > y0 ? hy0 : y0, my1 = hy1 < y1 ? hy1 : y1;   /* the rows beside the hole */
+                    if (hy0 > y0) { part[np][0] = x0; part[np][1] = y0; part[np][2] = x1; part[np][3] = my0; np++; }   /* above */
+                    if (hy1 < y1) { part[np][0] = x0; part[np][1] = my1; part[np][2] = x1; part[np][3] = y1; np++; }   /* below */
+                    if (hx0 > x0) { part[np][0] = x0; part[np][1] = my0; part[np][2] = hx0; part[np][3] = my1; np++; } /* left */
+                    if (hx1 < x1) { part[np][0] = hx1; part[np][1] = my0; part[np][2] = x1; part[np][3] = my1; np++; } /* right */
+                }
+                for (int p = 0; p < np; p++)
+                    if (part[p][2] > part[p][0] && part[p][3] > part[p][1])
+                        amd_comp_shadow_part(&f, it->x, it->y, it->x + it->w, it->y + it->h, (uint32_t)it->surface, (uint32_t)it->alpha,
+                                             (uint32_t)part[p][0], (uint32_t)part[p][1], (uint32_t)part[p][2], (uint32_t)part[p][3]);
                 continue;
             }
             if (it->surface < 1 || it->surface > SC_MAX || !sc_surf[it->surface - 1].off) return -1;
@@ -1043,7 +1058,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     if (!na) return -1;
     amd_comp_begin(&f, ib + na, SC_IB_MAX - na, rt_mc, rt_pitch_px, w, h, sc.bgr, shader_mc);   /* 2: the changed parts onto the target */
     for (int r = 0; r < nr; r++) {
-        GfxCompItem all = { 0, 0, 0, (int)w, (int)h, 0, 0 };
+        GfxCompItem all = { 0, 0, 0, (int)w, (int)h, 0, 0, { 0, 0, 0, 0 } };
         int x0 = rects[4 * r], y0 = rects[4 * r + 1], x1 = rects[4 * r + 2], y1 = rects[4 * r + 3];
         if (!cut(&x0, &y0, &x1, &y1, &all, w, h))
             continue;
@@ -1148,9 +1163,10 @@ int amd_comp_scene_test(void)
     if (amd_comp_surface_upload(ws, wall, 176, 0, 0, 176, 124, 1) || amd_comp_surface_upload(ls, lay, 96, 0, 0, 96, 64, 0)) {
         amd_comp_surface_free(ws); amd_comp_surface_free(ls); status = "scene test FAILED: upload"; return 0;
     }
-    items[0] = (GfxCompItem){ ws, 0, 0, 176, 124, 0, 0 };
-    items[1] = (GfxCompItem){ (int)SC_SH_R, SC_SH_X0, SC_SH_Y0, SC_SH_X1 - SC_SH_X0, SC_SH_Y1 - SC_SH_Y0, 2, (int)SC_SH_A };
-    items[2] = (GfxCompItem){ ls, 40, 30, 96, 64, 1, 0 };
+    items[0] = (GfxCompItem){ ws, 0, 0, 176, 124, 0, 0, { 0, 0, 0, 0 } };
+    /* the hole: where the layer is fully opaque (test_layer: 16 in from its edges, and not its see-through top-right corner) */
+    items[1] = (GfxCompItem){ (int)SC_SH_R, SC_SH_X0, SC_SH_Y0, SC_SH_X1 - SC_SH_X0, SC_SH_Y1 - SC_SH_Y0, 2, (int)SC_SH_A, { 56, 46, 120, 78 } };
+    items[2] = (GfxCompItem){ ls, 40, 30, 96, 64, 1, 0, { 0, 0, 0, 0 } };
     amd_gpu_fault_clear();
     if (compose_to(rt_mc, COMP_RT_W, 176, 124, items, 3, rects, 2) != 0) {
         keep_fault_registers();
