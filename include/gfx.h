@@ -161,8 +161,11 @@ typedef struct
     int surface;  /* id */
     int x, y;     /* where its pixel (0, 0) is on the screen */
     int w, h;
-    int layer;    /* 1 = packed layer (blended), 0 = opaque picture */
+    int layer;    /* 1 = packed layer (blended), 0 = opaque picture, 2 = a soft shadow (see below) */
+    int alpha;    /* a shadow: how dark it is at its darkest (0 .. 255) */
 } GfxCompItem;
+/* A shadow item has no surface: it is black, darkest inside, fading to nothing over `surface` pixels (its blur) towards the
+ * edges of its box x, y, w, h. A window's shadow comes before the window in the list. */
 /* What the desktop measured over a number of composed frames (for GfxCompOps.report). Times in microseconds. */
 typedef struct
 {

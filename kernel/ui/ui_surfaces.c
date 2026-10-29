@@ -82,6 +82,17 @@ void ui_window_button_state(int hover, int pressed)
     BTN_PRESS = pressed;
 }
 
+static int SHADOWS = 1; /* 0: a compositor draws the windows' shadows (ui_window_shadows) */
+
+void ui_window_shadows(int on) { SHADOWS = on; }
+
+void ui_window_shadow(int active, int *blur, int *dy, int *strength)
+{
+    *blur = active ? 28 : 18;
+    *dy = active ? 12 : 6;
+    *strength = active ? THEME->shadow : THEME->shadow * 2 / 3;
+}
+
 /* flat = 1: square corners and no shadow (a maximized window that touches the screen edges) */
 static UiRect window_impl(UiRect r, const char *title, int active, int flat)
 {
@@ -91,9 +102,12 @@ static UiRect window_impl(UiRect r, const char *title, int active, int flat)
     if (dialog)
         flat = 0;
     int rad = flat ? 0 : t->radius_l;
-    if (!flat)
-        gfx_shadow(r.x, r.y, r.w, r.h, rad, active ? 28 : 18, 0, active ? 12 : 6,
-                   (unsigned char)(active ? t->shadow : t->shadow * 2 / 3));
+    if (!flat && SHADOWS)
+    {
+        int blur, dy, strength;
+        ui_window_shadow(active, &blur, &dy, &strength);
+        gfx_shadow(r.x, r.y, r.w, r.h, rad, blur, 0, dy, (unsigned char)strength);
+    }
     gfx_fill_round_rect(r.x, r.y, r.w, r.h, rad, ui_color(t->surface));
 
     /* title bar: draw a taller rounded rectangle but clip it, so only the top corners are round */

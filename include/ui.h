@@ -102,6 +102,11 @@ void ui_background1(void);
 void ui_card(UiRect r); /* rounded panel with soft shadow and border */
 /* Window with title bar. Returns the content area below the title bar. */
 UiRect ui_window(UiRect r, const char *title, int active);
+/* The soft shadow a window frame casts under itself (ui_window and ui_dialog; ui_window_flat has none): how wide it fades
+ * (blur), how far down it is moved (dy), how dark (0 .. 255). ui_window_shadows(0): frames draw none (a compositor draws them
+ * on the GPU); 1 (the default): they do. */
+void ui_window_shadow(int active, int *blur, int *dy, int *strength);
+void ui_window_shadows(int on);
 /* Same, with square corners and no shadow: for a window that fills the screen. */
 UiRect ui_window_flat(UiRect r, const char *title, int active);
 /* Look of the window buttons (close / minimize / maximize = 0 / 1 / 2) in the NEXT ui_window /

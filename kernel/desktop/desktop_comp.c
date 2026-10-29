@@ -261,11 +261,11 @@ int desktop_comp_frame(const UiRect *areas, int n)
 
     GfxCompItem items[1 + 60 + 3 + 1];
     int k = 0;
-    items[k++] = (GfxCompItem){WALL_SURF, 0, 0, W, H, 0};
+    items[k++] = (GfxCompItem){WALL_SURF, 0, 0, W, H, 0, 0};
     k += wm_comp_items(items + k, 60);
     for (int i = 0; i < 3; i++)
         if (TOPS[i].shown)
-            items[k++] = (GfxCompItem){TOPS[i].surf, TOPS[i].r.x, TOPS[i].r.y, TOPS[i].r.w, TOPS[i].r.h, 1};
+            items[k++] = (GfxCompItem){TOPS[i].surf, TOPS[i].r.x, TOPS[i].r.y, TOPS[i].r.w, TOPS[i].r.h, 1, 0};
     /* the pointer, on top of everything (its picture goes up again only when its shape changed) */
     static unsigned int ptr_px[PTR_MAX * PTR_MAX];
     int px, py, pw, ph;
@@ -280,7 +280,7 @@ int desktop_comp_frame(const UiRect *areas, int n)
                 goto fail;
             PTR_UP = gen;
         }
-        items[k++] = (GfxCompItem){PTR_SURF, px, py, pw, ph, 1};
+        items[k++] = (GfxCompItem){PTR_SURF, px, py, pw, ph, 1, 0};
     }
     int rects[4 * (WM_DAMAGE_MAX + PTR_RECTS)], nr = 0;
     if (full)

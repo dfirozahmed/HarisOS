@@ -20,6 +20,7 @@ void *krealloc(void *p, unsigned long long n){ return realloc(p, (size_t)n); }
 static int NEXT_ID = 1, LIVE, FREED_ID;
 static int SW[100], SH[100];
 static int UPLOADS, UP_ID, UP_X, UP_Y, UP_W, UP_H, UP_OPAQUE;
+static unsigned CORNER_PX;
 static int LOG_X[16], LOG_Y[16], LOG_W[16], LOG_H[16], LOG_ID[16]; /* the last uploads */
 static int uploaded(int id, int x, int y, int w, int h)
 {
@@ -34,6 +35,7 @@ static int s_upload(int id, const void *px, int pitch, int x, int y, int w, int 
   (void)px; (void)pitch;
   assert(x >= 0 && y >= 0 && x + w <= SW[id] && y + h <= SH[id]);
   UPLOADS++; UP_ID = id; UP_X = x; UP_Y = y; UP_W = w; UP_H = h; UP_OPAQUE = opaque;
+  if (x == 0 && y == 0 && !opaque) CORNER_PX = ((const unsigned *)px)[0]; /* a whole layer: its top-left corner pixel */
   LOG_X[UPLOADS % 16] = x; LOG_Y[UPLOADS % 16] = y; LOG_W[UPLOADS % 16] = w; LOG_H[UPLOADS % 16] = h; LOG_ID[UPLOADS % 16] = id;
   return 0;
 }
@@ -65,7 +67,7 @@ int main(void){
   GfxCompItem items[8];
   UiRect dmg[WM_DAMAGE_MAX];
   ui_set_theme(&ui_theme_dark); gfx_init(fb,W,H,W,1);
-  int M = 48, R = ui_theme()->radius_l + 2;
+  int M = 0, R = ui_theme()->radius_l + 2;   /* M: the layer has no margin any more (the GPU draws the shadow) */
 
   Window*w=wm_create("One",200,100,400,300,draw,0);
   wm_comp_set(1);
@@ -77,14 +79,18 @@ int main(void){
   assert(gfx_width()==(unsigned)W && gfx_height()==(unsigned)H);
   { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==1 && cp==0); wm_comp_counts(&cf,&cp); assert(cf==0 && cp==0); }
   assert(UPLOADS==1 && UP_ID==1 && UP_X==0 && UP_Y==0 && UP_W==400+2*M && UP_H==300+2*M && !UP_OPAQUE);
-  assert(wm_comp_items(items,8)==1 && items[0].surface==1 && items[0].x==200-M && items[0].y==100-M && items[0].layer==1);
+  assert(wm_comp_items(items,8)==2 && items[1].surface==1 && items[1].x==200 && items[1].y==100 && items[1].layer==1);
+  assert((CORNER_PX >> 24) == 255 && (CORNER_PX & 0xFFFFFFu) == 0);   /* outside the round corner: see-through, no shadow baked in */
+  { int blur, dy, st; ui_window_shadow(1, &blur, &dy, &st);   /* its shadow first: drawn by the GPU, from the same numbers as ui_window */
+    assert(items[0].layer==2 && items[0].surface==blur && items[0].alpha==st && items[0].x==200-blur/2 && items[0].y==100+dy-blur/2 &&
+           items[0].w==400+blur && items[0].h==300+blur); }
   /* nothing changed: nothing is drawn */
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==1);
   /* moved by its title bar: no drawing, only the place */
   wm_pointer(350,115,1); wm_pointer(410,155,1); wm_pointer(410,155,0);
   assert(w->r.x==260 && w->r.y==140);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==1);
-  assert(wm_comp_items(items,8)==1 && items[0].x==260-M && items[0].y==140-M);
+  assert(wm_comp_items(items,8)==2 && items[1].x==260 && items[1].y==140);
   wm_take_damage_rects(dmg,WM_DAMAGE_MAX);
   /* the app changed a part inside its opaque body: one pass, only that part, as opaque pixels */
   wm_add_damage(ui_rect(w->r.x+50,w->r.y+80,100,40));
@@ -103,11 +109,11 @@ int main(void){
   /* a second window: new surface; the first one loses the focus, so it is drawn again too */
   Window*w2=wm_create("Two",500,300,300,200,draw,0);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==2 && UPLOADS==6);
-  assert(wm_comp_items(items,8)==2 && items[1].surface==2);   /* back to front */
+  assert(wm_comp_items(items,8)==4 && items[1].surface==1 && items[3].surface==2 && items[2].layer==2);   /* back to front, each after its shadow */
   /* raising the first one: both change their look (focus) */
   wm_raise(w);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==8);
-  assert(wm_comp_items(items,8)==2 && items[1].surface==1);
+  assert(wm_comp_items(items,8)==4 && items[3].surface==1);
   /* closing the second: its surface is freed */
   wm_close(w2);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==1 && FREED_ID==2);

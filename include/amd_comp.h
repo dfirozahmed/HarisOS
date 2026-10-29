@@ -49,6 +49,9 @@ void amd_comp_fill(AmdCompFrame *f, uint32_t x0, uint32_t y0, uint32_t x1, uint3
 void amd_comp_image(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
                     uint32_t opacity, int bgr);
 void amd_comp_shadow(AmdCompFrame *f, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, uint32_t r, uint32_t alpha);
+/* The same shadow (box bx0 .. by1, may start below 0) drawn only inside x0 .. y1 (a part of the screen being put together). */
+void amd_comp_shadow_part(AmdCompFrame *f, int bx0, int by0, int bx1, int by1, uint32_t r, uint32_t alpha, uint32_t x0, uint32_t y0,
+                          uint32_t x1, uint32_t y1);
 uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
 /* The shader offsets inside the 4 KiB at shader_mc that amd_comp_begin() assumes (0x200 bytes each). */
 #define AMD_COMP_VS_OFF 0x000u

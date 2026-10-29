@@ -271,6 +271,19 @@ void amd_comp_shadow(AmdCompFrame *f, uint32_t x0, uint32_t y0, uint32_t x1, uin
     comp_draw(f, x0, y0, x1, y1, 1, f->ps_shadow_mc, 1, 1, u, 6);
 }
 
+/* The float bits of a whole number that may be below 0 (a shadow's box can start left of or above the screen). */
+static uint32_t f32_of_int(int v) { return v < 0 ? (a3d_f32_bits((uint32_t)-v) | 0x80000000u) : a3d_f32_bits((uint32_t)v); }
+
+void amd_comp_shadow_part(AmdCompFrame *f, int bx0, int by0, int bx1, int by1, uint32_t r, uint32_t alpha, uint32_t x0, uint32_t y0,
+                          uint32_t x1, uint32_t y1)
+{
+    uint32_t u[6];
+    u[0] = f32_of_int(bx0); u[1] = f32_of_int(by0); u[2] = f32_of_int(bx1); u[3] = f32_of_int(by1);
+    u[4] = a3d_f32_ratio(1, r ? r : 1);
+    u[5] = a3d_f32_ratio(alpha, 255);
+    comp_draw(f, x0, y0, x1, y1, 1, f->ps_shadow_mc, 1, 1, u, 6);
+}
+
 /* SQ_SEL_W (Mesa gfx9.json SQ_SEL_XYZW01): the image's 4th byte as alpha, where amd_3d_build_tex_desc() gives 1. */
 #define E_SQ_SEL_W 7u
 
@@ -1008,6 +1021,13 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
             const GfxCompItem *it = &items[i];
             int x0 = rects[4 * r], y0 = rects[4 * r + 1], x1 = rects[4 * r + 2], y1 = rects[4 * r + 3];
             const AmdSurface *s;
+            if (it->layer == 2) /* a soft shadow: no surface; `surface` is its blur */
+            {
+                if (cut(&x0, &y0, &x1, &y1, it, w, h))
+                    amd_comp_shadow_part(&f, it->x, it->y, it->x + it->w, it->y + it->h, (uint32_t)it->surface, (uint32_t)it->alpha,
+                                         (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1);
+                continue;
+            }
             if (it->surface < 1 || it->surface > SC_MAX || !sc_surf[it->surface - 1].off) return -1;
             if (!cut(&x0, &y0, &x1, &y1, it, w, h)) continue;
             s = &sc_surf[it->surface - 1];
@@ -1023,7 +1043,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     if (!na) return -1;
     amd_comp_begin(&f, ib + na, SC_IB_MAX - na, rt_mc, rt_pitch_px, w, h, sc.bgr, shader_mc);   /* 2: the changed parts onto the target */
     for (int r = 0; r < nr; r++) {
-        GfxCompItem all = { 0, 0, 0, (int)w, (int)h, 0 };
+        GfxCompItem all = { 0, 0, 0, (int)w, (int)h, 0, 0 };
         int x0 = rects[4 * r], y0 = rects[4 * r + 1], x1 = rects[4 * r + 2], y1 = rects[4 * r + 3];
         if (!cut(&x0, &y0, &x1, &y1, &all, w, h))
             continue;
@@ -1080,12 +1100,39 @@ int amd_comp_scene_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, 
 /* What the scene test should show at (x, y) without the layer. */
 static uint32_t sc_wall(uint32_t x, uint32_t y) { return ((x * 3u) & 0xFFu) | (((y * 2u) & 0xFFu) << 8) | (0x40u << 16); }
 
-/* M4c check before the compositor is used: a 176 x 124 "wallpaper" and the test layer at (40, 30) put together in two rectangles
+/* The scene test's shadow: box (24, 18) .. (152, 108), fading over 12 pixels, 150 at its darkest (partly under the layer, partly
+ * not, and cut by both rectangles). */
+#define SC_SH_X0 24
+#define SC_SH_Y0 18
+#define SC_SH_X1 152
+#define SC_SH_Y1 108
+#define SC_SH_R 12u
+#define SC_SH_A 150u
+
+/* What the scene test should show at (x, y): wallpaper, the shadow over it, the layer over both. *in: 1 where shadow or layer is. */
+static uint32_t sc_want(const uint32_t *lay, uint32_t x, uint32_t y, int *in)
+{
+    uint32_t v = sc_wall(x, y);
+    *in = 0;
+    if ((int)x >= SC_SH_X0 && (int)x < SC_SH_X1 && (int)y >= SC_SH_Y0 && (int)y < SC_SH_Y1) {
+        Amd3dJob s = { 0 };
+        s.x0 = SC_SH_X0; s.y0 = SC_SH_Y0; s.x1 = SC_SH_X1; s.y1 = SC_SH_Y1; s.shadow_r = SC_SH_R; s.a = SC_SH_A;
+        v = amd_3d_blend_px(0, v, amd_3d_shadow_alpha(&s, x, y));
+        *in = 1;
+    }
+    if (x >= 40u && x < 136u && y >= 30u && y < 94u) {
+        v = amd_comp_layer_px(lay[(y - 30u) * 96u + (x - 40u)], v);
+        *in = 1;
+    }
+    return v & 0x00FFFFFFu;
+}
+
+/* M4c check before the compositor is used: a 176 x 124 "wallpaper", a soft shadow and the test layer at (40, 30) put together in two rectangles
  * (the top 60 rows, then the rest) into the offscreen buffer, through the back buffer, every pixel checked. 1 = right. */
 int amd_comp_scene_test(void)
 {
     static uint32_t lay[96u * 64u], wall[176u * 124u];
-    GfxCompItem items[2];
+    GfxCompItem items[3];
     const int rects[8] = { 0, 0, 176, 60, 0, 60, 176, 124 };
     uint32_t x, y, k, bad = 0;
     int ws, ls;
@@ -1101,10 +1148,11 @@ int amd_comp_scene_test(void)
     if (amd_comp_surface_upload(ws, wall, 176, 0, 0, 176, 124, 1) || amd_comp_surface_upload(ls, lay, 96, 0, 0, 96, 64, 0)) {
         amd_comp_surface_free(ws); amd_comp_surface_free(ls); status = "scene test FAILED: upload"; return 0;
     }
-    items[0] = (GfxCompItem){ ws, 0, 0, 176, 124, 0 };
-    items[1] = (GfxCompItem){ ls, 40, 30, 96, 64, 1 };
+    items[0] = (GfxCompItem){ ws, 0, 0, 176, 124, 0, 0 };
+    items[1] = (GfxCompItem){ (int)SC_SH_R, SC_SH_X0, SC_SH_Y0, SC_SH_X1 - SC_SH_X0, SC_SH_Y1 - SC_SH_Y0, 2, (int)SC_SH_A };
+    items[2] = (GfxCompItem){ ls, 40, 30, 96, 64, 1, 0 };
     amd_gpu_fault_clear();
-    if (compose_to(rt_mc, COMP_RT_W, 176, 124, items, 2, rects, 2) != 0) {
+    if (compose_to(rt_mc, COMP_RT_W, 176, 124, items, 3, rects, 2) != 0) {
         keep_fault_registers();
         val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
         amd_comp_surface_free(ws); amd_comp_surface_free(ls);
@@ -1113,11 +1161,10 @@ int amd_comp_scene_test(void)
     }
     for (y = 0; y < 124u; y++)
         for (x = 0; x < 176u; x++) {
-            uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = sc_wall(x, y);
-            int in = x >= 40u && x < 136u && y >= 30u && y < 94u;
-            if (in) want = amd_comp_layer_px(lay[(y - 30u) * 96u + (x - 40u)], want);
+            int in;
+            uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = sc_want(lay, x, y, &in);
             val[AMD_COMP_V_IN_TOTAL]++;
-            if (in ? near_n(v, want, 2) : v == want) { val[AMD_COMP_V_IN_GOOD]++; continue; }
+            if (in ? near_n(v, want, 3) : v == want) { val[AMD_COMP_V_IN_GOOD]++; continue; }
             if (!bad++) {
                 val[AMD_COMP_V_FIRST_IN] = v | 0x01000000u; val[AMD_COMP_V_FIRST_IN + 1] = want;
                 val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16);
@@ -1129,15 +1176,15 @@ int amd_comp_scene_test(void)
     uint32_t dbad = 0;
     if (!bad) {
         sc.dim = 128;
-        int rc = compose_to(rt_mc, COMP_RT_W, 176, 124, items, 2, rects, 2);
+        int rc = compose_to(rt_mc, COMP_RT_W, 176, 124, items, 3, rects, 2);
         sc.dim = 0;
         if (rc != 0) dbad = 1;
         for (y = 0; y < 124u && !dbad; y++)
             for (x = 0; x < 176u; x++) {
-                uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = sc_wall(x, y), half = 0;
-                if (x >= 40u && x < 136u && y >= 30u && y < 94u) want = amd_comp_layer_px(lay[(y - 30u) * 96u + (x - 40u)], want);
+                int in;
+                uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = sc_want(lay, x, y, &in), half = 0;
                 for (uint32_t s = 0; s < 24; s += 8) half |= (((want >> s) & 0xFFu) * 128u / 256u) << s;
-                if (!near_n(v, half, 2) && !dbad++) {
+                if (!near_n(v, half, 3) && !dbad++) {
                     val[AMD_COMP_V_FIRST_IN] = v | 0x02000000u; val[AMD_COMP_V_FIRST_IN + 1] = half;   /* 0x02...: in the dimmed round */
                     val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16);
                 }
@@ -1149,7 +1196,7 @@ int amd_comp_scene_test(void)
     { AmdSceneSums z; amd_comp_scene_sums(&z); }   /* the desktop's reports start from here */
     if (bad) { status = "scene FAILED: pixels are wrong"; return 0; }
     if (dbad) { status = "scene FAILED: the copy at half brightness is wrong"; return 0; }
-    status = "scene PASS: wallpaper + layer through the back buffer in 2 rectangles, and at half brightness, every pixel right";
+    status = "scene PASS: wallpaper + shadow + layer through the back buffer in 2 rectangles, and at half brightness, every pixel right";
     return 1;
 }
 

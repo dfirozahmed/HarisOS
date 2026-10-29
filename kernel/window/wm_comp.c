@@ -272,7 +272,7 @@ static unsigned signature(const unsigned part[WM_LOOK_COUNT])
     return h;
 }
 
-/* The whole window and its shadow drawn into a buffer (its corner at (m, m)): once over black and once over white, packed
+/* The whole window drawn into a buffer of its size (no shadow: the GPU draws that): once over black and once over white, packed
  * (see gfx_layer_pack). Only when its look changed (or its surface is new): content changes take one pass (wm_comp_update). */
 static int draw_layer(Window *w, int i, int top, Wmc *c, void *a, void *b)
 {
@@ -282,7 +282,9 @@ static int draw_layer(Window *w, int i, int top, Wmc *c, void *a, void *b)
         /* where the window is: what it remembers while drawing (its buttons, text boxes) stays in screen coordinates */
         if (gfx_layer_begin_at(buf[pass], w->r.x - c->m, w->r.y - c->m, c->lw, c->lh, pass ? 0x00FFFFFFu : 0) != 0)
             return -1;
+        ui_window_shadows(0); /* the GPU draws the shadow (wm_comp_items) */
         wm_draw_window_internal(w, i, top);
+        ui_window_shadows(1);
         gfx_layer_end();
     }
     gfx_layer_pack(a, b, c->lw, c->lh);
@@ -334,7 +336,7 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         c->px = w->r.x;
         c->py = w->r.y;
         unsigned long long t0 = timer_us();
-        int m = w->maximized ? 0 : WM_SHADOW_MARGIN;
+        int m = 0; /* the layer is the window only: its shadow is drawn by the GPU (wm_comp_items) */
         int lw = w->r.w + 2 * m, lh = w->r.h + 2 * m;
         if ((unsigned long long)lw * (unsigned long long)lh * 4ULL > bytes)
             return -1; /* too big for the drawing buffers */
@@ -389,7 +391,9 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
                 if (gfx_layer_begin_at_keep(a, w->r.x - m, w->r.y - m, lw, lh) != 0)
                     return -1;
                 gfx_clip_intersect(w->r.x + d[0], w->r.y + d[1], d[2] - d[0], d[3] - d[1]);
+                ui_window_shadows(0);
                 wm_draw_window_internal(w, i, top);
+                ui_window_shadows(1);
                 gfx_layer_end();
                 for (int k = 0; k < no; k++)
                 {
@@ -425,13 +429,20 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
 int wm_comp_items(GfxCompItem *out, int max)
 {
     int n = 0;
+    int top = wm_top_index_internal();
     for (int i = 0; i < WM_ZN && n < max; i++)
     {
         Window *w = WM_Z[i];
         Wmc *c = entry(w, 0);
         if (w->minimized || !c || !c->surf)
             continue;
-        out[n++] = (GfxCompItem){c->surf, w->r.x - c->m, w->r.y - c->m, c->lw, c->lh, 1};
+        if (!w->maximized && n + 1 < max) /* its shadow first (what ui_window draws on the CPU, here drawn by the GPU) */
+        {
+            int blur, dy, strength;
+            ui_window_shadow(i == top, &blur, &dy, &strength);
+            out[n++] = (GfxCompItem){blur, w->r.x - blur / 2, w->r.y + dy - blur / 2, w->r.w + blur, w->r.h + blur, 2, strength};
+        }
+        out[n++] = (GfxCompItem){c->surf, w->r.x - c->m, w->r.y - c->m, c->lw, c->lh, 1, 0};
     }
     return n;
 }
