@@ -366,6 +366,24 @@ static void upload_shaders(void)
     }
 }
 
+/* One submission for a frame: the default context state stream (the Linux clear-state table, what a3d_default_state() sends on its
+ * own) and then the frame, one after the other in the frame IB. Plain SET_CONTEXT_REG packets and a CONTEXT_CONTROL, so in one IB they
+ * do what two IBs did, with one ring submission and one fence wait instead of two. Returns the fence number, 0 = not submitted. */
+static uint32_t frame_submit(const uint32_t *ib, uint32_t n)
+{
+    static uint32_t def[AMD_3D_DEFAULT_IB_MAX];
+    static uint32_t nd;
+    uint32_t k;
+    if (!nd) nd = amd_3d_build_default_ib(def, AMD_3D_DEFAULT_IB_MAX);
+    if (!nd || !n || nd + n > amd_gpu_frame_ib_max_dwords()) return 0;
+    for (k = 0; k < nd; k++)
+        amd_gpu_frame_ib_write32(k, def[k]);
+    for (k = 0; k < n; k++)
+        amd_gpu_frame_ib_write32(nd + k, ib[k]);
+    amd_gpu_wc_flush();                 /* the IB, and whatever the CPU wrote that the frame reads */
+    return amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), nd + n);
+}
+
 /* The test scene, in scene coordinates (0, 0) .. (480, 224); the caller places it at (ox, oy). Three windows painted in order, each
  * after its shadow (offset 6, 8; r 12; alpha 150; the shadow rectangle is the window moved by the offset and grown by r / 2). */
 #define SCENE_W 480u
@@ -681,7 +699,7 @@ int amd_comp_overlay_draw(int x, int y, int x0, int y0, int x1, int y1)
 {
     static uint32_t ib[1024];
     AmdCompFrame f;
-    uint32_t k, n, seq;
+    uint32_t n, seq;
     unsigned long long t0 = comp_tsc();
     if (!ov.up || !ov.s.off || !amd_gpu_ring_running()) { oval[AMD_COMP_OV_FAILS]++; return -1; }
     if (x0 < 0) x0 = 0;
@@ -700,11 +718,7 @@ int amd_comp_overlay_draw(int x, int y, int x0, int y0, int x1, int y1)
                          (uint32_t)y1, ov.bgr);
     n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
     if (!n || n > amd_gpu_frame_ib_max_dwords()) { oval[AMD_COMP_OV_FAILS]++; return -1; }
-    if (a3d_default_state()) { oval[AMD_COMP_OV_FAILS]++; return -1; }
-    for (k = 0; k < n; k++)
-        amd_gpu_frame_ib_write32(k, ib[k]);
-    amd_gpu_wc_flush();                 /* the frame, and the picture below the layer the CPU just wrote */
-    seq = amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), n);
+    seq = frame_submit(ib, n);          /* default state + frame, and the picture below the layer the CPU just wrote is flushed */
     if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) { oval[AMD_COMP_OV_FAILS]++; return -1; }
     oval[AMD_COMP_OV_DRAWS]++;
     oval[AMD_COMP_OV_DRAW_CYCLES] = (uint32_t)(comp_tsc() - t0);
@@ -805,6 +819,7 @@ uint32_t amd_comp_drag_test(void)
     AmdSurface s;
     AmdCompFrame f;
     uint32_t x, y, n = 0, seq, k, round, bad = 0;
+    unsigned long long t0;
     const uint32_t ox = 40, oy = 30, w = 96u + 2u * 40u, h = 64u + 2u * 30u, around = 0x00C0A080u;
     uint64_t rt_mc = amd_native_vram_mc_addr(VRAM_COMP_RT_OFF, COMP_RT_W * COMP_RT_H * 4u);
     for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
@@ -825,17 +840,16 @@ uint32_t amd_comp_drag_test(void)
         amd_comp_begin(&f, ib, 1024, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u));
         amd_comp_layer_under(&f, &s, 0, 0, 64u, ox, oy, ox + 96u, oy + 64u, 1);
         n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
-        if (!n || a3d_default_state()) { bad = ~0u; status = "drag test FAILED: the frame / default state"; break; }
-        for (k = 0; k < n; k++)
-            amd_gpu_frame_ib_write32(k, ib[k]);
-        amd_gpu_wc_flush();
+        if (!n) { bad = ~0u; status = "drag test FAILED: the frame does not fit"; break; }
         amd_gpu_fault_clear();
-        seq = amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), n);
+        t0 = comp_tsc();
+        seq = frame_submit(ib, n);          /* default state + frame in one submission, as the overlay does it */
         if (!seq || !amd_gpu_fence_wait(seq, 8000000u)) {
             keep_fault_registers();
             val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
             bad = ~0u; status = "drag test FAILED: fence timeout"; break;
         }
+        val[AMD_COMP_V_CYCLES] = (uint32_t)(comp_tsc() - t0);
         for (y = 0; y < h; y++)
             for (x = 0; x < w; x++) {
                 uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want = around;

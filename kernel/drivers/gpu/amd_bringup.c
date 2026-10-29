@@ -582,6 +582,7 @@ void amd_gpu_bringup_cp(void)
         serial_print("DRAG: "); serial_print(amd_comp_status()); serial_print("\n");
         log_hex("  wrong pixels          ", bad);
         log_hex("  pixels checked        ", amd_comp_value(AMD_COMP_V_IN_TOTAL));
+        log_hex("  CPU cycles submit .. fence (last round, one submission)", amd_comp_value(AMD_COMP_V_CYCLES));
         if (bad) {
             log_hex("  first wrong pixel     ", amd_comp_value(AMD_COMP_V_FIRST_IN));
             log_hex("  it should be          ", amd_comp_value(AMD_COMP_V_FIRST_IN + 1));
