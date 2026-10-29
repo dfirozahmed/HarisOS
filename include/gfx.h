@@ -175,6 +175,8 @@ typedef struct
     int nwhy;
     unsigned why[12];
     const char *why_name[12];
+    int nlook;
+    const char *look_name[8];
     int nbusy;
     struct
     {
@@ -184,6 +186,7 @@ typedef struct
         unsigned long long us_max;
         unsigned why_n[12];   /* requests by reason (the names in why_name; the last used one: its look changed) */
         unsigned why_kpx[12]; /* thousands of pixels asked for */
+        unsigned look_n[8];   /* of the "look" ones: by the part of the look that changed (names in look_name) */
     } busy[3];
 } GfxCompStats;
 typedef struct

@@ -165,6 +165,19 @@ static void amd_scene_report(const GfxCompStats *s)
                 log_hex(label, part ? s->busy[i].why_kpx[r] : s->busy[i].why_n[r]);
             }
         }
+        /* of the "look" ones: which part of the window's look changed */
+        for (int r = 0; r < s->nlook && r < 8; r++) {
+            if (!s->busy[i].look_n[r])
+                continue;
+            char label[40];
+            int k = 0;
+            const char *p = "    look: ";
+            while (*p) label[k++] = *p++;
+            for (p = s->look_name[r]; *p && k < 24; ) label[k++] = *p++;
+            while (k < 24) label[k++] = ' ';
+            label[k] = 0;
+            log_hex(label, s->busy[i].look_n[r]);
+        }
     }
     /* Writing GPULOG.TXT stops the desktop meanwhile (the pointer too: ~0.2 s on the laptop, 2026-10-30), so the reports
      * stay in the log in memory and go to the disk only after the first one and the last one. */

@@ -25,6 +25,8 @@ typedef struct
     unsigned long long st_px;
     unsigned wn[WM_WHY_COUNT + 1];         /* requests to draw it, by reason (WM_WHY_*; the last: its look changed) */
     unsigned long long wpx[WM_WHY_COUNT + 1]; /* and the pixels they asked for */
+    unsigned lk[WM_LOOK_COUNT];            /* the parts of the look it was drawn with */
+    unsigned ln[WM_LOOK_COUNT];            /* whole drawings, by the part of the look that changed */
 } Wmc;
 
 static Wmc WMC[WMC_MAX];
@@ -41,6 +43,12 @@ void wm_comp_counts(unsigned *full, unsigned *part)
 static unsigned WHY[WM_WHY_COUNT];
 static const char *const WHY_NAME[WM_WHY_COUNT] = {"press", "right press", "drag", "window buttons", "hover left", "hover",
                                                    "tick", "wheel", "key", "app area", "invalidate"};
+
+const char *wm_look_name(int part)
+{
+    static const char *const NAME[WM_LOOK_COUNT] = {"new", "size", "focus", "title", "theme", "screen edge", "other"};
+    return part >= 0 && part < WM_LOOK_COUNT ? NAME[part] : "?";
+}
 
 const char *wm_why_name(int why)
 {
@@ -123,6 +131,8 @@ int wm_comp_busiest(WmBusy *out, int max)
             out[n].why_n[r] = best->wn[r];
             out[n].why_px[r] = best->wpx[r];
         }
+        for (int r = 0; r < WM_LOOK_COUNT; r++)
+            out[n].look_n[r] = best->ln[r];
         best->st_n = 0; /* taken: the next round finds the next one */
         best->st_px = 0;
         best->st_us_max = 0;
@@ -132,6 +142,8 @@ int wm_comp_busiest(WmBusy *out, int max)
         WMC[i].st_n = 0, WMC[i].st_px = 0, WMC[i].st_us_max = 0; /* everyone starts again */
         for (int r = 0; r <= WM_WHY_COUNT; r++)
             WMC[i].wn[r] = 0, WMC[i].wpx[r] = 0;
+        for (int r = 0; r < WM_LOOK_COUNT; r++)
+            WMC[i].ln[r] = 0;
     }
     return n;
 }
@@ -232,28 +244,37 @@ void wm_comp_all_internal(void)
     }
 }
 
-/* Everything the window's look depends on besides its content. */
-static unsigned signature(const Window *w, int i, int top)
+/* Everything the window's look depends on besides its content, in parts (WM_LOOK_*: which of them changed is counted). Not
+ * the title-bar buttons' hover / press: those are drawn again as a change of the title bar (wm_input.c damage_titlebar). */
+static void look_of(const Window *w, int i, int top, unsigned part[WM_LOOK_COUNT])
 {
     unsigned h = 2166136261u;
 #define MIX(v) (h = (h ^ (unsigned)(v)) * 16777619u)
-    MIX(w->r.w);
-    MIX(w->r.h);
-    MIX(w->maximized);
-    MIX(w->dialog);
-    MIX(w->fixed_size);
-    MIX(i == top);
-    /* not the title-bar buttons' hover / press: those are drawn again as a change of the title bar (wm_input.c damage_titlebar) */
-    MIX((unsigned)(unsigned long long)ui_theme());
+    for (int k = 0; k < WM_LOOK_COUNT; k++)
+        part[k] = 0;
+    part[WM_LOOK_SIZE] = (unsigned)w->r.w * 65536u + (unsigned)w->r.h;
+    part[WM_LOOK_FOCUS] = i == top;
+    part[WM_LOOK_THEME] = (unsigned)(unsigned long long)ui_theme();
     for (const char *s = w->title; *s; s++)
         MIX(*s);
+    part[WM_LOOK_TITLE] = h;
     /* drawing stops at the screen's left and top edges: while the window reaches past them, where it is matters */
     int m = w->maximized ? 0 : WM_SHADOW_MARGIN;
+    h = 2166136261u;
     if (w->r.x - m < 0)
         MIX(w->r.x - m);
     if (w->r.y - m < 0)
         MIX(w->r.y - m);
+    part[WM_LOOK_EDGE] = h;
+    part[WM_LOOK_OTHER] = (unsigned)w->maximized * 4u + (unsigned)w->dialog * 2u + (unsigned)w->fixed_size;
 #undef MIX
+}
+
+static unsigned signature(const unsigned part[WM_LOOK_COUNT])
+{
+    unsigned h = 2166136261u;
+    for (int k = 0; k < WM_LOOK_COUNT; k++)
+        h = (h ^ part[k]) * 16777619u;
     return h;
 }
 
@@ -323,7 +344,9 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         int lw = w->r.w + 2 * m, lh = w->r.h + 2 * m;
         if ((unsigned long long)lw * (unsigned long long)lh * 4ULL > bytes)
             return -1; /* too big for the drawing buffers */
-        unsigned sig = signature(w, i, top);
+        unsigned part[WM_LOOK_COUNT];
+        look_of(w, i, top, part);
+        unsigned sig = signature(part);
         if (c->surf && (c->lw != lw || c->lh != lh))
         {
             ops->surface_free(c->surf);
@@ -347,6 +370,17 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
                 return -1;
             DRAWN_FULL++;
             asked(c, WM_WHY_COUNT, (unsigned long long)w->r.w * (unsigned long long)w->r.h); /* its look changed (or a new surface) */
+            if (!c->lk[WM_LOOK_SIZE]) /* never drawn before: a new window */
+                c->ln[WM_LOOK_NEW]++;
+            else
+            {
+                int why = 0; /* which parts of the look changed */
+                for (int k = 0; k < WM_LOOK_COUNT; k++)
+                    if (k != WM_LOOK_NEW && part[k] != c->lk[k])
+                        c->ln[k]++, why = 1;
+                if (!why)
+                    c->ln[WM_LOOK_OTHER]++; /* asked for everything (the compositor started, say) */
+            }
             tally(c, w, (unsigned long long)lw * (unsigned long long)lh * 2ULL, timer_us() - t0); /* two passes */
         }
         else if (c->dirty)
@@ -379,6 +413,8 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
             tally(c, w, px, timer_us() - t0);
         }
         c->sig = sig;
+        for (int k = 0; k < WM_LOOK_COUNT; k++)
+            c->lk[k] = part[k];
         c->full = 0;
         c->dirty = 0;
     }

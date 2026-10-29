@@ -183,6 +183,9 @@ static void measure(const GfxCompOps *ops, unsigned long long draw_us, unsigned 
         STATS.why[i] = i < STATS.nwhy ? why[i] : 0;
         STATS.why_name[i] = wm_why_name(i);
     }
+    STATS.nlook = WM_LOOK_COUNT < 8 ? WM_LOOK_COUNT : 8;
+    for (int i = 0; i < STATS.nlook; i++)
+        STATS.look_name[i] = wm_look_name(i);
     STATS.nbusy = wm_comp_busiest(busy, 3);
     for (int i = 0; i < STATS.nbusy; i++)
     {
@@ -191,6 +194,8 @@ static void measure(const GfxCompOps *ops, unsigned long long draw_us, unsigned 
         STATS.busy[i].redraws = busy[i].redraws;
         STATS.busy[i].pixels = busy[i].pixels;
         STATS.busy[i].us_max = busy[i].us_max;
+        for (int r = 0; r < STATS.nlook; r++)
+            STATS.busy[i].look_n[r] = busy[i].look_n[r];
         for (int r = 0; r < 12 && r <= WM_WHY_COUNT; r++)
         {
             STATS.busy[i].why_n[r] = busy[i].why_n[r];

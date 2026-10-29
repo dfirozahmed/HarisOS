@@ -157,6 +157,12 @@ enum
     WM_WHY_PRESS, WM_WHY_RPRESS, WM_WHY_DRAG, WM_WHY_BUTTONS, WM_WHY_HOVER_LEAVE, WM_WHY_HOVER, WM_WHY_TICK, WM_WHY_WHEEL,
     WM_WHY_KEY, WM_WHY_AREA, WM_WHY_INVALIDATE, WM_WHY_COUNT
 };
+/* For "look" (the whole layer drawn twice): which part of the window's look changed. */
+enum
+{
+    WM_LOOK_NEW, WM_LOOK_SIZE, WM_LOOK_FOCUS, WM_LOOK_TITLE, WM_LOOK_THEME, WM_LOOK_EDGE, WM_LOOK_OTHER, WM_LOOK_COUNT
+};
+const char *wm_look_name(int part);
 const char *wm_why_name(int why);
 void wm_comp_why(unsigned out[WM_WHY_COUNT]); /* the counts since the last call (then 0) */
 /* The windows whose surfaces took the most drawing since the last call (then 0), most first; returns how many. */
@@ -168,6 +174,7 @@ typedef struct
     unsigned long long us_max; /* its slowest drawing */
     unsigned why_n[WM_WHY_COUNT + 1];          /* requests by reason; [WM_WHY_COUNT]: its look changed (wm_why_name) */
     unsigned long long why_px[WM_WHY_COUNT + 1]; /* the pixels asked for */
+    unsigned look_n[WM_LOOK_COUNT]; /* whole drawings by the part of the look that changed (WM_LOOK_*) */
 } WmBusy;
 int wm_comp_busiest(WmBusy *out, int max);
 int wm_drag_memory(void **a, void **b, unsigned long long *bytes); /* the two buffers of wm_set_drag_memory(); 0 = none */
