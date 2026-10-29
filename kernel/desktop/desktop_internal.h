@@ -17,5 +17,6 @@ int desktop_refresh_taskbar(void);
 int desktop_finish_input(int bar_changed);
 /* desktop_comp.c: this frame's changed areas through the GPU compositor; 1 = done, 0 = draw them with the CPU */
 int desktop_comp_frame(const UiRect *areas, int n);
+int desktop_comp_pointer_pending(void); /* the GPU draws the pointer and it moved: a frame is due even without other changes */
 
 #endif

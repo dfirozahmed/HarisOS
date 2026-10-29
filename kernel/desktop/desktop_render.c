@@ -37,7 +37,7 @@ int desktop_finish_input(int bar_changed)
 
     UiRect areas[WM_DAMAGE_MAX];
     int n = wm_take_damage_rects(areas, WM_DAMAGE_MAX);
-    if (n == 0)
+    if (n == 0 && !desktop_comp_pointer_pending()) /* nothing changed (and the GPU need not move the pointer) */
         return 0;
 
     /* With a GPU compositor the changed areas are put together from the surfaces (desktop_comp.c) */

@@ -49,6 +49,35 @@ static int REPORTS;          /* reports sent: at most REPORT_MAX, so the log sta
 #define REPORT_MAX 10
 static int WALL_SURF;
 static unsigned WALL_UP; /* WALL_GEN of the uploaded wallpaper */
+#define PTR_MAX 64        /* the pointer's pictures are at most 64 x 64 */
+static int PTR_SURF;
+static unsigned PTR_UP;   /* gfx_cursor_layer's gen of the uploaded picture, 0 = none */
+
+/* gfx: the pointer moved (or changed). Its old and new boxes are put together again with it on top, by the GPU. They are kept
+ * apart from the window manager's damage: nothing changed there, so no menu or taskbar is drawn again for them. */
+#define PTR_RECTS 8
+static int PRECT[PTR_RECTS][4], NPRECT;
+static void pointer_changed(int x, int y, int w, int h)
+{
+    if (NPRECT == PTR_RECTS) /* full: one box around them all */
+    {
+        for (int i = 1; i < NPRECT; i++)
+        {
+            if (PRECT[i][0] < PRECT[0][0]) PRECT[0][0] = PRECT[i][0];
+            if (PRECT[i][1] < PRECT[0][1]) PRECT[0][1] = PRECT[i][1];
+            if (PRECT[i][2] > PRECT[0][2]) PRECT[0][2] = PRECT[i][2];
+            if (PRECT[i][3] > PRECT[0][3]) PRECT[0][3] = PRECT[i][3];
+        }
+        NPRECT = 1;
+    }
+    PRECT[NPRECT][0] = x;
+    PRECT[NPRECT][1] = y;
+    PRECT[NPRECT][2] = x + w;
+    PRECT[NPRECT][3] = y + h;
+    NPRECT++;
+}
+
+int desktop_comp_pointer_pending(void) { return ON && NPRECT > 0; }
 
 /* Back to the CPU: the back buffer does not hold the windows' latest pictures, so draw everything once. */
 static void leave(void)
@@ -58,10 +87,15 @@ static void leave(void)
     ON = 0;
     gfx_backbuffer_detach(0); /* the CPU draws into it again (all of it, below) */
     gfx_scroll_hook(0);
+    gfx_cursor_external(0); /* the CPU draws the pointer again (gfx_present below) */
     const GfxCompOps *ops = gfx_comp();
     wm_comp_drop(ops);
     if (ops && WALL_SURF)
         ops->surface_free(WALL_SURF);
+    if (ops && PTR_SURF)
+        ops->surface_free(PTR_SURF);
+    PTR_SURF = 0;
+    PTR_UP = 0;
     WALL_SURF = 0;
     for (int i = 0; i < 3; i++)
     {
@@ -190,6 +224,7 @@ int desktop_comp_frame(const UiRect *areas, int n)
         wm_comp_set(1);
         gfx_backbuffer_detach(1); /* the windows' pictures are in their surfaces now: nothing to move in the back buffer */
         gfx_scroll_hook(wm_comp_scroll); /* rows a window scrolls move inside its surface (the GPU moves them) */
+        gfx_cursor_external(pointer_changed); /* the pointer too: the CPU no longer reads and writes the screen for it */
     }
     if (!WALL_SURF && !(WALL_SURF = ops->surface_new(W, H)))
         goto fail;
@@ -207,20 +242,37 @@ int desktop_comp_frame(const UiRect *areas, int n)
         if (update_top(&TOPS[i], ops, a, b, bytes, areas, n, full) != 0)
             goto fail;
 
-    GfxCompItem items[1 + 60 + 3];
+    GfxCompItem items[1 + 60 + 3 + 1];
     int k = 0;
     items[k++] = (GfxCompItem){WALL_SURF, 0, 0, W, H, 0};
     k += wm_comp_items(items + k, 60);
     for (int i = 0; i < 3; i++)
         if (TOPS[i].shown)
             items[k++] = (GfxCompItem){TOPS[i].surf, TOPS[i].r.x, TOPS[i].r.y, TOPS[i].r.w, TOPS[i].r.h, 1};
-    int rects[4 * WM_DAMAGE_MAX], nr = 0;
+    /* the pointer, on top of everything (its picture goes up again only when its shape changed) */
+    static unsigned int ptr_px[PTR_MAX * PTR_MAX];
+    int px, py, pw, ph;
+    unsigned gen;
+    if (gfx_cursor_layer(ptr_px, PTR_MAX * PTR_MAX, &px, &py, &pw, &ph, &gen))
+    {
+        if (!PTR_SURF && !(PTR_SURF = ops->surface_new(PTR_MAX, PTR_MAX)))
+            goto fail;
+        if (gen != PTR_UP)
+        {
+            if (ops->upload(PTR_SURF, ptr_px, pw, 0, 0, pw, ph, 0) != 0)
+                goto fail;
+            PTR_UP = gen;
+        }
+        items[k++] = (GfxCompItem){PTR_SURF, px, py, pw, ph, 1};
+    }
+    int rects[4 * (WM_DAMAGE_MAX + PTR_RECTS)], nr = 0;
     if (full)
     {
         rects[0] = 0; rects[1] = 0; rects[2] = W; rects[3] = H;
         nr = 1;
     }
     else
+    {
         for (int i = 0; i < n && nr < WM_DAMAGE_MAX; i++, nr++)
         {
             rects[4 * nr] = areas[i].x;
@@ -228,6 +280,11 @@ int desktop_comp_frame(const UiRect *areas, int n)
             rects[4 * nr + 2] = areas[i].x + areas[i].w;
             rects[4 * nr + 3] = areas[i].y + areas[i].h;
         }
+        for (int i = 0; i < NPRECT; i++, nr++) /* where the pointer was and is */
+            for (int c = 0; c < 4; c++)
+                rects[4 * nr + c] = PRECT[i][c];
+    }
+    NPRECT = 0;
     unsigned long long t1 = timer_us();
     if (gfx_comp_present(items, k, rects, nr) != 0)
         goto fail; /* the driver is dropped: the CPU from now on */

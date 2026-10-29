@@ -60,6 +60,14 @@ static void c_free(int id){ (void)id; }
 static int c_up(int id, const void *p, int pitch, int x, int y, int w, int h, int o){ (void)id; (void)p; (void)pitch; (void)x; (void)y; (void)w; (void)h; (void)o; return 0; }
 static int c_compose(const GfxCompItem *it, int n, const int *r, int nr){ (void)it; (void)n; (void)r; (void)nr; CMP_CALLS++; return CMP_FAIL ? -1 : 0; }
 
+/* the pointer drawn by a pretend compositor: the boxes it is told about */
+static int PTR_CALLS, PTR_BOX[8][4];
+static void ptr_changed(int x, int y, int w, int h)
+{
+    if (PTR_CALLS < 8) { PTR_BOX[PTR_CALLS][0] = x; PTR_BOX[PTR_CALLS][1] = y; PTR_BOX[PTR_CALLS][2] = w; PTR_BOX[PTR_CALLS][3] = h; }
+    PTR_CALLS++;
+}
+
 int main(void)
 {
     enum { WIDTH = 4, HEIGHT = 3, PITCH = 6 };
@@ -307,6 +315,43 @@ int main(void)
         gfx_layer_end();
         assert(buf[0] == gfx_rgb(6, 6, 6) && buf[7 * 10 + 9] == gfx_rgb(6, 6, 6));
         assert(gfx_width() == 40 && gfx_height() == 30);
+    }
+
+    {   /* a compositor draws the pointer: the CPU leaves the screen alone and reports the boxes */
+        enum { SW = 120, SH = 90 };
+        static unsigned int fb[SW * SH], back[SW * SH], pic[64 * 64];
+        gfx_init(fb, SW, SH, SW, 1);
+        assert(gfx_enable_backbuffer(back) == 0);
+        gfx_cursor_move(30, 20);
+        gfx_cursor_show(1);
+        int painted = 0;
+        for (int i = 0; i < SW * SH; ++i) painted |= fb[i] != 0;
+        assert(painted);                                       /* the CPU drew it */
+        gfx_cursor_external(ptr_changed);
+        for (int i = 0; i < SW * SH; ++i) assert(fb[i] == 0); /* taken off the screen ... */
+        assert(PTR_CALLS == 1);                                /* ... and its box given to the compositor */
+        int x, y, w, h; unsigned g1, g2;
+        assert(gfx_cursor_layer(pic, 64 * 64, &x, &y, &w, &h, &g1) == 1);
+        assert(x == PTR_BOX[0][0] && y == PTR_BOX[0][1] && w == PTR_BOX[0][2] && h == PTR_BOX[0][3]);
+        int see_through = 0, solid = 0;
+        for (int i = 0; i < w * h; ++i) { see_through |= (pic[i] >> 24) == 255 && (pic[i] & 0xFFFFFFu) == 0; solid |= (pic[i] >> 24) == 0; }
+        assert(see_through && solid);                         /* a packed layer: empty corners, an opaque arrow */
+        gfx_cursor_move(50, 40);
+        assert(PTR_CALLS == 3 && PTR_BOX[1][0] == x && PTR_BOX[2][0] == x + 20 && PTR_BOX[2][1] == y + 20);
+        for (int i = 0; i < SW * SH; ++i) assert(fb[i] == 0); /* still nothing written */
+        gfx_cursor_move(50, 40);
+        assert(PTR_CALLS == 3);                                /* not moved: nothing to draw */
+        gfx_cursor_set_shape(GFX_CURSOR_SIZE_H);
+        assert(PTR_CALLS == 5 && gfx_cursor_layer(pic, 64 * 64, &x, &y, &w, &h, &g2) == 1 && g2 != g1 && w == 21);
+        gfx_cursor_set_shape(0);
+        gfx_cursor_show(0);
+        assert(PTR_CALLS == 8 && gfx_cursor_layer(pic, 64 * 64, &x, &y, &w, &h, &g2) == 0); /* hidden: no picture */
+        gfx_cursor_show(1);
+        gfx_cursor_external(0);                                /* the CPU again: drawn on the screen */
+        painted = 0;
+        for (int i = 0; i < SW * SH; ++i) painted |= fb[i] != 0;
+        assert(painted);
+        gfx_disable_backbuffer();
     }
 
     puts("Graphics regression tests passed.");

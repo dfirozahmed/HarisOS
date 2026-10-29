@@ -216,6 +216,13 @@ void gfx_cursor_move(int x, int y); /* x,y = position of the arrow tip */
 #define GFX_CURSOR_SIZE_NWSE 3 /* top-left <-> bottom-right */
 #define GFX_CURSOR_SIZE_NESW 4 /* top-right <-> bottom-left */
 void gfx_cursor_set_shape(int shape);
+/* A compositor draws the pointer itself (as the last thing on the screen): then the CPU never touches the screen for it, and
+ * every change (moved, shown or hidden, another shape) only calls changed(x, y, w, h) with the box it was in and the box it is
+ * in now. 0: the CPU draws it again. gfx_cursor_layer() gives its picture as a packed layer (see gfx_layer_pack: colour
+ * premultiplied, 4th byte = how much shows through) of w x h <= max pixels, its corner x, y on the screen, and gen, which
+ * changes with the picture; 0 when the pointer is hidden. */
+void gfx_cursor_external(void (*changed)(int x, int y, int w, int h));
+int gfx_cursor_layer(unsigned int *out, int max, int *x, int *y, int *w, int *h, unsigned *gen);
 
 /* ---- colors ------------------------------------------------- */
 GfxColor gfx_rgb(unsigned char r, unsigned char g, unsigned char b);

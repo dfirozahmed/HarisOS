@@ -88,9 +88,13 @@ void gfx_internal_cursor_y_range(int *y0, int *y1)
     *y1 = *y0 + cur_h();
 }
 
+static void (*EXT)(int x, int y, int w, int h); /* set: a compositor draws the pointer (gfx_cursor_external) */
+static unsigned GEN = 1; /* changes with the pointer's picture (its shape) */
+static void ext_mark(void);
+
 void gfx_internal_cursor_restore(void)
 {
-    if (!CUR_DRAWN || !FB)
+    if (!CUR_DRAWN || !FB || EXT) /* EXT: a compositor draws the pointer, the CPU never did */
         return;
     int cw = cur_w(), ch = cur_h();
     int ox = CUR_X - cur_hot(), oy = CUR_Y_SHARED - cur_hot();
@@ -106,7 +110,7 @@ void gfx_internal_cursor_restore(void)
 
 void gfx_internal_cursor_paint(void)
 {
-    if (!CUR_ON || CUR_DRAWN || !FB)
+    if (!CUR_ON || CUR_DRAWN || !FB || EXT)
         return;
     int cw = cur_w(), ch = cur_h();
     const unsigned char *pix = cur_pix();
@@ -134,6 +138,14 @@ void gfx_cursor_set_shape(int shape)
         return;
     if (shape && !SHAPE_BUILT)
         build_shapes();
+    if (EXT) /* the old box and the new one (another size) are drawn again by the compositor */
+    {
+        ext_mark();
+        CUR_SHAPE = shape;
+        GEN++;
+        ext_mark();
+        return;
+    }
     gfx_internal_cursor_restore(); /* take the old one off the screen with its own size */
     CUR_SHAPE = shape;
     gfx_internal_cursor_paint();
@@ -141,6 +153,16 @@ void gfx_cursor_set_shape(int shape)
 
 void gfx_cursor_show(int on)
 {
+    if (EXT)
+    {
+        if ((on != 0) != CUR_ON)
+        {
+            CUR_ON = 1; /* mark the box while it counts as shown */
+            ext_mark();
+            CUR_ON = on != 0;
+        }
+        return;
+    }
     if (on)
     {
         CUR_ON = 1;
@@ -163,10 +185,69 @@ void gfx_cursor_move(int x, int y)
         x = W - 1;
     if (y >= H)
         y = H - 1;
+    if (EXT)
+    {
+        if (x == CUR_X && y == CUR_Y_SHARED)
+            return;
+        ext_mark(); /* where it was ... */
+        CUR_X = x;
+        CUR_Y_SHARED = y;
+        ext_mark(); /* ... and where it is now */
+        return;
+    }
     if (x == CUR_X && y == CUR_Y_SHARED && CUR_DRAWN)
         return;
     gfx_internal_cursor_restore();
     CUR_X = x;
     CUR_Y_SHARED = y;
     gfx_internal_cursor_paint();
+}
+
+/* ---- a compositor draws the pointer (see include/gfx.h) ---- */
+
+/* where the pointer is on the screen, as a box */
+static void ext_mark(void)
+{
+    if (EXT && CUR_ON)
+        EXT(CUR_X - cur_hot(), CUR_Y_SHARED - cur_hot(), cur_w(), cur_h());
+}
+
+void gfx_cursor_external(void (*changed)(int x, int y, int w, int h))
+{
+    if (changed && !EXT)
+    {
+        gfx_internal_cursor_restore(); /* the CPU's pointer off the screen; the compositor draws the box again */
+        EXT = changed;
+        ext_mark();
+    }
+    else if (!changed && EXT)
+    {
+        EXT = 0;
+        CUR_DRAWN = 0;
+        gfx_internal_cursor_paint(); /* the CPU draws it again (over whatever is on the screen now) */
+    }
+    else
+        EXT = changed;
+}
+
+int gfx_cursor_layer(unsigned int *out, int max, int *x, int *y, int *w, int *h, unsigned *gen)
+{
+    if (!CUR_ON)
+        return 0;
+    int cw = cur_w(), ch = cur_h();
+    if (cw * ch > max)
+        return 0;
+    const unsigned char *pix = cur_pix();
+    for (int i = 0; i < cw * ch; i++)
+    {
+        unsigned shade = pix[2 * i], alpha = pix[2 * i + 1];
+        unsigned c = (shade * alpha + 127) / 255; /* premultiplied, as gfx_layer_pack() makes it */
+        out[i] = ((255u - alpha) << 24) | (c << 16) | (c << 8) | c;
+    }
+    *x = CUR_X - cur_hot();
+    *y = CUR_Y_SHARED - cur_hot();
+    *w = cw;
+    *h = ch;
+    *gen = GEN;
+    return 1;
 }
