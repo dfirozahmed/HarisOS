@@ -29,7 +29,7 @@ static int s_upload(int id, const void *px, int pitch, int x, int y, int w, int 
   return 0;
 }
 static int s_compose(const GfxCompItem *it, int n, const int *r, int nr){ (void)it; (void)n; (void)r; (void)nr; return 0; }
-static const GfxCompOps OPS = { s_new, s_free, s_upload, s_compose };
+static const GfxCompOps OPS = { s_new, s_free, s_upload, s_compose, 0 };
 
 static UiRect LAST_BODY; /* the body rectangle the window was last drawn with: apps remember such places for the clicks */
 static void draw(Window*w,UiRect b){ LAST_BODY = b; ui_text(b.x+16,b.y+16,"Hello",UI_TEXT_HEADING); (void)w; }
@@ -51,6 +51,7 @@ int main(void){
   assert(LIVE==1 && SW[1]==400+2*M && SH[1]==300+2*M);
   assert(LAST_BODY.x==200+1 && LAST_BODY.y>100);          /* drawn into the surface, but in screen coordinates */
   assert(gfx_width()==(unsigned)W && gfx_height()==(unsigned)H);
+  { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==1 && cp==0); wm_comp_counts(&cf,&cp); assert(cf==0 && cp==0); }
   assert(UPLOADS==1 && UP_ID==1 && UP_X==0 && UP_Y==0 && UP_W==400+2*M && UP_H==300+2*M && !UP_OPAQUE);
   assert(wm_comp_items(items,8)==1 && items[0].surface==1 && items[0].x==200-M && items[0].y==100-M && items[0].layer==1);
   /* nothing changed: nothing is drawn */
@@ -66,6 +67,7 @@ int main(void){
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==2);
   assert(UP_OPAQUE && UP_X==50+M && UP_Y==80+M && UP_W==100 && UP_H==40);
   assert(LAST_BODY.x==w->r.x+1);                             /* the part was drawn where the window is now */
+  { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1); }
   /* a part reaching a rounded corner: the whole layer again */
   wm_add_damage(ui_rect(w->r.x,w->r.y+w->r.h-R,R,R));
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==3 && !UP_OPAQUE && UP_W==400+2*M);

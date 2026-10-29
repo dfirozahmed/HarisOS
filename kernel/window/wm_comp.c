@@ -20,6 +20,14 @@ typedef struct
 
 static Wmc WMC[WMC_MAX];
 static int ON;
+static unsigned DRAWN_FULL, DRAWN_PART; /* surfaces drawn again since wm_comp_counts() */
+
+void wm_comp_counts(unsigned *full, unsigned *part)
+{
+    *full = DRAWN_FULL;
+    *part = DRAWN_PART;
+    DRAWN_FULL = DRAWN_PART = 0;
+}
 
 static Wmc *entry(const Window *w, int make)
 {
@@ -196,6 +204,7 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         {
             if (draw_layer(w, i, top, c, a, b) != 0 || ops->upload(c->surf, a, lw, 0, 0, lw, lh, 0) != 0)
                 return -1;
+            DRAWN_FULL++;
         }
         else if (c->dirty)
         {
@@ -208,6 +217,7 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
             gfx_layer_end();
             if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, cw, ch, 1) != 0)
                 return -1;
+            DRAWN_PART++;
         }
         c->sig = sig;
         c->full = 0;

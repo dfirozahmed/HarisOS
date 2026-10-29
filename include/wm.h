@@ -149,6 +149,7 @@ int wm_comp_on(void);
 int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long bytes);
 int wm_comp_items(GfxCompItem *out, int max);
 void wm_comp_drop(const GfxCompOps *ops);
+void wm_comp_counts(unsigned *full, unsigned *part); /* windows drawn again whole / in part since the last call (then 0) */
 int wm_drag_memory(void **a, void **b, unsigned long long *bytes); /* the two buffers of wm_set_drag_memory(); 0 = none */
 
 /* Call often (every main-loop pass): lets windows react to time passing (on_tick). Returns 1 when some

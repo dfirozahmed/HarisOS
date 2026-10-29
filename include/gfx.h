@@ -157,12 +157,21 @@ typedef struct
     int w, h;
     int layer;    /* 1 = packed layer (blended), 0 = opaque picture */
 } GfxCompItem;
+/* What the desktop measured over a number of composed frames (for GfxCompOps.report). Times in microseconds. */
+typedef struct
+{
+    unsigned frames;
+    unsigned long long draw_us, draw_us_max;       /* the CPU bringing surfaces up to date (drawing, packing, uploading) */
+    unsigned long long present_us, present_us_max; /* the compose: building it, the GPU doing it, waiting for it */
+    unsigned windows_full, windows_part, tops;     /* surfaces drawn again: whole windows, parts of windows, menus / taskbar */
+} GfxCompStats;
 typedef struct
 {
     int (*surface_new)(int w, int h);
     void (*surface_free)(int id);
     int (*upload)(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque);
     int (*compose)(const GfxCompItem *items, int n, const int *rects, int nr);
+    void (*report)(const GfxCompStats *s); /* may be 0: every few hundred frames, what the desktop measured */
 } GfxCompOps;
 void gfx_comp_driver(const GfxCompOps *ops); /* 0: none */
 const GfxCompOps *gfx_comp(void);            /* the driver, 0 when there is none (or it failed) */

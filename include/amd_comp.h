@@ -148,5 +148,15 @@ int amd_comp_compose(const GfxCompItem *items, int n, const int *rects, int nr);
 #define AMD_COMP_SC_CYCLES 5     /* CPU cycles from building it to the fence */
 #define AMD_COMP_SC_VALUES 6
 uint32_t amd_comp_scene_value(int what);
+/* Sums over the composes since the last call (then they start again from 0): for the desktop's report. */
+typedef struct
+{
+    uint32_t composes;
+    uint64_t cycles, cycles_max; /* CPU cycles from building a compose to its fence */
+    uint64_t pixels;             /* of the rectangles put together */
+    uint64_t draws;
+    uint64_t upload_bytes;
+} AmdSceneSums;
+void amd_comp_scene_sums(AmdSceneSums *out);
 
 #endif

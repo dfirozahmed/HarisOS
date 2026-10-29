@@ -109,7 +109,33 @@ static int amd_scene_compose(const GfxCompItem *items, int n, const int *rects, 
     amd_gpu_log_save();
     return rc;
 }
-static const GfxCompOps amd_scene_ops = { amd_comp_surface_new, amd_comp_surface_free, amd_comp_surface_upload, amd_scene_compose };
+/* Every few hundred composed frames (at most 10 times): what the desktop measured and what the driver counted, to GPULOG.TXT.
+ * The desktop's times are microseconds, the compose's are CPU cycles (from building it to the GPU's fence). */
+static void amd_scene_report(const GfxCompStats *s)
+{
+    AmdSceneSums g;
+    unsigned f = s->frames ? s->frames : 1u, c;
+    amd_comp_scene_sums(&g);
+    c = g.composes ? g.composes : 1u;
+    serial_print("SCENE: report (desktop times in microseconds, compose times in CPU cycles)\n");
+    log_hex("  frames                ", s->frames);
+    log_hex("  CPU drawing us, avg   ", (uint32_t)(s->draw_us / f));
+    log_hex("  CPU drawing us, max   ", (uint32_t)s->draw_us_max);
+    log_hex("  compose us, avg       ", (uint32_t)(s->present_us / f));
+    log_hex("  compose us, max       ", (uint32_t)s->present_us_max);
+    log_hex("  windows drawn whole   ", s->windows_full);
+    log_hex("  windows drawn in part ", s->windows_part);
+    log_hex("  menus / taskbar drawn ", s->tops);
+    log_hex("  composes              ", g.composes);
+    log_hex("  compose cycles, avg   ", (uint32_t)(g.cycles / c));
+    log_hex("  compose cycles, max   ", (uint32_t)g.cycles_max);
+    log_hex("  pixels per compose    ", (uint32_t)(g.pixels / c));
+    log_hex("  draws per compose     ", (uint32_t)(g.draws / c));
+    log_hex("  KiB uploaded          ", (uint32_t)(g.upload_bytes >> 10));
+    amd_gpu_log_save();
+}
+static const GfxCompOps amd_scene_ops = { amd_comp_surface_new, amd_comp_surface_free, amd_comp_surface_upload, amd_scene_compose,
+                                          amd_scene_report };
 #endif
 
 /* The result of the last compositor test. */

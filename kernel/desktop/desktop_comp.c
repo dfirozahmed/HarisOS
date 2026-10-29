@@ -11,6 +11,7 @@
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
+#include "timer.h"
 
 extern int WALL_VALID;
 extern unsigned WALL_GEN; /* desktop.c: counts full redraws (the wallpaper may have changed) */
@@ -41,6 +42,11 @@ static Top TOPS[3] = {
 };
 
 static int ON; /* the last frame was composited */
+static GfxCompStats STATS;   /* this report's frames so far */
+static unsigned TOPS_DRAWN;
+static int REPORTS;          /* reports sent: at most REPORT_MAX, so the log stays small */
+#define REPORT_FRAMES 300
+#define REPORT_MAX 10
 static int WALL_SURF;
 static unsigned WALL_UP; /* WALL_GEN of the uploaded wallpaper */
 
@@ -110,8 +116,32 @@ static int update_top(Top *t, const GfxCompOps *ops, void *a, void *b, unsigned 
         t->draw();
         gfx_layer_end();
     }
+    TOPS_DRAWN++;
     gfx_layer_pack(a, b, r.w, r.h);
     return ops->upload(t->surf, a, r.w, 0, 0, r.w, r.h, 0);
+}
+
+/* One composed frame: draw_us drawing the surfaces, present_us the compose. Every REPORT_FRAMES frames the sums go to the
+ * driver's report (it writes them down), at most REPORT_MAX times. */
+static void measure(const GfxCompOps *ops, unsigned long long draw_us, unsigned long long present_us)
+{
+    unsigned full, part;
+    wm_comp_counts(&full, &part);
+    STATS.frames++;
+    STATS.draw_us += draw_us;
+    STATS.present_us += present_us;
+    if (draw_us > STATS.draw_us_max) STATS.draw_us_max = draw_us;
+    if (present_us > STATS.present_us_max) STATS.present_us_max = present_us;
+    STATS.windows_full += full;
+    STATS.windows_part += part;
+    STATS.tops += TOPS_DRAWN;
+    TOPS_DRAWN = 0;
+    if (STATS.frames < REPORT_FRAMES || REPORTS >= REPORT_MAX)
+        return;
+    if (ops->report)
+        ops->report(&STATS);
+    REPORTS++;
+    STATS = (GfxCompStats){0};
 }
 
 int desktop_comp_frame(const UiRect *areas, int n)
@@ -125,6 +155,7 @@ int desktop_comp_frame(const UiRect *areas, int n)
         leave();
         return 0;
     }
+    unsigned long long t0 = timer_us();
     int full = !ON;
     if (!ON)
     {
@@ -168,8 +199,10 @@ int desktop_comp_frame(const UiRect *areas, int n)
             rects[4 * nr + 2] = areas[i].x + areas[i].w;
             rects[4 * nr + 3] = areas[i].y + areas[i].h;
         }
+    unsigned long long t1 = timer_us();
     if (gfx_comp_present(items, k, rects, nr) != 0)
         goto fail; /* the driver is dropped: the CPU from now on */
+    measure(ops, t1 - t0, timer_us() - t1);
     return 1;
 fail:
     gfx_comp_driver(0);

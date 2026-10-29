@@ -895,6 +895,12 @@ static struct
     AmdSurface bb;                      /* the back buffer */
 } sc;
 static uint32_t scval[AMD_COMP_SC_VALUES];
+static AmdSceneSums sums; /* since the last amd_comp_scene_sums() */
+void amd_comp_scene_sums(AmdSceneSums *out)
+{
+    *out = sums;
+    sums = (AmdSceneSums){ 0 };
+}
 uint32_t amd_comp_scene_value(int what) { return (what >= 0 && what < AMD_COMP_SC_VALUES) ? scval[what] : 0; }
 
 int amd_comp_surface_new(int w, int h)
@@ -928,6 +934,7 @@ int amd_comp_surface_upload(int id, const void *px, int pitch, int x, int y, int
             amd_gpu_vram_write_span(off, src, (uint32_t)w);
     }
     scval[AMD_COMP_SC_UPLOADS]++;
+    sums.upload_bytes += (uint64_t)w * (uint64_t)h * 4u;
     return 0;
 }
 
@@ -989,6 +996,15 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     scval[AMD_COMP_SC_FRAMES]++;
     scval[AMD_COMP_SC_DWORDS] = na + nb;
     scval[AMD_COMP_SC_CYCLES] = (uint32_t)(comp_tsc() - t0);
+    {
+        uint64_t c = comp_tsc() - t0;
+        sums.composes++;
+        sums.cycles += c;
+        if (c > sums.cycles_max) sums.cycles_max = c;
+        sums.draws += scval[AMD_COMP_SC_DRAWS];
+        for (int r = 0; r < nr; r++)
+            sums.pixels += (uint64_t)(rects[4 * r + 2] - rects[4 * r]) * (uint64_t)(rects[4 * r + 3] - rects[4 * r + 1]);
+    }
     return 0;
 }
 
@@ -1067,6 +1083,7 @@ int amd_comp_scene_test(void)
     amd_comp_surface_free(ws);
     amd_comp_surface_free(ls);
     scval[AMD_COMP_SC_FRAMES] = scval[AMD_COMP_SC_UPLOADS] = 0;
+    { AmdSceneSums z; amd_comp_scene_sums(&z); }   /* the desktop's reports start from here */
     if (bad) { status = "scene FAILED: pixels are wrong"; return 0; }
     status = "scene PASS: wallpaper + layer through the back buffer in 2 rectangles, every pixel right";
     return 1;
