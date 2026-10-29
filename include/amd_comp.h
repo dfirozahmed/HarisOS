@@ -140,13 +140,16 @@ int amd_comp_surface_new(int w, int h);
 void amd_comp_surface_free(int id);
 int amd_comp_surface_upload(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque);
 int amd_comp_compose(const GfxCompItem *items, int n, const int *rects, int nr);
+int amd_comp_surface_scroll(int id, int x, int y, int w, int h, int dy); /* GfxCompOps.scroll */
+int amd_comp_scroll_test(void);       /* offscreen check before scroll is used: 1 = right */
 #define AMD_COMP_SC_FRAMES 0     /* composes done */
 #define AMD_COMP_SC_FAILS 1
 #define AMD_COMP_SC_UPLOADS 2
 #define AMD_COMP_SC_DRAWS 3      /* the last compose: draws into the back buffer */
 #define AMD_COMP_SC_DWORDS 4     /* its stream */
 #define AMD_COMP_SC_CYCLES 5     /* CPU cycles from building it to the fence */
-#define AMD_COMP_SC_VALUES 6
+#define AMD_COMP_SC_SCROLLS 6    /* rows moved inside surfaces (amd_comp_surface_scroll) */
+#define AMD_COMP_SC_VALUES 7
 uint32_t amd_comp_scene_value(int what);
 /* Sums over the composes since the last call (then they start again from 0): for the desktop's report. */
 typedef struct

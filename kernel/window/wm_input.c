@@ -553,9 +553,12 @@ int wm_key(const KeyEvent *k)
         return 0;
     KEY_PARTIAL = 0;
     {
+        Window *cw = WM_CALLING;
+        WM_CALLING = w;
         unsigned long long t0 = wm_now_us();
         w->on_key(w, k);
         wm_charge(w, t0);
+        WM_CALLING = cw;
     }
     if (!KEY_PARTIAL)
         wm_damage_content_internal(w, WM_WHY_KEY); /* the handler probably changed what the window shows */

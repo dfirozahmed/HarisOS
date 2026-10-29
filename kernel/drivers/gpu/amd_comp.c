@@ -1088,3 +1088,103 @@ int amd_comp_scene_test(void)
     status = "scene PASS: wallpaper + layer through the back buffer in 2 rectangles, every pixel right";
     return 1;
 }
+
+/* ---- M4c: rows moved inside a surface (a window's list scrolled) ----
+ * A copy that keeps all four bytes: the packed layer's 4th byte (how much shows through) must survive. The layer shader (texel
+ * alpha) with no blending. */
+static void comp_copy(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
+{
+    Amd3dJob t = { 0 };
+    uint32_t u[10];
+    t.tex_mc = s->mc; t.tex_w = s->w; t.tex_h = s->h; t.tex_pitch_px = s->pitch_px; t.bgr = sc.bgr;
+    amd_3d_build_tex_desc(u, &t);
+    u[3] = (u[3] & ~(7u << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W)) | (E_SQ_SEL_W << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W);
+    u[8] = sx - x0;
+    u[9] = sy - y0;
+    comp_draw(f, x0, y0, x1, y1, 0, f->ps_layer_mc, 1, 2, u, 10);
+}
+
+/* The rows of [x, x+w) x [y, y+h) of a surface move by dy inside that rectangle. Source and destination overlap, so through the
+ * back buffer (free between composes: a compose fills every rectangle it copies to the screen first): frame 1 copies the rows
+ * that stay into it, frame 2 copies them back, moved. One submission. The rows that came into view keep old pixels (the window
+ * draws them). */
+int amd_comp_surface_scroll(int id, int x, int y, int w, int h, int dy)
+{
+    static uint32_t ib[1024];
+    AmdCompFrame f;
+    const AmdSurface *s;
+    uint32_t na, nb, seq;
+    int n = h - (dy < 0 ? -dy : dy), sy, ty;
+    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u);
+    if (!sc.up || !amd_gpu_ring_running() || id < 1 || id > SC_MAX || !sc_surf[id - 1].off || x < 0 || y < 0 || w <= 0 || h <= 0)
+        return -1;
+    s = &sc_surf[id - 1];
+    if ((uint32_t)(x + w) > s->w || (uint32_t)(y + h) > s->h || (uint32_t)(x + w) > sc.bb.w || (uint32_t)(y + h) > sc.bb.h)
+        return -1;
+    if (dy == 0) return 0;
+    if (n <= 0) return 0;               /* everything scrolled out: nothing stays */
+    sy = dy > 0 ? y : y - dy;           /* the rows that stay ... */
+    ty = sy + dy;                       /* ... and where they go */
+    amd_comp_begin(&f, ib, 1024, sc.bb.mc, sc.bb.pitch_px, sc.bb.w, sc.bb.h, sc.bgr, shader_mc);
+    comp_copy(&f, s, (uint32_t)x, (uint32_t)sy, (uint32_t)x, (uint32_t)sy, (uint32_t)(x + w), (uint32_t)(sy + n));
+    na = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
+    if (!na) return -1;
+    amd_comp_begin(&f, ib + na, 1024 - na, s->mc, s->pitch_px, s->w, s->h, sc.bgr, shader_mc);
+    comp_copy(&f, &sc.bb, (uint32_t)x, (uint32_t)sy, (uint32_t)x, (uint32_t)ty, (uint32_t)(x + w), (uint32_t)(ty + n));
+    nb = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC2_OFF, 4u));
+    if (!nb) return -1;
+    seq = frame_submit(ib, na + nb);
+    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) return -1;
+    scval[AMD_COMP_SC_SCROLLS]++;
+    return 0;
+}
+
+/* M4c check before scrolling is used: the test layer (every 4th byte different) scrolled up by 10 and then down by 7 inside a
+ * rectangle of it; every word read back, all four bytes, inside and outside the rectangle. 1 = right. */
+int amd_comp_scroll_test(void)
+{
+    static uint32_t lay[96u * 64u], want[96u * 64u];
+    const int rx = 8, ry = 4, rw = 80, rh = 50;
+    const int dys[2] = { -10, 7 };
+    uint32_t x, y, k, bad = 0;
+    int id;
+    for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
+    if (!sc.up) { status = "scroll test skipped: the compositor is not set up"; return 0; }
+    test_layer(lay);
+    id = amd_comp_surface_new(96, 64);
+    if (!id || amd_comp_surface_upload(id, lay, 96, 0, 0, 96, 64, 0)) {
+        amd_comp_surface_free(id); status = "scroll test skipped: no surface"; return 0;
+    }
+    for (k = 0; k < 96u * 64u; k++) want[k] = lay[k];
+    for (int r = 0; r < 2; r++) {
+        int dy = dys[r], n = rh - (dy < 0 ? -dy : dy), sy = dy > 0 ? ry : ry - dy;
+        static uint32_t tmp[96u * 64u];
+        for (k = 0; k < 96u * 64u; k++) tmp[k] = want[k];
+        for (y = 0; y < (uint32_t)n; y++)               /* what the CPU says the move gives */
+            for (x = (uint32_t)rx; x < (uint32_t)(rx + rw); x++)
+                want[(sy + dy + (int)y) * 96 + (int)x] = tmp[(sy + (int)y) * 96 + (int)x];
+        amd_gpu_fault_clear();
+        if (amd_comp_surface_scroll(id, rx, ry, rw, rh, dy) != 0) {
+            keep_fault_registers();
+            val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
+            amd_comp_surface_free(id);
+            status = "scroll test FAILED: the move did not finish";
+            return 0;
+        }
+    }
+    for (y = 0; y < 64u; y++)
+        for (x = 0; x < 96u; x++) {
+            uint32_t v = amd_gpu_vram_read32(sc_surf[id - 1].off + (y * sc_surf[id - 1].pitch_px + x) * 4u);
+            val[AMD_COMP_V_IN_TOTAL]++;
+            if (v == want[y * 96u + x]) { val[AMD_COMP_V_IN_GOOD]++; continue; }
+            if (!bad++) {
+                val[AMD_COMP_V_FIRST_IN] = v; val[AMD_COMP_V_FIRST_IN + 1] = want[y * 96u + x];
+                val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16);
+            }
+        }
+    amd_comp_surface_free(id);
+    scval[AMD_COMP_SC_SCROLLS] = 0;
+    if (bad) { status = "scroll FAILED: words are wrong (all four bytes must survive)"; return 0; }
+    status = "scroll PASS: rows moved up and down inside a surface, every word right (all four bytes)";
+    return 1;
+}

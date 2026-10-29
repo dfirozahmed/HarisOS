@@ -30,11 +30,25 @@ static int s_upload(int id, const void *px, int pitch, int x, int y, int w, int 
   return 0;
 }
 static int s_compose(const GfxCompItem *it, int n, const int *r, int nr){ (void)it; (void)n; (void)r; (void)nr; return 0; }
-static const GfxCompOps OPS = { s_new, s_free, s_upload, s_compose, 0 };
+static int SCROLLS, SC_ID, SC_X, SC_Y, SC_W, SC_H, SC_DY;
+static int s_scroll(int id, int x, int y, int w, int h, int dy)
+{
+  assert(x >= 0 && y >= 0 && x + w <= SW[id] && y + h <= SH[id]);
+  SCROLLS++; SC_ID = id; SC_X = x; SC_Y = y; SC_W = w; SC_H = h; SC_DY = dy;
+  return 0;
+}
+static const GfxCompOps OPS = { s_new, s_free, s_upload, s_compose, s_scroll, 0 };
 
 static UiRect LAST_BODY; /* the body rectangle the window was last drawn with: apps remember such places for the clicks */
 static void draw(Window*w,UiRect b){ LAST_BODY = b; ui_text(b.x+16,b.y+16,"Hello",UI_TEXT_HEADING); (void)w; }
 static void draw_edit(Window*w,UiRect b){ ui_edit_draw(ui_rect(b.x+10,b.y+10,120,30),&w->edits[0],"Type",0); }
+/* a list that scrolls like File Explorer's: rows moved (gfx_scroll_rect), then the new rows and the scrollbar marked */
+static int on_wheel_scroll(Window*w,int steps){
+  int sx=w->r.x+20, sy=w->r.y+60; (void)steps;
+  if (gfx_scroll_rect(sx,sy,90,80,-16)!=0) return 1;
+  wm_add_damage(ui_rect(sx,sy+80-16,90,16)); wm_add_damage(ui_rect(sx+90,sy,10,80));
+  return 2;
+}
 
 int main(void){
   int W=1024,H=640; unsigned*fb=calloc(W*H,4);
@@ -134,6 +148,36 @@ int main(void){
     assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up2);   /* not drawn */
     assert(e->edits[0].field.x==f0.x+70 && e->edits[0].field.y==f0.y+30);
     assert(e->btn[bi].r.x==b0.x+70 && e->btn[bi].r.y==b0.y+30);
+  }
+  /* scrolling inside a window: the GPU moves the rows in its surface; only the screen is marked */
+  { Window*t=wm_top();
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    wm_take_damage_rects(dmg,WM_DAMAGE_MAX);
+    int sx=t->r.x+20, sy=t->r.y+60, up=UPLOADS;
+    gfx_backbuffer_detach(1); gfx_scroll_hook(wm_comp_scroll);
+    assert(gfx_scroll_rect(sx,sy,100,80,-16)==0 && SCROLLS==1);
+    assert(SC_X==20+M && SC_Y==60+M && SC_W==100 && SC_H==80 && SC_DY==-16 && UPLOADS==up);
+    assert(wm_take_damage_rects(dmg,WM_DAMAGE_MAX)==1 && dmg[0].x==sx && dmg[0].y==sy && dmg[0].w==100 && dmg[0].h==80);
+    /* the window then marks the new rows and its scrollbar: two parts, drawn and uploaded each on its own */
+    unsigned cf, cp; wm_comp_counts(&cf,&cp);
+    wm_add_damage(ui_rect(sx,sy+80-16,90,16)); wm_add_damage(ui_rect(sx+90,sy,10,80));
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    wm_comp_counts(&cf,&cp);
+    assert(UPLOADS-up==5 && cf==0 && cp==2);   /* from outside a handler: every window there (the one under it too) */
+    /* from the window's own wheel handler (as File Explorer does it): only that window, its two parts */
+    t->on_wheel=on_wheel_scroll;
+    assert(wm_comp_update(&OPS,a,b,bytes)==0); up=UPLOADS;
+    wm_wheel(sx+30,sy+30,1);
+    assert(SCROLLS==2 && SC_DY==-16 && SC_W==90);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up+2 && UP_W==10 && UP_H==80);
+    wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1);
+    /* a part changed but not drawn yet where the rows are: no, the window draws them all */
+    wm_add_damage(ui_rect(sx+5,sy+5,10,10));
+    assert(gfx_scroll_rect(sx,sy,100,80,-16)==-1 && SCROLLS==2);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    /* nothing there: no window holds the rectangle */
+    assert(gfx_scroll_rect(1000,630,10,5,2)==-1 && SCROLLS==2);
+    gfx_scroll_hook(0); gfx_backbuffer_detach(0);
   }
   puts("wm compositor tests passed");
   return 0;

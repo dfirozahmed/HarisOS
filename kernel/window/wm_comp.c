@@ -7,6 +7,7 @@
 #include "timer.h"
 
 #define WMC_MAX 64
+#define WMC_PARTS 4 /* changed parts kept apart per window (a list's new rows and its scrollbar); more are merged */
 
 typedef struct
 {
@@ -14,8 +15,8 @@ typedef struct
     int surf, lw, lh, m; /* the surface, its size, the margin around the window (room for the shadow) */
     unsigned sig;        /* the look it was drawn with */
     int full;            /* everything must be drawn again */
-    int dirty;           /* content changed inside [dx0,dx1) x [dy0,dy1), relative to the window's corner */
-    int dx0, dy0, dx1, dy1;
+    int dirty;           /* how many parts changed: d[0 .. dirty-1] = x0, y0, x1, y1 relative to the window's corner */
+    int d[WMC_PARTS][4];
     int seen;
     int px, py;                   /* where the window was when its surface was last brought up to date */
     char title[24];               /* for the report */
@@ -151,19 +152,26 @@ void wm_comp_content_internal(const Window *w, int x0, int y0, int x1, int y1)
     if (y1 > w->r.h) y1 = w->r.h;
     if (x1 <= x0 || y1 <= y0)
         return;
-    if (!c->dirty)
+    for (int k = 0; k < c->dirty; k++)
+        if (x0 >= c->d[k][0] && y0 >= c->d[k][1] && x1 <= c->d[k][2] && y1 <= c->d[k][3])
+            return; /* already in */
+    if (c->dirty == WMC_PARTS)
     {
+        /* full: everything into one box */
+        for (int k = 1; k < c->dirty; k++)
+        {
+            if (c->d[k][0] < c->d[0][0]) c->d[0][0] = c->d[k][0];
+            if (c->d[k][1] < c->d[0][1]) c->d[0][1] = c->d[k][1];
+            if (c->d[k][2] > c->d[0][2]) c->d[0][2] = c->d[k][2];
+            if (c->d[k][3] > c->d[0][3]) c->d[0][3] = c->d[k][3];
+        }
         c->dirty = 1;
-        c->dx0 = x0;
-        c->dy0 = y0;
-        c->dx1 = x1;
-        c->dy1 = y1;
-        return;
     }
-    if (x0 < c->dx0) c->dx0 = x0;
-    if (y0 < c->dy0) c->dy0 = y0;
-    if (x1 > c->dx1) c->dx1 = x1;
-    if (y1 > c->dy1) c->dy1 = y1;
+    c->d[c->dirty][0] = x0;
+    c->d[c->dirty][1] = y0;
+    c->d[c->dirty][2] = x1;
+    c->d[c->dirty][3] = y1;
+    c->dirty++;
 }
 
 void wm_comp_content_screen_internal(int x0, int y0, int x1, int y1)
@@ -188,9 +196,9 @@ void wm_comp_all_internal(void)
         if (!c->id || c->full || !c->surf)
             continue;
         c->dirty = 1;
-        c->dx0 = c->dy0 = 0;
-        c->dx1 = c->lw - 2 * c->m;
-        c->dy1 = c->lh - 2 * c->m;
+        c->d[0][0] = c->d[0][1] = 0;
+        c->d[0][2] = c->lw - 2 * c->m;
+        c->d[0][3] = c->lh - 2 * c->m;
     }
 }
 
@@ -256,10 +264,13 @@ static int opaque_rects(const Window *w, int out[3][4])
     return 3;
 }
 
+static const GfxCompOps *OPS; /* the driver of the last update (for wm_comp_scroll) */
+
 int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long bytes)
 {
     if (!ops || !a || !b)
         return -1;
+    OPS = ops;
     int top = wm_top_index_internal();
     for (int k = 0; k < WMC_MAX; k++)
         WMC[k].seen = 0;
@@ -311,23 +322,29 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
             /* The look is the same, only what it shows changed: one pass over whatever the buffer holds, inside the
              * changed part, and of that only the opaque pieces go up (the shadow and the corners stay as they are) */
             int op[3][4], no = opaque_rects(w, op);
-            if (gfx_layer_begin_at_keep(a, w->r.x - m, w->r.y - m, lw, lh) != 0)
-                return -1;
-            gfx_clip_intersect(w->r.x + c->dx0, w->r.y + c->dy0, c->dx1 - c->dx0, c->dy1 - c->dy0);
-            wm_draw_window_internal(w, i, top);
-            gfx_layer_end();
-            for (int k = 0; k < no; k++)
+            unsigned long long px = 0;
+            for (int p = 0; p < c->dirty; p++) /* each changed part on its own (a list's new rows, its scrollbar) */
             {
-                int x0 = op[k][0] > c->dx0 ? op[k][0] : c->dx0, y0 = op[k][1] > c->dy0 ? op[k][1] : c->dy0;
-                int x1 = op[k][2] < c->dx1 ? op[k][2] : c->dx1, y1 = op[k][3] < c->dy1 ? op[k][3] : c->dy1;
-                if (x1 <= x0 || y1 <= y0)
-                    continue;
-                x0 += m; y0 += m; x1 += m; y1 += m; /* in the layer */
-                if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, x1 - x0, y1 - y0, 1) != 0)
+                const int *d = c->d[p];
+                if (gfx_layer_begin_at_keep(a, w->r.x - m, w->r.y - m, lw, lh) != 0)
                     return -1;
+                gfx_clip_intersect(w->r.x + d[0], w->r.y + d[1], d[2] - d[0], d[3] - d[1]);
+                wm_draw_window_internal(w, i, top);
+                gfx_layer_end();
+                for (int k = 0; k < no; k++)
+                {
+                    int x0 = op[k][0] > d[0] ? op[k][0] : d[0], y0 = op[k][1] > d[1] ? op[k][1] : d[1];
+                    int x1 = op[k][2] < d[2] ? op[k][2] : d[2], y1 = op[k][3] < d[3] ? op[k][3] : d[3];
+                    if (x1 <= x0 || y1 <= y0)
+                        continue;
+                    x0 += m; y0 += m; x1 += m; y1 += m; /* in the layer */
+                    if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, x1 - x0, y1 - y0, 1) != 0)
+                        return -1;
+                }
+                px += (unsigned long long)(d[2] - d[0]) * (unsigned long long)(d[3] - d[1]);
             }
             DRAWN_PART++;
-            tally(c, w, (unsigned long long)(c->dx1 - c->dx0) * (unsigned long long)(c->dy1 - c->dy0), timer_us() - t0);
+            tally(c, w, px, timer_us() - t0);
         }
         c->sig = sig;
         c->full = 0;
@@ -366,4 +383,33 @@ void wm_comp_drop(const GfxCompOps *ops)
         WMC[k] = (Wmc){0};
     }
     ON = 0;
+}
+
+/* gfx_scroll_rect() while the compositor is on (gfx_scroll_hook): the rows of a screen rectangle inside one window move by
+ * dy. The window's surface holds them: the GPU moves them there, and only the screen is marked (the window marks the rows that
+ * came into view itself). -1 (the caller draws the whole rectangle) when that is not sure to be right: no such window, no
+ * driver for it, or parts of the window not drawn yet where the rows are. */
+int wm_comp_scroll(int x, int y, int w, int h, int dy)
+{
+    if (!ON || !OPS || !OPS->scroll || w <= 0 || h <= 0)
+        return -1;
+    for (int i = WM_ZN - 1; i >= 0; i--) /* the top window that holds the whole rectangle */
+    {
+        Window *win = WM_Z[i];
+        if (win->minimized || x < win->r.x || y < win->r.y || x + w > win->r.x + win->r.w || y + h > win->r.y + win->r.h)
+            continue;
+        Wmc *c = entry(win, 0);
+        if (!c || !c->surf || c->full || win->r.x != c->px || win->r.y != c->py)
+            return -1;
+        for (int k = 0; k < c->dirty; k++) /* a changed part not drawn yet would move with the rows, half updated */
+            if (c->d[k][0] < x - win->r.x + w && c->d[k][2] > x - win->r.x && c->d[k][1] < y - win->r.y + h &&
+                c->d[k][3] > y - win->r.y)
+                return -1;
+        int lx = x - win->r.x + c->m, ly = y - win->r.y + c->m; /* in the layer */
+        if (OPS->scroll(c->surf, lx, ly, w, h, dy) != 0)
+            return -1;
+        wm_damage_internal(x, y, x + w, y + h); /* the screen there changed; the surface already shows it */
+        return 0;
+    }
+    return -1;
 }

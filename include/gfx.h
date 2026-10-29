@@ -93,6 +93,8 @@ int gfx_scroll_rect(int x, int y, int w, int h, int dy);
 /* A compositor that keeps the windows' pictures elsewhere (gfx.h "compositor") says so: while on, the back buffer does not
  * hold what is on the screen, and gfx_scroll_rect() returns -1. */
 void gfx_backbuffer_detach(int on);
+/* While detached, gfx_scroll_rect() asks this instead (the compositor moves the rows inside the window's surface); 0: none */
+void gfx_scroll_hook(int (*fn)(int x, int y, int w, int h, int dy));
 
 /* ---- layers ---------------------------------------------------
  * Draw something once into its own w*h pixel buffer, then paste it often (a window being dragged).
@@ -187,6 +189,8 @@ typedef struct
     void (*surface_free)(int id);
     int (*upload)(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque);
     int (*compose)(const GfxCompItem *items, int n, const int *rects, int nr);
+    /* may be 0: moves the rows of [x, x+w) x [y, y+h) of a surface by dy (+ down), inside that rectangle; 0 = done */
+    int (*scroll)(int id, int x, int y, int w, int h, int dy);
     void (*report)(const GfxCompStats *s); /* may be 0: every few hundred frames, what the desktop measured */
 } GfxCompOps;
 void gfx_comp_driver(const GfxCompOps *ops); /* 0: none */

@@ -149,6 +149,7 @@ int wm_comp_on(void);
 int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long bytes);
 int wm_comp_items(GfxCompItem *out, int max);
 void wm_comp_drop(const GfxCompOps *ops);
+int wm_comp_scroll(int x, int y, int w, int h, int dy); /* for gfx_scroll_hook(): move rows inside a window's surface; 0 = done */
 void wm_comp_counts(unsigned *full, unsigned *part); /* windows drawn again whole / in part since the last call (then 0) */
 /* Where the requests to draw a window's content again came from (counted while the compositor is on, for its report). */
 enum

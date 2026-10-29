@@ -57,6 +57,7 @@ static void leave(void)
         return;
     ON = 0;
     gfx_backbuffer_detach(0); /* the CPU draws into it again (all of it, below) */
+    gfx_scroll_hook(0);
     const GfxCompOps *ops = gfx_comp();
     wm_comp_drop(ops);
     if (ops && WALL_SURF)
@@ -183,6 +184,7 @@ int desktop_comp_frame(const UiRect *areas, int n)
         ON = 1;
         wm_comp_set(1);
         gfx_backbuffer_detach(1); /* the windows' pictures are in their surfaces now: nothing to move in the back buffer */
+        gfx_scroll_hook(wm_comp_scroll); /* rows a window scrolls move inside its surface (the GPU moves them) */
     }
     if (!WALL_SURF && !(WALL_SURF = ops->surface_new(W, H)))
         goto fail;

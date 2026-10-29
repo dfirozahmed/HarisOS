@@ -25,7 +25,19 @@ void wm_comp_all_internal(void);
  * value of the macro. A handler may close its window; the slot is only cleared, never freed meanwhile (wm_tick reclaims chunks). */
 unsigned long long wm_now_us(void);
 void wm_charge(Window *w, unsigned long long start_us);
-#define WM_TIMED(w, call) ({ unsigned long long t0_ = wm_now_us(); __typeof__(call) r_ = (call); wm_charge((w), t0_); r_; })
+/* While a handler of a window runs, WM_CALLING is that window: what it marks with wm_add_damage() is its own content (the
+ * compositor draws only that window there, not the ones under it). */
+extern Window *WM_CALLING;
+#define WM_TIMED(w, call)                                                                                                        \
+    ({                                                                                                                           \
+        Window *cw_ = WM_CALLING;                                                                                                \
+        WM_CALLING = (w);                                                                                                        \
+        unsigned long long t0_ = wm_now_us();                                                                                    \
+        __typeof__(call) r_ = (call);                                                                                            \
+        wm_charge((w), t0_);                                                                                                     \
+        WM_CALLING = cw_;                                                                                                        \
+        r_;                                                                                                                      \
+    })
 int wm_top_index_internal(void);
 int wm_z_index_internal(const Window *w);
 Window *wm_blocker_internal(const Window *w);

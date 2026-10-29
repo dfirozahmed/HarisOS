@@ -273,7 +273,7 @@ int main(void)
     }
 
     {   /* compositor: present calls the driver; a failure drops it */
-        static const GfxCompOps cops = {c_new, c_free, c_up, c_compose, 0};
+        static const GfxCompOps cops = {c_new, c_free, c_up, c_compose, 0, 0};
         static unsigned int scr[16 * 8];
         GfxCompItem it = {1, 0, 0, 16, 8, 0};
         const int r[4] = {0, 0, 16, 8};

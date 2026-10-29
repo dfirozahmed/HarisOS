@@ -213,11 +213,15 @@ void gfx_cache_restore(int x, int y, int w, int h)
 /* ---- scrolling ----------------------------------------------- */
 static int DETACHED; /* the back buffer does not hold what is on the screen (a compositor draws it) */
 void gfx_backbuffer_detach(int on) { DETACHED = on; }
+static int (*SCROLL_HOOK)(int x, int y, int w, int h, int dy);
+void gfx_scroll_hook(int (*fn)(int x, int y, int w, int h, int dy)) { SCROLL_HOOK = fn; }
 
 int gfx_scroll_rect(int x, int y, int w, int h, int dy)
 {
-    if (!BACK || DETACHED || dy == 0)
-        return -1; /* detached: the pixels to move are not here, so the caller draws the whole rectangle */
+    if (DETACHED) /* the pixels to move are not here: the compositor moves them in the window's surface, or the caller draws */
+        return (SCROLL_HOOK && dy != 0) ? SCROLL_HOOK(x, y, w, h, dy) : -1;
+    if (!BACK || dy == 0)
+        return -1;
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + w > W ? W : x + w, y1 = y + h > H ? H : y + h;
     if (x1 <= x0 || y1 <= y0 || dy >= y1 - y0 || -dy >= y1 - y0)

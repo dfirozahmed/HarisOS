@@ -12,6 +12,7 @@ typedef struct
 static DmgRect DMG[WM_DAMAGE_MAX];
 static int DMG_N;
 int WM_HAS_DMG; /* DMG_N > 0 */
+Window *WM_CALLING; /* the window whose handler runs now, or 0 (see WM_TIMED) */
 
 /* Add [x0,x1) x [y0,y1) minus what DMG[from..] already covers. A rectangle that only partly overlaps
  * one in the list is cut into up to four strips around it, and each strip is added on its own. */
@@ -129,6 +130,9 @@ void wm_add_screen_damage(UiRect r)
 void wm_add_damage(UiRect r)
 {
     wm_comp_why_internal(WM_WHY_AREA);
-    wm_comp_content_screen_internal(r.x, r.y, r.x + r.w, r.y + r.h); /* what a window shows there changed */
+    if (WM_CALLING) /* a window's own handler: its own content changed there */
+        wm_comp_content_internal(WM_CALLING, r.x, r.y, r.x + r.w, r.y + r.h);
+    else /* from elsewhere: whatever window is there */
+        wm_comp_content_screen_internal(r.x, r.y, r.x + r.w, r.y + r.h);
     wm_damage_internal(r.x, r.y, r.x + r.w, r.y + r.h);
 }

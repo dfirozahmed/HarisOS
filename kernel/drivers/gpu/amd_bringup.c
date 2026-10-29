@@ -132,6 +132,7 @@ static void amd_scene_report(const GfxCompStats *s)
     log_hex("  pixels per compose    ", (uint32_t)(g.pixels / c));
     log_hex("  draws per compose     ", (uint32_t)(g.draws / c));
     log_hex("  KiB uploaded          ", (uint32_t)(g.upload_bytes >> 10));
+    log_hex("  scrolls by the GPU    ", amd_comp_scene_value(AMD_COMP_SC_SCROLLS));
     /* where the requests to draw window content came from, then the windows that took the most drawing */
     for (int i = 0; i < s->nwhy; i++) {
         char label[32];
@@ -162,8 +163,10 @@ static void amd_scene_report(const GfxCompStats *s)
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     last_save = (((unsigned long long)hi << 32) | lo) - t0;
 }
-static const GfxCompOps amd_scene_ops = { amd_comp_surface_new, amd_comp_surface_free, amd_comp_surface_upload, amd_scene_compose,
-                                          amd_scene_report };
+/* scroll stays 0 unless amd_comp_scroll_test() passed */
+static GfxCompOps amd_scene_ops = { .surface_new = amd_comp_surface_new, .surface_free = amd_comp_surface_free,
+                                    .upload = amd_comp_surface_upload, .compose = amd_scene_compose, .scroll = 0,
+                                    .report = amd_scene_report };
 #endif
 
 /* The result of the last compositor test. */
@@ -796,6 +799,14 @@ int amd_gpu_bringup_screen(void)
             int scene_ok = amd_comp_scene_test();
             log_comp_result(scene_ok);
             if (scene_ok) {
+                serial_print("SCROLL: about to move rows inside a surface (up 10, down 7), all four bytes checked\n");
+                amd_gpu_log_save();
+                int scroll_ok = amd_comp_scroll_test();
+                log_comp_result(scroll_ok);
+                if (scroll_ok)
+                    amd_scene_ops.scroll = amd_comp_surface_scroll;
+                serial_print(scroll_ok ? "SCROLL: a window's rows are moved by the GPU when it scrolls\n"
+                                       : "SCROLL: not used: a window draws its scrolled rows again\n");
                 gfx_comp_driver(&amd_scene_ops);
                 serial_print("SCENE: the GPU composes the desktop\n");
             } else
