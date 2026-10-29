@@ -5,6 +5,7 @@
 #include "amd_3d.h"
 #include "amd_3d_isa.h"
 #include "amd_3d_regs.h"
+#include "amd_comp.h"
 
 /* the GPU side is not there: stand-ins so that amd_3d.c links */
 uint64_t amd_native_vram_mc_addr(uint32_t offset, uint32_t bytes) { (void)offset; (void)bytes; return 0; }
@@ -25,8 +26,36 @@ int amd_gpu_fence_wait(uint32_t seq, uint32_t loops) { (void)seq; (void)loops; r
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { (void)dword_addr; return 0; }
 uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n) { (void)dw; (void)n; return 0; }
 void amd_gpu_fault_clear(void) {}
+uint64_t amd_gpu_frame_ib_va(void) { return 0; }
+uint32_t amd_gpu_frame_ib_max_dwords(void) { return 32768; }
+void amd_gpu_frame_ib_write32(uint32_t dw, uint32_t v) { (void)dw; (void)v; }
 
 static int ok = 1;
+
+/* GFX9 constant bus (Mesa aco_validate.cpp, const_bus_limit = 1): walks shader code instruction by instruction; returns how many
+ * instructions read VCC (VOP2 V_CNDMASK_B32 0, V_ADDC_CO_U32 0x1C, V_SUBB 0x1D, V_SUBBREV 0x1E) together with a literal or an SGPR,
+ * or ~0u if an encoding is not known to the walker. */
+static uint32_t const_bus_bad(const uint32_t *code, uint32_t cn)
+{
+    uint32_t k = 0, bad = 0;
+    while (k < cn) {
+        uint32_t w = code[k], top6 = w >> 26, src0 = w & 0x1FFu;
+        if (!(w >> 31)) {                                                                   /* VOP2 */
+            uint32_t op = (w >> 25) & 0x3Fu;
+            if ((op == 0 || op == 0x1C || op == 0x1D || op == 0x1E) && (src0 == 255 || src0 < 128)) bad++;
+            k += src0 == 255 ? 2 : 1;
+        } else if ((w & 0xFE000000u) == 0x7E000000u || (w & 0xFE000000u) == 0x7C000000u) { /* VOP1, VOPC */
+            k += src0 == 255 ? 2 : 1;
+        } else if (top6 == 0x31 || top6 == 0x34 || top6 == 0x3C || top6 == 0x37) {          /* EXP, VOP3, MIMG, GLOBAL */
+            k += 2;
+        } else if ((w >> 23) == 0x17Fu) {                                                   /* SOPP */
+            k += 1;
+        } else {
+            return ~0u;
+        }
+    }
+    return bad;
+}
 
 static void check(int cond, const char *name)
 {
@@ -387,6 +416,49 @@ int main(void)
         check(amd_3d_blur_px(&rj, 35, 17) == 0x00A07560u, "blur: across a cell edge = (3 x 0x2060E0 + 6 x 0xE08020) / 9 = 0xA07560");
         rn = amd_3d_build_ps(rps, &rj);
         check(rn > 0 && rn <= AMD_3D_PS_MAX && rps[rn - 1] == A3D_S_ENDPGM, "blur pixel shader fits and ends with s_endpgm");
+    }
+
+    /* M4 compositor: the four fixed shaders keep the constant bus rule and fit; a frame of fill + shadow + image is walked */
+    {
+        static uint32_t code[AMD_COMP_SHADER_MAX], fib[4096];
+        uint32_t cn, bad = 0, fits = 1, k = 0, nf, draws = 0, vs_ud = 0, vs_rect_ok = 1, ps_ud_n[8], nps = 0, blends[8], nbl = 0;
+        uint32_t img_s8 = 0, img_s10 = 0, sync_tail = 0;
+        AmdCompFrame f;
+        AmdSurface s = { 0x4100000000ULL + 0x10100000ULL, 0x10100000u, 160, 100, 256 };
+        cn = amd_comp_build_vs(code);        bad += const_bus_bad(code, cn); fits &= cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u;
+        cn = amd_comp_build_ps_fill(code);   bad += const_bus_bad(code, cn); fits &= cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u;
+        cn = amd_comp_build_ps_image(code);  bad += const_bus_bad(code, cn); fits &= cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u;
+        cn = amd_comp_build_ps_shadow(code); bad += const_bus_bad(code, cn); fits &= cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u;
+        check(bad == 0 && fits, "compositor shaders: no VCC + literal / SGPR, each fits in its 512-byte slot");
+        check(a3d_vop2(A3D_OP2_ADD_U32, 4, 4, 8) == 0x68080808u, "v_add_u32 v4, s8, v4 = 0x68080808 (GFX9 VOP2 0x34)");
+
+        amd_comp_begin(&f, fib, 4096, 0x4100000000ULL + 0x10000000ULL, 512, 512, 256, 1, 0x4100000000ULL + 0x0B004000ULL);
+        amd_comp_fill(&f, 16, 16, 496, 240, 0x30, 0x50, 0x70);
+        amd_comp_shadow(&f, 34, 26, 196, 138, 12, 150);
+        amd_comp_image(&f, &s, 0, 0, 40, 40, 200, 140, 160, 1);
+        nf = amd_comp_end(&f, 0x4100000000ULL + 0x0B300040ULL);
+        while (k < nf) {
+            uint32_t h = fib[k], body = ((h >> 16) & 0x3FFF) + 1, op = (h >> 8) & 0xFF;
+            if (op == 0x2D) draws++;
+            if (op == 0x76 && fib[k + 1] == R3D_SPI_SHADER_USER_DATA_VS_0) {
+                vs_ud++;
+                if (body != 5) vs_rect_ok = 0;
+            }
+            if (op == 0x76 && fib[k + 1] == R3D_SPI_SHADER_USER_DATA_PS_0 && nps < 8) {
+                ps_ud_n[nps++] = body - 1;
+                if (body - 1 == 11) { img_s8 = fib[k + 2 + 8]; img_s10 = fib[k + 2 + 10]; }
+            }
+            if (op == 0x69 && fib[k + 1] == R3D_CB_BLEND0_CONTROL && nbl < 8) blends[nbl++] = fib[k + 2];
+            if (op == 0x3C) sync_tail = 1;
+            k += 1 + body;
+        }
+        check(nf > 0 && k == nf && f.draws == 3 && draws == 3, "compositor frame: whole packets, 3 draws (fill, shadow, image) in one stream");
+        check(vs_ud == 3 && vs_rect_ok && nps == 3 && ps_ud_n[0] == 2 && ps_ud_n[1] == 6 && ps_ud_n[2] == 11,
+              "compositor frame: the rectangle in 4 VS user SGPRs per draw; 2 / 6 / 11 PS user SGPRs for fill / shadow / image");
+        check(img_s8 == (uint32_t)(0u - 40u) && img_s10 == a3d_f32_ratio(160, 255),
+              "compositor image: s8 = surface x - screen x (-40), s10 = opacity 160 / 255");
+        check(nbl == 3 && blends[0] == 0 && blends[1] != 0 && blends[2] != 0 && sync_tail,
+              "compositor frame: no blending for the fill, blending for the shadow and the transparent image; the end sync is there");
     }
 
     /* PA_SC_RASTER_CONFIG / _1: outside the clear-state table, so the draw stream itself writes both (0, as Mesa's GFX9 default) */

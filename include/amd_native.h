@@ -154,6 +154,11 @@ void     amd_gpu_fault_snapshot(void);  /* then read amd_native_fault_gc_status(
 void     amd_gpu_fault_clear(void);     /* clears the GC VM fault status (Linux gmc_v9_0_process_interrupt) */
 void     amd_gpu_reg_write32(uint32_t dword_addr, uint32_t v);  /* WRITES a GPU register by its dword address */
 uint64_t amd_gpu_ib_va(void);
+/* M4: the frame IB, 128 KiB of VRAM mapped through the GART (mapped on the first call; 0 = not possible). Write it, flush with
+ * amd_gpu_wc_flush(), then amd_gpu_submit_ib(amd_gpu_frame_ib_va(), dwords). */
+uint64_t amd_gpu_frame_ib_va(void);
+uint32_t amd_gpu_frame_ib_max_dwords(void);
+void     amd_gpu_frame_ib_write32(uint32_t dw, uint32_t v);
 const char *amd_native_ring_status(void);
 /* V151 GPU draw test */
 int      amd_gpu_draw_test(void);

@@ -24,6 +24,7 @@
 #include "amd_3d.h"
 #include "amd_3d_isa.h"
 #include "amd_3d_regs.h"
+#include "amd_3d_internal.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx9.h"
 #include "amd_native.h"
@@ -79,13 +80,6 @@
 #define COHER_TC (1u << 23)
 #define COHER_KCACHE (1u << 27)
 #define COHER_ICACHE (1u << 29)
-
-typedef struct
-{
-    uint32_t *p;
-    uint32_t n, cap;
-    int over;
-} Ib;
 
 static void put(Ib *b, uint32_t v)
 {
@@ -441,19 +435,19 @@ uint32_t amd_3d_build_ring_start(uint32_t *p, uint32_t cap)
     return b.over ? 0 : b.n;
 }
 
-/* ---- the command stream ---- */
-uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
+/* ---- the command stream: head + draws + tail ----
+ * The default context state is NOT part of it: amd_3d_build_default_ib() does that first, as a stream of its own, with the register
+ * table of the Linux driver. (CLEAR_STATE alone would not do: it only restores what the kernel driver put in the clear state
+ * snapshot at start-up.) Register writes only have to come before the draw that needs them, so their order inside head and draw
+ * does not matter. */
+void a3d_emit_head(Ib *bp, uint64_t rt_mc, uint32_t pitch_px, uint32_t width, uint32_t height, int bgr)
 {
-    Ib b = { ibp, 0, cap, 0 };
-    uint32_t swap = job->bgr ? E_SWAP_ALT : E_SWAP_STD;
+    Ib b = *bp;
+    uint32_t swap = bgr ? E_SWAP_ALT : E_SWAP_STD;
     /* X8 formats have no alpha: Mesa sets FORCE_DST_ALPHA_1 when the format's 4th swizzle is "1" */
     uint32_t force_a1 = 1;
 
-    /* 1. The default context state is NOT set up here: amd_3d_build_default_ib() does it first, as a stream of its own, with the
-     * register table of the Linux driver. (CLEAR_STATE would not do: it only restores what the kernel driver put in the clear state
-     * snapshot at start-up, and nothing did that on this GPU.) */
-
-    /* 2. the CPU wrote shader code, image and target: write back and invalidate the GPU caches first (see COHER_*) */
+    /* 1. the CPU wrote shader code, images and target: write back and invalidate the GPU caches first (see COHER_*) */
     put(&b, PKT3(OP_ACQUIRE_MEM, 5));
     put(&b, COHER_TC_WB | COHER_TC | COHER_TCL1 | COHER_KCACHE | COHER_ICACHE);         /* CP_COHER_CNTL */
     put(&b, 0xFFFFFFFFu);                                                              /* CP_COHER_SIZE */
@@ -462,16 +456,12 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     put(&b, 0);                                                                        /* CP_COHER_BASE_HI */
     put(&b, 0x0000000Au);                                                              /* POLL_INTERVAL */
 
-    /* 3. GFX9 start-up registers (ac_cmdbuf.c, GFX9 branch). CLEAR_STATE does not restore the generic scissor. */
+    /* 2. GFX9 start-up registers (ac_cmdbuf.c, GFX9 branch). CLEAR_STATE does not restore the generic scissor. */
     ctx2(&b, R3D_PA_SC_GENERIC_SCISSOR_TL, 1u << F3D_PA_SC_GENERIC_SCISSOR_TL__WINDOW_OFFSET_DISABLE,
          (16384u << F3D_PA_SC_GENERIC_SCISSOR_BR__BR_X) | (16384u << F3D_PA_SC_GENERIC_SCISSOR_BR__BR_Y));
     /* PA_SC_RASTER_CONFIG / _1 are the only context registers that matter for a draw and are in neither the clear-state table
-     * (gfx9_cs_data skips 0xA0D4..0xA0D5) nor anything else HarisOS writes. The context register memory holds random values after
-     * power-on (the MMIO read-back of context registers was random until the ring start-up packets), so these two may hold random
-     * values in some of the 8 hardware contexts. Suspected cause of the first ~20 draws of a boot getting lost: the pipeline
-     * statistics (2026-10-29) show a lost draw ran its vertex shader, but the clipper threw the triangles away or the scan converter
-     * made no pixels. Mesa writes them only up to GFX8; for GFX9 its register-shadowing table starts both at 0 (ac_shadowed_regs.c),
-     * which is what is written here. */
+     * (gfx9_cs_data skips 0xA0D4..0xA0D5) nor anything else HarisOS writes; the context register memory holds random values after
+     * power-on. Mesa writes them only up to GFX8; for GFX9 its register-shadowing table starts both at 0 (ac_shadowed_regs.c). */
     ctx2(&b, R3D_PA_SC_RASTER_CONFIG, 0, 0);
     ctx1(&b, R3D_DB_DFSM_CONTROL, E_PUNCHOUT_FORCE_OFF << F3D_DB_DFSM_CONTROL__PUNCHOUT_MODE);
     ctx1(&b, R3D_PA_SC_BINNER_CNTL_1, (127u << F3D_PA_SC_BINNER_CNTL_1__MAX_ALLOC_COUNT) |
@@ -487,19 +477,19 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     sh1(&b, R3D_SPI_SHADER_PGM_RSRC3_PS, (0xFFFFu << F3D_SPI_SHADER_PGM_RSRC3_PS__CU_EN) |
                                          (0x3Fu << F3D_SPI_SHADER_PGM_RSRC3_PS__WAVE_LIMIT));
 
-    /* 4. the colour buffer (gfx6_emit_framebuffer_state, GFX9 branch): 15 registers from CB_COLOR0_BASE */
+    /* 3. the colour buffer (gfx6_emit_framebuffer_state, GFX9 branch): 15 registers from CB_COLOR0_BASE */
     uint32_t info = (E_COLOR_8_8_8_8 << F3D_CB_COLOR0_INFO__FORMAT) | (E_NUMBER_UNORM << F3D_CB_COLOR0_INFO__NUMBER_TYPE) |
                     (swap << F3D_CB_COLOR0_INFO__COMP_SWAP) | (1u << F3D_CB_COLOR0_INFO__BLEND_CLAMP) |
                     (1u << F3D_CB_COLOR0_INFO__SIMPLE_FLOAT);
     uint32_t attrib = (force_a1 << F3D_CB_COLOR0_ATTRIB__FORCE_DST_ALPHA_1) | (E_RESOURCE_2D << F3D_CB_COLOR0_ATTRIB__RESOURCE_TYPE) |
                       (1u << F3D_CB_COLOR0_ATTRIB__RB_ALIGNED) | (1u << F3D_CB_COLOR0_ATTRIB__PIPE_ALIGNED); /* COLOR_SW_MODE 0 = linear */
-    uint32_t attrib2 = ((job->width - 1) << F3D_CB_COLOR0_ATTRIB2__MIP0_WIDTH) | ((job->height - 1) << F3D_CB_COLOR0_ATTRIB2__MIP0_HEIGHT);
+    uint32_t attrib2 = ((width - 1) << F3D_CB_COLOR0_ATTRIB2__MIP0_WIDTH) | ((height - 1) << F3D_CB_COLOR0_ATTRIB2__MIP0_HEIGHT);
     uint32_t dcc = (E_MAX_BLOCK_SIZE_256B << F3D_CB_COLOR0_DCC_CONTROL__MAX_UNCOMPRESSED_BLOCK_SIZE) |
                    (1u << F3D_CB_COLOR0_DCC_CONTROL__INDEPENDENT_64B_BLOCKS);
     put(&b, PKT3(OP_SET_CONTEXT_REG, 15));
     put(&b, R3D_CB_COLOR0_BASE);
-    put(&b, (uint32_t)(job->rt_mc >> 8));         /* CB_COLOR0_BASE */
-    put(&b, (uint32_t)(job->rt_mc >> 40) & 0xFFu); /* CB_COLOR0_BASE_EXT */
+    put(&b, (uint32_t)(rt_mc >> 8));               /* CB_COLOR0_BASE */
+    put(&b, (uint32_t)(rt_mc >> 40) & 0xFFu);       /* CB_COLOR0_BASE_EXT */
     put(&b, attrib2);                              /* CB_COLOR0_ATTRIB2 */
     put(&b, 0);                                    /* CB_COLOR0_VIEW: slice 0, mip 0 */
     put(&b, info);                                 /* CB_COLOR0_INFO */
@@ -513,12 +503,9 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     put(&b, 0);                                    /* CB_COLOR0_CLEAR_WORD1 */
     put(&b, 0);                                    /* CB_COLOR0_DCC_BASE */
     put(&b, 0);                                    /* CB_COLOR0_DCC_BASE_EXT */
-    ctx1(&b, R3D_CB_MRT0_EPITCH, (job->pitch_px - 1) << F3D_CB_MRT0_EPITCH__EPITCH);
+    ctx1(&b, R3D_CB_MRT0_EPITCH, (pitch_px - 1) << F3D_CB_MRT0_EPITCH__EPITCH);
     ctx2(&b, R3D_DB_Z_INFO, 0, 0);                 /* no depth / stencil buffer: Z_INVALID, STENCIL_INVALID (both 0) */
-    ctx1(&b, R3D_PA_SC_WINDOW_SCISSOR_BR, (job->width << F3D_PA_SC_WINDOW_SCISSOR_BR__BR_X) | (job->height << F3D_PA_SC_WINDOW_SCISSOR_BR__BR_Y));
-    ctx2(&b, R3D_PA_SC_VPORT_SCISSOR_0_TL, (job->x0 << F3D_PA_SC_VPORT_SCISSOR_0_TL__TL_X) | (job->y0 << F3D_PA_SC_VPORT_SCISSOR_0_TL__TL_Y) |
-                                           (1u << F3D_PA_SC_VPORT_SCISSOR_0_TL__WINDOW_OFFSET_DISABLE),
-         (job->x1 << F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_X) | (job->y1 << F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_Y));
+    ctx1(&b, R3D_PA_SC_WINDOW_SCISSOR_BR, (width << F3D_PA_SC_WINDOW_SCISSOR_BR__BR_X) | (height << F3D_PA_SC_WINDOW_SCISSOR_BR__BR_Y));
     ctx2(&b, R3D_PA_SC_VPORT_ZMIN_0, 0, 0x3F800000u); /* depth range 0.0 .. 1.0 */
 
     /* Clipping, guard band and sub-pixel precision for a vertex shader that writes window space positions (si_state.c
@@ -527,14 +514,14 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
      * PA_SC_MODE_CNTL_0 always has VPORT_SCISSOR_ENABLE). With the reset values of the guard band registers (and a 1/16 pixel
      * precision) triangles far from the origin were clipped away. */
     {
-        uint32_t hx = ((job->width / 2u) > 8176u ? 8176u : (job->width / 2u)) & ~15u;   /* HW screen offset, aligned to 16 */
-        uint32_t hy = ((job->height / 2u) > 8176u ? 8176u : (job->height / 2u)) & ~15u;
+        uint32_t hx = ((width / 2u) > 8176u ? 8176u : (width / 2u)) & ~15u;   /* HW screen offset, aligned to 16 */
+        uint32_t hy = ((height / 2u) > 8176u ? 8176u : (height / 2u)) & ~15u;
         /* guard band = min(-left, right) with max_range = 65536 / 2, as a ratio num / (width or height), at least 1.0 */
-        uint32_t ax = 65538u + job->width - 2u * hx, bx = 65536u - job->width + 2u * hx;
-        uint32_t ay = 65538u + job->height - 2u * hy, by = 65536u - job->height + 2u * hy;
+        uint32_t ax = 65538u + width - 2u * hx, bx = 65536u - width + 2u * hx;
+        uint32_t ay = 65538u + height - 2u * hy, by = 65536u - height + 2u * hy;
         uint32_t nx = ax < bx ? ax : bx, ny = ay < by ? ay : by;
-        uint32_t gbx = nx < job->width ? 0x3F800000u : a3d_f32_ratio(nx, job->width);
-        uint32_t gby = ny < job->height ? 0x3F800000u : a3d_f32_ratio(ny, job->height);
+        uint32_t gbx = nx < width ? 0x3F800000u : a3d_f32_ratio(nx, width);
+        uint32_t gby = ny < height ? 0x3F800000u : a3d_f32_ratio(ny, height);
 
         ctx1(&b, R3D_PA_CL_CLIP_CNTL, (1u << F3D_PA_CL_CLIP_CNTL__CLIP_DISABLE) | (1u << F3D_PA_CL_CLIP_CNTL__DX_LINEAR_ATTR_CLIP_ENA));
         put(&b, PKT3(OP_SET_CONTEXT_REG, 5));
@@ -551,33 +538,12 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
                                         (1u << F3D_PA_SC_MODE_CNTL_0__ALTERNATE_RBS_PER_TILE));
     }
 
-    /* 5. colour output: no blending, all four channels, RB+ down-conversion for 8-8-8-8 */
+    /* 4. colour output: all four channels, RB+ down-conversion for 8-8-8-8 (blending is per draw) */
     ctx1(&b, R3D_CB_COLOR_CONTROL, (E_CB_NORMAL << F3D_CB_COLOR_CONTROL__MODE) | (0xCCu << F3D_CB_COLOR_CONTROL__ROP3));
     ctx1(&b, R3D_CB_TARGET_MASK, 0xF);
     ctx1(&b, R3D_CB_SHADER_MASK, 0xF);
-    if (job->blend) {
-        /* M3: "over" blending, result = src * src_alpha + dst * (1 - src_alpha), as radeonsi si_create_blend_state_mode() sets it for
-         * PIPE_BLENDFACTOR_SRC_ALPHA / INV_SRC_ALPHA / PIPE_BLEND_ADD (alpha the same, so no SEPARATE_ALPHA_BLEND). RB+: SX_MRT0_BLEND_OPT
-         * from si_translate_blend_opt_factor() / _function(). Enum values: Mesa gfx9.json. */
-        ctx1(&b, R3D_CB_BLEND0_CONTROL, (1u << F3D_CB_BLEND0_CONTROL__ENABLE) |
-                                        (E_COMB_DST_PLUS_SRC << F3D_CB_BLEND0_CONTROL__COLOR_COMB_FCN) |
-                                        (E_BLEND_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_SRCBLEND) |
-                                        (E_BLEND_ONE_MINUS_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_DESTBLEND));
-    } else {
-        ctx1(&b, R3D_CB_BLEND0_CONTROL, 0);
-    }
     ctx1(&b, R3D_CB_DCC_CONTROL, (1u << F3D_CB_DCC_CONTROL__OVERWRITE_COMBINER_MRT_SHARING_DISABLE) |
                                  (4u << F3D_CB_DCC_CONTROL__OVERWRITE_COMBINER_WATERMARK));
-    if (job->blend)
-        ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__COLOR_SRC_OPT) |
-                                        (E_BLEND_OPT_PRESERVE_A0_IGNORE_A1 << F3D_SX_MRT0_BLEND_OPT__COLOR_DST_OPT) |
-                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
-                                        (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__ALPHA_SRC_OPT) |
-                                        (E_BLEND_OPT_PRESERVE_A0_IGNORE_A1 << F3D_SX_MRT0_BLEND_OPT__ALPHA_DST_OPT) |
-                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
-    else
-        ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
-                                        (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
     put(&b, PKT3(OP_SET_CONTEXT_REG, 3));
     put(&b, R3D_SX_PS_DOWNCONVERT);
     put(&b, E_SX_RT_EXPORT_8_8_8_8);               /* SX_PS_DOWNCONVERT, MRT0 */
@@ -587,39 +553,10 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     put(&b, 1u << F3D_SX_BLEND_OPT_CONTROL__MRT0_ALPHA_OPT_DISABLE);
     ctx1(&b, R3D_DB_DEPTH_CONTROL, 0);             /* no depth test */
     ctx1(&b, R3D_DB_SHADER_CONTROL, E_EARLY_Z_THEN_LATE_Z << F3D_DB_SHADER_CONTROL__Z_ORDER);
-
-    /* 6. the pixel shader: no interpolated inputs, but one perspective VGPR input must be enabled (Mesa: "we need to enable at
-     * least one of them, otherwise we hang the GPU"); one MRT, exported as FP16_ABGR */
-    uint32_t ps_in = 1u << F3D_SPI_PS_INPUT_ENA__PERSP_CENTER_ENA;
-    if (job->textured || job->shadow_r)  /* the pixel position, as floats, goes to the VGPRs after the two perspective ones: v2 = x, v3 = y */
-        ps_in |= (1u << F3D_SPI_PS_INPUT_ENA__POS_X_FLOAT_ENA) | (1u << F3D_SPI_PS_INPUT_ENA__POS_Y_FLOAT_ENA);
-    ctx2(&b, R3D_SPI_PS_INPUT_ENA, ps_in, ps_in);
     ctx1(&b, R3D_SPI_PS_IN_CONTROL, 0u << F3D_SPI_PS_IN_CONTROL__NUM_INTERP);
     ctx2(&b, R3D_SPI_SHADER_Z_FORMAT, 0, E_SPI_SHADER_FP16_ABGR);      /* Z: none; colour MRT0: FP16_ABGR */
-    sh1(&b, R3D_SPI_SHADER_PGM_LO_PS, (uint32_t)(job->ps_mc >> 8));
-    sh1(&b, R3D_SPI_SHADER_PGM_HI_PS, (uint32_t)(job->ps_mc >> 40) & 0xFFu);
-    /* VGPRS / SGPRS are counted in blocks of 4 / 8, minus 1: the textured shader uses v0 .. v11 (12) and 8 user SGPRs + the system ones */
-    /* the shadow shader uses v0 .. v6 (8 VGPRs), the blur shader v0 .. v15 (16) */
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, ((job->blur_r ? 3u : job->textured ? 2u : job->shadow_r ? 1u : 0u) << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) |
-                                         ((job->textured ? 2u : 1u) << F3D_SPI_SHADER_PGM_RSRC1_PS__SGPRS) |
-                                         (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_PS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_PS__DX10_CLAMP));
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_PS, (job->textured ? 8u : 0u) << F3D_SPI_SHADER_PGM_RSRC2_PS__USER_SGPR);
-    if (job->textured) {          /* the image resource goes straight into the pixel shader's user SGPRs s0 .. s7 */
-        uint32_t td[8], k;
-        amd_3d_build_tex_desc(td, job);
-        put(&b, PKT3(OP_SET_SH_REG, 8));
-        put(&b, R3D_SPI_SHADER_USER_DATA_PS_0);
-        for (k = 0; k < 8; k++)
-            put(&b, td[k]);
-    }
 
-    /* 7. the vertex shader: window space position (pixels), one position export, no parameters */
-    sh1(&b, R3D_SPI_SHADER_PGM_LO_VS, (uint32_t)(job->vs_mc >> 8));
-    sh1(&b, R3D_SPI_SHADER_PGM_HI_VS, (uint32_t)(job->vs_mc >> 40) & 0xFFu);
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_VS, (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__VGPRS) | (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__SGPRS) |
-                                         (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_VS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__DX10_CLAMP) |
-                                         (0u << F3D_SPI_SHADER_PGM_RSRC1_VS__VGPR_COMP_CNT)); /* only the vertex number in v0 */
-    sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_VS, 0u << F3D_SPI_SHADER_PGM_RSRC2_VS__USER_SGPR);
+    /* 5. the vertex shader's fixed registers: window space position (pixels), one position export, one (unused) parameter */
     sh1(&b, R3D_SPI_SHADER_PGM_RSRC3_VS, (0xFFFFu << F3D_SPI_SHADER_PGM_RSRC3_VS__CU_EN) | (0x3Fu << F3D_SPI_SHADER_PGM_RSRC3_VS__WAVE_LIMIT));
     sh1(&b, R3D_SPI_SHADER_LATE_ALLOC_VS, 0u << F3D_SPI_SHADER_LATE_ALLOC_VS__LIMIT);
     ctx1(&b, R3D_SPI_VS_OUT_CONFIG, 0u << F3D_SPI_VS_OUT_CONFIG__VS_EXPORT_COUNT);   /* one parameter slot: count - 1 = 0 */
@@ -628,23 +565,121 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     ctx1(&b, R3D_PA_CL_VS_OUT_CNTL, 0);
     ctx1(&b, R3D_VGT_GS_MODE, 0);                  /* GS_OFF */
     ctx1(&b, R3D_VGT_SHADER_STAGES_EN, 2u << F3D_VGT_SHADER_STAGES_EN__MAX_PRIMGRP_IN_WAVE);
-
-    /* 8. the draw: 4 vertices, triangle strip, vertex numbers generated by the hardware */
     uc1(&b, R3D_IA_MULTI_VGT_PARAM, (127u << F3D_IA_MULTI_VGT_PARAM__PRIMGROUP_SIZE) | (1u << F3D_IA_MULTI_VGT_PARAM__EN_INST_OPT_BASIC) |
                                     (1u << F3D_IA_MULTI_VGT_PARAM__EN_INST_OPT_ADV));
     uc1(&b, R3D_VGT_PRIMITIVE_TYPE, E_DI_PT_TRISTRIP);
+    *bp = b;
+}
+
+void a3d_emit_draw(Ib *bp, const A3dDraw *d)
+{
+    Ib b = *bp;
+    uint32_t k;
+
+    /* blending: "over", result = src * src_alpha + dst * (1 - src_alpha), as radeonsi si_create_blend_state_mode() sets it for
+     * PIPE_BLENDFACTOR_SRC_ALPHA / INV_SRC_ALPHA / PIPE_BLEND_ADD (alpha the same, so no SEPARATE_ALPHA_BLEND). RB+: SX_MRT0_BLEND_OPT
+     * from si_translate_blend_opt_factor() / _function(). Enum values: Mesa gfx9.json. */
+    if (d->blend) {
+        ctx1(&b, R3D_CB_BLEND0_CONTROL, (1u << F3D_CB_BLEND0_CONTROL__ENABLE) |
+                                        (E_COMB_DST_PLUS_SRC << F3D_CB_BLEND0_CONTROL__COLOR_COMB_FCN) |
+                                        (E_BLEND_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_SRCBLEND) |
+                                        (E_BLEND_ONE_MINUS_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_DESTBLEND));
+        ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__COLOR_SRC_OPT) |
+                                        (E_BLEND_OPT_PRESERVE_A0_IGNORE_A1 << F3D_SX_MRT0_BLEND_OPT__COLOR_DST_OPT) |
+                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
+                                        (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__ALPHA_SRC_OPT) |
+                                        (E_BLEND_OPT_PRESERVE_A0_IGNORE_A1 << F3D_SX_MRT0_BLEND_OPT__ALPHA_DST_OPT) |
+                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
+    } else {
+        ctx1(&b, R3D_CB_BLEND0_CONTROL, 0);
+        ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
+                                        (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
+    }
+
+    /* the scissor: exactly the rectangle */
+    ctx2(&b, R3D_PA_SC_VPORT_SCISSOR_0_TL, (d->x0 << F3D_PA_SC_VPORT_SCISSOR_0_TL__TL_X) | (d->y0 << F3D_PA_SC_VPORT_SCISSOR_0_TL__TL_Y) |
+                                           (1u << F3D_PA_SC_VPORT_SCISSOR_0_TL__WINDOW_OFFSET_DISABLE),
+         (d->x1 << F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_X) | (d->y1 << F3D_PA_SC_VPORT_SCISSOR_0_BR__BR_Y));
+
+    /* the pixel shader: no interpolated inputs, but one perspective VGPR input must be enabled (Mesa: "we need to enable at least
+     * one of them, otherwise we hang the GPU"); with ps_pos the pixel position as floats comes after the two perspective ones:
+     * v2 = x + 0.5, v3 = y + 0.5 */
+    uint32_t ps_in = 1u << F3D_SPI_PS_INPUT_ENA__PERSP_CENTER_ENA;
+    if (d->ps_pos)
+        ps_in |= (1u << F3D_SPI_PS_INPUT_ENA__POS_X_FLOAT_ENA) | (1u << F3D_SPI_PS_INPUT_ENA__POS_Y_FLOAT_ENA);
+    ctx2(&b, R3D_SPI_PS_INPUT_ENA, ps_in, ps_in);
+    sh1(&b, R3D_SPI_SHADER_PGM_LO_PS, (uint32_t)(d->ps_mc >> 8));
+    sh1(&b, R3D_SPI_SHADER_PGM_HI_PS, (uint32_t)(d->ps_mc >> 40) & 0xFFu);
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_PS, (d->ps_vgprs << F3D_SPI_SHADER_PGM_RSRC1_PS__VGPRS) | (d->ps_sgprs << F3D_SPI_SHADER_PGM_RSRC1_PS__SGPRS) |
+                                         (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_PS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_PS__DX10_CLAMP));
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_PS, d->ps_user_n << F3D_SPI_SHADER_PGM_RSRC2_PS__USER_SGPR);
+    if (d->ps_user_n) {
+        put(&b, PKT3(OP_SET_SH_REG, d->ps_user_n));
+        put(&b, R3D_SPI_SHADER_USER_DATA_PS_0);
+        for (k = 0; k < d->ps_user_n; k++)
+            put(&b, d->ps_user[k]);
+    }
+
+    /* the vertex shader (only the vertex number in v0) */
+    sh1(&b, R3D_SPI_SHADER_PGM_LO_VS, (uint32_t)(d->vs_mc >> 8));
+    sh1(&b, R3D_SPI_SHADER_PGM_HI_VS, (uint32_t)(d->vs_mc >> 40) & 0xFFu);
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC1_VS, (d->vs_vgprs << F3D_SPI_SHADER_PGM_RSRC1_VS__VGPRS) | (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__SGPRS) |
+                                         (0xC0u << F3D_SPI_SHADER_PGM_RSRC1_VS__FLOAT_MODE) | (1u << F3D_SPI_SHADER_PGM_RSRC1_VS__DX10_CLAMP) |
+                                         (0u << F3D_SPI_SHADER_PGM_RSRC1_VS__VGPR_COMP_CNT));
+    sh1(&b, R3D_SPI_SHADER_PGM_RSRC2_VS, d->vs_user_n << F3D_SPI_SHADER_PGM_RSRC2_VS__USER_SGPR);
+    if (d->vs_user_n) {
+        put(&b, PKT3(OP_SET_SH_REG, d->vs_user_n));
+        put(&b, R3D_SPI_SHADER_USER_DATA_VS_0);
+        for (k = 0; k < d->vs_user_n; k++)
+            put(&b, d->vs_user[k]);
+    }
+
+    /* the draw: 4 vertices, triangle strip, vertex numbers generated by the hardware */
     put(&b, PKT3(OP_NUM_INSTANCES, 0));
     put(&b, 1);
     put(&b, PKT3(OP_DRAW_INDEX_AUTO, 1));
     put(&b, 4);                                    /* vertex count */
     put(&b, E_DI_SRC_SEL_AUTO_INDEX);              /* VGT_DRAW_INITIATOR */
+    *bp = b;
+}
 
-    /* 9. flush the colour buffer and WAIT for it, as Mesa does (ac_barrier.c, SYNC_AND_INV_CB: EVENT_WRITE FLUSH_AND_INV_CB_META, then
-     * a RELEASE_MEM with FLUSH_AND_INV_CB_DATA_TS, then WAIT_REG_MEM on what it wrote). The fence of amd_gpu_submit_ib() comes right
-     * after this stream and is only a generic event: the CPU reads the pixels as soon as it fires. */
-    if (job->sync_mc)
-        cb_sync(&b, job->sync_mc, 0x3D3D0003u);
+/* Flush the colour buffer and WAIT for it, as Mesa does (ac_barrier.c, SYNC_AND_INV_CB: EVENT_WRITE FLUSH_AND_INV_CB_META, then a
+ * RELEASE_MEM with FLUSH_AND_INV_CB_DATA_TS, then WAIT_REG_MEM on what it wrote). The fence of amd_gpu_submit_ib() comes right after
+ * the stream and is only a generic event: the CPU reads the pixels as soon as it fires. */
+void a3d_emit_tail(Ib *bp, uint64_t sync_mc)
+{
+    if (sync_mc)
+        cb_sync(bp, sync_mc, 0x3D3D0003u);
+}
 
+/* The M1..M3 stream: head, one draw described by the job, tail. */
+uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
+{
+    Ib b = { ibp, 0, cap, 0 };
+    uint32_t td[8];
+    A3dDraw d;
+
+    a3d_emit_head(&b, job->rt_mc, job->pitch_px, job->width, job->height, job->bgr);
+    d.x0 = job->x0; d.y0 = job->y0; d.x1 = job->x1; d.y1 = job->y1;
+    d.blend = (int)job->blend;
+    d.ps_mc = job->ps_mc;
+    d.ps_pos = job->textured || job->shadow_r;
+    /* VGPRS / SGPRS are counted in blocks of 4 / 8, minus 1: the textured shader uses v0 .. v11 (12) and 8 user SGPRs + the system
+     * ones, the shadow shader v0 .. v6 (8 VGPRs), the blur shader v0 .. v15 (16) */
+    d.ps_vgprs = job->blur_r ? 3u : job->textured ? 2u : job->shadow_r ? 1u : 0u;
+    d.ps_sgprs = job->textured ? 2u : 1u;
+    d.ps_user_n = 0;
+    d.ps_user = td;
+    if (job->textured) {          /* the image resource goes straight into the pixel shader's user SGPRs s0 .. s7 */
+        amd_3d_build_tex_desc(td, job);
+        d.ps_user_n = 8;
+    }
+    d.vs_mc = job->vs_mc;
+    d.vs_vgprs = 1;               /* v0 .. v7 */
+    d.vs_user_n = 0;
+    d.vs_user = 0;
+    a3d_emit_draw(&b, &d);
+    a3d_emit_tail(&b, job->sync_mc);
     return b.over ? 0 : b.n;
 }
 
@@ -672,6 +707,18 @@ static int submit_and_wait(uint32_t ndw, const char *what_failed_submit, const c
     return 0;
 }
 
+/* The default context state stream (the Linux clear-state table) through the IB page, waiting for its fence. 0 = done. */
+int a3d_default_state(void)
+{
+    static uint32_t ib[AMD_3D_DEFAULT_IB_MAX];
+    uint32_t i, nib = amd_3d_build_default_ib(ib, AMD_3D_DEFAULT_IB_MAX);
+    if (!nib) { status = "3D: default state stream does not fit"; return 1; }
+    for (i = 0; i < nib; i++) amd_gpu_ib_write32(i, ib[i]);
+    amd_gpu_ib_flush();
+    return submit_and_wait(nib, "3D FAILED: the ring did not take the default state stream",
+                           "3D FAILED: fence timeout in the default state stream");
+}
+
 /* Writes the shaders, runs the default state stream, then the draw stream, and waits for the fences. Returns 0 if the GPU did both. */
 static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
 {
@@ -690,13 +737,8 @@ static int run_job(const Amd3dJob *job_in, uint32_t vs_off, uint32_t ps_off)
     amd_gpu_wc_flush();   /* the shader code is in memory before any command that may fetch it */
 
     /* 1. the default context state */
-    nib = amd_3d_build_default_ib(ib, AMD_3D_DEFAULT_IB_MAX);
-    if (!nib) { status = "3D test skipped: default state stream does not fit"; return 1; }
-    for (i = 0; i < nib; i++) amd_gpu_ib_write32(i, ib[i]);
-    amd_gpu_ib_flush();
     val[AMD_3D_V_STAGE] = 3;
-    rc = submit_and_wait(nib, "3D test FAILED: the ring did not take the default state stream",
-                         "3D test FAILED: fence timeout in the default state stream");
+    rc = a3d_default_state();
     if (rc) return rc;
 
     /* 2. the draw */

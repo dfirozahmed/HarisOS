@@ -2,6 +2,7 @@
 #include "amd_gpu.h"
 #include "amd_native.h"
 #include "amd_3d.h"
+#include "amd_comp.h"
 #include "amd_psp.h"
 #include "amd_firmware.h"
 #include "gpu_log.h"
@@ -56,6 +57,33 @@ static void log_3d_result(int ok, int with_map)
             if (m) { serial_print("  map "); serial_print(m); serial_print("\n"); }
         }
     serial_print(ok ? "3D: PASS\n" : "3D: did not pass\n");
+}
+#endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 8
+/* 0: no compositor frame worked offscreen yet, 1: through the IB page, 2: through the frame IB too (the screen test uses it). */
+static int comp_ib_ok;
+
+/* The result of the last compositor test. */
+static void log_comp_result(int ok)
+{
+    serial_print("COMP: "); serial_print(amd_comp_status()); serial_print("\n");
+    log_hex("  scene pixels right    ", amd_comp_value(AMD_COMP_V_IN_GOOD));
+    log_hex("  scene pixels          ", amd_comp_value(AMD_COMP_V_IN_TOTAL));
+    log_hex("  pixels changed around ", amd_comp_value(AMD_COMP_V_OUT_BAD));
+    log_hex("  pixels around         ", amd_comp_value(AMD_COMP_V_OUT_TOTAL));
+    log_hex("  draws in the frame    ", amd_comp_value(AMD_COMP_V_DRAWS));
+    log_hex("  frame stream dwords   ", amd_comp_value(AMD_COMP_V_DWORDS));
+    log_hex("  CPU cycles submit .. fence", amd_comp_value(AMD_COMP_V_CYCLES));
+    if (!ok) {
+        log_hex("  first wrong pixel     ", amd_comp_value(AMD_COMP_V_FIRST_IN));
+        log_hex("  it should be          ", amd_comp_value(AMD_COMP_V_FIRST_IN + 1));
+        log_hex("  at x | y << 16        ", amd_comp_value(AMD_COMP_V_FIRST_IN + 2));
+        log_hex("  VM fault: GC status   ", amd_comp_value(AMD_COMP_V_FAULT_GC));
+        log_hex("  VM fault: GC addr lo  ", amd_comp_value(AMD_COMP_V_FAULT_GC + 1));
+        log_hex("  VM fault: GC addr hi  ", amd_comp_value(AMD_COMP_V_FAULT_GC + 2));
+        log_hex("  GRBM_STATUS (timeout) ", amd_comp_value(AMD_COMP_V_GRBM));
+    }
+    serial_print(ok ? "COMP: PASS\n" : "COMP: did not pass\n");
 }
 #endif
 
@@ -315,6 +343,7 @@ void amd_gpu_bringup_firmware(void)
  *   5  also the 3D pipeline (amd_3d.c, M1): one rectangle drawn by vertex + pixel shaders, offscreen first, then on the screen
  *   6  also the same rectangle textured from an image in VRAM (the pixel shader reads it with IMAGE_LOAD)
  *   7  also M3: alpha blending, a soft shadow and a 3 x 3 box blur, offscreen and on the screen
+ *   8  also M4a: the compositor (amd_comp.c): 3 windows with shadows composited in one submission, offscreen and on the screen
  * It must run BEFORE the GART step: the PSP is given physical addresses, which stop being valid once VMID0 translates.
  * Every step saves the log first, so a hang leaves the last line that was reached. */
 #ifndef HARIS_AMD_GPU_PSP_LEVEL
@@ -466,6 +495,28 @@ void amd_gpu_bringup_cp(void)
         }
     }
 #endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 8
+    /* M4a: the compositor. A background, 3 windows (surfaces the CPU fills) each with a soft shadow, the third partly transparent:
+     * 7 draws in ONE submission (one frame IB through the GART, fixed shaders with their parameters in user SGPRs). */
+    /* Step by step, stopping at the first failure (a frame that hangs the GPU stops the ring for the rest of the boot): through the
+     * 4 KiB IB page of the 3D tests the background alone, then with the shadows, then the whole scene; then the whole scene through
+     * the frame IB (128 KiB through the GART). The first one that fails says what to look at. */
+    if (ib_ok) {
+        static const char *const what[4] = { "the background fill (IB page)", "background + 3 shadows (IB page)",
+                                             "background + 3 shadows + 3 windows (IB page)",
+                                             "background + 3 shadows + 3 windows (frame IB through the GART)" };
+        for (int step = 0; step < 4; step++) {
+            serial_print("COMP: about to composite into a 512 x 256 buffer in VRAM: "); serial_print(what[step]); serial_print("\n");
+            amd_gpu_log_save();
+            int okc = amd_comp_test_offscreen(step < 3 ? step + 1 : 3, step == 3);
+            log_comp_result(okc);
+            amd_gpu_log_save();
+            if (!okc)
+                break;
+            comp_ib_ok = step == 3 ? 2 : 1;   /* 1: the IB page works, 2: the frame IB works too */
+        }
+    }
+#endif
 #endif
 }
 
@@ -556,6 +607,18 @@ int amd_gpu_bringup_screen(void)
             amd_gpu_log_save();
             result = 1; /* the screen was painted over: the caller redraws the desktop */
         }
+    }
+#endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 8
+    /* M4a on the screen: the composited scene in the top right corner, through whichever IB worked offscreen. */
+    if (comp_ib_ok) {
+        serial_print(comp_ib_ok == 2 ? "COMP: about to composite 3 windows with shadows into the screen (frame IB)\n"
+                                     : "COMP: about to composite 3 windows with shadows into the screen (IB page)\n");
+        amd_gpu_log_save();
+        log_comp_result(amd_comp_test_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
+                                             (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first(), comp_ib_ok == 2));
+        amd_gpu_log_save();
+        result = 1;
     }
 #endif
     return result;

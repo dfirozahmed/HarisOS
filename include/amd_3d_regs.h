@@ -60,6 +60,7 @@
 
 /* SH registers (SET_SH_REG) */
 #define R3D_SPI_SHADER_USER_DATA_PS_0                0x000c
+#define R3D_SPI_SHADER_USER_DATA_VS_0                0x004c
 #define R3D_SPI_SHADER_PGM_LO_PS                     0x0008
 #define R3D_SPI_SHADER_PGM_HI_PS                     0x0009
 #define R3D_SPI_SHADER_PGM_RSRC1_PS                  0x000a

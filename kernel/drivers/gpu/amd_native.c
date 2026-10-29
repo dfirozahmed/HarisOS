@@ -2246,6 +2246,33 @@ uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n)
     return seq;
 }
 
+/* The frame IB (M4 compositor): 128 KiB of VRAM at CP_FRAME_IB_VRAM_OFF, mapped through 32 GART pages from RG_FRAME_IDX on, the same
+   way as the IB page (cpib_pte_set + hub_invalidate), so the CP fetches it through VMID0 as it fetches every other IB. */
+#define CP_FRAME_IB_VRAM_OFF 0x0A100000u
+#define RG_FRAME_IDX         0x120u
+#define RG_FRAME_PAGES       32u
+static uint64_t rg_va_frame;
+
+uint64_t amd_gpu_frame_ib_va(void)
+{
+    uint32_t i;
+    if (rg_va_frame) return rg_va_frame;
+    if (!rg_up || rg_dead || !amd_native_gart_va()) return 0;
+    for (i = 0; i < RG_FRAME_PAGES; i++) {
+        uint64_t pa = amd_native_cp_vm_mc_addr(CP_FRAME_IB_VRAM_OFF + i * 0x1000u, 0x1000u);
+        if (!pa) return 0;
+        cpib_pte_set(RG_FRAME_IDX + i, pa, 0, 1);
+    }
+    if (!hub_invalidate(g_gart_mmio, &hub_gc)) return 0;
+    rg_va_frame = amd_native_gart_va() + (uint64_t)RG_FRAME_IDX * 0x1000ULL;
+    return rg_va_frame;
+}
+uint32_t amd_gpu_frame_ib_max_dwords(void) { return RG_FRAME_PAGES * 1024u; }
+void amd_gpu_frame_ib_write32(uint32_t dw, uint32_t v)
+{
+    if (dw < RG_FRAME_PAGES * 1024u) vram_wr32(CP_FRAME_IB_VRAM_OFF + 4u * dw, v);
+}
+
 /* IB slot k: WRITE_DATA(marker k) + NOP padding. */
 static void rg_build_slot(uint32_t k, uint32_t value)
 {
