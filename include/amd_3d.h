@@ -25,6 +25,8 @@ typedef struct
     uint32_t tex_off;      /* the same place as a VRAM byte offset (for the CPU) */
     uint32_t tex_pitch_px, tex_w, tex_h;
     uint64_t marker_mc;    /* 0, or the address of 8 bytes the stream writes a marker to before and after the draw (see amd_3d.c) */
+    /* M3: 1 = "over" alpha blending: result = colour * a / 255 + what is in the colour buffer * (255 - a) / 255 */
+    uint32_t blend;
 } Amd3dJob;
 
 #define AMD_3D_IB_MAX 600 /* dwords amd_3d_build_ib() can write at most */
@@ -69,6 +71,11 @@ uint32_t amd_3d_warmup_vs(int k);
 /* One tiny draw whose vertex shader stores what it computed: target 0 = system-RAM scratch through the GART, 1 = VRAM. out[0 .. 11]
  * slot 0 .. 3: v0, x, y; [12] draw right; [13 .. 16] VM fault GC status / lo / hi / MM status; [17] ring alive; [18], [19] address. */
 int amd_3d_vs_store_probe(int target, uint32_t out[20]);
+/* M3: the rectangle "over"-blended (alpha 128) on a background; the screen one white, alpha 64, just above the solid one. */
+int amd_3d_blend_offscreen(void);
+int amd_3d_blend_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
+/* "Over" blending of one pixel byte by byte (0x00RRGGBB): src * a / 255 + dst * (255 - a) / 255, rounded. */
+uint32_t amd_3d_blend_px(uint32_t src, uint32_t dst, uint32_t a);
 int amd_3d_rect_offscreen(void);
 int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 /* The same two, with the rectangle textured from an image in VRAM (M2). */

@@ -36,6 +36,12 @@
 #define E_SX_RT_EXPORT_8_8_8_8 5u
 #define E_8BIT_FORMAT_0_5 6u
 #define E_OPT_COMB_BLEND_DISABLED 6u
+#define E_OPT_COMB_ADD 1u
+#define E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 4u
+#define E_BLEND_OPT_PRESERVE_A0_IGNORE_A1 5u
+#define E_COMB_DST_PLUS_SRC 0u
+#define E_BLEND_SRC_ALPHA 4u
+#define E_BLEND_ONE_MINUS_SRC_ALPHA 5u
 #define E_CB_NORMAL 1u
 #define E_EARLY_Z_THEN_LATE_Z 1u
 #define E_PUNCHOUT_FORCE_OFF 2u
@@ -513,16 +519,36 @@ uint32_t amd_3d_build_ib(uint32_t *ibp, uint32_t cap, const Amd3dJob *job)
     ctx1(&b, R3D_CB_COLOR_CONTROL, (E_CB_NORMAL << F3D_CB_COLOR_CONTROL__MODE) | (0xCCu << F3D_CB_COLOR_CONTROL__ROP3));
     ctx1(&b, R3D_CB_TARGET_MASK, 0xF);
     ctx1(&b, R3D_CB_SHADER_MASK, 0xF);
-    ctx1(&b, R3D_CB_BLEND0_CONTROL, 0);
+    if (job->blend) {
+        /* M3: "over" blending, result = src * src_alpha + dst * (1 - src_alpha), as radeonsi si_create_blend_state_mode() sets it for
+         * PIPE_BLENDFACTOR_SRC_ALPHA / INV_SRC_ALPHA / PIPE_BLEND_ADD (alpha the same, so no SEPARATE_ALPHA_BLEND). RB+: SX_MRT0_BLEND_OPT
+         * from si_translate_blend_opt_factor() / _function(). Enum values: Mesa gfx9.json. */
+        ctx1(&b, R3D_CB_BLEND0_CONTROL, (1u << F3D_CB_BLEND0_CONTROL__ENABLE) |
+                                        (E_COMB_DST_PLUS_SRC << F3D_CB_BLEND0_CONTROL__COLOR_COMB_FCN) |
+                                        (E_BLEND_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_SRCBLEND) |
+                                        (E_BLEND_ONE_MINUS_SRC_ALPHA << F3D_CB_BLEND0_CONTROL__COLOR_DESTBLEND));
+    } else {
+        ctx1(&b, R3D_CB_BLEND0_CONTROL, 0);
+    }
     ctx1(&b, R3D_CB_DCC_CONTROL, (1u << F3D_CB_DCC_CONTROL__OVERWRITE_COMBINER_MRT_SHARING_DISABLE) |
                                  (4u << F3D_CB_DCC_CONTROL__OVERWRITE_COMBINER_WATERMARK));
-    ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
-                                    (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
+    if (job->blend)
+        ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__COLOR_SRC_OPT) |
+                                        (E_BLEND_OPT_PRESERVE_A0_IGNORE_A1 << F3D_SX_MRT0_BLEND_OPT__COLOR_DST_OPT) |
+                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
+                                        (E_BLEND_OPT_PRESERVE_A1_IGNORE_A0 << F3D_SX_MRT0_BLEND_OPT__ALPHA_SRC_OPT) |
+                                        (E_BLEND_OPT_PRESERVE_A0_IGNORE_A1 << F3D_SX_MRT0_BLEND_OPT__ALPHA_DST_OPT) |
+                                        (E_OPT_COMB_ADD << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
+    else
+        ctx1(&b, R3D_SX_MRT0_BLEND_OPT, (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__COLOR_COMB_FCN) |
+                                        (E_OPT_COMB_BLEND_DISABLED << F3D_SX_MRT0_BLEND_OPT__ALPHA_COMB_FCN));
     put(&b, PKT3(OP_SET_CONTEXT_REG, 3));
     put(&b, R3D_SX_PS_DOWNCONVERT);
     put(&b, E_SX_RT_EXPORT_8_8_8_8);               /* SX_PS_DOWNCONVERT, MRT0 */
     put(&b, E_8BIT_FORMAT_0_5);                    /* SX_BLEND_OPT_EPSILON, MRT0 */
-    put(&b, 0);                                    /* SX_BLEND_OPT_CONTROL */
+    /* SX_BLEND_OPT_CONTROL: the target keeps no alpha (FORCE_DST_ALPHA_1), so, like Mesa ac_set_sx_downconvert_state_for_mrt(), the
+     * SX must not use the alpha channel when it decides to skip blending */
+    put(&b, 1u << F3D_SX_BLEND_OPT_CONTROL__MRT0_ALPHA_OPT_DISABLE);
     ctx1(&b, R3D_DB_DEPTH_CONTROL, 0);             /* no depth test */
     ctx1(&b, R3D_DB_SHADER_CONTROL, E_EARLY_Z_THEN_LATE_Z << F3D_DB_SHADER_CONTROL__Z_ORDER);
 
@@ -703,6 +729,29 @@ static char map[16][33];  /* a coarse picture of the offscreen buffer after the 
 const char *amd_3d_map_row(int row) { return (row >= 0 && row < 16 && map[row][0]) ? map[row] : 0; }
 
 /* two 8 bit channel triples differ by at most 1 in each channel (the colour goes through half floats and back) */
+/* Every colour byte of a and b within tol of each other (the X byte is not compared). */
+static int near_px(uint32_t a, uint32_t b, int tol)
+{
+    int s;
+    for (s = 0; s < 24; s += 8) {
+        int d = (int)((a >> s) & 0xFFu) - (int)((b >> s) & 0xFFu);
+        if (d > tol || d < -tol) return 0;
+    }
+    return 1;
+}
+
+/* "Over" blending of one 8-8-8-8 pixel, byte by byte: src * a / 255 + dst * (255 - a) / 255, rounded. The GPU blends from the FP16 export
+ * (a / 255 rounded toward zero) and its own rounding, so the check allows a difference of 2 (near_px). */
+uint32_t amd_3d_blend_px(uint32_t src, uint32_t dst, uint32_t a)
+{
+    uint32_t out = 0, s;
+    for (s = 0; s < 24; s += 8) {
+        uint32_t cs = (src >> s) & 0xFFu, cd = (dst >> s) & 0xFFu;
+        out |= ((cs * a + cd * (255u - a) + 127u) / 255u) << s;
+    }
+    return out;
+}
+
 static int close_px(uint32_t a, uint32_t b)
 {
     int s;
@@ -785,12 +834,15 @@ static int draw_once(Amd3dJob *job, uint32_t base_off, uint32_t margin, uint32_t
     expect = (px_r << 16) | (px_g << 8) | px_b;               /* memory dword 0x00RRGGBB, the X byte is not compared */
     if (!job->bgr)
         expect = (px_b << 16) | (px_g << 8) | px_r;
+    if (job->blend)                                           /* M3: what "over" blending onto the pattern gives */
+        expect = amd_3d_blend_px(expect, pattern, job->a);
     for (y = cy0; y < cy1; y++)
         for (x = cx0; x < cx1; x++) {
             uint32_t v = amd_gpu_vram_read32(base_off + (y * job->pitch_px + x) * 4u) & 0x00FFFFFFu;
             if (x >= job->x0 && x < job->x1 && y >= job->y0 && y < job->y1) {
                 in_total++;
-                if (job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu) : v == expect) in_good++;
+                if (job->textured ? close_px(v, amd_3d_texel(job, x - job->x0, y - job->y0) & 0x00FFFFFFu)
+                                  : job->blend ? near_px(v, expect, 2) : v == expect) in_good++;
                 else if (!first_in) first_in = v | 0x01000000u;
             } else {
                 out_total++;
@@ -1061,12 +1113,55 @@ int amd_3d_rect_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, u
     return draw_and_check(&job, (uint32_t)off64, 8, 0x00112233u, 0);
 }
 
+/* ---- M3: alpha blending ----
+ * The same solid rectangle, but half transparent (a = 128) over a background the CPU wrote: every pixel inside must be
+ * colour * 128/255 + background * 127/255 (within 2 per byte), every pixel outside the untouched background. */
+int amd_3d_blend_offscreen(void)
+{
+    Amd3dJob job = { 0 };
+    if (!amd_gpu_ring_running()) { status = "3D blend test skipped: the persistent ring is not running"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc) { status = "3D blend test skipped: no MC address for the test memory"; return 0; }
+    job.pitch_px = RT_W; job.width = RT_W; job.height = RT_H;
+    job.bgr = 1;
+    job.x0 = 32; job.y0 = 16; job.x1 = 224; job.y1 = 48;
+    job.r = 255; job.g = 128; job.b = 0; job.a = 128;
+    job.blend = 1;
+    return draw_and_check(&job, VRAM_RT_OFF, 256, 0x00204060u, 1);
+}
+
+/* The same on the screen, next to the solid rectangle: a white, 3/4 transparent (a = 64) rectangle over the background. */
+int amd_3d_blend_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
+{
+    Amd3dJob job = { 0 };
+    uint64_t off64;
+    if (!amd_gpu_ring_running()) { status = "3D blend screen test skipped: the persistent ring is not running"; return 0; }
+    if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 200 || fb_phys < vram_cpu) {
+        status = "3D blend screen test skipped: bad framebuffer info"; return 0; }
+    off64 = fb_phys - vram_cpu;
+    if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_SHADER_OFF) {
+        status = "3D blend screen test skipped: the framebuffer reaches the test memory"; return 0; }
+    job.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
+    job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
+    job.ps_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF + 0x100u, 0x100u);
+    if (!job.rt_mc || !job.vs_mc || !job.ps_mc) { status = "3D blend screen test skipped: no MC address"; return 0; }
+    job.pitch_px = pitch_bytes / 4u; job.width = width; job.height = height;
+    job.bgr = bgr;
+    job.x0 = width / 2 - 200; job.x1 = width / 2 + 200;
+    job.y0 = height - 160; job.y1 = height - 128;
+    job.r = 255; job.g = 255; job.b = 255; job.a = 64;
+    job.blend = 1;
+    return draw_and_check(&job, (uint32_t)off64, 8, 0x00204060u, 0);
+}
+
 /* ---- M2: the rectangle textured from an image in VRAM ---- */
 #define VRAM_TEX_OFF 0x0B200000u
 
 int amd_3d_tex_offscreen(void)
 {
-    Amd3dJob job;
+    Amd3dJob job = { 0 };
     if (!amd_gpu_ring_running()) { status = "3D texture test skipped: the persistent ring is not running"; return 0; }
     job.rt_mc = amd_native_vram_mc_addr(VRAM_RT_OFF, RT_W * RT_H * 4u);
     job.vs_mc = amd_native_vram_mc_addr(VRAM_SHADER_OFF, 0x200u);
@@ -1085,7 +1180,7 @@ int amd_3d_tex_offscreen(void)
 
 int amd_3d_tex_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr)
 {
-    Amd3dJob job;
+    Amd3dJob job = { 0 };
     uint64_t off64;
     if (!amd_gpu_ring_running()) { status = "3D texture screen test skipped: the persistent ring is not running"; return 0; }
     if (!pitch_bytes || (pitch_bytes & 3u) || width < 600 || height < 200 || fb_phys < vram_cpu) {

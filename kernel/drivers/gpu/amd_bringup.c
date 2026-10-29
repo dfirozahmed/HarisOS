@@ -621,6 +621,17 @@ void amd_gpu_bringup_cp(void)
         amd_gpu_log_save();
     }
 #endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 8
+    /* M3a: alpha blending. The solid rectangle with alpha 128, "over" a background: CB_BLEND0_CONTROL SRC_ALPHA / ONE_MINUS_SRC_ALPHA. */
+    if (ib_ok) {
+        serial_print("3D: about to draw an alpha-blended rectangle (alpha 128) into an offscreen buffer\n");
+        amd_gpu_log_save();
+        int ok3db = amd_3d_blend_offscreen();
+        log_3d_result(ok3db, 1);
+        log_hex("  expected inside (0x00RRGGBB)", amd_3d_blend_px(0x00FF8000u, 0x00204060u, 128));
+        amd_gpu_log_save();
+    }
+#endif
 #if HARIS_AMD_GPU_PSP_LEVEL >= 7
     /* Shader stores. On 2026-10-29 a vertex shader store to VRAM faulted (WRITE, MAPPING_ERROR) and, with SH_MEM_CONFIG = 0
      * (RETRY_DISABLE = 0), retried forever: the GPU hung. Linux gfx_v9_0_constants_init() sets RETRY_DISABLE (bit 12,
@@ -761,6 +772,17 @@ int amd_gpu_bringup_screen(void)
         log_3d_result(ok3dt, 0);
         amd_gpu_log_save();
         result = 1;
+    }
+#endif
+#if HARIS_AMD_GPU_PSP_LEVEL >= 8
+    /* M3b: a white, 3/4 transparent rectangle blended over a background on the screen, just above the solid one. */
+    {
+        serial_print("3D: about to draw an alpha-blended rectangle into the screen\n");
+        amd_gpu_log_save();
+        int ok3db = amd_3d_blend_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
+                                        (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first());
+        log_3d_result(ok3db, 0);
+        amd_gpu_log_save();
     }
 #endif
     return result;

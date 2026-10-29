@@ -71,7 +71,7 @@ int main(void)
 {
     static uint32_t ib[AMD_3D_IB_MAX], vs[AMD_3D_VS_MAX], ps[AMD_3D_PS_MAX];
     Amd3dJob job = { 0x4100000000ULL + 0x0E100000ULL, 256, 256, 64, 1, 32, 16, 224, 48, 255, 128, 0, 255,
-                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL, 0, 0, 0, 0, 0, 0, 0 };
+                     0x4100000000ULL + 0x0E000000ULL, 0x4100000000ULL + 0x0E000100ULL, 0, 0, 0, 0, 0, 0, 0, 0 };
     uint32_t i, n, cnt;
     const uint32_t *p;
 
@@ -330,6 +330,30 @@ int main(void)
     check(a3d_vop2(A3D_OP2_LSHLREV_B32, 7, 7, A3D_SRC_INT(5)) == 0x240E0E85u, "v_lshlrev_b32 v7, 5, v7 = 0x240E0E85");
     check(a3d_vop2(A3D_OP2_ADD_CO_U32, 8, 7, A3D_SRC_LITERAL) == 0x32100EFFu, "v_add_co_u32 v8, vcc, literal, v7 = 0x32100EFF");
     check(a3d_vop2(A3D_OP2_ADDC_CO_U32, 9, 10, A3D_SRC_LITERAL) == 0x381214FFu, "v_addc_co_u32 v9, vcc, literal, v10, vcc = 0x381214FF");
+
+    /* M3 alpha blending: the CB / SX blend registers as radeonsi sets them for SRC_ALPHA / INV_SRC_ALPHA / ADD (values: Mesa gfx9.json) */
+    {
+        static uint32_t bib[AMD_3D_IB_MAX];
+        Amd3dJob bj = job;
+        uint32_t bn, cnt = 0;
+        const uint32_t *bc, *bo, *bx;
+        bj.blend = 1; bj.a = 128;
+        bn = amd_3d_build_ib(bib, AMD_3D_IB_MAX, &bj);
+        bc = find_set(bib, bn, 0x69, R3D_CB_BLEND0_CONTROL, &cnt);
+        check(bc && bc[0] == ((1u << 30) | (0u << 5) | (4u << 0) | (5u << 8)),
+              "blend: CB_BLEND0_CONTROL = ENABLE, COMB_DST_PLUS_SRC, SRCBLEND SRC_ALPHA (4), DESTBLEND ONE_MINUS_SRC_ALPHA (5)");
+        bo = find_set(bib, bn, 0x69, R3D_SX_MRT0_BLEND_OPT, &cnt);
+        check(bo && bo[0] == (4u | (5u << 4) | (1u << 8) | (4u << 16) | (5u << 20) | (1u << 24)),
+              "blend: SX_MRT0_BLEND_OPT = PRESERVE_A1_IGNORE_A0 / PRESERVE_A0_IGNORE_A1 / OPT_COMB_ADD for colour and alpha");
+        bx = find_set(bib, bn, 0x69, R3D_SX_PS_DOWNCONVERT, &cnt);
+        check(bx && cnt >= 3 && bx[2] == 2u, "SX_BLEND_OPT_CONTROL = MRT0_ALPHA_OPT_DISABLE (the target keeps no alpha)");
+        bj.blend = 0;
+        bn = amd_3d_build_ib(bib, AMD_3D_IB_MAX, &bj);
+        bc = find_set(bib, bn, 0x69, R3D_CB_BLEND0_CONTROL, &cnt);
+        check(bc && bc[0] == 0, "no blend: CB_BLEND0_CONTROL = 0");
+        check(amd_3d_blend_px(0x00FF8000u, 0x00204060u, 128) == 0x00906030u && amd_3d_blend_px(0x00FFFFFFu, 0x00000000u, 255) == 0x00FFFFFFu &&
+              amd_3d_blend_px(0x00FFFFFFu, 0x00123456u, 0) == 0x00123456u, "blend_px: 0xFF8000 over 0x204060 at 128 = 0x906030; a 255 / 0");
+    }
 
     /* PA_SC_RASTER_CONFIG / _1: outside the clear-state table, so the draw stream itself writes both (0, as Mesa's GFX9 default) */
     {
