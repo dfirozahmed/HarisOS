@@ -100,10 +100,20 @@ void wm_comp_content_screen_internal(int x0, int y0, int x1, int y1)
     }
 }
 
+/* Apps ask with wm_invalidate() for their own window to be drawn again: everything a window shows (its look, when it
+ * changed, the signature catches). */
 void wm_comp_all_internal(void)
 {
     for (int i = 0; i < WMC_MAX; i++)
-        WMC[i].full = 1;
+    {
+        Wmc *c = &WMC[i];
+        if (!c->id || c->full || !c->surf)
+            continue;
+        c->dirty = 1;
+        c->dx0 = c->dy0 = 0;
+        c->dx1 = c->lw - 2 * c->m;
+        c->dy1 = c->lh - 2 * c->m;
+    }
 }
 
 /* Everything the window's look depends on besides its content. */
@@ -132,7 +142,8 @@ static unsigned signature(const Window *w, int i, int top)
     return h;
 }
 
-/* The window drawn at (m, m) of a buffer: once over black and once over white, packed (see gfx_layer_pack). */
+/* The whole window and its shadow drawn into a buffer (its corner at (m, m)): once over black and once over white, packed
+ * (see gfx_layer_pack). Only when its look changed (or its surface is new): content changes take one pass (wm_comp_update). */
 static int draw_layer(Window *w, int i, int top, Wmc *c, void *a, void *b)
 {
     void *buf[2] = {a, b};
@@ -148,16 +159,23 @@ static int draw_layer(Window *w, int i, int top, Wmc *c, void *a, void *b)
     return 0;
 }
 
-/* Is [x0,x1) x [y0,y1) (relative to the window) where the window is opaque for sure: inside it, away from the
- * rounded corners and the outline? There a single drawing pass gives the final pixels. */
-static int opaque_part(const Window *w, int x0, int y0, int x1, int y1)
+/* Where the window is opaque for sure (relative to its corner), as up to 3 rectangles x0, y0, x1, y1: inside it, away
+ * from the rounded corners and the 1-pixel outline. There one drawing pass gives the final pixels; what is outside them
+ * (the shadow, the corners, the outline) only changes with the window's look, and then the whole layer is drawn again.
+ * Returns how many. */
+static int opaque_rects(const Window *w, int out[3][4])
 {
-    if (w->maximized)
-        return 1; /* flat: no corners, no outline, no shadow */
+    int ww = w->r.w, hh = w->r.h;
+    if (w->maximized) /* flat: no corners, no outline, no shadow */
+    {
+        out[0][0] = 0; out[0][1] = 0; out[0][2] = ww; out[0][3] = hh;
+        return 1;
+    }
     int r = ui_theme()->radius_l + 2;
-    int in_a = x0 >= r && x1 <= w->r.w - r && y0 >= 1 && y1 <= w->r.h - 1;
-    int in_b = x0 >= 1 && x1 <= w->r.w - 1 && y0 >= r && y1 <= w->r.h - r;
-    return in_a || in_b;
+    out[0][0] = r;      out[0][1] = 1; out[0][2] = ww - r; out[0][3] = hh - 1;  /* the middle, top to bottom */
+    out[1][0] = 1;      out[1][1] = r; out[1][2] = r;      out[1][3] = hh - r;  /* the left strip between the corners */
+    out[2][0] = ww - r; out[2][1] = r; out[2][2] = ww - 1; out[2][3] = hh - r;  /* the right one */
+    return 3;
 }
 
 int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long bytes)
@@ -198,8 +216,6 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         c->m = m;
         if (sig != c->sig)
             c->full = 1;
-        if (c->dirty && !c->full && !opaque_part(w, c->dx0, c->dy0, c->dx1, c->dy1))
-            c->full = 1;
         if (c->full)
         {
             if (draw_layer(w, i, top, c, a, b) != 0 || ops->upload(c->surf, a, lw, 0, 0, lw, lh, 0) != 0)
@@ -208,15 +224,24 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         }
         else if (c->dirty)
         {
-            /* one pass over whatever the buffer holds, only inside the changed part; that part is opaque */
-            int x0 = c->dx0 + m, y0 = c->dy0 + m, cw = c->dx1 - c->dx0, ch = c->dy1 - c->dy0;
+            /* The look is the same, only what it shows changed: one pass over whatever the buffer holds, inside the
+             * changed part, and of that only the opaque pieces go up (the shadow and the corners stay as they are) */
+            int op[3][4], no = opaque_rects(w, op);
             if (gfx_layer_begin_at_keep(a, w->r.x - m, w->r.y - m, lw, lh) != 0)
                 return -1;
-            gfx_clip_intersect(w->r.x + c->dx0, w->r.y + c->dy0, cw, ch);
+            gfx_clip_intersect(w->r.x + c->dx0, w->r.y + c->dy0, c->dx1 - c->dx0, c->dy1 - c->dy0);
             wm_draw_window_internal(w, i, top);
             gfx_layer_end();
-            if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, cw, ch, 1) != 0)
-                return -1;
+            for (int k = 0; k < no; k++)
+            {
+                int x0 = op[k][0] > c->dx0 ? op[k][0] : c->dx0, y0 = op[k][1] > c->dy0 ? op[k][1] : c->dy0;
+                int x1 = op[k][2] < c->dx1 ? op[k][2] : c->dx1, y1 = op[k][3] < c->dy1 ? op[k][3] : c->dy1;
+                if (x1 <= x0 || y1 <= y0)
+                    continue;
+                x0 += m; y0 += m; x1 += m; y1 += m; /* in the layer */
+                if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, x1 - x0, y1 - y0, 1) != 0)
+                    return -1;
+            }
             DRAWN_PART++;
         }
         c->sig = sig;

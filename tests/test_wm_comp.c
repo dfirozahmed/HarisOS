@@ -68,27 +68,32 @@ int main(void){
   assert(UP_OPAQUE && UP_X==50+M && UP_Y==80+M && UP_W==100 && UP_H==40);
   assert(LAST_BODY.x==w->r.x+1);                             /* the part was drawn where the window is now */
   { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1); }
-  /* a part reaching a rounded corner: the whole layer again */
-  wm_add_damage(ui_rect(w->r.x,w->r.y+w->r.h-R,R,R));
-  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==3 && !UP_OPAQUE && UP_W==400+2*M);
+  /* a part reaching the bottom-left corner: still one pass; only its opaque pieces go up (the middle, the left strip) */
+  wm_add_damage(ui_rect(w->r.x,w->r.y+w->r.h-60,60,60));
+  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==4 && UP_OPAQUE);
+  assert(UP_X==1+M && UP_Y==w->r.h-60+M && UP_W==R-1 && UP_H==60-R);   /* the left strip, above the corner */
+  { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1); }
   /* the taskbar or a menu changed (screen only): no window is drawn */
   wm_add_screen_damage(ui_rect(w->r.x,w->r.y,w->r.w,w->r.h));
-  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==3);
+  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==4);
   /* a second window: new surface; the first one loses the focus, so it is drawn again too */
   Window*w2=wm_create("Two",500,300,300,200,draw,0);
-  assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==2 && UPLOADS==5);
+  assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==2 && UPLOADS==6);
   assert(wm_comp_items(items,8)==2 && items[1].surface==2);   /* back to front */
   /* raising the first one: both change their look (focus) */
   wm_raise(w);
-  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==7);
+  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==8);
   assert(wm_comp_items(items,8)==2 && items[1].surface==1);
   /* closing the second: its surface is freed */
   wm_close(w2);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==1 && FREED_ID==2);
+  { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==4 && cp==0); }  /* two windows drawn whole twice (a new one; the focus) */
   int up = UPLOADS;
-  /* an app asks for everything again */
+  /* an app asks for everything again: its look is the same, so one pass and the three opaque pieces, no shadow */
   wm_invalidate();
-  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up+1);
+  assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up+3 && UP_OPAQUE);
+  assert(UP_X==w->r.w-R+M && UP_Y==R+M && UP_W==R-1 && UP_H==w->r.h-2*R);   /* the right strip */
+  { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1); }
   /* resized: a new surface of the new size */
   wm_pointer(w->r.x+w->r.w-2,w->r.y+w->r.h-2,1); wm_pointer(w->r.x+w->r.w+38,w->r.y+w->r.h+18,1); wm_pointer(0,0,0);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==1 && SW[NEXT_ID-1]==w->r.w+2*M && SH[NEXT_ID-1]==w->r.h+2*M);
