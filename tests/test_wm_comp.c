@@ -95,7 +95,7 @@ int main(void){
   /* a part reaching the bottom-left corner: still one pass; only its opaque pieces go up (the middle, the left strip) */
   wm_add_damage(ui_rect(w->r.x,w->r.y+w->r.h-60,60,60));
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==4 && UP_OPAQUE);
-  assert(UP_X==1+M && UP_Y==w->r.h-60+M && UP_W==R-1 && UP_H==60-R);   /* the left strip, above the corner */
+  assert(UP_X==1+M && UP_Y==w->r.h-60+M && UP_W==R-1 && UP_H==60-(R-1));   /* the left strip, above the corner */
   { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1); }
   /* the taskbar or a menu changed (screen only): no window is drawn */
   wm_add_screen_damage(ui_rect(w->r.x,w->r.y,w->r.w,w->r.h));
@@ -116,7 +116,7 @@ int main(void){
   /* an app asks for everything again: its look is the same, so one pass and the three opaque pieces, no shadow */
   wm_invalidate();
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up+3 && UP_OPAQUE);
-  assert(UP_X==w->r.w-R+M && UP_Y==R+M && UP_W==R-1 && UP_H==w->r.h-2*R);   /* the right strip */
+  assert(UP_X==w->r.w-R+M && UP_Y==(R-1)+M && UP_W==R-1 && UP_H==w->r.h-2*(R-1));   /* the right strip */
   { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==0 && cp==1); }
   /* resized: a new surface of the new size */
   wm_pointer(w->r.x+w->r.w-2,w->r.y+w->r.h-2,1); wm_pointer(w->r.x+w->r.w+38,w->r.y+w->r.h+18,1); wm_pointer(0,0,0);
@@ -194,6 +194,19 @@ int main(void){
     /* nothing there: no window holds the rectangle */
     assert(gfx_scroll_rect(1000,630,10,5,2)==-1 && SCROLLS==3);
     gfx_scroll_hook(0); gfx_backbuffer_detach(0);
+  }
+  /* the pointer on a title-bar button (hover look): one pass over the title bar, not the whole layer twice */
+  { Window*t=wm_top(); unsigned cf, cp;
+    wm_pointer(0,0,0);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0); wm_comp_counts(&cf,&cp);
+    int up=UPLOADS, tb=ui_theme()->titlebar_h;
+    wm_pointer(t->r.x+t->r.w-22, t->r.y+tb/2, 0);   /* on the close button */
+    assert(wm_comp_update(&OPS,a,b,bytes)==0); wm_comp_counts(&cf,&cp);
+    assert(cf==0 && cp==1 && UPLOADS>up && UP_OPAQUE);
+    assert(UP_Y>=M && UP_Y+UP_H<=M+tb);                       /* inside the title bar */
+    wm_pointer(0,0,0);                                         /* off it again: the same */
+    assert(wm_comp_update(&OPS,a,b,bytes)==0); wm_comp_counts(&cf,&cp);
+    assert(cf==0 && cp==1);
   }
   puts("wm compositor tests passed");
   return 0;

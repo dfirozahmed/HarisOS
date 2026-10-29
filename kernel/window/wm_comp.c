@@ -243,8 +243,7 @@ static unsigned signature(const Window *w, int i, int top)
     MIX(w->dialog);
     MIX(w->fixed_size);
     MIX(i == top);
-    MIX(wm_titlebtn_hover(w) + 8);
-    MIX(wm_titlebtn_pressed(w) + 8);
+    /* not the title-bar buttons' hover / press: those are drawn again as a change of the title bar (wm_input.c damage_titlebar) */
     MIX((unsigned)(unsigned long long)ui_theme());
     for (const char *s = w->title; *s; s++)
         MIX(*s);
@@ -287,10 +286,12 @@ static int opaque_rects(const Window *w, int out[3][4])
         out[0][0] = 0; out[0][1] = 0; out[0][2] = ww; out[0][3] = hh;
         return 1;
     }
-    int r = ui_theme()->radius_l + 2;
+    /* r: columns kept away from the sides near the corners (radius + 2: the curve and its smoothing); c: rows the curve takes
+     * at the top and the bottom (radius + 1); below and above them the sides are straight, opaque but for the 1-pixel outline */
+    int r = ui_theme()->radius_l + 2, c = ui_theme()->radius_l + 1;
     out[0][0] = r;      out[0][1] = 1; out[0][2] = ww - r; out[0][3] = hh - 1;  /* the middle, top to bottom */
-    out[1][0] = 1;      out[1][1] = r; out[1][2] = r;      out[1][3] = hh - r;  /* the left strip between the corners */
-    out[2][0] = ww - r; out[2][1] = r; out[2][2] = ww - 1; out[2][3] = hh - r;  /* the right one */
+    out[1][0] = 1;      out[1][1] = c; out[1][2] = r;      out[1][3] = hh - c;  /* the left strip between the corners */
+    out[2][0] = ww - r; out[2][1] = c; out[2][2] = ww - 1; out[2][3] = hh - c;  /* the right one */
     return 3;
 }
 

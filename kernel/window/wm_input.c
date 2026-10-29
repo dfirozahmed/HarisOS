@@ -70,10 +70,16 @@ int wm_titlebtn_pressed(const Window *w)
                                                      : -1;
 }
 
+/* A title-bar button of w changed look (hover, press): its title bar is drawn again. For the compositor that is a change of what
+ * the window shows there (one pass over the title bar), not of its look: the buttons lie inside its opaque part. */
 static void damage_titlebar(const Window *w)
 {
-    if (w && wm_z_index_internal(w) >= 0)
-        wm_damage_internal(w->r.x, w->r.y, w->r.x + w->r.w, w->r.y + ui_theme()->titlebar_h);
+    if (!w || wm_z_index_internal(w) < 0)
+        return;
+    int x0 = w->r.x, y0 = w->r.y, x1 = w->r.x + w->r.w, y1 = w->r.y + ui_theme()->titlebar_h;
+    wm_comp_why_internal(WM_WHY_BUTTONS);
+    wm_comp_content_internal(w, x0, y0, x1, y1);
+    wm_damage_internal(x0, y0, x1, y1);
 }
 
 /* find the button under the pointer and redraw the title bars whose buttons changed look */
