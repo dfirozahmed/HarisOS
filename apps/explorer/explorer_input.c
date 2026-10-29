@@ -9,6 +9,24 @@ static int on_divider(const Layout *l, int x, int y)
     return x >= edge - SIDE_GRAB && x < edge + SIDE_GRAB && y >= l->side.y && y < l->side.y + l->side.h;
 }
 
+/* Mark list row `row` (an index into the items) to be drawn again, if it is in view. */
+static void mark_row(const Layout *l, int row)
+{
+    int i = row - EX_SCROLL;
+    if (row < 0 || i < 0 || i > ex_visible_rows(l))
+        return;
+    int top = l->list.y + i * ROW_H, bottom = top + ROW_H;
+    if (bottom > l->list.y + l->list.h)
+        bottom = l->list.y + l->list.h;
+    wm_add_damage(ui_rect(l->list.x, top, l->list.w, bottom - top));
+}
+
+/* a row is selected that the toolbar's Cut / Copy / Rename / Delete work on (see ex_sync_buttons) */
+static int has_selection(void)
+{
+    return EX_SEL >= 0 && EX_SEL < EX_NITEMS && !ex_is_drive(vfs_node(EX_ITEMS[EX_SEL]));
+}
+
 /* pointer shape: a left-right double arrow on the divider, and for as long as it is being dragged */
 int ex_cursor(Window *w, int x, int y)
 {
@@ -25,6 +43,7 @@ int ex_press(Window *w, int x, int y)
     UiRect body = wm_content(w);
     Layout l = ex_layout(body);
 
+    int tip_was_shown = EX_TIP_SHOWN;
     EX_TIP_BTN = -1; /* a click hides the tooltip until the pointer moves again */
     EX_TIP_SHOWN = 0;
     if (EX_MENU.open) /* a click on an item runs it; a click anywhere else only closes the menu */
@@ -115,13 +134,25 @@ int ex_press(Window *w, int x, int y)
     int double_click = row == EX_LAST_ROW && now - EX_LAST_CLICK_MS <= DOUBLE_CLICK_MS;
     EX_LAST_ROW = row;
     EX_LAST_CLICK_MS = now;
+    int old_sel = EX_SEL, old_scroll = EX_SCROLL, had = has_selection();
     ex_select_row(body, row);
     if (double_click)
     {
         EX_LAST_ROW = -1;
         ex_open_item(row);
+        return 1;
     }
-    return 1;
+    /* A plain selection: only the row that lost it, the row that got it and the status bar (it names the selection)
+     * look different; the toolbar too when Cut / Copy / Rename / Delete become usable or not. The whole window is
+     * drawn again only when the list scrolled or a tooltip was showing (the click hid it). */
+    if (EX_SCROLL != old_scroll || tip_was_shown)
+        return 1;
+    mark_row(&l, old_sel);
+    mark_row(&l, row);
+    wm_add_damage(l.status);
+    if (has_selection() != had)
+        wm_add_damage(l.toolbar);
+    return 2;
 }
 
 /* holding the button after a press in the rename field selects text */
@@ -225,17 +256,10 @@ int ex_hover(Window *w, int x, int y)
     /* Only the highlight of a row or sidebar entry moved: redraw just those. A row's pixels are where the row is
      * now, also after the list scrolled (they moved with it). */
     Layout l = ex_layout(wm_content(w));
-    int vis = ex_visible_rows(&l);
-    int rows[2] = {old_row, EX_HOVER_ROW};
-    for (int k = 0; k < 2 && old_row != EX_HOVER_ROW; k++)
+    if (old_row != EX_HOVER_ROW)
     {
-        int i = rows[k] - EX_SCROLL;
-        if (rows[k] < 0 || i < 0 || i > vis)
-            continue;
-        int top = l.list.y + i * ROW_H, bottom = top + ROW_H;
-        if (bottom > l.list.y + l.list.h)
-            bottom = l.list.y + l.list.h;
-        wm_add_damage(ui_rect(l.list.x, top, l.list.w, bottom - top));
+        mark_row(&l, old_row);
+        mark_row(&l, EX_HOVER_ROW);
     }
     if (old_place != EX_HOVER_PLACE)
         wm_add_damage(l.side);
