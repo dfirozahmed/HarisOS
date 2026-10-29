@@ -24,6 +24,14 @@ static int LAST_BLINK[CONSOLE_MAX]; /* by console slot (the low 8 bits of a hand
 
 static int handle_of(const Window *w) { return (int)(unsigned long long)w->user; }
 
+/* How many text rows fit in the body, and the height of one. */
+static int grid_rows(UiRect body, int *line_h)
+{
+    *line_h = font_line_height(&font_ui_14) + 2;
+    int rows = (body.h - 2 * PAD) / *line_h;
+    return rows < 1 ? 1 : rows;
+}
+
 static void draw(Window *w, UiRect body)
 {
     int con = handle_of(w);
@@ -31,10 +39,8 @@ static void draw(Window *w, UiRect body)
     UiRgb text_rgb = ui_rgb(220, 224, 232);
     GfxColor text_color = ui_color(text_rgb);
     const Font *f = &font_ui_14;
-    int line_h = font_line_height(f) + 2;
-    int rows = (body.h - 2 * PAD) / line_h;
-    if (rows < 1)
-        rows = 1;
+    int line_h;
+    int rows = grid_rows(body, &line_h);
 
     /* The newest row is at the bottom: row `back` rows above the one with the cursor is drawn (rows - 1 - back) lines down. */
     char text[CONSOLE_COLS + 1];
@@ -85,16 +91,24 @@ static void on_key(Window *w, const KeyEvent *k)
 static int on_tick(Window *w)
 {
     int con = handle_of(w);
-    int changed = console_dirty(con); /* the program printed something */
+    int printed = console_dirty(con); /* the program printed something: the rows may all have moved up */
     int blink = (int)((timer_ms() / 500) & 1);
     int *last = &LAST_BLINK[con & 255];
+    int cursor = 0;
     if (blink != *last)
     {
         *last = blink; /* the cursor turns on or off */
-        if (console_cursor_col(con) >= 0)
-            changed = 1;
+        cursor = console_cursor_col(con) >= 0;
     }
-    return changed;
+    if (printed)
+        return 1;
+    if (!cursor)
+        return 0;
+    /* Only the cursor blinked: it is in the bottom row, so only that row is drawn again (not the whole window). */
+    UiRect body = wm_content(w);
+    int line_h, rows = grid_rows(body, &line_h);
+    wm_add_damage(ui_rect(body.x, body.y + PAD + (rows - 1) * line_h, body.w, line_h));
+    return 2;
 }
 
 static void on_close(Window *w) { console_close(handle_of(w)); }
