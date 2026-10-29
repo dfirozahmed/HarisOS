@@ -29,6 +29,8 @@ void amd_gpu_fault_clear(void) {}
 uint64_t amd_gpu_frame_ib_va(void) { return 0; }
 uint32_t amd_gpu_frame_ib_max_dwords(void) { return 32768; }
 void amd_gpu_frame_ib_write32(uint32_t dw, uint32_t v) { (void)dw; (void)v; }
+uint64_t amd_gpu_frame_ib_mc(void) { return 0; }
+void amd_gpu_frame_ib_ptes(uint32_t out[7]) { (void)out; }
 
 static int ok = 1;
 

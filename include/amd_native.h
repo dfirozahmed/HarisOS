@@ -159,6 +159,8 @@ uint64_t amd_gpu_ib_va(void);
 uint64_t amd_gpu_frame_ib_va(void);
 uint32_t amd_gpu_frame_ib_max_dwords(void);
 void     amd_gpu_frame_ib_write32(uint32_t dw, uint32_t v);
+uint64_t amd_gpu_frame_ib_mc(void);      /* the frame IB by its VRAM MC address (no GART) */
+void     amd_gpu_frame_ib_ptes(uint32_t out[7]); /* read only: GART PTEs of the IB page and the first two frame IB pages, GART_PAGES */
 const char *amd_native_ring_status(void);
 /* V151 GPU draw test */
 int      amd_gpu_draw_test(void);

@@ -56,7 +56,7 @@ uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
 /* M4a test: three "windows" (surfaces the CPU fills) with soft shadows over a background, the third half transparent, composited in
  * ONE submission into a 512 x 256 buffer in VRAM / into the screen, every pixel checked against a CPU-made reference. 1 = right.
  * stage 1: only the background, 2: and the shadows, 3: and the windows. via_frame_ib 0: through the 4 KiB IB page of the 3D tests,
- * 1: through the frame IB (GART). */
+ * 1: through the frame IB by its GART address (hung the CP on the laptop), 2: the frame IB by its VRAM MC address. */
 int amd_comp_test_offscreen(int stage, int via_frame_ib);
 int amd_comp_test_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr,
                          int via_frame_ib);

@@ -2268,6 +2268,19 @@ uint64_t amd_gpu_frame_ib_va(void)
     return rg_va_frame;
 }
 uint32_t amd_gpu_frame_ib_max_dwords(void) { return RG_FRAME_PAGES * 1024u; }
+/* The frame IB by its VRAM MC address (no GART): VMID0 reaches VRAM through the system aperture, as the shaders, images and colour
+   buffers do. The fetch through the GART pages hung the CP on the laptop (2026-10-29), the same stream through the IB page ran. */
+uint64_t amd_gpu_frame_ib_mc(void) { return amd_native_vram_mc_addr(CP_FRAME_IB_VRAM_OFF, RG_FRAME_PAGES * 0x1000u); }
+/* Read only: the GART PTEs of the IB page and of the first two frame IB pages (lo, hi each), and GART_PAGES, for the log. */
+void amd_gpu_frame_ib_ptes(uint32_t out[7])
+{
+    uint32_t idx[3] = { RG_IB_IDX, RG_FRAME_IDX, RG_FRAME_IDX + 1u }, k;
+    for (k = 0; k < 3; k++) {
+        out[2 * k] = pt_rd32(GART_TABLE_VRAM_OFF + idx[k] * 8u);
+        out[2 * k + 1] = pt_rd32(GART_TABLE_VRAM_OFF + idx[k] * 8u + 4u);
+    }
+    out[6] = GART_PAGES;
+}
 void amd_gpu_frame_ib_write32(uint32_t dw, uint32_t v)
 {
     if (dw < RG_FRAME_PAGES * 1024u) vram_wr32(CP_FRAME_IB_VRAM_OFF + 4u * dw, v);

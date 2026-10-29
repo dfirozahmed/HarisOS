@@ -504,11 +504,20 @@ void amd_gpu_bringup_cp(void)
     if (ib_ok) {
         static const char *const what[4] = { "the background fill (IB page)", "background + 3 shadows (IB page)",
                                              "background + 3 shadows + 3 windows (IB page)",
-                                             "background + 3 shadows + 3 windows (frame IB through the GART)" };
+                                             "background + 3 shadows + 3 windows (frame IB by its VRAM MC address)" };
         for (int step = 0; step < 4; step++) {
+            if (step == 3) {
+                /* The frame IB through its GART pages hung the CP (2026-10-29); the same stream through the IB page ran. Read only:
+                 * the PTEs of the IB page and of the first frame IB pages, to compare. Then the frame IB by its MC address. */
+                uint32_t pte[7];
+                (void)amd_gpu_frame_ib_va();
+                amd_gpu_frame_ib_ptes(pte);
+                serial_print("COMP: GART PTEs (lo, hi): IB page, frame IB page 0, frame IB page 1; GART pages\n");
+                for (int q = 0; q < 7; q++) log_hex("  ", pte[q]);
+            }
             serial_print("COMP: about to composite into a 512 x 256 buffer in VRAM: "); serial_print(what[step]); serial_print("\n");
             amd_gpu_log_save();
-            int okc = amd_comp_test_offscreen(step < 3 ? step + 1 : 3, step == 3);
+            int okc = amd_comp_test_offscreen(step < 3 ? step + 1 : 3, step == 3 ? 2 : 0);
             log_comp_result(okc);
             amd_gpu_log_save();
             if (!okc)
@@ -616,7 +625,7 @@ int amd_gpu_bringup_screen(void)
                                      : "COMP: about to composite 3 windows with shadows into the screen (IB page)\n");
         amd_gpu_log_save();
         log_comp_result(amd_comp_test_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
-                                             (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first(), comp_ib_ok == 2));
+                                             (uint64_t)(g_bar0 & 0xFFFFFFF0u), gfx_screen_red_first(), comp_ib_ok == 2 ? 2 : 0));
         amd_gpu_log_save();
         result = 1;
     }

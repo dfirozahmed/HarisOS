@@ -285,7 +285,7 @@ static int near3(uint32_t a, uint32_t b)
 /* Composites the scene at (ox, oy) of the target (VRAM offset base_off, GPU address rt_mc) in ONE submission and checks it, with a
  * margin of 8 pixels around it that must stay as the CPU wrote it. stage 1: the background only, 2: and the shadows, 3: and the
  * windows (the whole scene). via_frame_ib 0: the stream goes through the 4 KiB IB page the 3D tests use (it must fit in 1024
- * dwords), 1: through the frame IB (128 KiB through the GART). */
+ * dwords), 1: through the frame IB (128 KiB) by its GART address, 2: the frame IB by its VRAM MC address. */
 static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32_t width, uint32_t height, int bgr, uint32_t ox, uint32_t oy,
                     int stage, int via_frame_ib)
 {
@@ -297,7 +297,7 @@ static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32
     uint32_t cx0 = ox >= 8u ? ox - 8u : 0, cy0 = oy >= 8u ? oy - 8u : 0;
     uint32_t cx1 = ox + SCENE_W + 8u > width ? width : ox + SCENE_W + 8u, cy1 = oy + SCENE_H + 8u > height ? height : oy + SCENE_H + 8u;
     uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
-    uint64_t frame_va = via_frame_ib ? amd_gpu_frame_ib_va() : amd_gpu_ib_va();
+    uint64_t frame_va = via_frame_ib == 1 ? amd_gpu_frame_ib_va() : via_frame_ib == 2 ? amd_gpu_frame_ib_mc() : amd_gpu_ib_va();
     unsigned long long t0;
     const uint32_t pattern = 0x00112233u;
 
