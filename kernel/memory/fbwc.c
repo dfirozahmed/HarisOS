@@ -90,9 +90,10 @@ static void flush_tlb_all(void)
 
 /* Add a variable MTRR that makes [first, last) write-combining, for a frame buffer that no range covers (so the
  * default type, uncached, applies). A range is a power of two in size and aligned to it, so it may be bigger than
- * the frame buffer: it must not touch any other valid range except uncached ones (UC wins there anyway; other
- * overlaps are undefined by the CPU). Follows the SDM's order for changing MTRRs: no interrupts, cache disabled,
- * flush, MTRRs off, write, flush, MTRRs on. */
+ * the frame buffer: it must not touch any other valid range except uncached ones (UC wins there anyway) and
+ * write-combining ones (two matching ranges of the same type give that type; other overlaps are undefined by the
+ * CPU). Follows the SDM's order for changing MTRRs: no interrupts, cache disabled, flush, MTRRs off, write, flush,
+ * MTRRs on. */
 static int mtrr_add_wc(u64 first, u64 last)
 {
     unsigned r[4];
@@ -132,7 +133,7 @@ static int mtrr_add_wc(u64 first, u64 last)
         }
         u64 mm = m & ADDR_MASK;
         u64 lo = b & mm, span = ~mm & phys_mask; /* the range is lo .. lo+span when its mask is contiguous */
-        if ((b & 0xFF) != MT_UC && lo <= base + size - 1 && base <= lo + span)
+        if ((b & 0xFF) != MT_UC && (b & 0xFF) != MT_WC && lo <= base + size - 1 && base <= lo + span)
             return -2; /* overlaps a cached range */
     }
     if (slot < 0)
@@ -241,6 +242,10 @@ int fbwc_enable(u64 phys, u64 bytes)
         MTRR_TYPE = a == b ? a : MT_UC; /* a mixed range: treat as the more careful answer */
         if (MTRR_TYPE == MT_WC)
             return STATUS = FBWC_ALREADY;
+        /* Partly write-combining already (say the frame buffer at the start of a bigger video memory range) and the
+         * rest uncached only by default: one bigger write-combining range covers both. */
+        if ((a == MT_WC && b == MT_UC && !rb) || (b == MT_WC && a == MT_UC && !ra))
+            return STATUS = (mtrr_add_wc(first, last) == 0) ? FBWC_ADDED : FBWC_MTRR_FAIL;
         if (MTRR_TYPE == MT_UC)
         {
             /* An uncached range always wins over write-combining, in the MTRRs and in the page tables. If the
@@ -290,6 +295,15 @@ int fbwc_enable(u64 phys, u64 bytes)
     }
     flush_all(first, last);
     return STATUS = FBWC_APPLIED;
+}
+
+int fbwc_enable_more(u64 phys, u64 bytes)
+{
+    int keep_status = STATUS, keep_type = MTRR_TYPE;
+    int r = fbwc_enable(phys, bytes);
+    STATUS = keep_status;
+    MTRR_TYPE = keep_type;
+    return r;
 }
 
 #else

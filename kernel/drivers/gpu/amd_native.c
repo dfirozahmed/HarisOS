@@ -3223,6 +3223,16 @@ uint32_t amd_native_vmdiag(int i) { return (i >= 0 && i < 64) ? vmdiag_val[i] : 
 /* Access for the 3D pipeline test (amd_3d.c): CPU access to VRAM, the IB page of the persistent ring. */
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { vram_wr32(off, v); }
 uint32_t amd_gpu_vram_read32(uint32_t off) { return vram_rd32(off); }
+/* n dwords from RAM to VRAM at off, one plain store each (no call per dword): write-combining merges them into bursts. */
+void amd_gpu_vram_write_span(uint32_t off, const uint32_t *src, uint32_t n)
+{
+    volatile uint8_t *base = gpu_mmio_ptr(g_cpu_vram);
+    volatile uint32_t *d;
+    uint32_t i;
+    if (!base) return;
+    d = (volatile uint32_t *)(base + off);
+    for (i = 0; i < n; i++) d[i] = src[i];
+}
 void amd_gpu_ib_write32(uint32_t dw, uint32_t v) { vram_wr32(CP_IB_VRAM_OFF + 4u * dw, v); }
 /* The CPU wrote the IB through the write-combined BAR: mfence drains the CPU's buffers (a plain read of one dword does not flush the
    buffers that hold other lines), then a read waits for the posted writes. The last lines of an IB hold the draw packet. */

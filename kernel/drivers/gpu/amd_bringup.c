@@ -11,6 +11,7 @@
 #include "gfx.h"
 #include "vfs.h"
 #include "exec.h"
+#include "fbwc.h"
 
 static const char *bringup_status = "AMD GPU not probed";
 static int bringup_ran, bringup_found, bringup_probed; /* for the Device Manager line */
@@ -84,6 +85,16 @@ static void log_comp_result(int ok)
         log_hex("  GRBM_STATUS (timeout) ", amd_comp_value(AMD_COMP_V_GRBM));
     }
     serial_print(ok ? "COMP: PASS\n" : "COMP: did not pass\n");
+}
+
+static void log_upload_result(int ok)
+{
+    serial_print("UPLOAD: "); serial_print(amd_comp_status()); serial_print("\n");
+    log_hex("  CPU cycles (1 MiB)    ", amd_comp_upload_value(AMD_COMP_U_CYCLES));
+    log_hex("  words wrong           ", amd_comp_upload_value(AMD_COMP_U_BAD));
+    log_hex("  surface VRAM offset   ", amd_comp_upload_value(AMD_COMP_U_OFF));
+    log_hex("  pool free after       ", amd_comp_upload_value(AMD_COMP_U_POOL_FREE));
+    serial_print(ok ? "UPLOAD: PASS\n" : "UPLOAD: did not pass\n");
 }
 #endif
 
@@ -504,6 +515,29 @@ void amd_gpu_bringup_cp(void)
         comp_ok = amd_comp_test_offscreen();
         log_comp_result(comp_ok);
         amd_gpu_log_save();
+    }
+    /* M4b-1: the windows' pictures will be uploaded from RAM into VRAM. Only the frame buffer (the first 16 MiB of BAR0) is
+     * write-combining; the rest of the 256 MiB the CPU reaches is uncached, one bus write per store. Time an upload, make all of
+     * BAR0 write-combining (here, before the other processors start: an MTRR change is per processor), time it again, and run the
+     * compositor once more (its surfaces are now written combined: the flushes before each submission must be enough). */
+    if (ib_ok) {
+        int wc;
+        serial_print("UPLOAD: 1 MiB RAM -> VRAM surface, VRAM uncached\n");
+        log_upload_result(amd_comp_upload_test());
+        wc = fbwc_enable_more((unsigned long long)(g_bar0 & 0xFFFFFFF0u), 0x10000000ull);
+        serial_print("UPLOAD: write-combining over all of BAR0 (256 MiB), FBWC_* result ");
+        serial_print(wc == FBWC_ADDED ? "ADDED (an MTRR)" : wc == FBWC_ALREADY ? "ALREADY" : wc == FBWC_APPLIED ? "APPLIED (PAT)"
+                     : wc == FBWC_MTRR_FAIL ? "MTRR_FAIL" : wc == FBWC_MTRR_UC ? "MTRR_UC" : "other");
+        serial_print("\n");
+        log_hex("  FBWC_* value          ", (uint32_t)wc);
+        log_upload_result(amd_comp_upload_test());
+        amd_gpu_log_save();
+        if (comp_ok) {
+            serial_print("COMP: again, with the surfaces written combined\n");
+            comp_ok = amd_comp_test_offscreen();
+            log_comp_result(comp_ok);
+            amd_gpu_log_save();
+        }
     }
 #endif
 #endif

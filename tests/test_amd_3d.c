@@ -12,6 +12,7 @@ uint64_t amd_native_vram_mc_addr(uint32_t offset, uint32_t bytes) { (void)offset
 int amd_gpu_ring_running(void) { return 0; }
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { (void)off; (void)v; }
 uint32_t amd_gpu_vram_read32(uint32_t off) { (void)off; return 0; }
+void amd_gpu_vram_write_span(uint32_t off, const uint32_t *src, uint32_t n) { (void)off; (void)src; (void)n; }
 void amd_gpu_ib_write32(uint32_t dw, uint32_t v) { (void)dw; (void)v; }
 void amd_gpu_ib_flush(void) {}
 uint64_t amd_gpu_ib_va(void) { return 0; }
@@ -488,6 +489,44 @@ int main(void)
               "ring start: PREAMBLE_CNTL, CONTEXT_CONTROL, SET_CONTEXT_REG..., PREAMBLE_CNTL, CLEAR_STATE, SET_BASE, SET_UCONFIG_REG");
         check(rs[1] == (2u << 28) && rs[nr - 2] == 0x20000243u && rs[nr - 1] == 0,
               "ring start: BEGIN_CLEAR_STATE first, VGT_INDEX_TYPE = 0 with INDEX_TYPE last");
+    }
+
+    /* M4b: the VRAM pool (first fit, 64 KiB granules, neighbours merge again) */
+    {
+        static AmdVPool vp;
+        uint32_t a, b, c, d, e;
+        amd_vpool_init(&vp, 0x0E000000u, 0x02000000u);
+        check(vp.n == 1 && amd_vpool_free_bytes(&vp) == 0x02000000u, "pool: one free block of 32 MiB");
+        a = amd_vpool_alloc(&vp, 1);
+        b = amd_vpool_alloc(&vp, 0x10001u);
+        c = amd_vpool_alloc(&vp, 512u * 512u * 4u);
+        check(a == 0x0E000000u && b == 0x0E010000u && c == 0x0E030000u, "pool: first fit, sizes rounded up to 64 KiB");
+        check(amd_vpool_free_bytes(&vp) == 0x02000000u - 0x10000u - 0x20000u - 0x100000u, "pool: free bytes after 3 allocations");
+        check(amd_vpool_alloc(&vp, 0) == 0 && amd_vpool_alloc(&vp, 0x02000000u) == 0 && amd_vpool_alloc(&vp, 0xFFFFFFFFu) == 0,
+              "pool: 0 bytes, too big, and overflowing sizes give 0");
+        check(amd_vpool_free(&vp, b) == 1 && amd_vpool_free(&vp, b) == 0 && amd_vpool_free(&vp, b + 0x10000u) == 0,
+              "pool: free once; twice, or not at a block start, is refused");
+        d = amd_vpool_alloc(&vp, 0x10000u);
+        check(d == b, "pool: a freed hole is used again (first fit)");
+        amd_vpool_free(&vp, a); amd_vpool_free(&vp, c); amd_vpool_free(&vp, d);
+        check(vp.n == 1 && vp.b[0].off == 0x0E000000u && vp.b[0].size == 0x02000000u && !vp.b[0].used,
+              "pool: everything freed merges back into one block");
+        /* more allocations than block entries: the last free block is given whole, nothing overlaps */
+        for (e = 0; e < AMD_VPOOL_BLOCKS + 4u; e++)
+            if (!amd_vpool_alloc(&vp, 0x10000u)) break;
+        {
+            uint32_t k, sane = 1, sum = 0;
+            for (k = 0; k < vp.n; k++) {
+                sum += vp.b[k].size;
+                if (k && vp.b[k].off != vp.b[k - 1].off + vp.b[k - 1].size) sane = 0;
+            }
+            check(vp.n == AMD_VPOOL_BLOCKS && sane && sum == 0x02000000u && amd_vpool_free_bytes(&vp) == 0 && e == AMD_VPOOL_BLOCKS,
+                  "pool: with all block entries used the rest is given whole; blocks stay back to back");
+        }
+        amd_vpool_init(&vp, 0, 0x30000u);
+        check(vp.n == 1 && vp.b[0].off == 0x10000u && vp.b[0].size == 0x20000u, "pool: offset 0 is never handed out");
+        amd_vpool_init(&vp, 0x1234u, 0x8000u);
+        check(vp.n == 0 && amd_vpool_alloc(&vp, 4) == 0, "pool: a range smaller than a granule is empty");
     }
 
     printf("\nAMD 3D TEST %s\n", ok ? "PASSED" : "FAILED");

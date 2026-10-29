@@ -59,6 +59,34 @@ uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
 int amd_comp_test_offscreen(void);
 int amd_comp_test_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 const char *amd_comp_status(void);
+
+/* M4b: VRAM for the windows' pictures. A first-fit allocator over a range of VRAM byte offsets, in 64 KiB granules (pure: no
+ * hardware access, so tests/test_amd_3d.c checks it). Freed neighbours merge again. */
+#define AMD_VPOOL_BLOCKS 64
+#define AMD_VPOOL_GRAIN 0x10000u
+typedef struct { uint32_t off, size, used; } AmdVBlock;
+typedef struct { uint32_t n; AmdVBlock b[AMD_VPOOL_BLOCKS]; } AmdVPool;
+void amd_vpool_init(AmdVPool *p, uint32_t off, uint32_t size);  /* off is rounded up to a granule and is never 0 */
+uint32_t amd_vpool_alloc(AmdVPool *p, uint32_t bytes);           /* the VRAM offset, 0 = no room */
+int amd_vpool_free(AmdVPool *p, uint32_t off);                    /* 1 freed, 0 not the start of a used block */
+uint32_t amd_vpool_free_bytes(const AmdVPool *p);
+
+/* Surfaces from the compositor's pool (the 32 MiB at 224 MiB of VRAM). The pitch is rounded up to 64 pixels (256 bytes). */
+int amd_surface_alloc(AmdSurface *s, uint32_t w, uint32_t h);    /* 1 = done */
+void amd_surface_free(AmdSurface *s);
+/* Copies a w x h rectangle of a RAM picture (src points at its pixel (0, 0), src_pitch_px pixels per row) to (x, y) of the surface.
+ * Then amd_gpu_wc_flush() before the GPU reads it. */
+void amd_surface_upload(const AmdSurface *s, const uint32_t *src, uint32_t src_pitch_px, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+
+/* M4b-1 test: a 512 x 512 picture from RAM into a pool surface, timed, then read back word by word. 1 = every word right. */
+int amd_comp_upload_test(void);
+#define AMD_COMP_U_CYCLES 0      /* CPU cycles of the upload (with the flush) */
+#define AMD_COMP_U_BYTES 1
+#define AMD_COMP_U_BAD 2         /* words that read back wrong */
+#define AMD_COMP_U_OFF 3         /* the surface's VRAM offset */
+#define AMD_COMP_U_POOL_FREE 4   /* free pool bytes after it was freed again */
+#define AMD_COMP_U_VALUES 5
+uint32_t amd_comp_upload_value(int what);
 #define AMD_COMP_V_IN_GOOD 0     /* pixels of the scene that are right */
 #define AMD_COMP_V_IN_TOTAL 1
 #define AMD_COMP_V_OUT_BAD 2     /* pixels around the scene that changed */

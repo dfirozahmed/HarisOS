@@ -183,6 +183,66 @@ uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc)
     return f->over ? 0 : f->n;
 }
 
+/* ---- the VRAM pool (blocks kept in address order, so neighbours are next to each other in b[]) ---- */
+void amd_vpool_init(AmdVPool *p, uint32_t off, uint32_t size)
+{
+    uint64_t lo = ((uint64_t)off + AMD_VPOOL_GRAIN - 1u) & ~(uint64_t)(AMD_VPOOL_GRAIN - 1u);
+    uint64_t hi = ((uint64_t)off + size) & ~(uint64_t)(AMD_VPOOL_GRAIN - 1u);
+    if (lo == 0) lo = AMD_VPOOL_GRAIN;  /* offset 0 means "no room" */
+    p->n = 0;
+    if (hi > lo && hi <= 0x100000000ull) {
+        p->b[0].off = (uint32_t)lo; p->b[0].size = (uint32_t)(hi - lo); p->b[0].used = 0;
+        p->n = 1;
+    }
+}
+
+uint32_t amd_vpool_alloc(AmdVPool *p, uint32_t bytes)
+{
+    uint32_t need, i, k;
+    if (!bytes || bytes > 0xFFFFFFFFu - (AMD_VPOOL_GRAIN - 1u)) return 0;
+    need = (bytes + AMD_VPOOL_GRAIN - 1u) & ~(AMD_VPOOL_GRAIN - 1u);
+    for (i = 0; i < p->n; i++) {
+        AmdVBlock *b = &p->b[i];
+        if (b->used || b->size < need) continue;
+        if (b->size > need && p->n < AMD_VPOOL_BLOCKS) {    /* split: the rest stays free, right after it */
+            for (k = p->n; k > i + 1u; k--) p->b[k] = p->b[k - 1u];
+            p->b[i + 1u].off = b->off + need; p->b[i + 1u].size = b->size - need; p->b[i + 1u].used = 0;
+            p->n++;
+            b->size = need;
+        }                                                   /* (no entry left to split with: the whole block is given) */
+        b->used = 1;
+        return b->off;
+    }
+    return 0;
+}
+
+int amd_vpool_free(AmdVPool *p, uint32_t off)
+{
+    uint32_t i, k;
+    for (i = 0; i < p->n && !(p->b[i].off == off && p->b[i].used); i++) {}
+    if (i == p->n) return 0;
+    p->b[i].used = 0;
+    if (i + 1u < p->n && !p->b[i + 1u].used) {               /* merge with the next block */
+        p->b[i].size += p->b[i + 1u].size;
+        for (k = i + 1u; k + 1u < p->n; k++) p->b[k] = p->b[k + 1u];
+        p->n--;
+    }
+    if (i > 0 && !p->b[i - 1u].used) {                       /* and with the one before */
+        p->b[i - 1u].size += p->b[i].size;
+        for (k = i; k + 1u < p->n; k++) p->b[k] = p->b[k + 1u];
+        p->n--;
+    }
+    return 1;
+}
+
+uint32_t amd_vpool_free_bytes(const AmdVPool *p)
+{
+    uint32_t i, s = 0;
+    for (i = 0; i < p->n; i++)
+        if (!p->b[i].used) s += p->b[i].size;
+    return s;
+}
+
 /* ---- running it, and the M4a test ---- */
 #define VRAM_COMP_SHADER_OFF 0x0B004000u   /* 4 KiB: the four shaders at AMD_COMP_*_OFF */
 #define VRAM_COMP_SYNC_OFF 0x0B300040u     /* 4 bytes for the end-of-frame sync */
@@ -407,4 +467,71 @@ int amd_comp_test_screen(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width,
         status = "compositor screen test skipped: the framebuffer reaches the test memory"; return 0; }
     return comp_run((uint32_t)off64, amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height), pitch_bytes / 4u, width, height, bgr,
                     width - SCENE_W - 20u, 20u);
+}
+
+/* ---- M4b: surfaces in the pool, uploads ---- */
+#define VRAM_COMP_POOL_OFF 0x0E000000u     /* 224 MiB .. 256 MiB: the end of what BAR0 reaches */
+#define VRAM_COMP_POOL_BYTES 0x02000000u
+static AmdVPool pool;
+static int pool_up;
+
+int amd_surface_alloc(AmdSurface *s, uint32_t w, uint32_t h)
+{
+    uint32_t pitch = (w + 63u) & ~63u, off;
+    s->mc = 0; s->off = 0; s->w = 0; s->h = 0; s->pitch_px = 0;
+    if (!w || !h || w > 16384u || h > 16384u) return 0;
+    if (!pool_up) { amd_vpool_init(&pool, VRAM_COMP_POOL_OFF, VRAM_COMP_POOL_BYTES); pool_up = 1; }
+    off = amd_vpool_alloc(&pool, pitch * h * 4u);
+    if (!off) return 0;
+    s->mc = amd_native_vram_mc_addr(off, pitch * h * 4u);
+    if (!s->mc) { amd_vpool_free(&pool, off); return 0; }
+    s->off = off; s->w = w; s->h = h; s->pitch_px = pitch;
+    return 1;
+}
+
+void amd_surface_free(AmdSurface *s)
+{
+    if (s->off) amd_vpool_free(&pool, s->off);
+    s->mc = 0; s->off = 0; s->w = 0; s->h = 0; s->pitch_px = 0;
+}
+
+void amd_surface_upload(const AmdSurface *s, const uint32_t *src, uint32_t src_pitch_px, uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+    uint32_t r;
+    if (!s->off || x >= s->w || y >= s->h) return;
+    if (w > s->w - x) w = s->w - x;
+    if (h > s->h - y) h = s->h - y;
+    for (r = 0; r < h; r++)
+        amd_gpu_vram_write_span(s->off + ((y + r) * s->pitch_px + x) * 4u, src + (uint64_t)r * src_pitch_px, w);
+}
+
+static uint32_t uval[AMD_COMP_U_VALUES];
+uint32_t amd_comp_upload_value(int what) { return (what >= 0 && what < AMD_COMP_U_VALUES) ? uval[what] : 0; }
+
+int amd_comp_upload_test(void)
+{
+    static uint32_t pic[512u * 512u];   /* 1 MiB in RAM */
+    AmdSurface s;
+    uint32_t x, y, k, bad = 0;
+    unsigned long long t0;
+    for (k = 0; k < AMD_COMP_U_VALUES; k++) uval[k] = 0;
+    if (!amd_gpu_ring_running()) { status = "upload test skipped: the persistent ring is not running"; return 0; }
+    if (!amd_surface_alloc(&s, 512, 512)) { status = "upload test skipped: no surface"; return 0; }
+    for (y = 0; y < 512u; y++)
+        for (x = 0; x < 512u; x++)
+            pic[y * 512u + x] = (x * 0x01010101u) ^ (y << 12) ^ 0x00A5005Au;
+    uval[AMD_COMP_U_OFF] = s.off;
+    uval[AMD_COMP_U_BYTES] = 512u * 512u * 4u;
+    t0 = comp_tsc();
+    amd_surface_upload(&s, pic, 512, 0, 0, 512, 512);
+    amd_gpu_wc_flush();
+    uval[AMD_COMP_U_CYCLES] = (uint32_t)(comp_tsc() - t0);
+    for (y = 0; y < 512u; y++)
+        for (x = 0; x < 512u; x++)
+            if (amd_gpu_vram_read32(s.off + (y * s.pitch_px + x) * 4u) != pic[y * 512u + x]) bad++;
+    uval[AMD_COMP_U_BAD] = bad;
+    amd_surface_free(&s);
+    uval[AMD_COMP_U_POOL_FREE] = amd_vpool_free_bytes(&pool);
+    status = bad ? "upload FAILED: words read back wrong" : "upload PASS: 1 MiB RAM -> VRAM surface, every word right";
+    return !bad;
 }

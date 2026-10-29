@@ -26,6 +26,9 @@
 #define FBWC_NOT_RUN -9
 
 int fbwc_enable(unsigned long long phys, unsigned long long bytes);
+/* The same for another range later in the boot (say all of a graphics card's memory window), before the other
+ * processors start; returns FBWC_*, fbwc_status() / fbwc_mtrr_type() keep the frame buffer's answer. */
+int fbwc_enable_more(unsigned long long phys, unsigned long long bytes);
 int fbwc_status(void);
 int fbwc_mtrr_type(void);
 
