@@ -71,14 +71,16 @@ void wm_damage_window_internal(const Window *w)
 }
 
 /* the window looks different (a handler said so): its surface is drawn again, and the screen there */
-void wm_damage_content_internal(const Window *w)
+void wm_damage_content_internal(const Window *w, int why)
 {
+    wm_comp_why_internal(why);
     wm_comp_content_internal(w, w->r.x, w->r.y, w->r.x + w->r.w, w->r.y + w->r.h);
     wm_damage_window_internal(w);
 }
 
 void wm_invalidate(void)
 {
+    wm_comp_why_internal(WM_WHY_INVALIDATE);
     wm_comp_all_internal(); /* apps ask with this for their own window to be drawn again */
     wm_damage_internal(0, 0, (int)gfx_width(), (int)gfx_height());
 }
@@ -126,6 +128,7 @@ void wm_add_screen_damage(UiRect r)
 
 void wm_add_damage(UiRect r)
 {
+    wm_comp_why_internal(WM_WHY_AREA);
     wm_comp_content_screen_internal(r.x, r.y, r.x + r.w, r.y + r.h); /* what a window shows there changed */
     wm_damage_internal(r.x, r.y, r.x + r.w, r.y + r.h);
 }

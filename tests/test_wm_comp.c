@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 /* Host-side tests for windows as compositor surfaces (kernel/window/wm_comp.c), with a pretend GPU driver that only
  * records what it is asked: which surfaces exist, which parts of them are uploaded, and whether as opaque pixels. */
 static unsigned long long NOW;
@@ -106,6 +107,18 @@ int main(void){
   wm_comp_set(1);
   up = UPLOADS;
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==up+1 && LIVE==1);
+  /* the report: where the requests came from, and which window took the drawing */
+  { unsigned why[WM_WHY_COUNT]; WmBusy bz[3];
+    wm_comp_why(why); wm_comp_busiest(bz,3);                      /* start from 0 */
+    wm_add_damage(ui_rect(w->r.x+50,w->r.y+80,10,10)); wm_invalidate();
+    wm_comp_why(why);
+    assert(why[WM_WHY_AREA]==1 && why[WM_WHY_INVALIDATE]==1 && why[WM_WHY_KEY]==0 && why[WM_WHY_TICK]==0);
+    assert(strcmp(wm_why_name(WM_WHY_TICK),"tick")==0 && strcmp(wm_why_name(99),"?")==0);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    assert(wm_comp_busiest(bz,3)==1 && strcmp(bz[0].title,"One")==0 && bz[0].redraws==1 &&
+           bz[0].pixels==(unsigned long long)w->r.w*w->r.h);
+    assert(wm_comp_busiest(bz,3)==0);                              /* taken: 0 again */
+  }
   puts("wm compositor tests passed");
   return 0;
 }

@@ -139,6 +139,23 @@ static void measure(const GfxCompOps *ops, unsigned long long draw_us, unsigned 
     TOPS_DRAWN = 0;
     if (STATS.frames < REPORT_FRAMES || REPORTS >= REPORT_MAX)
         return;
+    unsigned why[WM_WHY_COUNT];
+    WmBusy busy[3];
+    wm_comp_why(why);
+    STATS.nwhy = WM_WHY_COUNT < 12 ? WM_WHY_COUNT : 12;
+    for (int i = 0; i < STATS.nwhy; i++)
+    {
+        STATS.why[i] = why[i];
+        STATS.why_name[i] = wm_why_name(i);
+    }
+    STATS.nbusy = wm_comp_busiest(busy, 3);
+    for (int i = 0; i < STATS.nbusy; i++)
+    {
+        for (int k = 0; k < 24; k++)
+            STATS.busy[i].title[k] = busy[i].title[k];
+        STATS.busy[i].redraws = busy[i].redraws;
+        STATS.busy[i].pixels = busy[i].pixels;
+    }
     if (ops->report)
         ops->report(&STATS);
     REPORTS++;

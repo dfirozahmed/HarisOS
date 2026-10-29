@@ -150,6 +150,22 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
 int wm_comp_items(GfxCompItem *out, int max);
 void wm_comp_drop(const GfxCompOps *ops);
 void wm_comp_counts(unsigned *full, unsigned *part); /* windows drawn again whole / in part since the last call (then 0) */
+/* Where the requests to draw a window's content again came from (counted while the compositor is on, for its report). */
+enum
+{
+    WM_WHY_PRESS, WM_WHY_RPRESS, WM_WHY_DRAG, WM_WHY_BUTTONS, WM_WHY_HOVER_LEAVE, WM_WHY_HOVER, WM_WHY_TICK, WM_WHY_WHEEL,
+    WM_WHY_KEY, WM_WHY_AREA, WM_WHY_INVALIDATE, WM_WHY_COUNT
+};
+const char *wm_why_name(int why);
+void wm_comp_why(unsigned out[WM_WHY_COUNT]); /* the counts since the last call (then 0) */
+/* The windows whose surfaces took the most drawing since the last call (then 0), most first; returns how many. */
+typedef struct
+{
+    char title[24];
+    unsigned redraws;
+    unsigned long long pixels;
+} WmBusy;
+int wm_comp_busiest(WmBusy *out, int max);
 int wm_drag_memory(void **a, void **b, unsigned long long *bytes); /* the two buffers of wm_set_drag_memory(); 0 = none */
 
 /* Call often (every main-loop pass): lets windows react to time passing (on_tick). Returns 1 when some

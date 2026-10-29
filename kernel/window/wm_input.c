@@ -312,7 +312,7 @@ int wm_pointer(int x, int y, unsigned buttons)
             {
                 /* 1 = redraw the whole window; 2 = the handler marked its own area with wm_add_damage() */
                 if (w->on_press && WM_TIMED(w, w->on_press(w, x, y)) == 1)
-                    wm_damage_content_internal(w);
+                    wm_damage_content_internal(w, WM_WHY_PRESS);
                 if (w->on_drag)
                     PRESS_WIN = w;
             }
@@ -336,7 +336,7 @@ int wm_pointer(int x, int y, unsigned buttons)
         {
             wm_raise(w);
             if (!wm_blocker_internal(w) && !in_titlebar(w, x, y) && w->on_rpress && WM_TIMED(w, w->on_rpress(w, x, y)))
-                wm_damage_content_internal(w);
+                wm_damage_content_internal(w, WM_WHY_RPRESS);
         }
     }
 
@@ -350,7 +350,7 @@ int wm_pointer(int x, int y, unsigned buttons)
         if (!down)
             PRESS_WIN = 0;
         if (pw->on_drag && WM_TIMED(pw, pw->on_drag(pw, x, y, buttons)) == 1) /* 2 = it marked its own area (wm_add_damage) */
-            wm_damage_content_internal(pw);
+            wm_damage_content_internal(pw, WM_WHY_DRAG);
     }
 
     /* 1c) resize: follow the pointer while the button is held */
@@ -465,7 +465,7 @@ int wm_pointer(int x, int y, unsigned buttons)
         UiRect dirty;
         int r = ui_buttons_pointer_dirty(&w->set, hit ? x : -1, hit ? y : -1, buttons, &dirty);
         if (r == 1)
-            wm_damage_content_internal(w);
+            wm_damage_content_internal(w, WM_WHY_BUTTONS);
         else if (r == 2)
             wm_add_damage(dirty); /* just a hover or press highlight */
         if (WM_ZN == 0 || wm_z_index_internal(w) < 0) /* a click handler closed it */
@@ -478,13 +478,13 @@ int wm_pointer(int x, int y, unsigned buttons)
         Window *old = HOVER_CONTENT;
         HOVER_CONTENT = 0;
         if (old->on_hover && WM_TIMED(old, old->on_hover(old, -1, -1)) == 1) /* 2 = it marked its own area (wm_add_damage) */
-            wm_damage_content_internal(old);
+            wm_damage_content_internal(old, WM_WHY_HOVER_LEAVE);
     }
     if (target && wm_z_index_internal(target) >= 0)
     {
         HOVER_CONTENT = target;
         if (target->on_hover && WM_TIMED(target, target->on_hover(target, x, y)) == 1)
-            wm_damage_content_internal(target);
+            wm_damage_content_internal(target, WM_WHY_HOVER);
     }
     else
         HOVER_CONTENT = 0;
@@ -515,7 +515,7 @@ int wm_tick(void)
         if (r)
         {
             if (r == 1)
-                wm_damage_content_internal(w); /* 2 = it marked its own area with wm_add_damage() */
+                wm_damage_content_internal(w, WM_WHY_TICK); /* 2 = it marked its own area with wm_add_damage() */
             changed = 1;
         }
         if (i >= WM_ZN || WM_Z[i] != w) /* the handler closed or reordered windows: stop for this pass */
@@ -533,7 +533,7 @@ int wm_wheel(int x, int y, int steps)
         return 0;
     int changed = WM_TIMED(w, w->on_wheel(w, steps));
     if (changed == 1)
-        wm_damage_content_internal(w);
+        wm_damage_content_internal(w, WM_WHY_WHEEL);
     /* 2 = it changed something but marked the exact area itself (wm_add_damage): a list that only scrolled
      * does not need its frame, shadow and toolbar redrawn */
     return WM_HAS_DMG;
@@ -558,7 +558,7 @@ int wm_key(const KeyEvent *k)
         wm_charge(w, t0);
     }
     if (!KEY_PARTIAL)
-        wm_damage_content_internal(w); /* the handler probably changed what the window shows */
+        wm_damage_content_internal(w, WM_WHY_KEY); /* the handler probably changed what the window shows */
     KEY_PARTIAL = 0;
     return 1;
 }

@@ -132,6 +132,22 @@ static void amd_scene_report(const GfxCompStats *s)
     log_hex("  pixels per compose    ", (uint32_t)(g.pixels / c));
     log_hex("  draws per compose     ", (uint32_t)(g.draws / c));
     log_hex("  KiB uploaded          ", (uint32_t)(g.upload_bytes >> 10));
+    /* where the requests to draw window content came from, then the windows that took the most drawing */
+    for (int i = 0; i < s->nwhy; i++) {
+        char label[32];
+        int k = 0;
+        const char *p = "  asked by ";
+        while (*p && k < 24) label[k++] = *p++;
+        for (p = s->why_name[i]; *p && k < 24; ) label[k++] = *p++;
+        while (k < 24) label[k++] = ' ';
+        label[k] = 0;
+        log_hex(label, s->why[i]);
+    }
+    for (int i = 0; i < s->nbusy; i++) {
+        serial_print("  busy window: "); serial_print(s->busy[i].title); serial_print("\n");
+        log_hex("    times drawn         ", s->busy[i].redraws);
+        log_hex("    kilopixels drawn    ", (uint32_t)(s->busy[i].pixels / 1000u));
+    }
     amd_gpu_log_save();
 }
 static const GfxCompOps amd_scene_ops = { amd_comp_surface_new, amd_comp_surface_free, amd_comp_surface_upload, amd_scene_compose,

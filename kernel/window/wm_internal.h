@@ -14,7 +14,8 @@ extern int WM_HAS_DMG;
 Window *wm_moving_window_internal(void); /* the window being dragged by its title bar once it has really moved, or 0 */
 void wm_damage_internal(int x0, int y0, int x1, int y1);
 void wm_damage_window_internal(const Window *w);
-void wm_damage_content_internal(const Window *w); /* the same, and what the window shows changed (its compositor surface) */
+void wm_damage_content_internal(const Window *w, int why); /* the same, and what the window shows changed (its surface); why: WM_WHY_* */
+void wm_comp_why_internal(int why); /* count one request (WM_WHY_*) */
 /* compositor (wm_comp.c): what a window shows changed in a screen rectangle; in every window under one; in all of them */
 void wm_comp_content_internal(const Window *w, int x0, int y0, int x1, int y1);
 void wm_comp_content_screen_internal(int x0, int y0, int x1, int y1);
