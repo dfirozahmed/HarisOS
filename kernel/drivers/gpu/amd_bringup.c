@@ -149,9 +149,12 @@ static void amd_scene_report(const GfxCompStats *s)
         log_hex("    kilopixels drawn    ", (uint32_t)(s->busy[i].pixels / 1000u));
         log_hex("    slowest drawing us  ", (uint32_t)s->busy[i].us_max);
     }
-    /* writing GPULOG.TXT stops the desktop meanwhile (the pointer too): how long did the last one take? */
+    /* Writing GPULOG.TXT stops the desktop meanwhile (the pointer too: ~0.2 s on the laptop, 2026-10-30), so the reports
+     * stay in the log in memory and go to the disk only after the first one and the last one. */
     static unsigned long long last_save;
     log_hex("  last log save, cycles ", (uint32_t)(last_save > 0xFFFFFFFFull ? 0xFFFFFFFFull : last_save));
+    if (!s->first && !s->last)
+        return;
     unsigned lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     unsigned long long t0 = ((unsigned long long)hi << 32) | lo;

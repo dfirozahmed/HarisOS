@@ -167,6 +167,7 @@ typedef struct
     unsigned long long draw_us, draw_us_max;       /* the CPU bringing surfaces up to date (drawing, packing, uploading) */
     unsigned long long present_us, present_us_max; /* the compose: building it, the GPU doing it, waiting for it */
     unsigned windows_full, windows_part, tops;     /* surfaces drawn again: whole windows, parts of windows, menus / taskbar */
+    int first, last; /* the first report, the last one (REPORT_MAX): the driver writes its log to the disk only then */
     /* where the requests to draw window content came from (names from the window manager), and the busiest windows */
     int nwhy;
     unsigned why[12];
