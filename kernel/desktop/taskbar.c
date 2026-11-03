@@ -101,40 +101,34 @@ void taskbar_bounds(int *x, int *y, int *w, int *h)
     *h = TASKBAR_HEIGHT;
 }
 
-/* background color of a button: normal, hover or pressed */
-static UiRgb state_bg(UiRgb base, int idx, int active)
+/* ---- glass: the bar and its pills are see-through tints over the wallpaper, in both looks ---- */
+typedef struct
 {
-    if (SET.pressed == idx)
-        return ui_rgb_mix(base, ui_rgb(0, 0, 0), 55);
-    if (SET.hover == idx && SET.pressed < 0)
-        return ui_rgb_mix(base, ui_rgb(255, 255, 255), active ? 22 : 34);
-    return base;
-}
+    unsigned char bar;                  /* the bar's surface colour: 255 = solid; lower = more of the wallpaper */
+    unsigned char sheen;                /* white over the bar's upper half */
+    GfxColor tint;                      /* what a pill is tinted with */
+    unsigned char rest, hover, pressed; /* tint strength of a pill */
+    unsigned char active;               /* accent strength behind the window in front */
+    unsigned char rim;                  /* white edge of a pill */
+} Glass;
 
-/* ---- light glass: on a light theme the bar and its pills are see-through tints, not solid grey ---- */
-#define GLASS_ALPHA 168 /* the bar's white: 255 = solid; lower = more of the wallpaper */
-static int LIGHT;     /* set by taskbar_draw from the theme's surface */
+/* light: white frost, pills a faint dark tint with a bright rim */
+static const Glass LIGHT_GLASS = {168, 36, 0, 18, 34, 58, 48, 150};
+/* dark: smoky glass, pills a faint white tint with a thin highlight; pressed is the faintest (it goes in) */
+static const Glass DARK_GLASS = {196, 10, 0, 16, 30, 8, 84, 34};
+static Glass G;
 
 static int is_light(UiRgb c) { return (c.r * 299 + c.g * 587 + c.b * 114) / 1000 > 160; }
 
-/* a pill behind a button: a faint dark tint (stronger on hover, pressed), or the accent when active */
-static void glass_pill(int x, int y, int w, int h, int radius, int idx, int active, const UiTheme *t)
+/* a pill behind a button (idx < 0 = not a button: search, tray), the accent behind the active window */
+static void pill(int x, int y, int w, int h, int radius, int idx, int active, const UiTheme *t)
 {
-    int a = idx < 0 ? 18 : SET.pressed == idx ? 58 : SET.hover == idx && SET.pressed < 0 ? 34 : 18;
+    int a = idx < 0 ? G.rest : SET.pressed == idx ? G.pressed : SET.hover == idx && SET.pressed < 0 ? G.hover : G.rest;
     if (active)
-        gfx_fill_round_rect_alpha(x, y, w, h, radius, ui_color(t->accent), (unsigned char)(a + 30));
+        gfx_fill_round_rect_alpha(x, y, w, h, radius, ui_color(t->accent), (unsigned char)(G.active + (a - G.rest)));
     else
-        gfx_fill_round_rect_alpha(x, y, w, h, radius, gfx_rgb(20, 36, 70), (unsigned char)a);
-    gfx_round_rect_alpha(x, y, w, h, radius, 1, gfx_rgb(255, 255, 255), 150); /* bright rim */
-}
-
-/* a button background in either look; idx < 0 = not a button (search, tray) */
-static void pill(int x, int y, int w, int h, int radius, int idx, int active, UiRgb solid, const UiTheme *t)
-{
-    if (LIGHT)
-        glass_pill(x, y, w, h, radius, idx, active, t);
-    else
-        gfx_fill_round_rect(x, y, w, h, radius, ui_color(idx < 0 ? solid : state_bg(solid, idx, active)));
+        gfx_fill_round_rect_alpha(x, y, w, h, radius, G.tint, (unsigned char)a);
+    gfx_round_rect_alpha(x, y, w, h, radius, 1, gfx_rgb(255, 255, 255), G.rim);
 }
 
 void taskbar_set_time(int hour, int minute, int day, int month, int year)
@@ -197,21 +191,15 @@ void taskbar_draw(void)
     int by = H - TASKBAR_HEIGHT;
     int cy = by + TASKBAR_HEIGHT / 2;
 
-    LIGHT = is_light(t->surface);
-    if (LIGHT)
-    {
-        /* frosted glass: more see-through, a little brighter at the top, a dark hairline then a white one */
-        gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT, t->surface.r, t->surface.g, t->surface.b, GLASS_ALPHA);
-        gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT / 2, 255, 255, 255, 36);
-        gfx_fill_rect_alpha(0, by, W, 1, 20, 36, 70, 46);
-        gfx_fill_rect_alpha(0, by + 1, W, 1, 255, 255, 255, 200);
-    }
-    else
-    {
-        /* translucent bar: the wallpaper shows through, with a light top edge */
-        gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT, t->surface.r, t->surface.g, t->surface.b, 232);
-        gfx_fill_rect_alpha(0, by, W, 1, 255, 255, 255, 40);
-    }
+    int light = is_light(t->surface);
+    G = light ? LIGHT_GLASS : DARK_GLASS;
+    G.tint = light ? gfx_rgb(20, 36, 70) : gfx_rgb(255, 255, 255);
+
+    /* the bar: see-through, a little brighter at the top, a dark hairline then a light one on top */
+    gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT, t->surface.r, t->surface.g, t->surface.b, G.bar);
+    gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT / 2, 255, 255, 255, G.sheen);
+    gfx_fill_rect_alpha(0, by, W, 1, light ? 20 : 0, light ? 36 : 0, light ? 70 : 0, light ? 46 : 90);
+    gfx_fill_rect_alpha(0, by + 1, W, 1, 255, 255, 255, light ? 200 : 46);
 
     int x = 10;
 
@@ -220,7 +208,7 @@ void taskbar_draw(void)
     int name_w = gfx_text_w(nf, "Haris");
     int start_w = 8 + 28 + 8 + name_w + 14;
     ITEM[0].r = ui_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4);
-    pill(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, t->radius_m, 0, 0, t->surface_alt, t);
+    pill(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, t->radius_m, 0, 0, t);
     ui_icon(UI_ICON_LOGO, x + 8 + 14, cy, 28, t->text);
     ui_text_in(ui_rect(x + 8 + 28 + 8, cy - 14, name_w + 4, 28), "Haris", UI_TEXT_TITLE, UI_ALIGN_LEFT);
     x += start_w + GAP + 4;
@@ -229,7 +217,7 @@ void taskbar_draw(void)
     if (W >= 780)
     {
         int sw = 170;
-        pill(x, cy - 16, sw, 32, 16, -1, 0, t->surface_alt, t);
+        pill(x, cy - 16, sw, 32, 16, -1, 0, t);
         ui_icon(UI_ICON_SEARCH, x + 18, cy, 15, t->text_dim);
         ui_text_in(ui_rect(x + 34, cy - 16, sw - 44, 32), "Search", UI_TEXT_BODY, UI_ALIGN_LEFT);
         /* (colored by the "dim" style below) */
@@ -253,13 +241,8 @@ void taskbar_draw(void)
     {
         int icx = x + slot / 2;
         ITEM[1 + i].r = ui_rect(x, cy - SLOT / 2 + 2, slot, SLOT - 4);
-        UiRgb bg = APPS[i].active ? ui_rgb_mix(t->surface_alt, t->accent, 40) : t->surface;
         if (APPS[i].active || SET.hover == 1 + i || SET.pressed == 1 + i)
-        {
-            if (!APPS[i].active)
-                bg = t->surface_alt;
-            pill(x, cy - SLOT / 2 + 2, slot, SLOT - 4, t->radius_m, 1 + i, APPS[i].active, bg, t);
-        }
+            pill(x, cy - SLOT / 2 + 2, slot, SLOT - 4, t->radius_m, 1 + i, APPS[i].active, t);
         ui_icon(app_icon(APPS[i].icon), icx, cy - 1, isz, APPS[i].minimized ? t->text_dim : t->text);
         if (APPS[i].active)
             gfx_fill_round_rect(icx - (isz / 3), by + TASKBAR_HEIGHT - 6, (isz / 3) * 2, 3, 1, ui_color(t->accent_hi));
@@ -305,7 +288,7 @@ void taskbar_draw(void)
     int tx = rx - cw - 14 - tray_w;
     if (tx > x)
     {
-        pill(tx, cy - 17, tray_w, 34, t->radius_m, -1, 0, t->surface_alt, t);
+        pill(tx, cy - 17, tray_w, 34, t->radius_m, -1, 0, t);
         int ix = tx + 14 + 10;
         ui_icon(UI_ICON_WIFI, ix, cy, 20, t->text);
         ix += 10 + 14 + 11;
