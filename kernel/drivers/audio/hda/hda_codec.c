@@ -242,6 +242,18 @@ void hda_codec_stop_outputs(const HdaCodec *c, HdaVerbFn fn, void *ctx)
 
 /* ---- pure helpers ---- */
 
+/* The devices of intel.c's pci_ids table that have AZX_DCAPS_SNOOP_TYPE(ATI): ATI SB450 .. SB900 (0x1002: 437b, 4383) and the AMD
+ * ones, Hudson 780d, X370 1457, X570 1487, Stoney 157a, Raven / Renoir 15e3 (0x1022). The ATI HDMI audio functions of GPUs
+ * (also 0x1002) are NOT in the list. */
+int hda_needs_ati_snoop(unsigned short vendor, unsigned short device)
+{
+    if (vendor == 0x1002)
+        return device == 0x437B || device == 0x4383;
+    if (vendor == 0x1022)
+        return device == 0x780D || device == 0x1457 || device == 0x1487 || device == 0x157A || device == 0x15E3;
+    return 0;
+}
+
 /* Taylor series to x^7 on [-pi/2, pi/2] (worst error 1.6e-4 at the ends), in Q30 fixed point. */
 int hda_sine_q15(unsigned phase)
 {

@@ -326,6 +326,14 @@ static void bring_up(HdaCtrl *h, const PciDevice *pd)
         return;
     }
     h->regs = (volatile u8 *)base;
+    if (hda_needs_ati_snoop(pd->vendor_id, pd->device_id))
+    {
+        /* Linux azx_init_pci(): byte 0x42 of the PCI config space, bits 2:0 = 2 ("enable snoop"). Without it the controller reads
+         * the buffers from RAM without asking the CPU caches, and our buffers are ordinary cached memory. */
+        u32 w = pci_cfg_read(pd->bus, pd->dev, pd->fn, 0x40);
+        pci_cfg_write(pd->bus, pd->dev, pd->fn, 0x40, (w & ~(0x07u << 16)) | (0x02u << 16));
+        serial_puts("HDA: AMD / ATI snoop enabled (PCI 0x42)\n");
+    }
     u16 gcap = rd16(h, R_GCAP);
     h->oss = (gcap >> 12) & 0xFu;
     h->iss = (gcap >> 8) & 0xFu;
@@ -373,7 +381,14 @@ static void bring_up(HdaCtrl *h, const PciDevice *pd)
     {
         if (!(h->codecs & (1u << cad)))
             continue;
+        /* Linux retries (AZX_DCAPS_RETRY_PROBE, up to 60 times a second apart) when an AMD codec does not answer yet: so do we, briefly */
         int e = hda_codec_scan(&scratch, cad, verb, h);
+        for (int tries = 0; e == HDA_ERR_SILENT && tries < 5; tries++)
+        {
+            serial_puts("HDA: codec not answering yet, trying again\n");
+            HDA_WAIT(0, 300);
+            e = hda_codec_scan(&scratch, cad, verb, h);
+        }
         if (e == 0)
             hda_codec_find_outputs(&scratch);
         log_codec(&scratch);

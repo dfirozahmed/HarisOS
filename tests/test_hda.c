@@ -274,6 +274,11 @@ int main(void)
     CHECK(worst < 8);
     CHECK(hda_sine_q15(0) == 0 && hda_sine_q15(1u << 30) >= 32760 && hda_sine_q15(3u << 30) <= -32760);
 
+    /* ---- which controllers need the snoop bit ---- */
+    CHECK(hda_needs_ati_snoop(0x1022, 0x15E3) && hda_needs_ati_snoop(0x1022, 0x1487) && hda_needs_ati_snoop(0x1002, 0x4383));
+    CHECK(!hda_needs_ati_snoop(0x1002, 0xAA01));  /* a GPU's HDMI audio */
+    CHECK(!hda_needs_ati_snoop(0x8086, 0x293E) && !hda_needs_ati_snoop(0x1022, 0x1234));
+
     /* ---- stream format ---- */
     CHECK(hda_stream_format(48000, 16, 2) == 0x0011);
     CHECK(hda_stream_format(44100, 16, 2) == 0x4011);

@@ -39,6 +39,9 @@ int hda_count(void);
 int hda_status(int index, unsigned char loc[3], int *working, char *buf, int cap);
 
 /* ---- pure helpers (host-tested) ---- */
+/* 1 if Linux (sound/hda/controllers/intel.c, AZX_SNOOP_TYPE_ATI) sets "enable snoop" in this AMD / ATI southbridge controller's
+ * PCI config byte 0x42 (mask 0x07, value 0x02) before using it: the controller's DMA then looks into the CPU caches. */
+int hda_needs_ati_snoop(unsigned short vendor, unsigned short device);
 /* sin(2*pi * phase / 2^32) in Q15 (-32767..32767), error below 8 / 32767 */
 int hda_sine_q15(unsigned phase);
 /* stream format word for PCM (spec 3.7.1): 48000 or 44100 Hz (or 8000..192000 through mult / div), 8/16/20/24/32
