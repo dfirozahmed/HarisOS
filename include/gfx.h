@@ -193,6 +193,7 @@ typedef struct
         unsigned look_n[8];   /* of the "look" ones: by the part of the look that changed (names in look_name) */
     } busy[3];
 } GfxCompStats;
+struct GfxWallpaper; /* below, with the gradients */
 typedef struct
 {
     int (*surface_new)(int w, int h);
@@ -203,6 +204,9 @@ typedef struct
     int (*scroll)(int id, int x, int y, int w, int h, int dy);
     void (*report)(const GfxCompStats *s); /* may be 0: every few hundred frames, what the desktop measured */
     void (*dim)(int scale); /* may be 0: the screen's brightness, 0 .. 256 (256 = full), for the copies to the screen */
+    /* may be 0: paints the wallpaper (GfxWallpaper below, w x h from the surface's (0, 0)) into a surface; 0 = done. Then the
+     * CPU never draws or uploads it while the desktop is composed. */
+    int (*wallpaper)(int id, const struct GfxWallpaper *w);
 } GfxCompOps;
 void gfx_comp_driver(const GfxCompOps *ops); /* 0: none */
 const GfxCompOps *gfx_comp(void);            /* the driver, 0 when there is none (or it failed) */
@@ -314,5 +318,28 @@ void gfx_gradient_h(int x, int y, int w, int h,
 /* Vertical gradient inside a rounded rectangle (buttons, bars). */
 void gfx_fill_round_rect_gradient(int x, int y, int w, int h, int radius,
                                   GfxColor top, GfxColor bottom);
+
+/* ---- wallpaper ---------------------------------------------- */
+/* A wallpaper given as numbers, so a GPU can paint the same picture (GfxCompOps.wallpaper): a vertical gradient over
+ * (0, 0) .. (w, h), soft round lights over it (as gfx_glow), then solid rectangles (as gfx_fill_rect). Colours are r, g, b. */
+#define GFX_WALL_GLOWS 2
+#define GFX_WALL_RECTS 3
+typedef struct GfxWallpaper
+{
+    int w, h;
+    unsigned char top[3], bottom[3];
+    int nglow, nrect;
+    struct
+    {
+        int cx, cy, r;
+        unsigned char rgb[3], alpha;
+    } glow[GFX_WALL_GLOWS];
+    struct
+    {
+        int x, y, w, h;
+        unsigned char rgb[3];
+    } rect[GFX_WALL_RECTS];
+} GfxWallpaper;
+void gfx_wallpaper_draw(const GfxWallpaper *w); /* with the CPU */
 
 #endif

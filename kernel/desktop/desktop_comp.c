@@ -2,8 +2,9 @@
  * taskbar are surfaces, and for the parts of the screen that changed the GPU puts them together, in the order the
  * CPU draws them (desktop_draw_region): wallpaper, windows, start menu, app menu, taskbar. The CPU draws a window
  * only when what it shows changed (wm_comp.c), a menu or the taskbar only when something on it changed, the
- * wallpaper only once per theme. When anything fails the desktop is drawn by the CPU as before; going back to the
- * CPU draws the whole scene once, because the back buffer did not follow. */
+ * wallpaper only once per theme (or not at all: a driver with GfxCompOps.wallpaper paints it). When anything fails
+ * the desktop is drawn by the CPU as before; going back to the CPU draws the whole scene once, because the back
+ * buffer did not follow. */
 #include "desktop.h"
 #include "taskbar.h"
 #include "startmenu.h"
@@ -12,6 +13,7 @@
 #include "wm.h"
 #include "desktop_internal.h"
 #include "timer.h"
+#include "mem.h"
 
 extern int WALL_VALID;
 extern unsigned WALL_GEN; /* desktop.c: counts full redraws (the wallpaper may have changed) */
@@ -49,6 +51,8 @@ static int REPORTS;          /* reports sent: at most REPORT_MAX, so the log sta
 #define REPORT_MAX 10
 static int WALL_SURF;
 static unsigned WALL_UP; /* WALL_GEN of the uploaded wallpaper */
+static GfxWallpaper WALL_DESC; /* the wallpaper the GPU painted (ops->wallpaper) */
+static int WALL_PAINTED;
 #define PTR_MAX 64        /* the pointer's pictures are at most 64 x 64 */
 static int PTR_SURF;
 static unsigned PTR_UP;   /* gfx_cursor_layer's gen of the uploaded picture, 0 = none */
@@ -101,6 +105,7 @@ static void leave(void)
     PTR_SURF = 0;
     PTR_UP = 0;
     WALL_SURF = 0;
+    WALL_PAINTED = 0;
     for (int i = 0; i < 3; i++)
     {
         if (ops && TOPS[i].surf)
@@ -220,7 +225,8 @@ int desktop_comp_frame(const UiRect *areas, int n)
     void *a, *b;
     unsigned long long bytes;
     int W = (int)gfx_width(), H = (int)gfx_height();
-    if (!ops || !WALL_VALID || !gfx_double_buffered() || !wm_drag_memory(&a, &b, &bytes))
+    /* the CPU's wallpaper is needed only when the driver cannot paint it (a new theme makes it invalid until the CPU draws it) */
+    if (!ops || (!WALL_VALID && !ops->wallpaper) || !gfx_double_buffered() || !wm_drag_memory(&a, &b, &bytes))
     {
         leave();
         return 0;
@@ -237,7 +243,22 @@ int desktop_comp_frame(const UiRect *areas, int n)
     }
     if (!WALL_SURF && !(WALL_SURF = ops->surface_new(W, H)))
         goto fail;
-    if (full || WALL_UP != WALL_GEN)
+    if (ops->wallpaper)
+    {
+        /* the GPU paints it from the theme's numbers: again only when they changed (another theme), nothing to upload */
+        GfxWallpaper wd;
+        memset(&wd, 0, sizeof wd); /* the padding too: the two are compared byte by byte */
+        ui_wallpaper(&wd);
+        if (full || !WALL_PAINTED || memcmp(&wd, &WALL_DESC, sizeof wd) != 0)
+        {
+            if (ops->wallpaper(WALL_SURF, &wd) != 0)
+                goto fail;
+            WALL_DESC = wd;
+            WALL_PAINTED = 1;
+            full = 1;
+        }
+    }
+    else if (full || WALL_UP != WALL_GEN)
     {
         const unsigned int *wall = gfx_cache_pixels();
         if (!wall || ops->upload(WALL_SURF, wall, W, 0, 0, W, H, 1) != 0)

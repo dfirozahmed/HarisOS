@@ -184,6 +184,84 @@ uint32_t amd_comp_build_ps_shadow(uint32_t *code)
     return n;
 }
 
+/* The 4 x 4 ordered dither of gfx_effects.c (BAYER[(y & 3) << 2 | (x & 3)]) from the pixel position, times s_k into vout. With
+ * a = x ^ y the table is (a & 1) << 3 | (y & 1) << 2 | (a & 2) | (y & 2) >> 1. v12..v15 are scratch. */
+static void wall_dither(uint32_t *code, uint32_t *n, uint32_t vout, uint32_t s_k)
+{
+    code[(*n)++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 12, A3D_SRC_VGPR(2));          /* v12 = x                    */
+    code[(*n)++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 13, A3D_SRC_VGPR(3));          /* v13 = y                    */
+    code[(*n)++] = a3d_vop2(A3D_OP2_XOR_B32, 14, 13, A3D_SRC_VGPR(12));         /* v14 = a = x ^ y            */
+    code[(*n)++] = a3d_vop2(A3D_OP2_AND_B32, 15, 14, A3D_SRC_INT(1));           /* v15 = a & 1                */
+    code[(*n)++] = a3d_vop2(A3D_OP2_LSHLREV_B32, 15, 15, A3D_SRC_INT(3));       /* v15 <<= 3                  */
+    code[(*n)++] = a3d_vop2(A3D_OP2_AND_B32, 12, 13, A3D_SRC_INT(1));           /* v12 = y & 1                */
+    code[(*n)++] = a3d_vop2(A3D_OP2_LSHLREV_B32, 12, 12, A3D_SRC_INT(2));       /* v12 <<= 2                  */
+    code[(*n)++] = a3d_vop2(A3D_OP2_OR_B32, 15, 15, A3D_SRC_VGPR(12));          /* v15 |= v12                 */
+    code[(*n)++] = a3d_vop2(A3D_OP2_AND_B32, 12, 14, A3D_SRC_INT(2));           /* v12 = a & 2                */
+    code[(*n)++] = a3d_vop2(A3D_OP2_OR_B32, 15, 15, A3D_SRC_VGPR(12));          /* v15 |= v12                 */
+    code[(*n)++] = a3d_vop2(A3D_OP2_LSHRREV_B32, 12, 13, A3D_SRC_INT(1));       /* v12 = y >> 1               */
+    code[(*n)++] = a3d_vop2(A3D_OP2_AND_B32, 12, 12, A3D_SRC_INT(1));           /* v12 &= 1                   */
+    code[(*n)++] = a3d_vop2(A3D_OP2_OR_B32, 15, 15, A3D_SRC_VGPR(12));          /* v15 |= v12  (0 .. 15)      */
+    code[(*n)++] = a3d_vop1(A3D_OP1_CVT_F32_U32, vout, A3D_SRC_VGPR(15));       /* vout = float(v15)          */
+    code[(*n)++] = a3d_vop2(A3D_OP2_MUL_F32, vout, vout, SGPR(s_k));            /* vout *= s_k                */
+}
+
+/* The wallpaper's gradient: per channel base + y * slope + dither (the base already holds the offset that turns the export's
+ * rounding into gfx_gradient_v's "(value + dither) >> 16"). */
+uint32_t amd_comp_build_ps_wall_grad(uint32_t *code)
+{
+    uint32_t n = 0, c;
+    wall_dither(code, &n, 9, 6);                                                 /* v9 = dither * s6           */
+    for (c = 0; c < 3; c++) {
+        code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 6 + c, 3, SGPR(3 + c));            /* v6+c = y * slope           */
+        code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 6 + c, 6 + c, SGPR(c));            /* v6+c += base               */
+        code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 6 + c, 9, A3D_SRC_VGPR(6 + c));    /* v6+c += dither             */
+    }
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 9, A3D_SRC_ONE_F);                     /* v9 = 1.0 (alpha)           */
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 10);                      /* v_cvt_pkrtz_f16_f32 v10, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 11);                      /* v_cvt_pkrtz_f16_f32 v11, v8, v9 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(9), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v10, v11 compr done vm */
+    code[n++] = a3d_exp1(10, 11, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
+/* A soft round light (gfx_glow): t = whole part of 256 * max(1 - d^2 / r^2, 0) (the CPU's steps of 1/256), a = t^2 * alpha / 2^24;
+ * premultiplied for blend mode 2, the dither added to the colour, so the blend gives colour * a + below * (1 - a) + dither. */
+uint32_t amd_comp_build_ps_wall_glow(uint32_t *code)
+{
+    uint32_t n = 0, c;
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 4, 2, SGPR(0));                        /* v4 = cx - x                */
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 5, 3, SGPR(1));                        /* v5 = cy - y                */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 4, 4, A3D_SRC_VGPR(4));                /* v4 = dx^2                  */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 5, 5, A3D_SRC_VGPR(5));                /* v5 = dy^2                  */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 4, 5, A3D_SRC_VGPR(4));                /* v4 = d^2                   */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 4, 4, SGPR(2));                        /* v4 = d^2 / r^2             */
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 4, 4, A3D_SRC_ONE_F);                  /* v4 = 1.0 - v4              */
+    code[n++] = a3d_vop2(A3D_OP2_MAX_F32, 4, 4, A3D_SRC_ZERO);                   /* v4 = max(0.0, v4)          */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 4, 4, SGPR(9));                        /* v4 *= 256.0                */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(4));               /* v4 = t (truncated)         */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_F32_U32, 4, A3D_SRC_VGPR(4));               /* v4 = float(t)              */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 4, 4, A3D_SRC_VGPR(4));                /* v4 = t^2                   */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 4, 4, SGPR(3));                        /* v4 = a                     */
+    wall_dither(code, &n, 9, 7);                                                 /* v9 = dither * s7           */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 9, 9, SGPR(8));                        /* v9 += s8                   */
+    for (c = 0; c < 3; c++) {
+        code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 6 + c, 4, SGPR(4 + c));            /* v6+c = colour * a          */
+        code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 6 + c, 9, A3D_SRC_VGPR(6 + c));    /* v6+c += dither             */
+    }
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 10, 4, A3D_SRC_ONE_F);                 /* v10 = 1.0 - a (what shows through) */
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 11);                      /* v_cvt_pkrtz_f16_f32 v11, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 12);                      /* v_cvt_pkrtz_f16_f32 v12, v8, v10 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(10), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v11, v12 compr done vm */
+    code[n++] = a3d_exp1(11, 12, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
 /* ---- building a frame ---- */
 
 void amd_comp_begin(AmdCompFrame *f, uint32_t *ib, uint32_t cap, uint64_t rt_mc, uint32_t pitch_px, uint32_t width, uint32_t height,
@@ -199,6 +277,8 @@ void amd_comp_begin(AmdCompFrame *f, uint32_t *ib, uint32_t cap, uint64_t rt_mc,
     f->ps_layer_mc = shader_mc + AMD_COMP_PS_LAYER_OFF;
     f->ps_under_mc = shader_mc + AMD_COMP_PS_UNDER_OFF;
     f->ps_dim_mc = shader_mc + AMD_COMP_PS_DIM_OFF;
+    f->ps_wgrad_mc = shader_mc + AMD_COMP_PS_WGRAD_OFF;
+    f->ps_wglow_mc = shader_mc + AMD_COMP_PS_WGLOW_OFF;
     f->draws = 0;
     a3d_emit_head(&b, rt_mc, pitch_px, width, height, bgr);
     f->n = b.n; f->over = b.over;
@@ -314,6 +394,77 @@ void amd_comp_layer_under(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uin
     comp_draw(f, x0, y0, x1, y1, 0, f->ps_under_mc, 1, 4, u, 11);   /* v0 .. v17: 20 VGPRs */
 }
 
+/* IEEE-754 single precision bits of num / den, either sign (den > 0, |num| and den below 2^31; truncated). num is shifted up to
+ * bit 62 first, so even a tiny result (1 / r^2) keeps every bit of its mantissa. */
+static uint32_t f32_frac(long long num, long long den)
+{
+    uint32_t sign = 0, p = 0;
+    unsigned long long a, q;
+    int s = 0, e;
+    if (num == 0 || den <= 0)
+        return 0;
+    if (num < 0) { sign = 0x80000000u; num = -num; }
+    a = (unsigned long long)num;
+    while (a < (1ull << 62)) { a <<= 1; s++; }
+    q = a / (unsigned long long)den;    /* the value times 2^s, at least 2^31 */
+    while ((q >> (p + 1)) != 0)
+        p++;
+    e = (int)p - s + 127;
+    if (e <= 0)
+        return sign;
+    return sign | ((uint32_t)e << 23) | ((uint32_t)(q >> (p - 23u)) & 0x7FFFFFu);
+}
+
+/* [*x0, *x1) x [*y0, *y1) cut to 0 .. (w, h); 1 when something is left */
+static int wall_clip(int *x0, int *y0, int *x1, int *y1, int w, int h)
+{
+    if (*x0 < 0) *x0 = 0;
+    if (*y0 < 0) *y0 = 0;
+    if (*x1 > w) *x1 = w;
+    if (*y1 > h) *y1 = h;
+    return *x0 < *x1 && *y0 < *y1;
+}
+
+/* The CPU's dither turns a value v (in 1/255 steps) into floor(v + bayer / 16); the export rounds to nearest, so the shaders add
+ * bayer / 16 + 1/32 - 1/2 (the middle of the dither step: never half way, so the rounding is never in doubt). */
+void amd_comp_wallpaper(AmdCompFrame *f, const GfxWallpaper *w)
+{
+    uint32_t u[10];
+    long long span = w->h > 1 ? w->h - 1 : 1;
+    int c, i;
+    if (w->w <= 0 || w->h <= 0 || w->w > 16384 || w->h > 16384)   /* keeps every f32_frac() below 2^31 */
+        return;
+    for (c = 0; c < 3; c++) {           /* gfx_gradient_v: top + (bottom - top) * row / span, row = y - 1/2 */
+        long long top = w->top[c], d = (long long)w->bottom[c] - top;
+        u[c] = f32_frac(64 * span * top - 32 * d - 30 * span, 64 * span * 255);
+        u[3 + c] = f32_frac(d, span * 255);
+    }
+    u[6] = f32_frac(1, 16 * 255);
+    comp_draw(f, 0, 0, (uint32_t)w->w, (uint32_t)w->h, 0, f->ps_wgrad_mc, 1, 3, u, 7);   /* v0 .. v15: 16 VGPRs */
+    for (i = 0; i < w->nglow && i < GFX_WALL_GLOWS; i++) {
+        int cx = w->glow[i].cx, cy = w->glow[i].cy, r = w->glow[i].r;
+        int x0 = cx - r, y0 = cy - r, x1 = cx + r + 1, y1 = cy + r + 1;
+        if (r <= 0 || r >= 46000 || !w->glow[i].alpha || !wall_clip(&x0, &y0, &x1, &y1, w->w, w->h))
+            continue;
+        u[0] = f32_frac(2 * (long long)cx + 1, 2);
+        u[1] = f32_frac(2 * (long long)cy + 1, 2);
+        u[2] = f32_frac(1, (long long)r * r);
+        u[3] = f32_frac(w->glow[i].alpha, 1ll << 24);
+        for (c = 0; c < 3; c++)
+            u[4 + c] = f32_frac(w->glow[i].rgb[c], 255);
+        u[7] = f32_frac(1, 16 * 255);
+        u[8] = f32_frac(-15, 32 * 255);
+        u[9] = a3d_f32_bits(256);
+        comp_draw(f, (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1, 2, f->ps_wglow_mc, 1, 3, u, 10);
+    }
+    for (i = 0; i < w->nrect && i < GFX_WALL_RECTS; i++) {
+        int x0 = w->rect[i].x, y0 = w->rect[i].y, x1 = x0 + w->rect[i].w, y1 = y0 + w->rect[i].h;
+        if (w->rect[i].w <= 0 || w->rect[i].h <= 0 || !wall_clip(&x0, &y0, &x1, &y1, w->w, w->h))
+            continue;
+        amd_comp_fill(f, (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1, w->rect[i].rgb[0], w->rect[i].rgb[1], w->rect[i].rgb[2]);
+    }
+}
+
 uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc)
 {
     Ib b = { f->ib, f->n, f->cap, f->over };
@@ -383,7 +534,7 @@ uint32_t amd_vpool_free_bytes(const AmdVPool *p)
 }
 
 /* ---- running it, and the M4a test ---- */
-#define VRAM_COMP_SHADER_OFF 0x0B004000u   /* 4 KiB: the four shaders at AMD_COMP_*_OFF */
+#define VRAM_COMP_SHADER_OFF 0x0B004000u   /* 8 KiB (AMD_COMP_SHADER_BYTES): the shaders at AMD_COMP_*_OFF */
 #define VRAM_COMP_SYNC_OFF 0x0B300040u     /* 4 bytes for the end-of-frame sync */
 #define VRAM_COMP_SYNC2_OFF 0x0B300044u    /* the same for a second frame in one submission (the scene compositor) */
 /* Below 256 MiB: the CPU reaches VRAM only through BAR0, and on this laptop BAR0 covers the first 256 MiB of the 512 MiB (reads at
@@ -405,15 +556,17 @@ static unsigned long long comp_tsc(void)
     return ((unsigned long long)hi << 32) | lo;
 }
 
-/* Writes the seven shaders to VRAM, each padded with zeros (the shader fetch reads ahead). */
+/* Writes the nine shaders to VRAM, each padded with zeros (the shader fetch reads ahead). */
 static void upload_shaders(void)
 {
-    static const uint32_t off[7] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF,
-                                     AMD_COMP_PS_LAYER_OFF, AMD_COMP_PS_UNDER_OFF, AMD_COMP_PS_DIM_OFF };
+    static const uint32_t off[9] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF,
+                                     AMD_COMP_PS_LAYER_OFF, AMD_COMP_PS_UNDER_OFF, AMD_COMP_PS_DIM_OFF, AMD_COMP_PS_WGRAD_OFF,
+                                     AMD_COMP_PS_WGLOW_OFF };
     uint32_t code[AMD_COMP_SHADER_MAX], k, i, n;
-    for (k = 0; k < 7; k++) {
+    for (k = 0; k < 9; k++) {
         n = k == 0 ? amd_comp_build_vs(code) : k == 1 ? amd_comp_build_ps_fill(code) : k == 2 ? amd_comp_build_ps_image(code)
-          : k == 3 ? amd_comp_build_ps_shadow(code) : k == 4 ? amd_comp_build_ps_layer(code) : k == 5 ? amd_comp_build_ps_under(code) : amd_comp_build_ps_dim(code);
+          : k == 3 ? amd_comp_build_ps_shadow(code) : k == 4 ? amd_comp_build_ps_layer(code) : k == 5 ? amd_comp_build_ps_under(code)
+          : k == 6 ? amd_comp_build_ps_dim(code) : k == 7 ? amd_comp_build_ps_wall_grad(code) : amd_comp_build_ps_wall_glow(code);
         for (i = 0; i < 0x200u / 4u; i++)
             amd_gpu_vram_write32(VRAM_COMP_SHADER_OFF + off[k] + 4u * i, i < n ? code[i] : 0u);
     }
@@ -524,7 +677,7 @@ static int comp_run(uint32_t base_off, uint64_t rt_mc, uint32_t pitch_px, uint32
     uint32_t k, x, y, n, seq, cap;
     uint32_t cx0 = ox >= 8u ? ox - 8u : 0, cy0 = oy >= 8u ? oy - 8u : 0;
     uint32_t cx1 = ox + SCENE_W + 8u > width ? width : ox + SCENE_W + 8u, cy1 = oy + SCENE_H + 8u > height ? height : oy + SCENE_H + 8u;
-    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
+    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
     uint64_t frame_mc = amd_gpu_frame_ib_mc();
     unsigned long long t0;
     const uint32_t pattern = 0x00112233u;
@@ -724,7 +877,7 @@ int amd_comp_overlay_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width
     off64 = fb_phys - vram_cpu;
     if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_COMP_SHADER_OFF) return 0;
     ov.rt_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
-    if (!ov.rt_mc || !amd_gpu_frame_ib_mc() || !amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u)) return 0;
+    if (!ov.rt_mc || !amd_gpu_frame_ib_mc() || !amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES)) return 0;
     ov.pitch_px = pitch_bytes / 4u; ov.width = width; ov.height = height; ov.bgr = bgr;
     upload_shaders();
     amd_gpu_wc_flush();
@@ -773,7 +926,7 @@ int amd_comp_overlay_draw(int x, int y, int x0, int y0, int x1, int y1)
     if (x0 >= x1 || y0 >= y1) return 0;  /* nothing of the layer in the box */
 
     amd_comp_begin(&f, ib, 1024, ov.rt_mc, ov.pitch_px, ov.width, ov.height, ov.bgr,
-                   amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u));
+                   amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES));
     amd_comp_layer_under(&f, &ov.s, (uint32_t)(x0 - x), (uint32_t)(y0 - y), ov.lh, (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
                          (uint32_t)y1, ov.bgr);
     n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
@@ -832,7 +985,7 @@ int amd_comp_layer_test(void)
         for (x = 0; x < 96u + 2u * ox; x++)
             amd_gpu_vram_write32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u, pattern);
     amd_gpu_wc_flush();
-    amd_comp_begin(&f, ib, 1024, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u));
+    amd_comp_begin(&f, ib, 1024, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES));
     amd_comp_layer(&f, &s, 0, 0, ox, oy, ox + 96u, oy + 64u, 1);
     n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
     if (!n || a3d_default_state()) { amd_surface_free(&s); status = "layer test FAILED: the frame / default state"; return 0; }
@@ -897,7 +1050,7 @@ uint32_t amd_comp_drag_test(void)
         for (y = 0; y < 64u; y++)                                         /* the picture below the layer, fast */
             amd_gpu_vram_write_span(s.off + (64u + y) * s.pitch_px * 4u, row, 96u);
         __asm__ volatile("sfence" ::: "memory");
-        amd_comp_begin(&f, ib, 1024, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u));
+        amd_comp_begin(&f, ib, 1024, rt_mc, COMP_RT_W, COMP_RT_W, COMP_RT_H, 1, amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES));
         amd_comp_layer_under(&f, &s, 0, 0, 64u, ox, oy, ox + 96u, oy + 64u, 1);
         n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
         if (!n) { bad = ~0u; status = "drag test FAILED: the frame does not fit"; break; }
@@ -1011,7 +1164,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     static uint32_t ib[SC_IB_MAX];
     AmdCompFrame f;
     uint32_t na, nb, seq;
-    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
+    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
     unsigned long long t0 = comp_tsc();
     if (!sc.up || !amd_gpu_ring_running() || w > sc.bb.w || h > sc.bb.h) return -1;
 
@@ -1103,7 +1256,7 @@ int amd_comp_scene_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, 
     off64 = fb_phys - vram_cpu;
     if (off64 + (uint64_t)pitch_bytes * height > (uint64_t)VRAM_COMP_POOL_OFF) return 0;   /* the screen must end before the pool */
     sc.fb_mc = amd_native_vram_mc_addr((uint32_t)off64, pitch_bytes * height);
-    if (!sc.fb_mc || !amd_gpu_frame_ib_mc() || !amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u)) return 0;
+    if (!sc.fb_mc || !amd_gpu_frame_ib_mc() || !amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES)) return 0;
     if (!sc.bb.off && !amd_surface_alloc(&sc.bb, width, height)) return 0;
     sc.fb_pitch_px = pitch_bytes / 4u; sc.width = width; sc.height = height; sc.bgr = bgr;
     upload_shaders();
@@ -1242,7 +1395,7 @@ int amd_comp_surface_scroll(int id, int x, int y, int w, int h, int dy)
     const AmdSurface *s;
     uint32_t na, nb, seq;
     int n = h - (dy < 0 ? -dy : dy), sy, ty;
-    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, 0x1000u);
+    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES);
     if (!sc.up || !amd_gpu_ring_running() || id < 1 || id > SC_MAX || !sc_surf[id - 1].off || x < 0 || y < 0 || w <= 0 || h <= 0)
         return -1;
     s = &sc_surf[id - 1];
@@ -1313,5 +1466,70 @@ int amd_comp_scroll_test(void)
     scval[AMD_COMP_SC_SCROLLS] = 0;
     if (bad) { status = "scroll FAILED: words are wrong (all four bytes must survive)"; return 0; }
     status = "scroll PASS: rows moved up and down inside a surface, every word right (all four bytes)";
+    return 1;
+}
+
+/* ---- M4c: the wallpaper painted by the GPU ----
+ * The gradient, the lights and the rectangles in one frame straight into the target (a surface, or the test buffer). */
+static int wall_paint(uint64_t rt_mc, uint32_t pitch_px, const GfxWallpaper *w)
+{
+    static uint32_t ib[4096];
+    AmdCompFrame f;
+    uint32_t n, seq;
+    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES);
+    if (!sc.up || !amd_gpu_ring_running() || !rt_mc || !shader_mc || w->w <= 0 || w->h <= 0) return -1;
+    amd_comp_begin(&f, ib, 4096, rt_mc, pitch_px, (uint32_t)w->w, (uint32_t)w->h, sc.bgr, shader_mc);
+    amd_comp_wallpaper(&f, w);
+    n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
+    if (!n) return -1;
+    seq = frame_submit(ib, n);
+    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) return -1;
+    scval[AMD_COMP_SC_DRAWS] = f.draws;
+    scval[AMD_COMP_SC_DWORDS] = n;
+    return 0;
+}
+
+int amd_comp_surface_wallpaper(int id, const GfxWallpaper *w)
+{
+    const AmdSurface *s;
+    if (id < 1 || id > SC_MAX || !sc_surf[id - 1].off || !w) return -1;
+    s = &sc_surf[id - 1];
+    if (w->w <= 0 || w->h <= 0 || (uint32_t)w->w > s->w || (uint32_t)w->h > s->h) return -1;
+    return wall_paint(s->mc, s->pitch_px, w);
+}
+
+/* M4c check before the GPU paints the wallpaper: w painted into the offscreen buffer, every pixel compared with what the CPU drew
+ * (the shaders' floats and the CPU's integers differ by a little: every channel within 2). */
+int amd_comp_wall_test(const GfxWallpaper *w, const uint32_t *want)
+{
+    uint32_t x, y, k, bad = 0;
+    uint64_t rt_mc = amd_native_vram_mc_addr(VRAM_COMP_RT_OFF, COMP_RT_W * COMP_RT_H * 4u);
+    for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
+    if (!sc.up || !rt_mc) { status = "wallpaper test skipped: the compositor is not set up"; return 0; }
+    if (!w || !want || w->w <= 0 || w->h <= 0 || (uint32_t)w->w > COMP_RT_W || (uint32_t)w->h > COMP_RT_H) {
+        status = "wallpaper test skipped: no test picture (at most 512 x 256)";
+        return 0;
+    }
+    amd_gpu_fault_clear();
+    if (wall_paint(rt_mc, COMP_RT_W, w) != 0) {
+        keep_fault_registers();
+        val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
+        status = "wallpaper test FAILED: the paint did not finish";
+        return 0;
+    }
+    for (y = 0; y < (uint32_t)w->h; y++)
+        for (x = 0; x < (uint32_t)w->w; x++) {
+            uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu;
+            uint32_t want_px = want[y * (uint32_t)w->w + x] & 0x00FFFFFFu;
+            val[AMD_COMP_V_IN_TOTAL]++;
+            if (near_n(v, want_px, 2)) { val[AMD_COMP_V_IN_GOOD]++; continue; }
+            if (!bad++) {
+                val[AMD_COMP_V_FIRST_IN] = v | 0x01000000u; val[AMD_COMP_V_FIRST_IN + 1] = want_px;
+                val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16);
+            }
+        }
+    val[AMD_COMP_V_DRAWS] = scval[AMD_COMP_SC_DRAWS]; val[AMD_COMP_V_DWORDS] = scval[AMD_COMP_SC_DWORDS];
+    if (bad) { status = "wallpaper FAILED: pixels differ from the CPU's by more than 2"; return 0; }
+    status = "wallpaper PASS: gradient + 2 lights + rectangles painted by the GPU, every pixel within 2 of the CPU's";
     return 1;
 }

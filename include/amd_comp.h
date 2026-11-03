@@ -3,6 +3,7 @@
  *   fill    a solid colour rectangle
  *   image   a rectangle copied from a surface (an 8-8-8-8 picture in VRAM), with an opacity
  *   shadow  a soft black shadow (alpha falling to 0 over the outer r pixels), blended "over" what is there
+ *   wall    the wallpaper's gradient and its soft lights, worked out per pixel (with the CPU's ordered dither)
  * The frame builders are pure functions (no hardware access), so tests/test_amd_3d.c walks the stream and the shaders. */
 #ifndef HARIS_AMD_COMP_H
 #define HARIS_AMD_COMP_H
@@ -27,6 +28,7 @@ typedef struct
     uint32_t pitch_px, width, height;
     int bgr;
     uint64_t vs_mc, ps_fill_mc, ps_image_mc, ps_shadow_mc, ps_layer_mc, ps_under_mc, ps_dim_mc;  /* the shaders (amd_comp_build_*), 256-byte aligned */
+    uint64_t ps_wgrad_mc, ps_wglow_mc;
     uint32_t draws;
 } AmdCompFrame;
 
@@ -39,6 +41,11 @@ uint32_t amd_comp_build_ps_shadow(uint32_t *code);  /* s0..s3 = x0, y0, x1, y1, 
 uint32_t amd_comp_build_ps_layer(uint32_t *code);   /* s0..s7 = image resource (alpha from the 4th byte), s8 / s9 as for the image */
 uint32_t amd_comp_build_ps_under(uint32_t *code);   /* as layer, plus the picture below it s10 rows further down: out = layer + below * alpha */
 uint32_t amd_comp_build_ps_dim(uint32_t *code);     /* as image, colour times s10 (the screen's brightness) */
+/* colour = s0..s2 + y * s3..s5 + dither * s6 (floats, 1.0 = 255; the dither is the 4 x 4 Bayer value 0 .. 15 of the pixel) */
+uint32_t amd_comp_build_ps_wall_grad(uint32_t *code);
+/* s0 / s1 = centre + 0.5, s2 = 1 / r^2, s3 = alpha / 2^24, s4..s6 = colour, s7 = dither scale, s8 = dither offset, s9 = 256.0:
+ * t = whole part of s9 * max(1 - d^2 / r^2, 0), a = t^2 * s3, out = (colour * a + dither, 1 - a) for blend mode 2 (gfx_glow's formula) */
+uint32_t amd_comp_build_ps_wall_glow(uint32_t *code);
 
 /* Building a frame: begin (the target), any number of fills / images / shadows (painted in that order), end. end returns the number
  * of dwords, 0 if the stream did not fit. sync_mc: 4 bytes in VRAM for the end-of-frame colour buffer sync. */
@@ -53,7 +60,7 @@ void amd_comp_shadow(AmdCompFrame *f, uint32_t x0, uint32_t y0, uint32_t x1, uin
 void amd_comp_shadow_part(AmdCompFrame *f, int bx0, int by0, int bx1, int by1, uint32_t r, uint32_t alpha, uint32_t x0, uint32_t y0,
                           uint32_t x1, uint32_t y1);
 uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
-/* The shader offsets inside the 4 KiB at shader_mc that amd_comp_begin() assumes (0x200 bytes each). */
+/* The shader offsets inside the 8 KiB at shader_mc that amd_comp_begin() assumes (0x200 bytes each). */
 #define AMD_COMP_VS_OFF 0x000u
 #define AMD_COMP_PS_FILL_OFF 0x200u
 #define AMD_COMP_PS_IMAGE_OFF 0x400u
@@ -61,6 +68,9 @@ uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
 #define AMD_COMP_PS_LAYER_OFF 0x800u
 #define AMD_COMP_PS_UNDER_OFF 0xA00u
 #define AMD_COMP_PS_DIM_OFF 0xC00u
+#define AMD_COMP_PS_WGRAD_OFF 0xE00u
+#define AMD_COMP_PS_WGLOW_OFF 0x1000u
+#define AMD_COMP_SHADER_BYTES 0x2000u
 
 /* M4a test: three "windows" (surfaces the CPU fills) with soft shadows over a background, the third half transparent, composited in
  * ONE submission into a 512 x 256 buffer in VRAM / into the screen, every pixel checked against a CPU-made reference. 1 = right.
@@ -151,6 +161,12 @@ int amd_comp_compose(const GfxCompItem *items, int n, const int *rects, int nr);
 int amd_comp_surface_scroll(int id, int x, int y, int w, int h, int dy); /* GfxCompOps.scroll */
 void amd_comp_set_dim(int scale);    /* GfxCompOps.dim: the screen's brightness, 0 .. 256 */
 int amd_comp_scroll_test(void);       /* offscreen check before scroll is used: 1 = right */
+/* The wallpaper painted by the GPU (GfxCompOps.wallpaper): the frame builder (pure: gradient, lights, rectangles, the same order and
+ * formulas as gfx_wallpaper_draw), painting a surface with it, and the offscreen check before it is used: w (at most 512 x 256)
+ * painted and compared with want (what the CPU drew, w->w pixels per row), every channel within 2. 1 = right. */
+void amd_comp_wallpaper(AmdCompFrame *f, const GfxWallpaper *w);
+int amd_comp_surface_wallpaper(int id, const GfxWallpaper *w);
+int amd_comp_wall_test(const GfxWallpaper *w, const uint32_t *want);
 #define AMD_COMP_SC_FRAMES 0     /* composes done */
 #define AMD_COMP_SC_FAILS 1
 #define AMD_COMP_SC_UPLOADS 2

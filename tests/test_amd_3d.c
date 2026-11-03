@@ -34,6 +34,73 @@ uint64_t amd_gpu_frame_ib_mc(void) { return 0; }
 
 static int ok = 1;
 
+/* ---- the wallpaper shaders' arithmetic on the host (float, as the GPU does it) against the CPU's integers ---- */
+static float f32_of(uint32_t b) { union { uint32_t u; float f; } c; c.u = b; return c.f; }
+static float f16_of(uint32_t h)
+{
+    uint32_t e = (h >> 10) & 31u, m = h & 1023u;
+    float v = 1.0f + (float)m / 1024.0f;
+    if (!e) return 0.0f;
+    for (; e > 15u; e--) v *= 2.0f;
+    for (; e < 15u; e++) v /= 2.0f;
+    return v;
+}
+/* V_CVT_PKRTZ_F16_F32: 11 significant bits, rounded toward zero */
+static float f16_rtz(float v)
+{
+    float a = v < 0 ? -v : v, s = 1.0f;
+    if (a == 0.0f) return 0.0f;
+    while (a >= 2048.0f) { a /= 2.0f; s *= 2.0f; }
+    while (a < 1024.0f) { a *= 2.0f; s /= 2.0f; }
+    a = (float)(long)a * s;
+    return v < 0 ? -a : a;
+}
+/* the colour buffer's float -> 8-bit unorm: clamped, rounded to nearest */
+static int unorm8(float v)
+{
+    if (v <= 0.0f) return 0;
+    if (v >= 1.0f) return 255;
+    return (int)(v * 255.0f + 0.5f);
+}
+static const unsigned char T_BAYER[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };   /* gfx_effects.c */
+#define TW 176
+#define TH 124
+/* What the CPU draws (kernel/graphics/gfx_effects.c gfx_gradient_v, gfx_glow with blend_ptr16, gfx_fill_rect: the integer
+ * arithmetic copied), channel by channel */
+static void cpu_wall(const GfxWallpaper *w, unsigned char (*px)[3])
+{
+    int span = w->h > 1 ? w->h - 1 : 1, x, y, c, i;
+    for (y = 0; y < w->h; y++) {
+        int t = (int)((long long)y * 65535 / span);
+        for (x = 0; x < w->w; x++)
+            for (c = 0; c < 3; c++) {
+                int v = (w->top[c] * 65536 + ((int)w->bottom[c] - (int)w->top[c]) * t + T_BAYER[((y & 3) << 2) | (x & 3)] * 4096) >> 16;
+                px[y * w->w + x][c] = (unsigned char)(v > 255 ? 255 : v);
+            }
+    }
+    for (i = 0; i < w->nglow; i++) {
+        long long r2 = (long long)w->glow[i].r * w->glow[i].r;
+        for (y = 0; y < w->h; y++)
+            for (x = 0; x < w->w; x++) {
+                long long dx = x - w->glow[i].cx, dy = y - w->glow[i].cy, d2 = dx * dx + dy * dy;
+                int t, a16, d, ia;
+                if (d2 >= r2) continue;
+                t = (int)((r2 - d2) * 256 / r2);
+                a16 = (int)(((long long)t * t * w->glow[i].alpha) >> 8);
+                if (a16 <= 0) continue;
+                d = T_BAYER[((y & 3) << 2) | (x & 3)] * 4096;
+                ia = 65536 - a16;
+                for (c = 0; c < 3; c++)
+                    px[y * w->w + x][c] = (unsigned char)((w->glow[i].rgb[c] * a16 + px[y * w->w + x][c] * ia + d) >> 16);
+            }
+    }
+    for (i = 0; i < w->nrect; i++)
+        for (y = w->rect[i].y; y < w->rect[i].y + w->rect[i].h; y++)
+            for (x = w->rect[i].x; x < w->rect[i].x + w->rect[i].w; x++)
+                if (x >= 0 && y >= 0 && x < w->w && y < w->h)
+                    for (c = 0; c < 3; c++) px[y * w->w + x][c] = w->rect[i].rgb[c];
+}
+
 /* GFX9 constant bus (Mesa aco_validate.cpp, const_bus_limit = 1): walks shader code instruction by instruction; returns how many
  * instructions read VCC (VOP2 V_CNDMASK_B32 0, V_ADDC_CO_U32 0x1C, V_SUBB 0x1D, V_SUBBREV 0x1E) together with a literal or an SGPR,
  * or ~0u if an encoding is not known to the walker. */
@@ -582,6 +649,104 @@ int main(void)
                   ud[8] == (uint32_t)(20 - 120) && ud[9] == (uint32_t)(10 - 110),
                   "under draw: no blending (the shader writes the finished pixel), 11 user SGPRs, alpha from the 4th byte, below 200 rows down");
         }
+    }
+
+    /* M4c wallpaper: the two shaders keep the constant bus rule and fit; the frame (gradient, 2 lights, 3 rectangles) is walked,
+     * its SGPRs run through the shaders' arithmetic in float for every pixel and compared with what the CPU draws */
+    {
+        static uint32_t code[AMD_COMP_SHADER_MAX], fib[8192];
+        static unsigned char cpu[TW * TH][3], gpu[TW * TH][3];
+        uint32_t cn, nf, k = 0, ndraw = 0, nud = 0, vs[4] = { 0 }, ud[16] = { 0 }, blend = 0, nps[8] = { 0 }, bl[8] = { 0 };
+        int bad = 0, worst = 0, exact = 0, fits = 1;
+        AmdCompFrame f;
+        GfxWallpaper w = { 0 };
+        cn = amd_comp_build_ps_wall_grad(code);
+        bad += (int)const_bus_bad(code, cn); fits &= cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && code[cn - 1] == A3D_S_ENDPGM;
+        cn = amd_comp_build_ps_wall_glow(code);
+        bad += (int)const_bus_bad(code, cn); fits &= cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && code[cn - 1] == A3D_S_ENDPGM;
+        check(bad == 0 && fits && AMD_COMP_PS_WGLOW_OFF + 0x200u <= AMD_COMP_SHADER_BYTES,
+              "wallpaper shaders: no VCC + literal / SGPR, each fits in its slot inside the 8 KiB");
+        check(a3d_vop2(A3D_OP2_XOR_B32, 14, 13, A3D_SRC_VGPR(12)) == 0x2A1C1B0Cu && a3d_vop1(A3D_OP1_CVT_F32_U32, 9, A3D_SRC_VGPR(15)) == 0x7E120D0Fu,
+              "v_xor_b32 v14, v12, v13 = 0x2A1C1B0C; v_cvt_f32_u32 v9, v15 = 0x7E120D0F");
+
+        /* the bring-up's test wallpaper (amd_bringup.c wall_check) */
+        w.w = TW; w.h = TH;
+        w.top[0] = 11; w.top[1] = 16; w.top[2] = 38; w.bottom[0] = 36; w.bottom[1] = 64; w.bottom[2] = 128;
+        w.nglow = 2;
+        w.glow[0].cx = 137; w.glow[0].cy = 25; w.glow[0].r = 106; w.glow[0].alpha = 90;
+        w.glow[0].rgb[0] = 74; w.glow[0].rgb[1] = 128; w.glow[0].rgb[2] = 255;
+        w.glow[1].cx = 32; w.glow[1].cy = 109; w.glow[1].r = 85; w.glow[1].alpha = 70;
+        w.glow[1].rgb[0] = 150; w.glow[1].rgb[1] = 84; w.glow[1].rgb[2] = 235;
+        w.nrect = 3;
+        w.rect[0].x = 98; w.rect[0].y = 20; w.rect[0].w = 60; w.rect[0].h = 60;
+        w.rect[0].rgb[0] = 29; w.rect[0].rgb[1] = 104; w.rect[0].rgb[2] = 169;
+        w.rect[1].x = 109; w.rect[1].y = 27; w.rect[1].w = 44; w.rect[1].h = 45;
+        w.rect[1].rgb[0] = 34; w.rect[1].rgb[1] = 126; w.rect[1].rgb[2] = 185;
+        w.rect[2].x = -10; w.rect[2].y = 100; w.rect[2].w = 30; w.rect[2].h = 40;
+        w.rect[2].rgb[0] = 42; w.rect[2].rgb[1] = 148; w.rect[2].rgb[2] = 199;
+        cpu_wall(&w, cpu);
+
+        amd_comp_begin(&f, fib, 8192, 0x4100000000ULL + 0x0D000000ULL, 512, TW, TH, 1, 0x4100000000ULL + 0x0B004000ULL);
+        amd_comp_wallpaper(&f, &w);
+        nf = amd_comp_end(&f, 0x4100000000ULL + 0x0B300040ULL);
+        while (k < nf) {
+            uint32_t h = fib[k], body = ((h >> 16) & 0x3FFF) + 1, op = (h >> 8) & 0xFF, i;
+            if (op == 0x76 && fib[k + 1] == R3D_SPI_SHADER_USER_DATA_VS_0)
+                for (i = 0; i < 4; i++) vs[i] = fib[k + 2 + i];
+            if (op == 0x76 && fib[k + 1] == R3D_SPI_SHADER_USER_DATA_PS_0) {
+                nud = body - 1;
+                for (i = 0; i < nud && i < 16; i++) ud[i] = fib[k + 2 + i];
+            }
+            if (op == 0x69 && fib[k + 1] == R3D_CB_BLEND0_CONTROL) blend = fib[k + 2];
+            if (op == 0x2D) {   /* a draw: run it on the host */
+                int x0 = (int)f32_of(vs[0]), y0 = (int)f32_of(vs[1]), x1 = (int)f32_of(vs[2]), y1 = (int)f32_of(vs[3]), x, y, c;
+                if (ndraw < 8) { nps[ndraw] = nud; bl[ndraw] = blend; }
+                ndraw++;
+                for (y = y0; y < y1; y++)
+                    for (x = x0; x < x1; x++) {
+                        float px = (float)x + 0.5f, py = (float)y + 0.5f, d = (float)T_BAYER[((y & 3) << 2) | (x & 3)];
+                        unsigned char *o = gpu[y * TW + x];
+                        if (nud == 7)          /* gradient */
+                            for (c = 0; c < 3; c++) {
+                                float v = py * f32_of(ud[3 + c]);
+                                v += f32_of(ud[c]);
+                                v += d * f32_of(ud[6]);
+                                o[c] = (unsigned char)unorm8(f16_rtz(v));
+                            }
+                        else if (nud == 10) {  /* a light, blend mode 2: src + dst * src alpha */
+                            float dx = f32_of(ud[0]) - px, dy = f32_of(ud[1]) - py, t, a, dv;
+                            t = (dx * dx + dy * dy) * f32_of(ud[2]);
+                            t = 1.0f - t;
+                            if (t < 0.0f) t = 0.0f;
+                            t = (float)(uint32_t)(t * f32_of(ud[9]));   /* v_cvt_u32_f32 truncates */
+                            a = t * t * f32_of(ud[3]);
+                            dv = d * f32_of(ud[7]) + f32_of(ud[8]);
+                            for (c = 0; c < 3; c++)
+                                o[c] = (unsigned char)unorm8(f16_rtz(f32_of(ud[4 + c]) * a + dv) + (float)o[c] / 255.0f * f16_rtz(1.0f - a));
+                        } else if (nud == 2) { /* solid */
+                            o[0] = (unsigned char)unorm8(f16_of(ud[0] & 0xFFFFu));
+                            o[1] = (unsigned char)unorm8(f16_of(ud[0] >> 16));
+                            o[2] = (unsigned char)unorm8(f16_of(ud[1] & 0xFFFFu));
+                        }
+                    }
+            }
+            k += 1 + body;
+        }
+        for (k = 0; k < TW * TH; k++) {
+            int c, m = 0;
+            for (c = 0; c < 3; c++) {
+                int dd = (int)cpu[k][c] - (int)gpu[k][c];
+                if (dd < 0) dd = -dd;
+                if (dd > m) m = dd;
+            }
+            if (m > worst) worst = m;
+            if (!m) exact++;
+        }
+        printf("wallpaper on the host: %d of %d pixels exactly the CPU's, worst channel off by %d\n", exact, TW * TH, worst);
+        check(nf > 0 && f.draws == 6 && ndraw == 6 && nps[0] == 7 && nps[1] == 10 && nps[2] == 10 && nps[3] == 2 && nps[5] == 2 &&
+              bl[0] == 0 && bl[1] == 0x40000401u && bl[2] == 0x40000401u && bl[3] == 0,
+              "wallpaper frame: gradient (7 SGPRs, no blending), 2 lights (10 SGPRs, ONE / SRC_ALPHA), 3 solid rectangles");
+        check(worst <= 2, "wallpaper: the shaders' float arithmetic gives every pixel within 2 of the CPU's (the device check's limit)");
     }
 
     printf("\nAMD 3D TEST %s\n", ok ? "PASSED" : "FAILED");

@@ -2,21 +2,59 @@
 #include "ui_internal.h"
 
 /* ---- surfaces ------------------------------------------------ */
-void ui_background(void)
+static void wall_rgb(unsigned char *out, UiRgb c)
+{
+    out[0] = c.r;
+    out[1] = c.g;
+    out[2] = c.b;
+}
+
+static void wall_rect(GfxWallpaper *w, int x, int y, int rw, int rh, unsigned char r, unsigned char g, unsigned char b)
+{
+    int i = w->nrect++;
+    w->rect[i].x = x;
+    w->rect[i].y = y;
+    w->rect[i].w = rw;
+    w->rect[i].h = rh;
+    w->rect[i].rgb[0] = r;
+    w->rect[i].rgb[1] = g;
+    w->rect[i].rgb[2] = b;
+}
+
+void ui_wallpaper(GfxWallpaper *w)
 {
     const UiTheme *t = THEME;
     int W = (int)gfx_width(), H = (int)gfx_height();
-    gfx_gradient_v(0, 0, W, H, t->bg_top.r, t->bg_top.g, t->bg_top.b,
-                   t->bg_bottom.r, t->bg_bottom.g, t->bg_bottom.b);
+    w->w = W;
+    w->h = H;
+    wall_rgb(w->top, t->bg_top);
+    wall_rgb(w->bottom, t->bg_bottom);
     /* two big soft lights give the wallpaper depth */
     int big = (W > H ? W : H) * 6 / 10;
-    gfx_glow(W * 78 / 100, H * 20 / 100, big, ui_color(t->glow1), 90);
-    gfx_glow(W * 18 / 100, H * 88 / 100, big * 8 / 10, ui_color(t->glow2), 70);
+    w->nglow = 2;
+    w->glow[0].cx = W * 78 / 100;
+    w->glow[0].cy = H * 20 / 100;
+    w->glow[0].r = big;
+    wall_rgb(w->glow[0].rgb, t->glow1);
+    w->glow[0].alpha = 90;
+    w->glow[1].cx = W * 18 / 100;
+    w->glow[1].cy = H * 88 / 100;
+    w->glow[1].r = big * 8 / 10;
+    wall_rgb(w->glow[1].rgb, t->glow2);
+    w->glow[1].alpha = 70;
 
     /* soft abstract wallpaper waves */
-    gfx_fill_rect(W * 56 / 100, H * 16 / 100, W * 34 / 100, H * 48 / 100, gfx_rgb(29, 104, 169));
-    gfx_fill_rect(W * 62 / 100, H * 22 / 100, W * 25 / 100, H * 36 / 100, gfx_rgb(34, 126, 185));
-    gfx_fill_rect(W * 68 / 100, H * 28 / 100, W * 15 / 100, H * 24 / 100, gfx_rgb(42, 148, 199));
+    w->nrect = 0;
+    wall_rect(w, W * 56 / 100, H * 16 / 100, W * 34 / 100, H * 48 / 100, 29, 104, 169);
+    wall_rect(w, W * 62 / 100, H * 22 / 100, W * 25 / 100, H * 36 / 100, 34, 126, 185);
+    wall_rect(w, W * 68 / 100, H * 28 / 100, W * 15 / 100, H * 24 / 100, 42, 148, 199);
+}
+
+void ui_background(void)
+{
+    GfxWallpaper w;
+    ui_wallpaper(&w);
+    gfx_wallpaper_draw(&w);
 }
 
 void ui_background1(void)

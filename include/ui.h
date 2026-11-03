@@ -98,6 +98,7 @@ void ui_text_in_color(UiRect r, const char *s, UiTextStyle style, UiAlign align,
 
 /* ---- surfaces ------------------------------------------------ */
 void ui_background(void); /* full-screen wallpaper from the theme */
+void ui_wallpaper(GfxWallpaper *w); /* the same wallpaper as numbers (for a GPU to paint) */
 void ui_background1(void);
 void ui_card(UiRect r); /* rounded panel with soft shadow and border */
 /* Window with title bar. Returns the content area below the title bar. */

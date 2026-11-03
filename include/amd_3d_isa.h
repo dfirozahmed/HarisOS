@@ -150,6 +150,9 @@ static inline uint32_t a3d_mimg_1(uint32_t vaddr, uint32_t vdata, uint32_t srsrc
 #define A3D_OP2_OR_B32 0x14u
 #define A3D_OP2_ADD_CO_U32 0x19u
 #define A3D_OP2_ADDC_CO_U32 0x1Cu
+/* for the wallpaper (ordered dither from the pixel position): VOP2 V_XOR_B32 0x15, VOP1 V_CVT_F32_U32 6 (aco_opcodes.py, gfx8 column) */
+#define A3D_OP2_XOR_B32 0x15u
+#define A3D_OP1_CVT_F32_U32 6u
 #define A3D_GLOBAL_STORE_DWORD 0x1Cu
 #define A3D_GLOBAL_STORE_DWORDX4 0x1Fu
 

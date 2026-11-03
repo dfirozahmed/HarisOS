@@ -192,10 +192,38 @@ static void amd_scene_report(const GfxCompStats *s)
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     last_save = (((unsigned long long)hi << 32) | lo) - t0;
 }
-/* scroll stays 0 unless amd_comp_scroll_test() passed */
+/* scroll stays 0 unless amd_comp_scroll_test() passed, wallpaper unless wall_check() did */
 static GfxCompOps amd_scene_ops = { .surface_new = amd_comp_surface_new, .surface_free = amd_comp_surface_free,
                                     .upload = amd_comp_surface_upload, .compose = amd_scene_compose, .scroll = 0,
-                                    .report = amd_scene_report, .dim = amd_comp_set_dim };
+                                    .report = amd_scene_report, .dim = amd_comp_set_dim, .wallpaper = 0 };
+
+/* A small wallpaper like the desktop's (the dark theme's colours; a light and a rectangle reach past the edges), drawn by the CPU
+ * into a buffer and then by the GPU: amd_comp_wall_test() compares them. 1 = the same. */
+static int wall_check(void)
+{
+    static uint32_t want[176u * 124u];
+    GfxWallpaper w = { 0 };
+    w.w = 176; w.h = 124;
+    w.top[0] = 11; w.top[1] = 16; w.top[2] = 38;
+    w.bottom[0] = 36; w.bottom[1] = 64; w.bottom[2] = 128;
+    w.nglow = 2;
+    w.glow[0].cx = 137; w.glow[0].cy = 25; w.glow[0].r = 106; w.glow[0].alpha = 90;
+    w.glow[0].rgb[0] = 74; w.glow[0].rgb[1] = 128; w.glow[0].rgb[2] = 255;
+    w.glow[1].cx = 32; w.glow[1].cy = 109; w.glow[1].r = 85; w.glow[1].alpha = 70;
+    w.glow[1].rgb[0] = 150; w.glow[1].rgb[1] = 84; w.glow[1].rgb[2] = 235;
+    w.nrect = 3;
+    w.rect[0].x = 98; w.rect[0].y = 20; w.rect[0].w = 60; w.rect[0].h = 60;
+    w.rect[0].rgb[0] = 29; w.rect[0].rgb[1] = 104; w.rect[0].rgb[2] = 169;
+    w.rect[1].x = 109; w.rect[1].y = 27; w.rect[1].w = 44; w.rect[1].h = 45;
+    w.rect[1].rgb[0] = 34; w.rect[1].rgb[1] = 126; w.rect[1].rgb[2] = 185;
+    w.rect[2].x = -10; w.rect[2].y = 100; w.rect[2].w = 30; w.rect[2].h = 40;
+    w.rect[2].rgb[0] = 42; w.rect[2].rgb[1] = 148; w.rect[2].rgb[2] = 199;
+    if (gfx_layer_begin_at(want, 0, 0, 176, 124, 0) != 0)
+        return 0;
+    gfx_wallpaper_draw(&w);
+    gfx_layer_end();
+    return amd_comp_wall_test(&w, want);
+}
 #endif
 
 /* The result of the last compositor test. */
@@ -836,6 +864,14 @@ int amd_gpu_bringup_screen(void)
                     amd_scene_ops.scroll = amd_comp_surface_scroll;
                 serial_print(scroll_ok ? "SCROLL: a window's rows are moved by the GPU when it scrolls\n"
                                        : "SCROLL: not used: a window draws its scrolled rows again\n");
+                serial_print("WALL: about to paint a test wallpaper with the GPU (offscreen), against the CPU's\n");
+                amd_gpu_log_save();
+                int wall_ok = wall_check();
+                log_comp_result(wall_ok);
+                if (wall_ok)
+                    amd_scene_ops.wallpaper = amd_comp_surface_wallpaper;
+                serial_print(wall_ok ? "WALL: the GPU paints the wallpaper\n"
+                                     : "WALL: not used: the CPU draws the wallpaper and it is uploaded\n");
                 gfx_comp_driver(&amd_scene_ops);
                 serial_print("SCENE: the GPU composes the desktop\n");
             } else
