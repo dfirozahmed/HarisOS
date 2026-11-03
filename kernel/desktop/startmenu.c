@@ -8,9 +8,9 @@
 #include "wm.h"
 #include "desktop_internal.h"
 
-/* ---- look: always a light glass theme, whatever the desktop theme is ---- */
+/* ---- look: always a light glass theme, whatever the desktop theme is; only the accent follows the desktop's ---- */
 #define RGB(r, g, b) {r, g, b}
-static const UiTheme MENU_THEME = {
+static UiTheme MENU_THEME = {
     .bg_top = RGB(150, 190, 246),
     .bg_bottom = RGB(226, 238, 252),
     .glow1 = RGB(255, 255, 255),
@@ -63,7 +63,7 @@ typedef struct
 static const MenuItem BUILTIN[BUILTIN_ITEMS] = {
     {"Welcome", "The HarisOS start page", UI_ICON_LOGO},
     {"Hello window", "Text boxes and dialogs", UI_ICON_TERMINAL},
-    {"Settings", "Switch dark / light theme", UI_ICON_SETTINGS},
+    {"Settings", "Theme, wallpaper and colours", UI_ICON_SETTINGS},
 };
 
 static int item_count(void) { return BUILTIN_ITEMS + app_count(); }
@@ -77,7 +77,21 @@ static MenuItem item_get(int i)
     return m;
 }
 
-const UiTheme *startmenu_theme(void) { return &MENU_THEME; }
+static void follow_accent(void)
+{
+    const UiTheme *t = ui_theme();
+    if (t == &MENU_THEME)
+        return;
+    MENU_THEME.accent = t->accent;
+    MENU_THEME.accent_hi = t->accent_hi;
+    MENU_THEME.text_on_accent = t->text_on_accent;
+}
+
+const UiTheme *startmenu_theme(void)
+{
+    follow_accent();
+    return &MENU_THEME;
+}
 
 void startmenu_glass(UiRect r, int radius)
 {
@@ -300,7 +314,7 @@ static void activate(int item)
         open_hello_window();
         break;
     case 2:
-        desktop_toggle_theme();
+        desktop_open_settings();
         break;
     default:
         if (item >= BUILTIN_ITEMS)
@@ -533,6 +547,7 @@ void startmenu_draw(void)
     if (!OPEN || !gfx_ready())
         return;
     const UiTheme *prev = ui_theme();
+    follow_accent();
     ui_set_theme(&MENU_THEME); /* every ui_* call below (text, icons, buttons, the search box) uses the light look */
     const UiTheme *t = &MENU_THEME;
     UiRect m = menu_rect();

@@ -1,6 +1,8 @@
 /* HarisOS desktop windows: welcome screen and sample Hello/message dialogs. */
 #include "desktop.h"
+#include "app.h"
 #include "heap.h"
+#include "look.h"
 #include "taskbar.h"
 #include "ui.h"
 #include "wm.h"
@@ -235,20 +237,32 @@ static void on_get_started(UiButton *b, void *user)
     open_hello_window();
 }
 
-/* "Settings": switch between the dark and light theme */
-void desktop_toggle_theme(void)
+/* switch between the dark and light theme (look.c draws everything again and remembers it) */
+void desktop_toggle_theme(void) { look_set_dark(!look_dark()); }
+
+/* "Settings": the Personalize app (theme, wallpaper, colours); without it, the old dark / light switch */
+void desktop_open_settings(void)
 {
-    DARK = !DARK;
-    ui_set_theme(DARK ? &ui_theme_dark : &ui_theme_light);
-    WALL_VALID = 0; /* the wallpaper colors changed: draw it again */
-    wm_invalidate();
+    for (int i = 0; i < app_count(); i++)
+    {
+        const AppInfo *a = app_get(i);
+        const char *n = a ? a->name : 0, *want = "Personalize";
+        while (n && *n && *n == *want)
+            n++, want++;
+        if (n && !*n && !*want && a->open)
+        {
+            a->open();
+            return;
+        }
+    }
+    desktop_toggle_theme();
 }
 
 static void on_settings(UiButton *b, void *user)
 {
     (void)b;
     (void)user;
-    desktop_toggle_theme();
+    desktop_open_settings();
 }
 
 /* keyboard: Enter does the same as "Get started" */

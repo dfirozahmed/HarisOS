@@ -241,6 +241,7 @@ set(KERNEL_SOURCES
     kernel/drivers/bus/display.c         # display adapters on PCI: Bochs VBE mode setting, framebuffer owner
     kernel/graphics/gfx_shapes.c  # anti-aliased rounded rectangles and circles
     kernel/graphics/gfx_effects.c # gradients, shadows and glow effects
+    kernel/graphics/bmp.c       # BMP pictures: read and scaled to cover the screen (wallpaper)
     kernel/graphics/gfx_cursor.c # software cursor save/restore and rendering
     kernel/graphics/gfx_lines.c  # anti-aliased lines and convex polygons
     kernel/graphics/gfx.c       # basic drawing primitives and alpha blending
@@ -280,6 +281,7 @@ set(KERNEL_SOURCES
     kernel/desktop/desktop_clock.c
     kernel/desktop/desktop_windows.c
     kernel/desktop/desktop_power.c  # shut down / restart screen
+    kernel/desktop/look.c           # theme, accent colour and wallpaper; THEME.CFG
     kernel/desktop/bootsplash.c     # "Welcome to HarisOS" screen with a progress bar while the kernel starts
     kernel/desktop/appmenu.c        # taskbar app right-click menu
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
@@ -297,6 +299,7 @@ set(KERNEL_SOURCES
     apps/explorer/explorer_input.c    # File Explorer: mouse and keyboard
     apps/devmgr/devmgr_app.c        # Device Manager app
     apps/display/display_app.c      # Display Settings app: brightness slider
+    apps/personalize/personalize_app.c # Personalize app: theme, wallpaper, accent colour
     apps/taskmgr/taskmgr_app.c      # Task Manager app: processes and performance
     apps/notepad/notepad_app.c      # Notepad app: plain-text editor
     apps/wifi/wifi_app.c            # Wi-Fi app: pick a wireless network and join it

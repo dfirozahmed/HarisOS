@@ -341,5 +341,6 @@ typedef struct GfxWallpaper
     } rect[GFX_WALL_RECTS];
 } GfxWallpaper;
 void gfx_wallpaper_draw(const GfxWallpaper *w); /* with the CPU */
+void gfx_wallpaper_draw_at(const GfxWallpaper *w, int ox, int oy); /* the same moved to (ox, oy), cut to its w x h (a preview) */
 
 #endif

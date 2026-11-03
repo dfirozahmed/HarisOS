@@ -52,7 +52,9 @@ static int REPORTS;          /* reports sent: at most REPORT_MAX, so the log sta
 static int WALL_SURF;
 static unsigned WALL_UP; /* WALL_GEN of the uploaded wallpaper */
 static GfxWallpaper WALL_DESC; /* the wallpaper the GPU painted (ops->wallpaper) */
-static int WALL_PAINTED;
+static int WALL_KIND;          /* what is in WALL_SURF: 0 = nothing yet / the CPU's, 1 = painted from WALL_DESC, 2 = a picture */
+static unsigned WALL_PIC_GEN;  /* ui_wallpaper_image's gen of the uploaded picture */
+#define WALL_ROW_MAX 16384
 #define PTR_MAX 64        /* the pointer's pictures are at most 64 x 64 */
 static int PTR_SURF;
 static unsigned PTR_UP;   /* gfx_cursor_layer's gen of the uploaded picture, 0 = none */
@@ -105,7 +107,7 @@ static void leave(void)
     PTR_SURF = 0;
     PTR_UP = 0;
     WALL_SURF = 0;
-    WALL_PAINTED = 0;
+    WALL_KIND = 0;
     for (int i = 0; i < 3; i++)
     {
         if (ops && TOPS[i].surf)
@@ -244,8 +246,12 @@ int desktop_comp_frame(const UiRect *areas, int n)
     void *a, *b;
     unsigned long long bytes;
     int W = (int)gfx_width(), H = (int)gfx_height();
-    /* the CPU's wallpaper is needed only when the driver cannot paint it (a new theme makes it invalid until the CPU draws it) */
-    if (!ops || (!WALL_VALID && !ops->wallpaper) || !gfx_double_buffered() || !wm_drag_memory(&a, &b, &bytes))
+    unsigned pic_gen;
+    const unsigned int *pic = ui_wallpaper_image(&pic_gen); /* a picture as the wallpaper (look.c), 0 = a ready-made one */
+    /* the CPU's wallpaper is needed only when it is not a picture and the driver cannot paint it (a new theme makes it
+     * invalid until the CPU draws it) */
+    if (!ops || (!WALL_VALID && !ops->wallpaper && !pic) || W > WALL_ROW_MAX || !gfx_double_buffered() ||
+        !wm_drag_memory(&a, &b, &bytes))
     {
         leave();
         return 0;
@@ -262,23 +268,43 @@ int desktop_comp_frame(const UiRect *areas, int n)
     }
     if (!WALL_SURF && !(WALL_SURF = ops->surface_new(W, H)))
         goto fail;
-    if (ops->wallpaper)
+    if (pic)
+    {
+        /* a picture: uploaded once (it is 0x00RRGGBB, the surface takes the screen's own order: a row at a time) */
+        if (full || WALL_KIND != 2 || WALL_PIC_GEN != pic_gen)
+        {
+            static unsigned int row[WALL_ROW_MAX];
+            for (int y = 0; y < H; y++)
+            {
+                const unsigned int *src = pic + (long long)y * W;
+                for (int x = 0; x < W; x++)
+                    row[x] = gfx_rgb((unsigned char)(src[x] >> 16), (unsigned char)(src[x] >> 8), (unsigned char)src[x]);
+                if (ops->upload(WALL_SURF, row, W, 0, y, W, 1, 1) != 0)
+                    goto fail;
+            }
+            WALL_KIND = 2;
+            WALL_PIC_GEN = pic_gen;
+            full = 1;
+        }
+    }
+    else if (ops->wallpaper)
     {
         /* the GPU paints it from the theme's numbers: again only when they changed (another theme), nothing to upload */
         GfxWallpaper wd;
         memset(&wd, 0, sizeof wd); /* the padding too: the two are compared byte by byte */
         ui_wallpaper(&wd);
-        if (full || !WALL_PAINTED || memcmp(&wd, &WALL_DESC, sizeof wd) != 0)
+        if (full || WALL_KIND != 1 || memcmp(&wd, &WALL_DESC, sizeof wd) != 0)
         {
             if (ops->wallpaper(WALL_SURF, &wd) != 0)
                 goto fail;
             WALL_DESC = wd;
-            WALL_PAINTED = 1;
+            WALL_KIND = 1;
             full = 1;
         }
     }
-    else if (full || WALL_UP != WALL_GEN)
+    else if (full || WALL_KIND != 0 || WALL_UP != WALL_GEN)
     {
+        WALL_KIND = 0;
         const unsigned int *wall = gfx_cache_pixels();
         if (!wall || ops->upload(WALL_SURF, wall, W, 0, 0, W, H, 1) != 0)
             goto fail;

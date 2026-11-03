@@ -48,7 +48,12 @@ typedef struct
 
 extern const UiTheme ui_theme_dark, ui_theme_light;
 const UiTheme *ui_theme(void);
-void ui_set_theme(const UiTheme *t); /* NULL = default (dark) */
+void ui_set_theme(const UiTheme *t); /* NULL = the desktop's look (ui_set_look), or dark before there is one */
+/* The desktop's look: the dark or light theme with an accent colour of its own (NULL: the theme's), which becomes the
+ * theme in use. ui_accent_shades gives the brighter shade of an accent and the text colour that reads on it. */
+void ui_set_look(int dark, const UiRgb *accent);
+int ui_look_dark(void);
+void ui_accent_shades(UiRgb accent, UiRgb *hi, UiRgb *on);
 
 /* ---- layout -------------------------------------------------- */
 typedef struct
@@ -97,8 +102,20 @@ void ui_text_in(UiRect r, const char *s, UiTextStyle style, UiAlign align);
 void ui_text_in_color(UiRect r, const char *s, UiTextStyle style, UiAlign align, UiRgb color);
 
 /* ---- surfaces ------------------------------------------------ */
-void ui_background(void); /* full-screen wallpaper from the theme */
-void ui_wallpaper(GfxWallpaper *w); /* the same wallpaper as numbers (for a GPU to paint) */
+void ui_background(void); /* full-screen wallpaper: the picture, or the ready-made one in use */
+void ui_wallpaper(GfxWallpaper *w); /* the ready-made one in use as numbers (for a GPU to paint) */
+/* The ready-made wallpapers (the first follows the theme's colours): their names, and one as numbers for a w x h
+ * area (a preview). ui_set_wallpaper picks one (and drops a picture); ui_wallpaper_current() is -1 while a picture is
+ * used. ui_set_wallpaper_image: a picture of exactly the screen's size (0x00RRGGBB, gfx_width() per row), kept by the
+ * caller while in use; 0 = none. ui_wallpaper_image gives it (0 = none) and gen, which changes with every new picture. */
+#define UI_WALL_PRESETS 8
+int ui_wallpaper_preset_count(void);
+const char *ui_wallpaper_preset_name(int i);
+void ui_wallpaper_preset(int i, int w, int h, GfxWallpaper *out);
+void ui_set_wallpaper(int preset);
+int ui_wallpaper_current(void);
+void ui_set_wallpaper_image(const unsigned int *px);
+const unsigned int *ui_wallpaper_image(unsigned *gen);
 void ui_background1(void);
 void ui_card(UiRect r); /* rounded panel with soft shadow and border */
 /* Window with title bar. Returns the content area below the title bar. */

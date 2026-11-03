@@ -12,7 +12,8 @@ void welcome_create(void);
 void open_hello_window(void);
 Window *desktop_taskbar_window(int i);
 void desktop_toggle_theme(void);
-void desktop_power_action(int restart); /* full-screen message, then shut down (0) or restart (1); returns only if a window has unsaved work and asked the user first (nothing is shut down) */ /* dark <-> light */
+void desktop_open_settings(void); /* the Personalize app */
+void desktop_power_action(int restart); /* full-screen message, then shut down (0) or restart (1); returns only if a window has unsaved work and asked the user first (nothing is shut down) */ 
 int desktop_refresh_taskbar(void);
 int desktop_finish_input(int bar_changed);
 /* desktop_comp.c: this frame's changed areas through the GPU compositor; 1 = done, 0 = draw them with the CPU */

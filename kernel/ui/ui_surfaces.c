@@ -21,37 +21,99 @@ static void wall_rect(GfxWallpaper *w, int x, int y, int rw, int rh, unsigned ch
     w->rect[i].rgb[2] = b;
 }
 
-void ui_wallpaper(GfxWallpaper *w)
+/* The ready-made wallpapers. The first follows the theme (its colours, and the soft blue "waves"); the others look the
+ * same in the dark and the light theme. */
+typedef struct
+{
+    const char *name;
+    UiRgb top, bottom, glow1, glow2;
+    unsigned char a1, a2;
+} WallPreset;
+
+#define RGB(r, g, b) {r, g, b}
+static const WallPreset PRESETS[UI_WALL_PRESETS] = {
+    {"HarisOS", RGB(0, 0, 0), RGB(0, 0, 0), RGB(0, 0, 0), RGB(0, 0, 0), 90, 70}, /* colours from the theme */
+    {"Midnight", RGB(6, 8, 20), RGB(26, 30, 64), RGB(90, 110, 255), RGB(40, 190, 220), 80, 50},
+    {"Aurora", RGB(4, 22, 30), RGB(16, 70, 82), RGB(60, 220, 160), RGB(120, 90, 255), 95, 75},
+    {"Sunset", RGB(44, 18, 64), RGB(236, 120, 92), RGB(255, 196, 120), RGB(200, 60, 140), 110, 80},
+    {"Forest", RGB(8, 28, 18), RGB(40, 92, 60), RGB(150, 220, 120), RGB(30, 120, 90), 70, 60},
+    {"Ocean", RGB(6, 36, 76), RGB(40, 150, 200), RGB(120, 220, 255), RGB(20, 80, 200), 90, 70},
+    {"Rose", RGB(62, 20, 42), RGB(228, 140, 170), RGB(255, 210, 230), RGB(180, 80, 200), 100, 60},
+    {"Graphite", RGB(16, 16, 20), RGB(58, 60, 70), RGB(150, 150, 170), RGB(90, 90, 116), 50, 40},
+};
+#undef RGB
+
+static int WALL = 0;                    /* the preset in use */
+static const unsigned int *WALL_IMAGE;  /* or a picture: screen size, 0x00RRGGBB, one screen width per row */
+static unsigned WALL_IMAGE_GEN;
+
+int ui_wallpaper_preset_count(void) { return UI_WALL_PRESETS; }
+const char *ui_wallpaper_preset_name(int i) { return i >= 0 && i < UI_WALL_PRESETS ? PRESETS[i].name : ""; }
+
+void ui_wallpaper_preset(int i, int W, int H, GfxWallpaper *w)
 {
     const UiTheme *t = THEME;
-    int W = (int)gfx_width(), H = (int)gfx_height();
+    const WallPreset *p = &PRESETS[i >= 0 && i < UI_WALL_PRESETS ? i : 0];
+    int theme = p == &PRESETS[0];
     w->w = W;
     w->h = H;
-    wall_rgb(w->top, t->bg_top);
-    wall_rgb(w->bottom, t->bg_bottom);
+    wall_rgb(w->top, theme ? t->bg_top : p->top);
+    wall_rgb(w->bottom, theme ? t->bg_bottom : p->bottom);
     /* two big soft lights give the wallpaper depth */
     int big = (W > H ? W : H) * 6 / 10;
     w->nglow = 2;
     w->glow[0].cx = W * 78 / 100;
     w->glow[0].cy = H * 20 / 100;
     w->glow[0].r = big;
-    wall_rgb(w->glow[0].rgb, t->glow1);
-    w->glow[0].alpha = 90;
+    wall_rgb(w->glow[0].rgb, theme ? t->glow1 : p->glow1);
+    w->glow[0].alpha = p->a1;
     w->glow[1].cx = W * 18 / 100;
     w->glow[1].cy = H * 88 / 100;
     w->glow[1].r = big * 8 / 10;
-    wall_rgb(w->glow[1].rgb, t->glow2);
-    w->glow[1].alpha = 70;
+    wall_rgb(w->glow[1].rgb, theme ? t->glow2 : p->glow2);
+    w->glow[1].alpha = p->a2;
 
-    /* soft abstract wallpaper waves */
+    /* soft abstract wallpaper waves (only the theme's own wallpaper has them) */
     w->nrect = 0;
+    if (!theme)
+        return;
     wall_rect(w, W * 56 / 100, H * 16 / 100, W * 34 / 100, H * 48 / 100, 29, 104, 169);
     wall_rect(w, W * 62 / 100, H * 22 / 100, W * 25 / 100, H * 36 / 100, 34, 126, 185);
     wall_rect(w, W * 68 / 100, H * 28 / 100, W * 15 / 100, H * 24 / 100, 42, 148, 199);
 }
 
+void ui_wallpaper(GfxWallpaper *w) { ui_wallpaper_preset(WALL, (int)gfx_width(), (int)gfx_height(), w); }
+
+void ui_set_wallpaper(int preset)
+{
+    WALL = preset >= 0 && preset < UI_WALL_PRESETS ? preset : 0;
+    WALL_IMAGE = 0;
+}
+
+int ui_wallpaper_current(void) { return WALL_IMAGE ? -1 : WALL; }
+
+void ui_set_wallpaper_image(const unsigned int *px)
+{
+    WALL_IMAGE = px;
+    WALL_IMAGE_GEN++;
+}
+
+const unsigned int *ui_wallpaper_image(unsigned *gen)
+{
+    if (gen)
+        *gen = WALL_IMAGE_GEN;
+    return WALL_IMAGE;
+}
+
 void ui_background(void)
 {
+    if (WALL_IMAGE)
+    {
+        int W = (int)gfx_width(), H = (int)gfx_height();
+        for (int y = 0; y < H; y++)
+            gfx_put_pixels(0, y, WALL_IMAGE + (long long)y * W, W);
+        return;
+    }
     GfxWallpaper w;
     ui_wallpaper(&w);
     gfx_wallpaper_draw(&w);

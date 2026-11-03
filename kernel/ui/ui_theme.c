@@ -85,8 +85,34 @@ const UiTheme ui_theme_light = {
     .font_heading = &font_bold_20,
 };
 
+/* The desktop's look: a copy of the dark or light theme with the accent colour the user picked (ui_set_look). */
+static UiTheme LOOK;
+static int LOOK_DARK = 1;
+
 const UiTheme *THEME = &ui_theme_dark;
 
 const UiTheme *ui_theme(void) { return THEME; }
-void ui_set_theme(const UiTheme *t) { THEME = t ? t : &ui_theme_dark; }
+void ui_set_theme(const UiTheme *t) { THEME = t ? t : (LOOK.font_body ? &LOOK : &ui_theme_dark); }
+
+/* the brighter shade (hover) and the text that reads on it: dark on a light accent, white on the rest */
+void ui_accent_shades(UiRgb accent, UiRgb *hi, UiRgb *on)
+{
+    *hi = ui_rgb_mix(accent, ui_rgb(255, 255, 255), 70);
+    int luma = (accent.r * 299 + accent.g * 587 + accent.b * 114) / 1000;
+    *on = luma > 170 ? ui_rgb(26, 36, 56) : ui_rgb(255, 255, 255);
+}
+
+void ui_set_look(int dark, const UiRgb *accent)
+{
+    LOOK_DARK = dark ? 1 : 0;
+    LOOK = dark ? ui_theme_dark : ui_theme_light;
+    if (accent)
+    {
+        LOOK.accent = *accent;
+        ui_accent_shades(*accent, &LOOK.accent_hi, &LOOK.text_on_accent);
+    }
+    THEME = &LOOK;
+}
+
+int ui_look_dark(void) { return LOOK_DARK; }
 

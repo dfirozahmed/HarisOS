@@ -140,16 +140,21 @@ void gfx_gradient_v(int x, int y, int w, int h,
     gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
 
-void gfx_wallpaper_draw(const GfxWallpaper *w)
+void gfx_wallpaper_draw_at(const GfxWallpaper *w, int ox, int oy)
 {
-    gfx_gradient_v(0, 0, w->w, w->h, w->top[0], w->top[1], w->top[2], w->bottom[0], w->bottom[1], w->bottom[2]);
+    GfxClip saved = gfx_get_clip();
+    gfx_clip_intersect(ox, oy, w->w, w->h); /* the lights reach past the picture */
+    gfx_gradient_v(ox, oy, w->w, w->h, w->top[0], w->top[1], w->top[2], w->bottom[0], w->bottom[1], w->bottom[2]);
     for (int i = 0; i < w->nglow && i < GFX_WALL_GLOWS; i++)
-        gfx_glow(w->glow[i].cx, w->glow[i].cy, w->glow[i].r, gfx_rgb(w->glow[i].rgb[0], w->glow[i].rgb[1], w->glow[i].rgb[2]),
-                 w->glow[i].alpha);
+        gfx_glow(ox + w->glow[i].cx, oy + w->glow[i].cy, w->glow[i].r,
+                 gfx_rgb(w->glow[i].rgb[0], w->glow[i].rgb[1], w->glow[i].rgb[2]), w->glow[i].alpha);
     for (int i = 0; i < w->nrect && i < GFX_WALL_RECTS; i++)
-        gfx_fill_rect(w->rect[i].x, w->rect[i].y, w->rect[i].w, w->rect[i].h,
+        gfx_fill_rect(ox + w->rect[i].x, oy + w->rect[i].y, w->rect[i].w, w->rect[i].h,
                       gfx_rgb(w->rect[i].rgb[0], w->rect[i].rgb[1], w->rect[i].rgb[2]));
+    gfx_restore_clip(saved);
 }
+
+void gfx_wallpaper_draw(const GfxWallpaper *w) { gfx_wallpaper_draw_at(w, 0, 0); }
 
 void gfx_gradient_h(int x, int y, int w, int h,
                     unsigned char r1, unsigned char g1, unsigned char b1,
