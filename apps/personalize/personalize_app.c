@@ -1,5 +1,5 @@
 /* Personalize app: the theme (dark / light), the wallpaper (a ready-made one, with a preview of each, or a .bmp
- * picture from a drive) and the accent colour (8 ready-made ones, the theme's own, or any colour from three R / G / B
+ * picture from a drive, found in the list or chosen with "Browse...") and the accent colour (8 ready-made ones, the theme's own, or any colour from three R / G / B
  * sliders). A pick is shown at once and remembered in THEME.CFG (look.h does both). Esc closes the window.
  * An app uses only public headers (ui.h, wm.h, look.h, ...) - never desktop_internal.h. */
 #include "app.h"
@@ -7,6 +7,7 @@
 #include "gfx.h"
 #include "look.h"
 #include "taskbar.h"
+#include "timer.h"
 #include "ui.h"
 #include "vfs.h"
 #include "wm.h"
@@ -24,6 +25,7 @@ static const UiRgb ACCENTS[DOTS] = {
 };
 
 static Window *PS_WIN;
+static void browse_open(void);
 static int PICS[PIC_MAX], NPICS;
 static UiRgb CUSTOM; /* the colour of the sliders */
 static int DRAG = -1; /* the slider being dragged (0 = red, 1 = green, 2 = blue), -1 = none */
@@ -31,7 +33,7 @@ static int DRAG = -1; /* the slider being dragged (0 = red, 1 = green, 2 = blue)
 typedef struct
 {
     int y_theme, y_wall, y_pics, y_accent, y_custom, y_msg;
-    UiRect theme[2], wall[UI_WALL_PRESETS], pics[PIC_MAX], own, dots[DOTS], slider[3], swatch;
+    UiRect theme[2], wall[UI_WALL_PRESETS], pics[PIC_MAX], browse, own, dots[DOTS], slider[3], swatch;
 } Layout;
 
 static void layout(UiRect body, Layout *L)
@@ -49,6 +51,7 @@ static void layout(UiRect body, Layout *L)
     y += 32 + 2 * (th + 26) + 4;
 
     L->y_pics = y;
+    L->browse = ui_rect(x + w - 110, y - 6, 110, 28);
     int cw = (w - (PIC_COLS - 1) * 10) / PIC_COLS;
     for (int i = 0; i < PIC_MAX; i++)
         L->pics[i] = ui_rect(x + (i % PIC_COLS) * (cw + 10), y + 24 + (i / PIC_COLS) * 42, cw, 34);
@@ -136,8 +139,8 @@ static void ps_draw(Window *w, UiRect body)
                          t->text_dim);
     }
 
-    ui_text_color(x, L.y_pics, "Pictures (.bmp in a drive's top folder, or its Pictures / Wallpapers folder)", UI_TEXT_SMALL,
-                  t->text_dim);
+    ui_text_color(x, L.y_pics, "Pictures (.bmp found on your drives)", UI_TEXT_SMALL, t->text_dim);
+    ui_button(L.browse, "Browse...", UI_BTN_SECONDARY, UI_STATE_NORMAL);
     if (NPICS == 0)
         ui_text_in_color(ui_rect(x, L.y_pics + 24, body.w - 2 * M, 34), "No .bmp pictures found", UI_TEXT_BODY, UI_ALIGN_LEFT,
                          t->text_dim);
@@ -208,6 +211,11 @@ static int ps_press(Window *w, int x, int y)
                 look_set_wallpaper(i);
             return 1;
         }
+    if (in(L.browse, x, y))
+    {
+        browse_open();
+        return 1;
+    }
     for (int i = 0; i < NPICS; i++)
         if (in(L.pics[i], x, y))
         {
@@ -268,6 +276,312 @@ static void ps_close(Window *w)
     (void)w;
     PS_WIN = 0;
     DRAG = -1;
+}
+
+/* ---- the Browse dialog: folders and .bmp files only. One click selects, a double click (or Enter) opens a folder or
+ * picks the picture; "Select" picks the selected picture, "Up" goes to the parent folder (This PC = the drives). ---- */
+#define BR_W 520
+#define BR_H 440
+#define BR_M 20
+#define BR_ROW 26
+#define BR_MAX 256
+#define BR_DOUBLE_MS 450
+
+static Window *BR_WIN;
+static int BR_DIR;               /* the folder shown (VFS_ROOT = This PC) */
+static int BR_ITEMS[BR_MAX], BR_N; /* its folders, then its .bmp files */
+static int BR_SEL = -1, BR_TOP;
+static int BR_LAST_ROW = -1;
+static unsigned long long BR_LAST_MS;
+static const char *BR_ERR;
+
+typedef struct
+{
+    UiRect path, list, err;
+} BrLayout;
+
+static BrLayout br_layout(UiRect content)
+{
+    UiRect b = ui_rect(content.x + BR_M, content.y + BR_M, content.w - 2 * BR_M, content.h - 2 * BR_M);
+    BrLayout l;
+    int list_h = b.h - 42 - 28 - 50; /* path row, message line, buttons */
+    if (list_h < BR_ROW)
+        list_h = BR_ROW;
+    l.path = ui_rect(b.x, b.y, b.w - 90, 30);
+    l.list = ui_rect(b.x, b.y + 42, b.w, list_h);
+    l.err = ui_rect(b.x, l.list.y + l.list.h + 6, b.w, 20);
+    return l;
+}
+
+static int br_rows(const BrLayout *l) { return l->list.h / BR_ROW; }
+
+static int br_is_bmp(const char *s)
+{
+    int n = 0;
+    while (s[n])
+        n++;
+    return n >= 4 && s[n - 4] == '.' && (s[n - 3] | 32) == 'b' && (s[n - 2] | 32) == 'm' && (s[n - 1] | 32) == 'p';
+}
+
+/* show folder `dir`: read it from the drive again, keep the folders and the .bmp files */
+static void br_enter(int dir)
+{
+    int all[BR_MAX];
+    BR_DIR = dir;
+    vfs_refresh(dir);
+    int k = vfs_list(dir, all, BR_MAX);
+    if (k > BR_MAX)
+        k = BR_MAX;
+    BR_N = 0;
+    for (int i = 0; i < k; i++)
+    {
+        const VfsNode *n = vfs_node(all[i]);
+        if (n && (n->is_dir || br_is_bmp(n->name)))
+            BR_ITEMS[BR_N++] = all[i];
+    }
+    BR_SEL = -1;
+    BR_TOP = 0;
+    BR_LAST_ROW = -1;
+    BR_ERR = 0;
+}
+
+static void br_draw(Window *w, UiRect body)
+{
+    (void)w;
+    const UiTheme *t = ui_theme();
+    BrLayout l = br_layout(body);
+    char path[160];
+    if (BR_DIR == VFS_ROOT)
+    {
+        const char *s = "This PC";
+        int i = 0;
+        for (; s[i]; i++)
+            path[i] = s[i];
+        path[i] = 0;
+    }
+    else
+        vfs_path(BR_DIR, path, (int)sizeof path);
+    ui_text_in(l.path, path, UI_TEXT_LABEL, UI_ALIGN_LEFT);
+
+    gfx_fill_round_rect(l.list.x, l.list.y, l.list.w, l.list.h, t->radius_s, ui_color(t->surface_alt));
+    gfx_round_rect(l.list.x, l.list.y, l.list.w, l.list.h, t->radius_s, 1, ui_color(t->border));
+    int rows = br_rows(&l);
+    if (BR_N == 0)
+        ui_text_in_color(l.list, "No folders or .bmp pictures here", UI_TEXT_SMALL, UI_ALIGN_CENTER, t->text_dim);
+    for (int r = 0; r < rows && BR_TOP + r < BR_N; r++)
+    {
+        int idx = BR_TOP + r;
+        const VfsNode *n = vfs_node(BR_ITEMS[idx]);
+        if (!n)
+            continue;
+        UiRect row = ui_rect(l.list.x + 4, l.list.y + r * BR_ROW, l.list.w - 12, BR_ROW);
+        if (idx == BR_SEL)
+            gfx_fill_rect_alpha(row.x, row.y + 1, row.w, row.h - 2, t->accent.r, t->accent.g, t->accent.b, 90);
+        ui_icon(n->is_dir ? UI_ICON_FILES : UI_ICON_DISPLAY, row.x + 16, row.y + row.h / 2, 18, t->text);
+        ui_text_in(ui_rect(row.x + 34, row.y, row.w - 34, row.h), n->name, UI_TEXT_BODY, UI_ALIGN_LEFT);
+    }
+    if (BR_N > rows && rows > 0) /* a thin scroll thumb */
+    {
+        int thumb = l.list.h * rows / BR_N;
+        if (thumb < 16)
+            thumb = 16;
+        int y = l.list.y + (l.list.h - thumb) * BR_TOP / (BR_N - rows);
+        gfx_fill_round_rect(l.list.x + l.list.w - 6, y, 3, thumb, 1, ui_color(t->border));
+    }
+    if (BR_ERR)
+        ui_text_in_color(l.err, BR_ERR, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->danger);
+}
+
+/* pick the selected picture: the wallpaper changes and the dialog closes; if it cannot be shown the dialog stays and says why */
+static void br_ok(void)
+{
+    const VfsNode *n = BR_SEL >= 0 ? vfs_node(BR_ITEMS[BR_SEL]) : 0;
+    if (!n || n->is_dir)
+    {
+        BR_ERR = "Select a .bmp picture first";
+        return;
+    }
+    if (look_set_picture(BR_ITEMS[BR_SEL]) != 0)
+    {
+        BR_ERR = look_message();
+        return;
+    }
+    wm_close(BR_WIN);
+}
+
+static void br_select(int idx)
+{
+    BrLayout l = br_layout(wm_content(BR_WIN));
+    int rows = br_rows(&l);
+    if (idx > BR_N - 1)
+        idx = BR_N - 1;
+    if (idx < 0)
+        idx = 0;
+    if (BR_N == 0)
+        return;
+    BR_SEL = idx;
+    if (idx < BR_TOP)
+        BR_TOP = idx;
+    if (idx >= BR_TOP + rows)
+        BR_TOP = idx - rows + 1;
+    BR_ERR = 0;
+}
+
+/* Enter / double click on the selected row: a folder is opened, a picture is picked */
+static void br_activate(void)
+{
+    const VfsNode *n = BR_SEL >= 0 ? vfs_node(BR_ITEMS[BR_SEL]) : 0;
+    if (n && n->is_dir)
+        br_enter(BR_ITEMS[BR_SEL]);
+    else
+        br_ok();
+}
+
+static void br_key(Window *w, const KeyEvent *k)
+{
+    if (!k->pressed)
+        return;
+    BrLayout l = br_layout(wm_content(w));
+    int rows = br_rows(&l);
+    switch (k->key)
+    {
+    case KEY_ENTER:
+        br_activate();
+        break;
+    case KEY_ESC:
+        wm_close(w);
+        break;
+    case KEY_UP:
+        br_select(BR_SEL < 0 ? BR_N - 1 : BR_SEL - 1);
+        break;
+    case KEY_DOWN:
+        br_select(BR_SEL + 1);
+        break;
+    case KEY_PAGEUP:
+        br_select(BR_SEL - rows);
+        break;
+    case KEY_PAGEDOWN:
+        br_select(BR_SEL + rows);
+        break;
+    default:
+        break;
+    }
+}
+
+static int br_press(Window *w, int x, int y)
+{
+    BrLayout l = br_layout(wm_content(w));
+    if (!ui_contains(l.list, x, y))
+        return 0;
+    int row = (y - l.list.y) / BR_ROW, idx = BR_TOP + row;
+    if (row >= br_rows(&l) || idx >= BR_N)
+        return 0;
+    unsigned long long now = timer_ms();
+    int dbl = idx == BR_LAST_ROW && now - BR_LAST_MS < BR_DOUBLE_MS;
+    BR_LAST_ROW = idx;
+    BR_LAST_MS = now;
+    br_select(idx);
+    if (dbl)
+        br_activate();
+    return 1;
+}
+
+static int br_wheel(Window *w, int steps)
+{
+    BrLayout l = br_layout(wm_content(w));
+    int top = BR_TOP + steps * 3, max = BR_N - br_rows(&l);
+    if (top > max)
+        top = max;
+    if (top < 0)
+        top = 0;
+    if (top == BR_TOP)
+        return 0;
+    BR_TOP = top;
+    return 1;
+}
+
+static void br_close(Window *w)
+{
+    (void)w;
+    BR_WIN = 0;
+}
+
+static void on_br_up(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    const VfsNode *n = vfs_node(BR_DIR);
+    if (BR_WIN && n && n->parent >= 0)
+        br_enter(n->parent);
+}
+
+static void on_br_cancel(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    if (BR_WIN)
+        wm_close(BR_WIN);
+}
+
+static void on_br_ok(UiButton *b, void *user)
+{
+    (void)b;
+    (void)user;
+    if (BR_WIN)
+        br_ok();
+}
+
+static void browse_open(void)
+{
+    if (!PS_WIN)
+        return;
+    if (BR_WIN)
+    {
+        wm_activate(BR_WIN);
+        return;
+    }
+    int W = (int)gfx_width(), H = (int)gfx_height();
+    int w = BR_W, h = BR_H;
+    if (w > W - 20)
+        w = W - 20;
+    if (h > H - TASKBAR_HEIGHT - 8)
+        h = H - TASKBAR_HEIGHT - 8;
+    int x = PS_WIN->r.x + (PS_WIN->r.w - w) / 2, y = PS_WIN->r.y + (PS_WIN->r.h - h) / 2;
+    if (x + w > W)
+        x = W - w;
+    if (y + h > H - TASKBAR_HEIGHT)
+        y = H - TASKBAR_HEIGHT - h;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    Window *win = wm_create_dialog(PS_WIN, "Choose a wallpaper", x, y, w, h, br_draw, 0);
+    if (!win)
+    {
+        desktop_set_status("Window limit reached - close one first.");
+        return;
+    }
+    BR_WIN = win;
+    win->on_key = br_key;
+    win->on_press = br_press;
+    win->on_wheel = br_wheel;
+    win->on_close = br_close;
+
+    /* start in the folder of the picture in use, else on "This PC" */
+    const VfsNode *cur = look_picture() >= 0 ? vfs_node(look_picture()) : 0;
+    br_enter(cur && cur->parent >= 0 ? cur->parent : VFS_ROOT);
+    if (cur)
+        for (int i = 0; i < BR_N; i++)
+            if (BR_ITEMS[i] == look_picture())
+                BR_SEL = i;
+
+    int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
+    int anchor = WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM;
+    wm_add_button_ex(win, "Up", UI_BTN_SECONDARY, ui_rect(cw - BR_M - 80, BR_M, 80, 30), WM_ANCHOR_RIGHT, on_br_up, 0);
+    wm_set_button_icon(win, 0, UI_ICON_ARROW_UP);
+    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 20 - 100 - 10 - 100, ch - 20 - 34, 100, 34), anchor,
+                     on_br_cancel, 0);
+    wm_add_button_ex(win, "Select", UI_BTN_PRIMARY, ui_rect(cw - 20 - 100, ch - 20 - 34, 100, 34), anchor, on_br_ok, 0);
 }
 
 static void personalize_open(void)
