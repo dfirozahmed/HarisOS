@@ -30,6 +30,7 @@ static int NAPS;
 static int SEL = -1;
 static int SHOW_PASS; /* the passphrase is shown as typed instead of as stars (the "Show password" switch); off again whenever the field is wiped */
 static int SCROLL;
+static UiScroll SB; /* the network list's scrollbar: sb_sync() fills it from SCROLL, NAPS and the layout */
 static int OP;
 static char MSG[100];       /* the last result, under the passphrase field */
 static int MSG_KIND;        /* 0 none, 1 good, 2 bad */
@@ -149,6 +150,7 @@ static Layout layout(UiRect body)
     UiRect r = ui_inset(body, 8);
     l.head = ui_cut_top(&r, HEAD_H);
     l.foot = ui_cut_bottom(&r, FOOT_H);
+    ui_cut_right(&r, UI_SCROLL_W); /* the scrollbar's column is to the right of the rows */
     l.list = r;
     UiRect f = l.foot;
     ui_cut_top(&f, 28); /* the label above the field */
@@ -161,6 +163,15 @@ static int visible_rows(const Layout *l)
 {
     int n = l->list.h / ROW_H;
     return n < 1 ? 1 : n;
+}
+
+/* The wheel, the keys and a rescan move SCROLL directly, so the scrollbar is brought in step before every use. */
+static void sb_sync(const Layout *l)
+{
+    SB.total = NAPS;
+    SB.page = visible_rows(l);
+    SB.pos = SCROLL;
+    SB.track = ui_rect(l->list.x + l->list.w, l->list.y, UI_SCROLL_W, l->list.h);
 }
 
 /* the "Show password" switch and its label, under the passphrase field */
@@ -290,6 +301,8 @@ static void wf_draw(Window *w, UiRect body)
         ui_text_in(l.list, OP == OP_NONE ? (ST.present ? "No networks found - try Rescan." : "") : "", UI_TEXT_DIM, UI_ALIGN_CENTER);
     }
     int vis = visible_rows(&l);
+    sb_sync(&l);
+    ui_scroll_draw(SB.track, &SB);
     for (int i = 0; i < vis && SCROLL + i < NAPS; i++)
     {
         int ri = SCROLL + i;
@@ -526,9 +539,15 @@ static void on_disconnect(UiButton *b, void *user)
 
 static int wf_press(Window *w, int x, int y)
 {
+    Layout l = layout(wm_content(w));
+    sb_sync(&l); /* the scrollbar: grab the thumb (wf_drag follows it) or click the track for a page; it works during a scan too */
+    if (ui_scroll_press(&SB, x, y))
+    {
+        SCROLL = SB.pos;
+        return 1;
+    }
     if (OP != OP_NONE)
         return 0;
-    Layout l = layout(wm_content(w));
     if (ui_contains(l.list, x, y))
     {
         int row = SCROLL + (y - l.list.y) / ROW_H;
@@ -555,11 +574,27 @@ static int wf_press(Window *w, int x, int y)
 
 static int wf_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (SB.dragging) /* the scrollbar's thumb is held: the list follows the pointer */
+    {
+        Layout l = layout(wm_content(w));
+        sb_sync(&l);
+        int changed = ui_scroll_drag(&SB, x, y, buttons);
+        SCROLL = SB.pos;
+        return changed;
+    }
     if (!w->edits[0].dragging || !ui_edit_mouse(&w->edits[0], x, y, buttons))
         return 0;
     ui_caret_restart();
     wm_add_damage(ui_inset(w->edits[0].field, -3));
     return 2;
+}
+
+/* the scrollbar widens while the pointer is over it */
+static int wf_hover(Window *w, int x, int y)
+{
+    Layout l = layout(wm_content(w));
+    sb_sync(&l);
+    return ui_scroll_hover(&SB, x, y);
 }
 
 static int wf_wheel(Window *w, int steps)
@@ -654,6 +689,8 @@ static void wifi_app_open(void)
     win->on_press = wf_press;
     win->on_drag = wf_drag;
     win->on_wheel = wf_wheel;
+    win->on_hover = wf_hover;
+    SB.dragging = SB.hover = 0;
     win->on_tick = wf_tick;
     win->on_close = wf_close;
     win->icon = TASKBAR_ICON_WIFI;

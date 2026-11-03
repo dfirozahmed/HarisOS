@@ -61,6 +61,8 @@ static const UiIcon PERF_ICON[PERF_COUNT] = {UI_ICON_MEMORY, UI_ICON_CPU, UI_ICO
 
 static Window *TM_WIN;
 static int TAB;
+static int SCROLL;  /* first visible row of the Processes / Threads list (back to 0 on a tab change) */
+static UiScroll SB; /* that list's scrollbar: sb_sync() fills it */
 static int PERF = PERF_MEMORY;
 static unsigned char MEM_HIST[HIST_N]; /* used memory in percent, oldest first */
 static int MEM_HIST_N;
@@ -167,8 +169,39 @@ static UiRect tab_rect(UiRect body, int i)
 
 static UiRect list_rect(UiRect body)
 {
-    return ui_rect(body.x + PAD, body.y + 8 + TAB_H + 8 + HEAD_H, body.w - 2 * PAD,
+    return ui_rect(body.x + PAD, body.y + 8 + TAB_H + 8 + HEAD_H, body.w - 2 * PAD - UI_SCROLL_W, /* the scrollbar's column is to the right */
                    body.h - (8 + TAB_H + 8 + HEAD_H) - FOOT_H);
+}
+
+/* kernel threads that exist (the Threads list's rows) */
+static int live_threads(void)
+{
+    int n = 0;
+    for (int id = 0; id < task_slots(); id++)
+        if (task_name(id) && task_state(id) != TASK_DEAD)
+            n++;
+    return n;
+}
+
+/* The scrollbar for the tab shown: the Processes list has one row per app plus "Desktop and system", the Threads list one per thread, the
+ * Performance tab none. SCROLL is clamped here, so every user of it sees a valid first row (the list may have shrunk since). */
+static void sb_sync(UiRect body)
+{
+    UiRect list = list_rect(body);
+    int vis = list.h / ROW_H;
+    SB.total = TAB == TAB_PROCESSES ? NPROCS + 1 : TAB == TAB_THREADS ? live_threads() : 0;
+    SB.page = vis < 1 ? 1 : vis;
+    SB.pos = SCROLL;
+    SB.track = ui_rect(list.x + list.w, list.y, UI_SCROLL_W, list.h);
+    ui_scroll_set(&SB, SCROLL);
+    SCROLL = SB.pos;
+}
+
+static void set_tab(int tab)
+{
+    TAB = tab;
+    SCROLL = 0;
+    SB.dragging = SB.hover = 0;
 }
 
 static void draw_tabs(UiRect body)
@@ -235,6 +268,7 @@ static void put_pct10(char *s, int *n, unsigned tenths)
 static void draw_processes(UiRect body)
 {
     const UiTheme *t = ui_theme();
+    sb_sync(body);
     UiRect list = list_rect(body);
     int hy = list.y - HEAD_H;
     /* columns from the right: ID, the app's CPU share, the status, then the name */
@@ -250,10 +284,32 @@ static void draw_processes(UiRect body)
 
     int vis = list.h / ROW_H;
     Window *top = wm_top();
-    for (int i = 0; i < NPROCS && i < vis; i++)
+
+    /* The apps' figures count only their own code (drawing, input, timers). Everything else the main loop does, the desktop, the taskbar, the
+     * window frames, the drivers, has no window: it is one more row (the last), so that the column adds up to the processor's load (the CPU page).
+     * The two figures come from slightly different one-second windows, so the rest is clamped at 0. */
+    int apps_sum = 0;
+    for (int i = 0; i < NPROCS; i++)
+        apps_sum += PROCS[i]->cpu_pct;
+    int main_loop = cpuload_percent() * 10 / ncpus(); /* the main loop's busy share, as a share of all processors, in tenths */
+    int total = total_cpu_percent();
+    int rest = main_loop > apps_sum ? main_loop - apps_sum : 0;
+
+    for (int k = 0; k < vis && SCROLL + k <= NPROCS; k++)
     {
+        int i = SCROLL + k;
+        UiRect r = ui_rect(list.x, list.y + k * ROW_H, list.w, ROW_H);
+        if (i == NPROCS) /* "Desktop and system", after the last app */
+        {
+            ui_text_in_color(ui_rect(r.x + 8, r.y, x_state - list.x - 16, r.h), "Desktop and system", UI_TEXT_BODY, UI_ALIGN_LEFT,
+                             t->text_dim);
+            char pct[8];
+            int pn = 0;
+            put_pct10(pct, &pn, (unsigned)rest);
+            ui_text_in_color(ui_rect(x_cpu, r.y, CPU_W, r.h), pct, UI_TEXT_SMALL, UI_ALIGN_RIGHT, rest > 0 ? t->text : t->text_dim);
+            break;
+        }
         const Window *p = PROCS[i];
-        UiRect r = ui_rect(list.x, list.y + i * ROW_H, list.w, ROW_H);
         if (p->id == SEL_ID)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 40);
         ui_text_in(ui_rect(r.x + 8, r.y, x_state - list.x - 16, r.h), p->title, UI_TEXT_BODY, UI_ALIGN_LEFT);
@@ -271,26 +327,7 @@ static void draw_processes(UiRect body)
         ui_text_in_color(ui_rect(r.x + r.w - PID_W - 4, r.y, PID_W, r.h), id, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                          t->text_dim);
     }
-
-    /* The apps' figures count only their own code (drawing, input, timers). Everything else the main loop does, the desktop, the taskbar, the
-     * window frames, the drivers, has no window: it is one more row, so that the column adds up to the processor's load (the CPU page).
-     * The two figures come from slightly different one-second windows, so the rest is clamped at 0. */
-    int apps_sum = 0;
-    for (int i = 0; i < NPROCS; i++)
-        apps_sum += PROCS[i]->cpu_pct;
-    int main_loop = cpuload_percent() * 10 / ncpus(); /* the main loop's busy share, as a share of all processors, in tenths */
-    int total = total_cpu_percent();
-    int rest = main_loop > apps_sum ? main_loop - apps_sum : 0;
-    if (NPROCS < vis)
-    {
-        UiRect r = ui_rect(list.x, list.y + NPROCS * ROW_H, list.w, ROW_H);
-        ui_text_in_color(ui_rect(r.x + 8, r.y, x_state - list.x - 16, r.h), "Desktop and system", UI_TEXT_BODY, UI_ALIGN_LEFT,
-                         t->text_dim);
-        char pct[8];
-        int pn = 0;
-        put_pct10(pct, &pn, (unsigned)rest);
-        ui_text_in_color(ui_rect(x_cpu, r.y, CPU_W, r.h), pct, UI_TEXT_SMALL, UI_ALIGN_RIGHT, rest > 0 ? t->text : t->text_dim);
-    }
+    ui_scroll_draw(SB.track, &SB);
 
     char line[64];
     int n = 0;
@@ -306,6 +343,7 @@ static void draw_processes(UiRect body)
 static void draw_threads(UiRect body)
 {
     const UiTheme *t = ui_theme();
+    sb_sync(body);
     UiRect list = list_rect(body);
     int hy = list.y - HEAD_H;
     /* columns from the right: ID, the processor it last ran on, its CPU share, the state, then the name */
@@ -328,8 +366,8 @@ static void draw_threads(UiRect body)
         if (!name || st == TASK_DEAD)
             continue;
         live++;
-        if (row >= vis)
-            continue; /* no room: still counted below */
+        if (live <= SCROLL || row >= vis)
+            continue; /* above the view, or no room: still counted below */
         UiRect r = ui_rect(list.x, list.y + row * ROW_H, list.w, ROW_H);
         row++;
         ui_text_in(ui_rect(r.x + 8, r.y, x_state - list.x - 16, r.h), name, UI_TEXT_BODY, UI_ALIGN_LEFT);
@@ -365,6 +403,8 @@ static void draw_threads(UiRect body)
         ui_text_in_color(ui_rect(r.x + r.w - PID_W - 4, r.y, PID_W, r.h), id_s, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                          t->text_dim);
     }
+
+    ui_scroll_draw(SB.track, &SB);
 
     char line[64];
     int n = 0;
@@ -996,7 +1036,8 @@ static int tm_press(Window *w, int x, int y)
         if (ui_contains(tab_rect(body, i), x, y))
         {
             int changed = TAB != i;
-            TAB = i;
+            if (changed)
+                set_tab(i);
             return changed;
         }
     }
@@ -1026,28 +1067,60 @@ static int tm_press(Window *w, int x, int y)
                 }
         return 0;
     }
+    sb_sync(body); /* the scrollbar: grab the thumb (tm_drag follows it) or click the track for a page */
+    if (ui_scroll_press(&SB, x, y))
+    {
+        SCROLL = SB.pos;
+        return 1;
+    }
     if (TAB != TAB_PROCESSES) /* the thread list cannot be selected */
         return 0;
     UiRect list = list_rect(body);
     if (!ui_contains(list, x, y))
         return 0;
-    int row = (y - list.y) / ROW_H;
+    int row = SCROLL + (y - list.y) / ROW_H;
     if (row < 0 || row >= NPROCS || PROCS[row]->id == SEL_ID)
         return 0;
     SEL_ID = PROCS[row]->id;
     return 1;
 }
 
+/* the thumb is held: the list follows the pointer */
+static int tm_drag(Window *w, int x, int y, unsigned buttons)
+{
+    if (!SB.dragging)
+        return 0;
+    sb_sync(wm_content(w));
+    int changed = ui_scroll_drag(&SB, x, y, buttons);
+    SCROLL = SB.pos;
+    return changed;
+}
+
+/* the scrollbar widens while the pointer is over it */
+static int tm_hover(Window *w, int x, int y)
+{
+    sb_sync(wm_content(w));
+    return ui_scroll_hover(&SB, x, y);
+}
+
+/* wheel over the Processes / Threads list: 3 rows per step */
+static int tm_wheel(Window *w, int steps)
+{
+    sb_sync(wm_content(w));
+    int changed = ui_scroll_by(&SB, steps * 3);
+    SCROLL = SB.pos;
+    return changed;
+}
+
 static void tm_key(Window *w, const KeyEvent *k)
 {
-    (void)w;
     if (!k->pressed)
         return;
     revalidate();
     switch (k->key)
     {
     case KEY_TAB:
-        TAB = (TAB + 1) % TAB_COUNT;
+        set_tab((TAB + 1) % TAB_COUNT);
         break;
     case KEY_UP:
     case KEY_DOWN:
@@ -1061,6 +1134,11 @@ static void tm_key(Window *w, const KeyEvent *k)
         if (i >= NPROCS)
             i = NPROCS - 1;
         SEL_ID = PROCS[i]->id;
+        sb_sync(wm_content(w)); /* keep the selected row in view */
+        if (i < SCROLL)
+            SCROLL = i;
+        if (i >= SCROLL + SB.page)
+            SCROLL = i - SB.page + 1;
         break;
     }
     case KEY_DELETE:
@@ -1138,11 +1216,14 @@ static void taskmgr_open(void)
     }
     win->on_key = tm_key;
     win->on_press = tm_press;
+    win->on_drag = tm_drag;
+    win->on_hover = tm_hover;
+    win->on_wheel = tm_wheel;
     win->on_tick = tm_tick;
     win->on_close = tm_close;
     win->icon = TASKBAR_ICON_TASKMGR;
     TM_WIN = win;
-    TAB = TAB_PROCESSES;
+    set_tab(TAB_PROCESSES);
     SEL_ID = -1;
     PERF = PERF_MEMORY;
     LAST_MS = timer_ms();

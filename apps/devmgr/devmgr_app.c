@@ -24,6 +24,7 @@ static Row ROWS[DEVMGR_MAX + DEV_CAT_COUNT];
 static int NROWS;
 static int SEL = -1;  /* selected row (always a device row), -1 = none */
 static int SCROLL;    /* first visible row */
+static UiScroll SB;   /* the list's scrollbar: sb_sync() fills it from SCROLL, NROWS and the layout */
 
 static void rebuild_rows(void)
 {
@@ -104,6 +105,7 @@ static UiRect list_rect(UiRect body)
 {
     body = ui_inset(body, 8);
     ui_cut_bottom(&body, DETAIL_H + 8);
+    ui_cut_right(&body, UI_SCROLL_W); /* the scrollbar's column is to the right of the rows */
     return body;
 }
 
@@ -111,6 +113,16 @@ static int visible_rows(UiRect body)
 {
     int n = list_rect(body).h / ROW_H;
     return n < 1 ? 1 : n;
+}
+
+/* The wheel, the keys and a refresh move SCROLL directly, so the scrollbar is brought in step before every use. */
+static void sb_sync(UiRect body)
+{
+    UiRect list = list_rect(body);
+    SB.total = NROWS;
+    SB.page = visible_rows(body);
+    SB.pos = SCROLL;
+    SB.track = ui_rect(list.x + list.w, list.y, UI_SCROLL_W, list.h);
 }
 
 /* Move the selection by `step` device rows (headers are skipped) and keep it on screen. */
@@ -157,6 +169,8 @@ static void dm_draw(Window *w, UiRect body)
     }
     if (SCROLL > NROWS - 1)
         SCROLL = NROWS - 1;
+    sb_sync(body);
+    ui_scroll_draw(SB.track, &SB);
 
     for (int i = 0; i < vis && SCROLL + i < NROWS; i++)
     {
@@ -202,6 +216,12 @@ static int dm_press(Window *w, int x, int y)
 {
     UiRect body = wm_content(w);
     UiRect list = list_rect(body);
+    sb_sync(body); /* the scrollbar: grab the thumb (dm_drag follows it) or click the track for a page */
+    if (ui_scroll_press(&SB, x, y))
+    {
+        SCROLL = SB.pos;
+        return 1;
+    }
     if (!ui_contains(list, x, y))
         return 0;
     int row = SCROLL + (y - list.y) / ROW_H;
@@ -209,6 +229,24 @@ static int dm_press(Window *w, int x, int y)
         return 0;
     select_to(body, row);
     return 1;
+}
+
+/* the thumb is held: the list follows the pointer */
+static int dm_drag(Window *w, int x, int y, unsigned buttons)
+{
+    if (!SB.dragging)
+        return 0;
+    sb_sync(wm_content(w));
+    int changed = ui_scroll_drag(&SB, x, y, buttons);
+    SCROLL = SB.pos;
+    return changed;
+}
+
+/* the scrollbar widens while the pointer is over it */
+static int dm_hover(Window *w, int x, int y)
+{
+    sb_sync(wm_content(w));
+    return ui_scroll_hover(&SB, x, y);
 }
 
 /* wheel: scroll the view by 3 rows per step; the selection stays where it is */
@@ -355,6 +393,9 @@ static void devmgr_app_open(void)
     win->on_key = dm_key;
     win->on_press = dm_press;
     win->on_wheel = dm_wheel;
+    win->on_drag = dm_drag;
+    win->on_hover = dm_hover;
+    SB.dragging = SB.hover = 0;
     win->on_close = dm_close;
     win->icon = TASKBAR_ICON_DEVMGR;
     DM_WIN = win;

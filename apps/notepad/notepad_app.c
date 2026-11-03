@@ -39,6 +39,7 @@ static int NP_LEN;
 static int NP_CUR;     /* caret: 0..NP_LEN */
 static int NP_DESIRED; /* column the Up / Down keys try to keep */
 static int NP_TOP;     /* first visible line */
+static UiScroll NP_SB; /* the text's scrollbar: total and page are set at each draw, pos is NP_TOP (synced before each use) */
 static int NP_HSCROLL; /* pixels the text is scrolled to the left */
 static int NP_ROWS = 1; /* visible rows at the last draw (for PageUp / PageDown) */
 static int NP_FOLLOW;  /* 1 = scroll so that the caret is visible at the next draw */
@@ -420,6 +421,12 @@ static UiRect text_area(UiRect body)
     return ui_rect(body.x + NP_PAD, body.y + top, body.w - 2 * NP_PAD, body.h - top - NP_STATUS_H - 6 - NP_PAD / 2);
 }
 
+/* the scrollbar's track: the right edge inside the text box */
+static UiRect sb_track(UiRect ta)
+{
+    return ui_rect(ta.x + ta.w - UI_SCROLL_W - 2, ta.y + 3, UI_SCROLL_W, ta.h - 6);
+}
+
 static UiRect status_rect(UiRect body)
 {
     return ui_rect(body.x + NP_PAD, body.y + body.h - NP_STATUS_H - 4, body.w - 2 * NP_PAD, NP_STATUS_H);
@@ -761,6 +768,10 @@ static void np_draw(Window *w, UiRect body)
             break;
     }
     gfx_restore_clip(saved);
+    NP_SB.total = total; /* rows of the text, so the scrollbar counts wrapped rows too */
+    NP_SB.page = NP_ROWS;
+    NP_SB.pos = NP_TOP;
+    ui_scroll_draw(sb_track(ta), &NP_SB);
     if (NP_BAR)
         bar_draw(body);
 
@@ -819,7 +830,10 @@ static void mark_changed(Window *w, int old_lo, int old_hi, int old_lines, int o
     int new_lo, new_hi;
     sel_lines(&new_lo, &new_hi);
     UiRect rows = in;
-    if (NP_TOP == old_top && NP_HSCROLL == old_hscroll && row_count() == old_lines)
+    int same = NP_TOP == old_top && NP_HSCROLL == old_hscroll && row_count() == old_lines;
+    if (!same)
+        wm_add_damage(sb_track(text_area(body))); /* the thumb moved or changed size */
+    if (same)
     {
         int a = old_lo < new_lo ? old_lo : new_lo;
         int b = old_hi > new_hi ? old_hi : new_hi;
@@ -2100,6 +2114,7 @@ static void find_damage(Window *w)
 {
     UiRect body = wm_content(w);
     wm_add_damage(ui_inset(text_area(body), NP_PAD));
+    wm_add_damage(sb_track(text_area(body))); /* a match can scroll the text */
     wm_add_damage(status_rect(body));
 }
 
@@ -2424,6 +2439,16 @@ static int np_press(Window *w, int x, int y)
         return on_bar;
     UiRect body = wm_content(w);
     UiRect in = ui_inset(text_area(body), NP_PAD);
+    NP_SB.pos = NP_TOP; /* the scrollbar: grab the thumb (np_drag follows it) or click the track for a page */
+    NP_SB.track = sb_track(text_area(body));
+    if (ui_scroll_press(&NP_SB, x, y))
+    {
+        NP_TOP = NP_SB.pos;
+        NP_FOLLOW = 0; /* do not jump back to the caret at the next draw */
+        wm_add_damage(in);
+        wm_add_damage(NP_SB.track);
+        return 2;
+    }
     if (!ui_contains(in, x, y))
         return 0;
     int left_bar = NP_FOCUS != 0; /* the keyboard comes back to the text: the bar loses its caret */
@@ -2447,6 +2472,19 @@ static int np_press(Window *w, int x, int y)
 
 static int np_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (NP_SB.dragging) /* the scrollbar's thumb is held: the text follows the pointer */
+    {
+        UiRect body = wm_content(w);
+        NP_SB.pos = NP_TOP;
+        NP_SB.track = sb_track(text_area(body));
+        int changed = ui_scroll_drag(&NP_SB, x, y, buttons);
+        NP_TOP = NP_SB.pos;
+        if (!changed)
+            return 0;
+        wm_add_damage(ui_inset(text_area(body), NP_PAD));
+        wm_add_damage(NP_SB.track);
+        return 2;
+    }
     if (NP_BAR_DRAG) /* selecting inside a field of the find bar */
     {
         UiEdit *e = NP_FOCUS == 2 ? &NP_REPL : &NP_FIND;
@@ -2496,6 +2534,17 @@ static int np_wheel(Window *w, int steps)
         return 0;
     NP_TOP = top;
     wm_add_damage(ui_inset(text_area(wm_content(w)), NP_PAD)); /* only the text moved, not the frame or the status bar */
+    wm_add_damage(sb_track(text_area(wm_content(w)))); /* and the scrollbar's thumb */
+    return 2;
+}
+
+/* the scrollbar widens while the pointer is over it */
+static int np_hover(Window *w, int x, int y)
+{
+    NP_SB.track = sb_track(text_area(wm_content(w)));
+    if (!ui_scroll_hover(&NP_SB, x, y))
+        return 0;
+    wm_add_damage(NP_SB.track);
     return 2;
 }
 
@@ -2573,6 +2622,7 @@ static void notepad_app_open(void)
     win->on_press = np_press;
     win->on_drag = np_drag;
     win->on_wheel = np_wheel;
+    win->on_hover = np_hover;
     win->on_tick = np_tick;
     win->on_close = np_close;
     win->on_close_request = np_close_request;

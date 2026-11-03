@@ -66,6 +66,12 @@ int main(void)
     s.pos = 90;
     t = ui_scroll_thumb(&s, s.track);
     CHECK(t.y + t.h == 50 + 208 - 4); /* bottom of the travel */
+    s = mk(100, 10, 99); /* pos past total - page (a list that may scroll to its last row): the thumb stays in the track */
+    t = ui_scroll_thumb(&s, s.track);
+    CHECK(t.y + t.h == 50 + 208 - 4);
+    s.pos = -7;
+    t = ui_scroll_thumb(&s, s.track);
+    CHECK(t.y == 54);
     s = mk(20, 10, 0);
     t = ui_scroll_thumb(&s, s.track);
     CHECK(t.h == 100); /* half the content in view = half the track */

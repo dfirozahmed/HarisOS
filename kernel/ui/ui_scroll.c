@@ -63,7 +63,8 @@ UiRect ui_scroll_thumb(const UiScroll *s, UiRect tr)
     int th, travel;
     sb_geometry(s, tr, &th, &travel);
     int max = ui_scroll_max(s);
-    int off = (int)((long long)travel * s->pos / max);
+    int pos = s->pos < 0 ? 0 : (s->pos > max ? max : s->pos); /* an app may let pos run past the end (Notepad's wheel does) */
+    int off = (int)((long long)travel * pos / max);
     return ui_rect(tr.x, tr.y + SB_MARGIN + off, tr.w, th);
 }
 
