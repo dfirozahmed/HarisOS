@@ -152,6 +152,7 @@ void     amd_gpu_ib_write32(uint32_t dword_index, uint32_t v);
 void     amd_gpu_ib_flush(void);
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr); /* a register of the GPU by its dword address (read only) */
 void     amd_gpu_wc_flush(void);        /* mfence + a read: the CPU's write-combined VRAM writes are in memory */
+int      amd_gpu_busy_percent(void);    /* GPU load 0..100 from GRBM_STATUS.GUI_ACTIVE, -1 = registers not reachable */
 void     amd_gpu_fault_snapshot(void);  /* then read amd_native_fault_gc_status() etc. */
 void     amd_gpu_fault_clear(void);     /* clears the GC VM fault status (Linux gmc_v9_0_process_interrupt) */
 void     amd_gpu_reg_write32(uint32_t dword_addr, uint32_t v);  /* WRITES a GPU register by its dword address */

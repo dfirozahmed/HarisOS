@@ -3273,6 +3273,16 @@ void amd_gpu_ib_flush(void)
 uint64_t amd_gpu_ib_va(void) { return rg_va_ib; }
 int amd_gpu_ring_running(void) { return rg_up && !rg_dead; }
 uint32_t amd_gpu_reg_read32(uint32_t dword_addr) { return gpu_mmio_read32(rg_mmio, dword_addr << 2); }
+/* GPU load for the Task Manager: GRBM_STATUS.GUI_ACTIVE (bit 31) is 1 while any graphics block is working. One read is only a snapshot,
+   so read it many times in a row and report the share of reads that found the GPU busy. Read only. -1 = registers not reachable. */
+int amd_gpu_busy_percent(void)
+{
+    uint32_t i, busy = 0;
+    if (!rg_mmio || !gpu_mmio_can_access(rg_mmio)) return -1;
+    for (i = 0; i < 256u; i++)
+        if (gpu_mmio_read32(rg_mmio, GC_GRBM_STATUS_OFF) & 0x80000000u) busy++;
+    return (int)(busy * 100u / 256u);
+}
 /* Everything the CPU wrote to VRAM (write combined) is out of the CPU's buffers (mfence, then a read) and out of the HDP. For data the
    GPU is about to use. */
 void amd_gpu_wc_flush(void)

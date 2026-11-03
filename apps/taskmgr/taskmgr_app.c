@@ -7,9 +7,13 @@
 #include "blk.h"
 #include "cpuinfo.h"
 #include "cpuload.h"
+#include "amd_gpu.h"
+#include "amd_native.h"
 #include "desktop.h"
+#include "display.h"
 #include "gfx.h"
 #include "heap.h"
+#include "pci.h"
 #include "pmm.h"
 #include "process.h"
 #include "smp.h"
@@ -49,10 +53,11 @@ enum
     PERF_MEMORY,
     PERF_CPU,
     PERF_DISK,
+    PERF_GPU,
     PERF_COUNT
 };
-static const char *const PERF_NAME[PERF_COUNT] = {"Memory", "CPU", "Disk"};
-static const UiIcon PERF_ICON[PERF_COUNT] = {UI_ICON_MEMORY, UI_ICON_CPU, UI_ICON_DISK};
+static const char *const PERF_NAME[PERF_COUNT] = {"Memory", "CPU", "Disk", "GPU"};
+static const UiIcon PERF_ICON[PERF_COUNT] = {UI_ICON_MEMORY, UI_ICON_CPU, UI_ICON_DISK, UI_ICON_DISPLAY};
 
 static Window *TM_WIN;
 static int TAB;
@@ -61,6 +66,9 @@ static unsigned char MEM_HIST[HIST_N]; /* used memory in percent, oldest first *
 static int MEM_HIST_N;
 static unsigned char CPU_HIST[HIST_N]; /* CPU load in percent, oldest first */
 static int CPU_HIST_N;
+static unsigned char GPU_HIST[HIST_N]; /* GPU load in percent, oldest first */
+static int GPU_HIST_N;
+static int GPU_PCT = -1; /* last GPU load in percent, -1 = the driver cannot read it (no AMD GPU with a running driver) */
 static unsigned DISK_HIST[HIST_N]; /* disk throughput (read + write) in KB/s, oldest first */
 static int DISK_HIST_N;
 static BlkStats DISK_PREV; /* counters at the last sample, to get the change per second */
@@ -501,6 +509,8 @@ static void take_samples(unsigned long long dt_ms)
 {
     hist_push(MEM_HIST, &MEM_HIST_N, mem_used_percent());
     hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)total_cpu_percent());
+    GPU_PCT = amd_gpu_busy_percent();
+    hist_push(GPU_HIST, &GPU_HIST_N, GPU_PCT > 0 ? (unsigned)GPU_PCT : 0);
     thread_samples(dt_ms);
     app_samples(dt_ms);
     disk_sample(dt_ms);
@@ -816,6 +826,97 @@ static void draw_disk(UiRect pane)
     }
 }
 
+/* GPU page: the adapter the kernel found on PCI (display.h), its video memory and driver, and the load graph. The load can only be read
+ * from an AMD GPU whose driver is running (amd_native.h: GRBM_STATUS); other adapters (the firmware framebuffer, Bochs) show no load. */
+static void draw_gpu(UiRect pane)
+{
+    const UiTheme *t = ui_theme();
+    char line[96];
+    int n = 0;
+
+    ui_text(pane.x, pane.y, "GPU", UI_TEXT_TITLE);
+    if (GPU_PCT >= 0)
+    {
+        put_dec(line, &n, (unsigned)GPU_PCT);
+        put_str(line, &n, "%");
+    }
+    else
+        put_str(line, &n, "n/a");
+    ui_text_in(ui_rect(pane.x + pane.w - 80, pane.y, 80, 28), line, UI_TEXT_LABEL, UI_ALIGN_RIGHT);
+
+    UiRect g = ui_rect(pane.x, pane.y + 36, pane.w, 80);
+    draw_graph(g, GPU_HIST, GPU_HIST_N);
+    ui_progress(ui_rect(pane.x, g.y + g.h + 10, pane.w, 12), GPU_PCT > 0 ? GPU_PCT : 0);
+    ui_text_color(pane.x, g.y + g.h + 28,
+                  GPU_PCT >= 0 ? "Load = share of samples in which the graphics engine was busy (GRBM_STATUS)"
+                               : "The load can only be read from an AMD GPU with a running driver",
+                  UI_TEXT_SMALL, t->text_dim);
+
+    int y = g.y + g.h + 56;
+    int count = display_count();
+    if (count == 0)
+    {
+        ui_text_color(pane.x, y, "No display adapter found", UI_TEXT_BODY, t->text_dim);
+        return;
+    }
+    const int vx = pane.x + 150;
+    for (int a = 0; a < count && y + 24 * 4 <= pane.y + pane.h; a++)
+    {
+        const DisplayAdapter *d = display_get(a);
+        n = 0;
+        line[0] = 0;
+        if (d->vendor_id == 0x1002)
+            put_str(line, &n, amd_gpu_name(d->device_id));
+        else
+        {
+            put_str(line, &n, pci_vendor_name(d->vendor_id));
+            put_str(line, &n, " graphics");
+        }
+        ui_text_in(ui_rect(pane.x, y, pane.w, 22), line, UI_TEXT_LABEL, UI_ALIGN_LEFT);
+        y += 30;
+
+        static const char *const label[4] = {"Driver", "Video memory", "Location", "Acceleration"};
+        for (int i = 0; i < 4; i++)
+        {
+            n = 0;
+            line[0] = 0;
+            if (i == 0)
+                put_str(line, &n, display_driver_name(d->kind));
+            else if (i == 1)
+            {
+                unsigned mib = d->kind == DISP_BOCHS ? d->vram_bytes >> 20 : (d->vendor_id == 0x1002 ? amd_native_vram_mib() : 0);
+                if (mib)
+                {
+                    put_dec(line, &n, mib);
+                    put_str(line, &n, " MB");
+                }
+                else
+                    put_str(line, &n, "-");
+            }
+            else if (i == 2)
+            {
+                static const char hex[] = "0123456789ABCDEF";
+                line[n++] = hex[d->bus >> 4];
+                line[n++] = hex[d->bus & 15];
+                line[n++] = ':';
+                line[n++] = hex[d->dev >> 4];
+                line[n++] = hex[d->dev & 15];
+                line[n++] = '.';
+                line[n++] = hex[d->fn & 15];
+                line[n] = 0;
+                if (d->active)
+                    put_str(line, &n, "  (shows the desktop)");
+            }
+            else
+                put_str(line, &n, d->vendor_id == 0x1002 && amd_gpu_ring_running() ? "GPU command ring running" : "None (CPU drawing)");
+            ui_text_color(pane.x, y, label[i], UI_TEXT_BODY, t->text_dim);
+            ui_text(vx, y, line, UI_TEXT_BODY);
+            y += 24;
+        }
+        y += 8;
+    }
+}
+
 static void draw_performance(UiRect body)
 {
     const UiTheme *t = ui_theme();
@@ -835,6 +936,8 @@ static void draw_performance(UiRect body)
         draw_memory(pane);
     else if (PERF == PERF_CPU)
         draw_cpu(pane);
+    else if (PERF == PERF_GPU)
+        draw_gpu(pane);
     else
         draw_disk(pane);
 }
@@ -1045,6 +1148,7 @@ static void taskmgr_open(void)
     LAST_MS = timer_ms();
     MEM_HIST_N = 0;
     CPU_HIST_N = 0;
+    GPU_HIST_N = 0;
     DISK_HIST_N = 0;
     take_samples(0);
     reload();
