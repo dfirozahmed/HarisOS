@@ -58,7 +58,7 @@ int ex_press(Window *w, int x, int y)
     {
         int hit = ex_menu_hit(x, y);
         if (hit >= 0)
-            ex_menu_run(EX_MENU.items[hit]);
+            EX_MENU.press = hit, EX_MENU.press_on = 1; /* shown pressed; it runs when the button is released (ex_drag) */
         else
             EX_MENU.open = 0;
         return 1;
@@ -166,6 +166,23 @@ int ex_press(Window *w, int x, int y)
 /* holding the button after a press in the rename field selects text */
 int ex_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (EX_MENU.open && EX_MENU.press >= 0)
+    {
+        int hit = ex_menu_hit(x, y);
+        int on = hit == EX_MENU.press; /* the pointer is still on the pressed item */
+        if (buttons & 1)
+        {
+            int changed = on != EX_MENU.press_on;
+            EX_MENU.press_on = on;
+            return changed; /* pressed look follows the pointer on and off the item */
+        }
+        int item = on ? hit : -1;
+        EX_MENU.press = -1;
+        EX_MENU.press_on = 0;
+        if (item >= 0)
+            ex_menu_run(EX_MENU.items[item]);
+        return 1;
+    }
     if (EX_PRESS_PLACE >= 0 || EX_PRESS_HEAD >= 0)
     {
         Layout l = ex_layout(wm_content(w));

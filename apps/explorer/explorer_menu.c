@@ -88,6 +88,8 @@ void ex_menu_open(int x, int y, int kind)
     EX_MENU.x = x < b.x + 4 ? b.x + 4 : x;
     EX_MENU.y = y < b.y + 4 ? b.y + 4 : y;
     EX_MENU.hover = -1;
+    EX_MENU.press = -1;
+    EX_MENU.press_on = 0;
     EX_MENU.open = 1;
 }
 
@@ -194,7 +196,9 @@ void ex_menu_draw(const UiTheme *t)
             ui_separator(r.x + 6, r.y + r.h / 2, r.w - 12);
             continue;
         }
-        if (i == EX_MENU.hover)
+        if (i == EX_MENU.press && EX_MENU.press_on) /* held down: darker than hover */
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 110);
+        else if (i == EX_MENU.hover)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 60);
         UiRgb c = item == M_DELETE ? t->danger : t->text;
         int tx = EX_MENU.kind == 2 ? 34 : 12; /* the sort menu leaves room for a check mark */

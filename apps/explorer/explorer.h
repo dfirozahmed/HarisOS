@@ -128,6 +128,8 @@ typedef struct
     int count;
     int items[MENU_MAX];
     int hover; /* index into items, -1 = none */
+    int press_on; /* the pointer is on that item right now */
+    int press; /* item the left button is held down on (it runs on release), -1 = none */
 } Menu;
 
 /* ---- shared state (explorer_state.c) ---------------------------- */
