@@ -9,6 +9,13 @@ static int on_divider(const Layout *l, int x, int y)
     return x >= edge - SIDE_GRAB && x < edge + SIDE_GRAB && y >= l->side.y && y < l->side.y + l->side.h;
 }
 
+/* the column title at x in the header */
+static int head_key(const Layout *l, int x)
+{
+    Cols cols = ex_columns(l);
+    return x >= cols.size_x ? VFS_SORT_SIZE : (cols.show_type && x >= cols.type_x) ? VFS_SORT_TYPE : VFS_SORT_NAME;
+}
+
 /* Mark list row `row` (an index into the items) to be drawn again, if it is in view. */
 static void mark_row(const Layout *l, int row)
 {
@@ -107,17 +114,17 @@ int ex_press(Window *w, int x, int y)
         int row = (y - (l.side.y + 32)) / (PLACE_H + 2);
         if (y >= l.side.y + 32 && row >= 0 && row < ex_place_count() && ex_place_id(row) >= 0)
         {
-            ex_go_to(ex_place_id(row), 1);
-            return 1;
+            EX_PRESS_PLACE = row; /* shown pressed; it opens when the button is released (ex_drag) */
+            wm_add_damage(l.side);
+            return 2;
         }
         return 0;
     }
     if (ui_contains(l.head, x, y)) /* a column title: sort by it, again to reverse */
     {
-        Cols cols = ex_columns(&l);
-        int key = x >= cols.size_x ? VFS_SORT_SIZE : (cols.show_type && x >= cols.type_x) ? VFS_SORT_TYPE : VFS_SORT_NAME;
-        ex_set_sort(key, key == EX_SORT_KEY ? !EX_SORT_DESC : 0);
-        return 1;
+        EX_PRESS_HEAD = head_key(&l, x); /* shown pressed; it sorts when the button is released (ex_drag) */
+        wm_add_damage(l.head);
+        return 2;
     }
     if (!ui_contains(l.list, x, y))
         return 0;
@@ -159,6 +166,35 @@ int ex_press(Window *w, int x, int y)
 /* holding the button after a press in the rename field selects text */
 int ex_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (EX_PRESS_PLACE >= 0 || EX_PRESS_HEAD >= 0)
+    {
+        Layout l = ex_layout(wm_content(w));
+        int place = EX_PRESS_PLACE, head = EX_PRESS_HEAD;
+        int over_place = place >= 0 && ui_contains(l.side, x, y) && y >= l.side.y + 32 && (y - (l.side.y + 32)) / (PLACE_H + 2) == place;
+        int over_head = head >= 0 && ui_contains(l.head, x, y) && head_key(&l, x) == head;
+        if (buttons & 1) /* still held: pressed look only while the pointer is on the same entry */
+        {
+            int was_p = EX_PRESS_PLACE, was_h = EX_PRESS_HEAD;
+            EX_PRESS_PLACE = over_place ? place : -1;
+            EX_PRESS_HEAD = over_head ? head : -1;
+            if (was_p == EX_PRESS_PLACE && was_h == EX_PRESS_HEAD)
+                return 0;
+            wm_add_damage(place >= 0 ? l.side : l.head);
+            return 2;
+        }
+        /* released: act only if the pointer is still on the entry that was pressed */
+        EX_PRESS_PLACE = EX_PRESS_HEAD = -1;
+        if (over_place)
+            ex_go_to(ex_place_id(place), 1);
+        else if (over_head)
+            ex_set_sort(head, head == EX_SORT_KEY ? !EX_SORT_DESC : 0);
+        else
+        {
+            wm_add_damage(place >= 0 ? l.side : l.head);
+            return 2;
+        }
+        return 1;
+    }
     if (EX_SIDE_DRAG)
     {
         if (!(buttons & 1))

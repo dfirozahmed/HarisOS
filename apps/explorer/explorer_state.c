@@ -19,6 +19,8 @@ int EX_LAST_ROW = -1;
 unsigned long long EX_LAST_CLICK_MS;
 int EX_HOVER_ROW = -1;
 int EX_HOVER_PLACE = -1;
+int EX_PRESS_PLACE = -1;
+int EX_PRESS_HEAD = -1;
 int EX_SORT_KEY = VFS_SORT_NAME;
 int EX_SORT_DESC;
 int EX_TIP_BTN = -1;

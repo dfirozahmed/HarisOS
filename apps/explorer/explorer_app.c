@@ -66,6 +66,7 @@ static void explorer_app_open(void)
     EX_NOTE = 0;
     EX_LAST_ROW = -1;
     EX_HOVER_ROW = EX_HOVER_PLACE = -1;
+    EX_PRESS_PLACE = EX_PRESS_HEAD = -1;
     EX_RENAME_ID = -1;
     EX_MENU.open = 0;
     ex_reload();

@@ -147,6 +147,8 @@ extern int EX_SIDE_DRAG;            /* 1 while the edge is held */
 extern int EX_LAST_ROW;           /* double-click detection */
 extern unsigned long long EX_LAST_CLICK_MS;
 extern int EX_HOVER_ROW;           /* list row under the pointer, -1 = none */
+extern int EX_PRESS_PLACE;         /* sidebar entry the left button is held down on (it opens on release), -1 = none */
+extern int EX_PRESS_HEAD;          /* column title (VFS_SORT_*) the button is held down on (it sorts on release), -1 = none */
 extern int EX_HOVER_PLACE;         /* sidebar entry under the pointer */
 extern int EX_SORT_KEY;            /* VFS_SORT_* */
 extern int EX_SORT_DESC;

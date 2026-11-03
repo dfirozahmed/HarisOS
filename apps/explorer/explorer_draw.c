@@ -145,7 +145,9 @@ static void draw_sidebar(const Layout *l, const UiTheme *t)
         /* "This PC" is current only at the root; a drive while inside it */
         int here = id == VFS_ROOT ? EX_CUR == VFS_ROOT : vfs_is_under(EX_CUR, id);
         UiRect r = ui_rect(s.x + 8, y, s.w - 16, PLACE_H);
-        if (!here && i == EX_HOVER_PLACE)
+        if (!here && i == EX_PRESS_PLACE)
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 56); /* held down: darker than hover */
+        else if (!here && i == EX_HOVER_PLACE)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 20);
         if (here)
         {
@@ -219,6 +221,8 @@ Cols ex_columns(const Layout *l)
 static void head_cell(UiRect cell, const char *label, UiAlign align, int key, const UiTheme *t)
 {
     int active = EX_SORT_KEY == key;
+    if (EX_PRESS_HEAD == key) /* held down: the title is sorted by on release */
+        gfx_fill_round_rect_alpha(cell.x, cell.y + 2, cell.w, cell.h - 4, 4, ui_color(t->accent), 56);
     ui_text_in_color(cell, label, UI_TEXT_SMALL, align, active ? t->text : t->text_dim);
     if (!active)
         return;
