@@ -192,8 +192,6 @@ void kernel_main(const BootInfo *info)
     fault_init(info->framebuffer, info->width, info->height, info->pitch, info->red_mask_mode); /* crash screen */
     gfx_init(info->framebuffer, info->width, info->height,
              info->pitch, info->red_mask_mode);
-    splash_show(); /* "Welcome to HarisOS" with a progress bar until the desktop's first frame (bootsplash.h) */
-
     power_init(info); /* shut down / restart, used by the start menu */
 
     splash_progress(8, "Reading system tables");
@@ -248,6 +246,11 @@ void kernel_main(const BootInfo *info)
     /* Video memory write-combining: after the back buffer copied the screen (reads are slow once it is set). */
     if (pmm_ok)
         fbwc_enable((unsigned long long)info->framebuffer, (unsigned long long)info->pitch * info->height * 4ULL);
+
+    /* "Welcome to HarisOS" with a progress bar until the desktop's first frame (bootsplash.h). Only now: it is drawn in
+     * the back buffer and copied write-combined in one go (before, straight into uncached video memory, the screen
+     * filled slowly from the top). The firmware's picture stays until then. */
+    splash_show();
 
     /* The kernel heap takes its first arena after the big contiguous blocks above, so it does not split their space. */
     if (pmm_ok)

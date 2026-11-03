@@ -3,8 +3,11 @@
  * progress bar, shown while the kernel starts up. The desktop's first
  * frame draws over it.
  *
- *   splash_show();                      draw the scene (kernel_main does it right after gfx_init)
- *   splash_progress(40, "Starting ...");  move the bar (0..100) and change the line under it
+ *   splash_show();                      draw the scene (kernel_main does it once the back buffer and the
+ *                                       frame buffer's write-combining are set up: drawn straight into
+ *                                       uncached video memory the screen filled slowly from the top)
+ *   splash_progress(40, "Starting ...");  move the bar (0..100) and change the line under it; before
+ *                                       splash_show() it is only remembered
  *
  * Both do nothing while there is no screen (gfx_ready() == 0).
  * ============================================================ */

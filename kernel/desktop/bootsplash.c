@@ -68,11 +68,8 @@ void splash_progress(int percent, const char *status)
     for (; status && status[i] && i < STATUS_MAX - 1; i++)
         STATUS[i] = status[i];
     STATUS[i] = 0;
-    if (!SHOWN)
-    {
-        splash_show();
+    if (!SHOWN) /* before splash_show(): remembered, shown with the scene */
         return;
-    }
     draw_strip();
     gfx_present();
 }
