@@ -238,7 +238,10 @@ void taskbar_draw(void)
     const Font *nf = t->font_title;
     int name_w = gfx_text_w(nf, "Haris");
     int start_w = 8 + 28 + 8 + name_w + 14;
-    ITEM[0].r = ui_rect(x, cy - SLOT / 2 + 2, start_w, SLOT - 4);
+    /* the click area is bigger than the drawn button, like the Start button of Windows: it reaches the left edge of the screen and the bottom
+     * edge and the whole height of the bar, so a push into the bottom-left corner opens the menu without aiming (a corner is the easiest
+     * place to hit with a mouse) */
+    ITEM[0].r = ui_rect(0, by, x + start_w + (GAP + 4) / 2, TASKBAR_HEIGHT);
     pill(x, cy - SLOT / 2 + 2, start_w, SLOT - 4, t->radius_m, 0, 0, t);
     ui_icon(UI_ICON_LOGO, x + 8 + 14, cy, 28, t->text);
     ui_text_in(ui_rect(x + 8 + 28 + 8, cy - 14, name_w + 4, 28), "Haris", UI_TEXT_TITLE, UI_ALIGN_LEFT);
