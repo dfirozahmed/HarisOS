@@ -85,6 +85,40 @@ int main(void){
     ptr(w->r.x + 120, cy, 0);
     assert(wm_titlebtn_hover(w) == -1);
   }
+  /* the title-bar buttons are 20 px columns over the whole title bar: they touch, the top and bottom row of the bar count, and the close button reaches the
+   * right edge of the window - except in the resize border, which is still the resize handle */
+  {
+    int tb = ui_theme()->titlebar_h, R = w->r.x + w->r.w, T = w->r.y;
+    ptr(R - 22, T + 8, 0);  assert(wm_titlebtn_hover(w) == 0);       /* close, far from the middle of the bar vertically */
+    ptr(R - 22, T + tb - 1, 0); assert(wm_titlebtn_hover(w) == 0);   /* ... down to the last row of the bar */
+    ptr(R - 22, T + tb, 0); assert(wm_titlebtn_hover(w) == -1);      /* the window's content starts there */
+    ptr(R - 31, T + 20, 0); assert(wm_titlebtn_hover(w) == 0);       /* close: from 32 px left of the edge ... */
+    ptr(R - 8, T + 20, 0);  assert(wm_titlebtn_hover(w) == 0);       /* ... to the edge (outside the 6 px border) */
+    ptr(R - 33, T + 20, 0); assert(wm_titlebtn_hover(w) == 2);       /* the columns touch: no dead gap between close and maximize */
+    ptr(R - 52, T + 20, 0); assert(wm_titlebtn_hover(w) == 2 || wm_titlebtn_hover(w) == 1);
+    ptr(R - 53, T + 20, 0); assert(wm_titlebtn_hover(w) == 1);       /* minimize */
+    ptr(R - 72, T + 20, 0); assert(wm_titlebtn_hover(w) == 1);
+    ptr(R - 73, T + 20, 0); assert(wm_titlebtn_hover(w) == -1);      /* the title area */
+    /* the resize border stays a resize handle, also on top of the close button */
+    ptr(R - 3, T + 20, 0);  assert(wm_titlebtn_hover(w) == -1 && wm_resize_hint(R - 3, T + 20) != 0);
+    ptr(R - 22, T + 2, 0);  assert(wm_titlebtn_hover(w) == -1 && wm_resize_hint(R - 22, T + 2) != 0);
+    /* a click on the far part of the close button closes the window (asks it first) */
+    {
+      int before = wm_count();
+      Window *c = wm_create("Closer", 300, 300, 200, 150, draw, 0);
+      c->on_close_request = on_close_req_cb; c->on_close = on_closed_cb;
+      close_req_calls = 0; closed_calls = 0; close_req_veto = 0;
+      int cr = c->r.x + c->r.w;
+      ptr(cr - 10, c->r.y + 10, 1); ptr(cr - 10, c->r.y + 10, 0);
+      assert(close_req_calls == 1 && closed_calls == 1 && wm_count() == before);
+    }
+    /* a maximized window has no border: the close button reaches the corner of the screen */
+    wm_set_maximized(w, 1);
+    ptr(w->r.x + w->r.w - 1, w->r.y, 0);
+    assert(wm_titlebtn_hover(w) == 0);
+    wm_set_maximized(w, 0);
+    ptr(5000, 5000, 0);
+  }
   /* title drag still works when pressing in the middle of the title bar */
   int ox=w->r.x; ptr(w->r.x+200,w->r.y+20,1); ptr(w->r.x+240,w->r.y+20,1); ptr(w->r.x+240,w->r.y+20,0);
   assert(w->r.x==ox+40);

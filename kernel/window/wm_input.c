@@ -31,30 +31,26 @@ static int RS_EDGE;      /* WM_EDGE_* being dragged */
 static int RS_PX, RS_PY; /* pointer position when the resize started */
 static UiRect RS_START;  /* window rectangle when it started */
 
-static int close_hit(const Window *w, int x, int y)
+static int resize_edge(const Window *w, int x, int y); /* (below) */
+
+/* The title-bar buttons have big click areas, like the ones of Windows: each is a 20 px wide column over the whole height of the title bar (the
+ * columns touch, so there is no dead gap between two buttons or above and below one), and the close button reaches the right edge of the window.
+ * Where the window can be resized, the border (RESIZE_GRAB px) still belongs to the resize handle and not to the button, so a window is never
+ * stuck without its corner; a maximized window has no border, so its close button reaches the corner of the screen. */
+static int titlebtn_hit(const Window *w, int offset, int to_edge, int x, int y)
 {
-    int cx = w->r.x + w->r.w - 22, cy = w->r.y + ui_theme()->titlebar_h / 2;
-    int dx = x - cx, dy = y - cy;
-    return dx * dx + dy * dy <= 8 * 8;
+    if (resize_edge(w, x, y))
+        return 0;
+    int cx = w->r.x + w->r.w - offset;
+    int x1 = to_edge ? w->r.x + w->r.w : cx + 10;
+    return x >= cx - 10 && x < x1 && y >= w->r.y && y < w->r.y + ui_theme()->titlebar_h;
 }
 
-static int min_hit(const Window *w, int x, int y)
-{
-    if (w->dialog)
-        return 0;
-    int cx = w->r.x + w->r.w - 62, cy = w->r.y + ui_theme()->titlebar_h / 2;
-    int dx = x - cx, dy = y - cy;
-    return dx * dx + dy * dy <= 8 * 8;
-}
+static int close_hit(const Window *w, int x, int y) { return titlebtn_hit(w, 22, 1, x, y); }
 
-static int max_hit(const Window *w, int x, int y)
-{
-    if (w->dialog)
-        return 0;
-    int cx = w->r.x + w->r.w - 42, cy = w->r.y + ui_theme()->titlebar_h / 2;
-    int dx = x - cx, dy = y - cy;
-    return dx * dx + dy * dy <= 8 * 8;
-}
+static int min_hit(const Window *w, int x, int y) { return !w->dialog && titlebtn_hit(w, 62, 0, x, y); }
+
+static int max_hit(const Window *w, int x, int y) { return !w->dialog && titlebtn_hit(w, 42, 0, x, y); }
 
 static int in_titlebar(const Window *w, int x, int y)
 {
