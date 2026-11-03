@@ -234,6 +234,38 @@ void hda_codec_setup_outputs(const HdaCodec *c, unsigned tag, u16 fmt, HdaVerbFn
     }
 }
 
+int hda_amp_gain(u32 ampcaps, unsigned percent, int *mute)
+{
+    unsigned offset = ampcaps & 0x7Fu, steps = (ampcaps >> 8) & 0x7Fu; /* steps = the number of steps above step 0 */
+    unsigned top = offset && offset <= steps ? offset : steps;         /* 100 % = 0 dB (the offset step), or the last step if there is no 0 dB point */
+    if (percent > 100)
+        percent = 100;
+    *mute = percent == 0 && (ampcaps >> 31);
+    return (int)((top * percent + 50u) / 100u);
+}
+
+int hda_codec_set_volume(const HdaCodec *c, unsigned percent, HdaVerbFn fn, void *ctx)
+{
+    int set = 0;
+    for (int o = 0; o < c->nouts; o++)
+    {
+        const HdaPath *p = &c->out[o];
+        /* the amplifier nearest to the DAC that has steps: volume belongs there, the pin and mixer amps stay at 0 dB */
+        for (int i = (int)p->len - 1; i >= 0; i--)
+        {
+            const HdaNode *n = hda_codec_node(c, p->nid[i]);
+            if (!(n->caps & HDA_WCAP_OUT_AMP) || !((n->out_amp >> 8) & 0x7Fu))
+                continue;
+            int mute;
+            u32 gain = (u32)hda_amp_gain(n->out_amp, percent, &mute);
+            fn(ctx, c->cad, p->nid[i], verb4(HDA_VERB4_SET_AMP, (1u << 15) | (3u << 12) | (mute ? 1u << 7 : 0u) | gain));
+            set++;
+            break;
+        }
+    }
+    return set;
+}
+
 void hda_codec_stop_outputs(const HdaCodec *c, HdaVerbFn fn, void *ctx)
 {
     for (int o = 0; o < c->nouts; o++)

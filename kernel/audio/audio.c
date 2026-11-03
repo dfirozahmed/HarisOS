@@ -4,6 +4,17 @@
 #include "pmm.h"
 #include "wav.h"
 
+int audio_volume(void) { return hda_ready() ? hda_volume() : -1; }
+
+int audio_set_volume(int percent) { return hda_ready() ? hda_set_volume(percent) : -1; }
+
+int audio_volume_step(int delta)
+{
+    if (!hda_ready())
+        return -1;
+    return hda_set_volume(hda_volume() + delta);
+}
+
 int audio_play_wav(const unsigned char *file, unsigned long len)
 {
     WavInfo wi;

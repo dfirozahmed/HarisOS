@@ -34,6 +34,11 @@ int hda_play_tone(unsigned hz, unsigned ms);
 #define HDA_MAX_FRAMES (48000ul * 90)
 int hda_play_pcm(const short *stereo, unsigned long frames);
 
+/* Master volume in percent (0 = silent, 100 = the codec's 0 dB, the default). hda_set_volume clamps to 0..100, applies it at once (also
+ * while a sound plays) and returns the new value; without a working controller it only remembers it for later. */
+int hda_volume(void);
+int hda_set_volume(int percent);
+
 /* Controllers found (0..HDA_MAX_CTRL). For each: PCI location (bus, dev, fn), whether it works, and one line. */
 int hda_count(void);
 int hda_status(int index, unsigned char loc[3], int *working, char *buf, int cap);

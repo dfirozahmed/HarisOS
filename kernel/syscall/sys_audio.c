@@ -28,3 +28,10 @@ long long sys_audio_play(const SyscallFrame *f)
     pmm_free_contiguous((unsigned long long)buf, pages);
     return r == 0 ? 0 : -100 + r; /* -101 .. -104 file errors, -110 none, -111 busy, -112 memory */
 }
+
+/* SYS_AUDIO_VOLUME: rdi = -1 (ask) or the new volume in percent (clamped to 0 .. 100). The volume now in force, or -1 without sound hardware. */
+long long sys_audio_volume(const SyscallFrame *f)
+{
+    long long v = (long long)f->rdi;
+    return v == -1 ? audio_volume() : audio_set_volume(v < 0 ? 0 : v > 100 ? 100 : (int)v);
+}

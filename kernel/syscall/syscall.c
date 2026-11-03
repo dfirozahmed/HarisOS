@@ -138,6 +138,8 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_clock(f);
     case SYS_TIME:
         return sys_time(f);
+    case SYS_AUDIO_VOLUME:
+        return sys_audio_volume(f);
     case SYS_AUDIO_PLAY:
         return sys_audio_play(f);
     case SYS_SIGACTION:

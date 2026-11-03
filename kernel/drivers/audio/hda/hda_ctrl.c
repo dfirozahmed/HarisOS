@@ -89,6 +89,7 @@ typedef struct
 static HdaCtrl CTRL[HDA_MAX_CTRL];
 static int NCTRL;
 static int PRIMARY = -1; /* the controller that plays */
+static int VOLUME = 100;  /* master volume, percent */
 
 static inline u8 rd8(HdaCtrl *h, u32 o) { return *(volatile u8 *)(h->regs + o); }
 static inline u16 rd16(HdaCtrl *h, u32 o) { return *(volatile u16 *)(h->regs + o); }
@@ -447,6 +448,18 @@ void hda_init(void)
 }
 
 int hda_ready(void) { return PRIMARY >= 0; }
+
+int hda_volume(void) { return VOLUME; }
+
+/* Changes the level at once, also while a sound plays. The verbs go through the same command ring as the player's, but the player only
+ * sends verbs when it starts and stops (between those it reads the stream position), so a change cannot interleave with one of its verbs. */
+int hda_set_volume(int percent)
+{
+    VOLUME = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    if (PRIMARY >= 0)
+        hda_codec_set_volume(&CTRL[PRIMARY].codec, (unsigned)VOLUME, verb, &CTRL[PRIMARY]);
+    return VOLUME;
+}
 int hda_count(void) { return NCTRL; }
 
 int hda_status(int index, unsigned char loc[3], int *working, char *buf, int cap)
@@ -503,6 +516,7 @@ static int play_buffer(HdaCtrl *h, u64 buf, u32 sound, u32 total)
     wr32(h, R_DPUBASE, (u32)((h->page + PG_DPOS) >> 32));
 
     hda_codec_setup_outputs(&h->codec, STREAM_TAG, fmt, verb, h);
+    hda_codec_set_volume(&h->codec, (unsigned)VOLUME, verb, h); /* setup unmutes at 0 dB: now the chosen level */
     wr8(h, sd + SD_CTL, CTL_RUN);
 
     /* follow LPIB until the stream is inside the silence; give up if it stops moving for half a second.

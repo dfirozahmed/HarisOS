@@ -10,6 +10,8 @@
 
 static TaskbarApp APPS[MAX_APPS] = {};
 static int APP_COUNT = 4;
+static int VOLUME = -1;      /* percent, -1 = none */
+static int VOL_X, VOL_Y, VOL_W, VOL_H; /* the speaker icon's area, set by the last draw */
 static int HAS_TIME, T_HOUR, T_MIN, T_DAY, T_MON, T_YEAR;
 
 void taskbar_set_apps(const TaskbarApp *apps, int count)
@@ -128,6 +130,19 @@ static void pill(int x, int y, int w, int h, int radius, int idx, int active, co
     else
         gfx_fill_round_rect_alpha(x, y, w, h, radius, G.tint, (unsigned char)a);
     gfx_round_rect_alpha(x, y, w, h, radius, 1, gfx_rgb(255, 255, 255), G.rim);
+}
+
+int taskbar_set_volume(int percent)
+{
+    int v = percent < 0 ? -1 : percent > 100 ? 100 : percent;
+    int changed = v != VOLUME;
+    VOLUME = v;
+    return changed;
+}
+
+int taskbar_volume_at(int x, int y)
+{
+    return VOL_W > 0 && x >= VOL_X && x < VOL_X + VOL_W && y >= VOL_Y && y < VOL_Y + VOL_H;
 }
 
 void taskbar_set_time(int hour, int minute, int day, int month, int year)
@@ -290,6 +305,17 @@ void taskbar_draw(void)
         ui_icon(UI_ICON_WIFI, ix, cy, 20, t->text);
         ix += 10 + 14 + 11;
         ui_icon(UI_ICON_VOLUME, ix, cy, 22, t->text);
+        VOL_X = ix - 11 - 7; /* the icon and half of the gaps next to it */
+        VOL_Y = cy - 17;
+        VOL_W = 22 + 14;
+        VOL_H = 34;
+        if (VOLUME >= 0) /* level bar under the icon: a track, and the filled part in the accent colour */
+        {
+            int bx = ix - 11, by = cy + 12;
+            gfx_fill_round_rect(bx, by, 22, 3, 1, ui_color(t->text_dim));
+            if (VOLUME > 0)
+                gfx_fill_round_rect(bx, by, 22 * VOLUME / 100 > 2 ? 22 * VOLUME / 100 : 2, 3, 1, ui_color(t->accent));
+        }
         ix += 11 + 14 + 13;
         ui_icon(UI_ICON_BATTERY, ix, cy, 26, t->text);
     }

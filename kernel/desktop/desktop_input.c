@@ -1,4 +1,5 @@
 /* Desktop keyboard and pointer event routing. */
+#include "audio.h"
 #include "desktop.h"
 #include "taskbar.h"
 #include "startmenu.h"
@@ -7,6 +8,8 @@
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
+
+#define VOLUME_STEP 5 /* percent points per wheel step or key press */
 
 static unsigned LAST_BTN;
 
@@ -58,7 +61,15 @@ int desktop_pointer(int x, int y, unsigned buttons)
 
 int desktop_wheel(int x, int y, int steps)
 {
-    if (startmenu_is_open() || appmenu_is_open() || y >= (int)gfx_height() - TASKBAR_HEIGHT)
+    if (startmenu_is_open() || appmenu_is_open())
+        return 0;
+    if (taskbar_volume_at(x, y)) /* wheel over the tray speaker: louder (up) / quieter (down), 5 points a step */
+    {
+        audio_volume_step(-steps * VOLUME_STEP);
+        taskbar_set_volume(audio_volume());
+        return desktop_finish_input(1);
+    }
+    if (y >= (int)gfx_height() - TASKBAR_HEIGHT)
         return 0;
     wm_wheel(x, y, steps);
     return desktop_finish_input(0);
@@ -100,6 +111,8 @@ int desktop_key(const KeyEvent *k)
         }
         else if ((k->mods & KMOD_CTRL) && (k->mods & KMOD_ALT) && (k->key == KEY_UP || k->key == KEY_DOWN))
             gfx_set_brightness(gfx_brightness() + (k->key == KEY_UP ? 10 : -10)); /* Ctrl+Alt+Up / Down: brightness */
+        else if ((k->mods & KMOD_CTRL) && (k->mods & KMOD_ALT) && (k->key == KEY_RIGHT || k->key == KEY_LEFT))
+            audio_volume_step(k->key == KEY_RIGHT ? VOLUME_STEP : -VOLUME_STEP); /* Ctrl+Alt+Right / Left: volume (the main loop's tick redraws the bar) */
         else if ((k->mods & KMOD_ALT) && k->key == KEY_F4)
             wm_request_close(wm_top()); /* Alt+F4: close the focused window (it may say no) */
         else if ((k->mods & KMOD_ALT) && k->key == KEY_TAB)

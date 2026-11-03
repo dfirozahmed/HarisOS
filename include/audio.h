@@ -15,4 +15,11 @@
 
 int audio_play_wav(const unsigned char *file, unsigned long len);
 
+/*   audio_volume();               master volume 0..100 (%), or -1 when there is no sound hardware with an output
+ *   audio_set_volume(70);         sets it (clamped to 0..100); also while a sound plays; returns the new value or -1
+ *   audio_volume_step(+5);        louder / quieter by that many percent points; returns the new value or -1 */
+int audio_volume(void);
+int audio_set_volume(int percent);
+int audio_volume_step(int delta);
+
 #endif

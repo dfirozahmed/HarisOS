@@ -777,6 +777,15 @@ unsigned long long pmm_alloc_contiguous_tag(unsigned long long count, PmmTag tag
     return ((unsigned long long)(size_t)raw + 4095) & ~4095ULL; /* (leaks: the test is short) */
 }
 void pmm_free_contiguous(unsigned long long phys, unsigned long long count) { (void)phys; (void)count; }
+static int VOLUME = 40, VOLUME_HW = 1; /* the master volume and whether there is sound hardware */
+int audio_volume(void) { return VOLUME_HW ? VOLUME : -1; }
+int audio_set_volume(int percent)
+{
+    if (!VOLUME_HW)
+        return -1;
+    CHECK(percent >= 0 && percent <= 100); /* the call clamps before it gets here */
+    return VOLUME = percent;
+}
 int audio_play_wav(const unsigned char *file, unsigned long len)
 {
     AUDIO_CALLS++;
@@ -2433,6 +2442,23 @@ int main(void)
         CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == -1);        /* no memory for the copy */
         PMM_FAIL = 0;
         CHECK(AUDIO_CALLS == 0);
+    }
+
+    /* ================= SYS_AUDIO_VOLUME ================= */
+    reset();
+    {
+        VOLUME = 40;
+        VOLUME_HW = 1;
+        CHECK(call(SYS_AUDIO_VOLUME, (ull)-1, 0, 0) == 40);   /* -1 asks */
+        CHECK(call(SYS_AUDIO_VOLUME, 75, 0, 0) == 75 && VOLUME == 75);
+        CHECK(call(SYS_AUDIO_VOLUME, 0, 0, 0) == 0);
+        CHECK(call(SYS_AUDIO_VOLUME, 100, 0, 0) == 100);
+        CHECK(call(SYS_AUDIO_VOLUME, 250, 0, 0) == 100);      /* clamped */
+        CHECK(call(SYS_AUDIO_VOLUME, (ull)-7, 0, 0) == 0);    /* below -1: clamped to silent */
+        VOLUME_HW = 0;
+        CHECK(call(SYS_AUDIO_VOLUME, (ull)-1, 0, 0) == -1);   /* no sound hardware */
+        CHECK(call(SYS_AUDIO_VOLUME, 50, 0, 0) == -1);
+        VOLUME_HW = 1;
     }
 
     /* ================= SYS_WIFISCAN ================= */

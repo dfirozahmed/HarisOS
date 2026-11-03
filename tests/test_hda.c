@@ -274,6 +274,40 @@ int main(void)
     CHECK(worst < 8);
     CHECK(hda_sine_q15(0) == 0 && hda_sine_q15(1u << 30) >= 32760 && hda_sine_q15(3u << 30) <= -32760);
 
+    /* ---- volume: the gain step for a percentage ---- */
+    int mute;
+    CHECK(hda_amp_gain(DAC_AMP, 100, &mute) == 0x57 && !mute);              /* 100 % = the 0 dB step */
+    CHECK(hda_amp_gain(DAC_AMP, 50, &mute) == 44 && !mute);                 /* 0x57 * 0.5 = 43.5, rounded */
+    CHECK(hda_amp_gain(DAC_AMP, 1, &mute) == 1 && !mute);
+    CHECK(hda_amp_gain(DAC_AMP, 0, &mute) == 0 && !mute);                   /* it cannot mute: the lowest step */
+    CHECK(hda_amp_gain(0x80004A4Au, 0, &mute) == 0 && mute);                /* QEMU's amp: mute capable */
+    CHECK(hda_amp_gain(0x80004A4Au, 100, &mute) == 0x4A && !mute);
+    CHECK(hda_amp_gain(0x00000F00u, 100, &mute) == 15 && !mute);            /* no 0 dB offset: the last step */
+    CHECK(hda_amp_gain(0x00000F20u, 100, &mute) == 15);                     /* an offset above the last step is clamped */
+    CHECK(hda_amp_gain(DAC_AMP, 500, &mute) == 0x57);                       /* clamped */
+
+    /* ---- volume on the laptop graph: the DACs' amps, not the pins' ---- */
+    laptop();
+    CHECK(hda_codec_scan(&C, 2, codec, 0) == 0 && hda_codec_find_outputs(&C) == 2);
+    NLOG = 0;
+    CHECK(hda_codec_set_volume(&C, 50, codec, 0) == 2);
+    CHECK(NLOG == 2);                                           /* one verb per output path, nothing else */
+    CHECK(sent(0x02, 0x3B000 | 44) && sent(0x03, 0x3B000 | 44)); /* output + left + right, gain 44 */
+    NLOG = 0;
+    CHECK(hda_codec_set_volume(&C, 100, codec, 0) == 2 && sent(0x02, 0x3B057));
+    /* a codec whose DAC has no amp: the pin's amp (the nearest one along the path) is used */
+    small(0x01014010u);
+    N[2].caps = W(HDA_W_OUTPUT) | 1u;                    /* DAC without an amp */
+    N[3].caps |= HDA_WCAP_OUT_AMP | HDA_WCAP_AMP_OVRD;   /* the pin has one */
+    N[3].out_amp = 0x80002020u;
+    CHECK(hda_codec_scan(&C, 0, codec, 0) == 0 && hda_codec_find_outputs(&C) == 1);
+    NLOG = 0;
+    CHECK(hda_codec_set_volume(&C, 0, codec, 0) == 1 && sent(3, 0x3B080)); /* muted: bit 7, gain 0 */
+    /* no amp at all (and amps with no steps): nothing to set */
+    N[3].caps &= ~(u32)HDA_WCAP_OUT_AMP;
+    CHECK(hda_codec_scan(&C, 0, codec, 0) == 0 && hda_codec_find_outputs(&C) == 1);
+    CHECK(hda_codec_set_volume(&C, 50, codec, 0) == 0);
+
     /* ---- which controllers need the snoop bit ---- */
     CHECK(hda_needs_ati_snoop(0x1022, 0x15E3) && hda_needs_ati_snoop(0x1022, 0x1487) && hda_needs_ati_snoop(0x1002, 0x4383));
     CHECK(!hda_needs_ati_snoop(0x1002, 0xAA01));  /* a GPU's HDMI audio */

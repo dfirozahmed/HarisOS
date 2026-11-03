@@ -50,6 +50,12 @@ int taskbar_app_rect(int index, int *x, int *y, int *w, int *h);
 /* Where the taskbar is on screen (for partial redraws). */
 void taskbar_bounds(int *x, int *y, int *w, int *h);
 
+/* The master volume shown under the tray's speaker icon: a small level bar (percent 0..100; -1 = no sound hardware: no bar). Returns 1 if it
+ * changed, so the taskbar must be redrawn. taskbar_volume_at() says whether (x, y) is on the speaker (valid after the taskbar was drawn):
+ * the mouse wheel over it changes the volume (desktop_input.c). */
+int taskbar_set_volume(int percent);
+int taskbar_volume_at(int x, int y);
+
 void taskbar_set_time(int hour, int minute, int day, int month, int year);
 
 /* Draw the taskbar along the bottom of the screen. */

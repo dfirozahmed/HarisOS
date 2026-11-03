@@ -105,6 +105,7 @@ long long sys_accept(const SyscallFrame *f);
 long long sys_clock(const SyscallFrame *f);
 long long sys_time(const SyscallFrame *f);
 long long sys_audio_play(const SyscallFrame *f);
+long long sys_audio_volume(const SyscallFrame *f);
 long long sys_gui_create(const SyscallFrame *f);
 long long sys_gui_present(const SyscallFrame *f);
 long long sys_gui_event(const SyscallFrame *f);

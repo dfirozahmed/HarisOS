@@ -109,6 +109,11 @@ int hda_codec_scan(HdaCodec *c, unsigned cad, HdaVerbFn fn, void *ctx);
 int hda_codec_find_outputs(HdaCodec *c);
 /* Powers up, routes and unmutes every found path and points its DAC at stream `tag` with the stream format `fmt`. */
 void hda_codec_setup_outputs(const HdaCodec *c, unsigned tag, u16 fmt, HdaVerbFn fn, void *ctx);
+/* Sets the master volume (0..100 %) on every output path: the output amplifier nearest to the DAC that has gain steps is set to
+ * `percent` of its range up to 0 dB (muted at 0 % if it can mute). Returns how many amplifiers were set (0 = no volume control). */
+int hda_codec_set_volume(const HdaCodec *c, unsigned percent, HdaVerbFn fn, void *ctx);
+/* The gain step for `percent` of an output amp with the given capabilities (parameter 0x12); *mute = 1 if it should be muted. Pure. */
+int hda_amp_gain(u32 ampcaps, unsigned percent, int *mute);
 /* Stops the DACs (stream tag 0). */
 void hda_codec_stop_outputs(const HdaCodec *c, HdaVerbFn fn, void *ctx);
 

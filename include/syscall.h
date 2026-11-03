@@ -166,6 +166,8 @@
  *                  16 bit, mono or stereo, 8000 .. 96000 Hz) and returns when it has finished. 0, or negative: -1 for a bad pointer or
  *                  length, -101 .. -104 the file cannot be played (not WAV, not PCM, a format not supported, no samples), -110 no sound
  *                  hardware, -111 busy or the stream stopped, -112 too long or no memory.
+ *   SYS_AUDIO_VOLUME (64) rdi = -1 to ask, or 0 .. 100 (percent; values outside are clamped) to set the master volume, also while a
+ *                  sound plays. Returns the volume now in force (0 .. 100), or -1 when there is no sound hardware with an output.
  *   SYS_TIME (62)  no arguments: the wall clock as Unix time, seconds since 1970-01-01 00:00:00, from the real-time clock (read as UTC).
  *                  -1 if there is no clock.
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
@@ -258,6 +260,7 @@
 #define SYS_CLOCK 61
 #define SYS_TIME 62
 #define SYS_AUDIO_PLAY 63
+#define SYS_AUDIO_VOLUME 64
 #define SYS_AUDIO_MAX (8u << 20) /* the largest WAV image SYS_AUDIO_PLAY takes */
 
 /* SYS_SOCKET types */
