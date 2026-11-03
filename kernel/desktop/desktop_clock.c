@@ -1,5 +1,6 @@
 /* Taskbar clock polling and caret blink updates. */
 #include "audio.h"
+#include "net.h"
 #include "desktop.h"
 #include "guiapp.h"
 #include "taskbar.h"
@@ -55,12 +56,34 @@ static int refresh_taskbar_clock(void)
     return changed;
 }
 
+/* The Wi-Fi state for the tray icon, asked twice a second (the driver keeps it up to date; this only copies it). */
+static int refresh_wifi(void)
+{
+    static unsigned long long next_ms;
+    static unsigned fallback;
+    if (timer_ready())
+    {
+        unsigned long long now = timer_ms();
+        if (now < next_ms)
+            return 0;
+        next_ms = now + 500;
+    }
+    else if (++fallback < 4096u)
+        return 0;
+    else
+        fallback = 0;
+    NetWifiStatus st;
+    net_wifi_status(&st);
+    return taskbar_set_wifi(!st.present ? -1 : st.state);
+}
+
 /* Called on every main-loop pass: updates the taskbar clock and makes the text
  * caret blink. Only the taskbar or small text field is redrawn when needed. */
 int desktop_tick(void)
 {
     int clock_changed = refresh_taskbar_clock();
     clock_changed |= taskbar_set_volume(audio_volume());
+    clock_changed |= refresh_wifi();
     volmenu_tick(); /* the volume may have been changed by a program (SYS_AUDIO_VOLUME) */
     int flipped = ui_caret_update();
     int ticked = gui_app_poll(); /* windows of user programs that appeared or went away */

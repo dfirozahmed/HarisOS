@@ -55,7 +55,14 @@ void taskbar_bounds(int *x, int *y, int *w, int *h);
  * the mouse wheel over it changes the volume (desktop_input.c). */
 int taskbar_set_volume(int percent);
 int taskbar_volume_at(int x, int y);
-int taskbar_volume_center(void); /* x of the middle of the speaker (the volume popup opens above it) */
+int taskbar_volume_center(void);
+
+/* The Wi-Fi state shown by the tray icon: -1 no Wi-Fi card (dim, slashed), 0 not connected (dim, slashed), 1 connected (normal), 2 connection lost,
+ * connecting again (warning colour). Returns 1 if it changed. taskbar_wifi_at() says whether (x, y) is on the icon (valid after the taskbar was drawn):
+ * a click on it opens the Wi-Fi app (desktop_input.c). */
+int taskbar_set_wifi(int state);
+int taskbar_wifi_at(int x, int y);
+int taskbar_wifi_state(void); /* the state last set (-1 .. 2) */ /* x of the middle of the speaker (the volume popup opens above it) */
 
 void taskbar_set_time(int hour, int minute, int day, int month, int year);
 

@@ -240,6 +240,23 @@ static void on_get_started(UiButton *b, void *user)
 /* switch between the dark and light theme (look.c draws everything again and remembers it) */
 void desktop_toggle_theme(void) { look_set_dark(!look_dark()); }
 
+/* The tray's Wi-Fi icon: the Wi-Fi app (choose a network) */
+void desktop_open_wifi(void)
+{
+    for (int i = 0; i < app_count(); i++)
+    {
+        const AppInfo *a = app_get(i);
+        const char *n = a ? a->name : 0, *want = "Wi-Fi";
+        while (n && *n && *n == *want)
+            n++, want++;
+        if (n && !*n && !*want && a->open)
+        {
+            a->open();
+            return;
+        }
+    }
+}
+
 /* "Settings": the Personalize app (theme, wallpaper, colours); without it, the old dark / light switch */
 void desktop_open_settings(void)
 {

@@ -10,6 +10,8 @@
 
 static TaskbarApp APPS[MAX_APPS] = {};
 static int APP_COUNT = 4;
+static int WIFI = -1;        /* see taskbar_set_wifi */
+static int WIFI_X, WIFI_Y, WIFI_W, WIFI_H; /* the Wi-Fi icon's area, set by the last draw */
 static int VOLUME = -1;      /* percent, -1 = none */
 static int VOL_X, VOL_Y, VOL_W, VOL_H; /* the speaker icon's area, set by the last draw */
 static int HAS_TIME, T_HOUR, T_MIN, T_DAY, T_MON, T_YEAR;
@@ -130,6 +132,21 @@ static void pill(int x, int y, int w, int h, int radius, int idx, int active, co
     else
         gfx_fill_round_rect_alpha(x, y, w, h, radius, G.tint, (unsigned char)a);
     gfx_round_rect_alpha(x, y, w, h, radius, 1, gfx_rgb(255, 255, 255), G.rim);
+}
+
+int taskbar_set_wifi(int state)
+{
+    int v = state < 0 || state > 2 ? -1 : state;
+    int changed = v != WIFI;
+    WIFI = v;
+    return changed;
+}
+
+int taskbar_wifi_state(void) { return WIFI; }
+
+int taskbar_wifi_at(int x, int y)
+{
+    return WIFI_W > 0 && x >= WIFI_X && x < WIFI_X + WIFI_W && y >= WIFI_Y && y < WIFI_Y + WIFI_H;
 }
 
 int taskbar_set_volume(int percent)
@@ -304,7 +321,13 @@ void taskbar_draw(void)
     {
         pill(tx, cy - 17, tray_w, 34, t->radius_m, -1, 0, t);
         int ix = tx + 14 + 10;
-        ui_icon(UI_ICON_WIFI, ix, cy, 20, t->text);
+        ui_icon(UI_ICON_WIFI, ix, cy, 20, WIFI == 1 ? t->text : WIFI == 2 ? t->warning : t->text_dim);
+        WIFI_X = ix - 10 - 7;
+        WIFI_Y = cy - 17;
+        WIFI_W = 20 + 14;
+        WIFI_H = 34;
+        if (WIFI <= 0) /* no card, or not connected: a slash across the bars */
+            gfx_line_q((ix - 9) * 16, (cy - 9) * 16, (ix + 9) * 16, (cy + 9) * 16, 2 * 16, ui_color(t->text_dim), 255);
         ix += 10 + 14 + 11;
         ui_icon(UI_ICON_VOLUME, ix, cy, 22, t->text);
         VOL_X = ix - 11 - 7; /* the icon and half of the gaps next to it */

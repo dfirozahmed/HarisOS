@@ -27,6 +27,14 @@ int desktop_pointer(int x, int y, unsigned buttons)
         to_windows = 0;
     /* a click on the tray speaker opens the volume panel, or closes it if it is open (the panel's own "click away closes" must not
      * run for this click, or the panel would close and open again at once) */
+    int wifi_click = on_bar && !wm_dragging() && (buttons & MOUSE_LEFT) && !(LAST_BTN & MOUSE_LEFT) && taskbar_wifi_at(x, y) && taskbar_wifi_state() >= 0;
+    if (wifi_click)
+    {
+        startmenu_close();
+        appmenu_close();
+        volmenu_close();
+        desktop_open_wifi();
+    }
     int vol_toggle = on_bar && !wm_dragging() && (buttons & MOUSE_LEFT) && !(LAST_BTN & MOUSE_LEFT) && taskbar_volume_at(x, y);
     if (vol_toggle)
     {
