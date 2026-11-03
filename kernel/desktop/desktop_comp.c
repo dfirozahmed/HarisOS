@@ -121,6 +121,24 @@ static int overlaps(UiRect a, UiRect b)
     return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
+/* Draws the part p of a top part (screen pixels, inside its surface's place t->r) and puts it into its surface. Drawn
+ * twice (over black, over white: menus and the taskbar are partly see-through), where it is on the screen: what it
+ * remembers while drawing (where its buttons and rows are) is then right for the clicks. The buffers hold only p: the
+ * drawing is cut to it, so a blinking caret or a row under the mouse costs that much, not the whole menu. */
+static int draw_top_part(Top *t, const GfxCompOps *ops, void *a, void *b, UiRect p)
+{
+    void *buf[2] = {a, b};
+    for (int pass = 0; pass < 2; pass++)
+    {
+        if (gfx_layer_begin_at(buf[pass], p.x, p.y, p.w, p.h, pass ? 0x00FFFFFFu : 0) != 0)
+            return -1;
+        t->draw();
+        gfx_layer_end();
+    }
+    gfx_layer_pack(a, b, p.w, p.h);
+    return ops->upload(t->surf, a, p.w, p.x - t->r.x, p.y - t->r.y, p.w, p.h, 0);
+}
+
 /* Brings one top part's surface up to date. 0 = done (or nothing to do), -1 = failed. */
 static int update_top(Top *t, const GfxCompOps *ops, void *a, void *b, unsigned long long bytes, const UiRect *areas,
                       int n, int full)
@@ -133,7 +151,7 @@ static int update_top(Top *t, const GfxCompOps *ops, void *a, void *b, unsigned 
     UiRect r = t->bounds();
     if (r.w <= 0 || r.h <= 0 || (unsigned long long)r.w * (unsigned long long)r.h * 4ULL > bytes)
         return -1;
-    int redraw = full || !t->shown || r.x != t->r.x || r.y != t->r.y;
+    int whole = full || !t->shown || r.x != t->r.x || r.y != t->r.y;
     if (t->surf && (r.w != t->r.w || r.h != t->r.h))
     {
         ops->surface_free(t->surf);
@@ -143,27 +161,28 @@ static int update_top(Top *t, const GfxCompOps *ops, void *a, void *b, unsigned 
     {
         if (!(t->surf = ops->surface_new(r.w, r.h)))
             return -1;
-        redraw = 1;
+        whole = 1;
     }
-    for (int i = 0; i < n && !redraw; i++)
-        redraw = overlaps(areas[i], r);
     t->r = r;
     t->shown = 1;
-    if (!redraw)
-        return 0;
-    /* drawn twice (over black, over white: menus and the taskbar are partly see-through), where it is on the screen:
-     * what it remembers while drawing (where its buttons and rows are) is then right for the clicks */
-    void *buf[2] = {a, b};
-    for (int pass = 0; pass < 2; pass++)
+    if (whole)
     {
-        if (gfx_layer_begin_at(buf[pass], r.x, r.y, r.w, r.h, pass ? 0x00FFFFFFu : 0) != 0)
-            return -1;
-        t->draw();
-        gfx_layer_end();
+        TOPS_DRAWN++;
+        return draw_top_part(t, ops, a, b, r);
     }
-    TOPS_DRAWN++;
-    gfx_layer_pack(a, b, r.w, r.h);
-    return ops->upload(t->surf, a, r.w, 0, 0, r.w, r.h, 0);
+    /* only where something changed: each changed area cut to it */
+    for (int i = 0; i < n; i++)
+    {
+        if (!overlaps(areas[i], r))
+            continue;
+        int x0 = areas[i].x > r.x ? areas[i].x : r.x, y0 = areas[i].y > r.y ? areas[i].y : r.y;
+        int x1 = areas[i].x + areas[i].w < r.x + r.w ? areas[i].x + areas[i].w : r.x + r.w;
+        int y1 = areas[i].y + areas[i].h < r.y + r.h ? areas[i].y + areas[i].h : r.y + r.h;
+        TOPS_DRAWN++;
+        if (draw_top_part(t, ops, a, b, ui_rect(x0, y0, x1 - x0, y1 - y0)) != 0)
+            return -1;
+    }
+    return 0;
 }
 
 /* One composed frame: draw_us drawing the surfaces, present_us the compose. Every REPORT_FRAMES frames the sums go to the
