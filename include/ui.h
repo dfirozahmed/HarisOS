@@ -206,6 +206,43 @@ void ui_toggle(UiRect r, int on);                      /* switch; 40x22 looks be
 int ui_badge(int x, int y, const char *s, UiRgb color); /* small pill; returns its width */
 void ui_text_field(UiRect r, const char *text, const char *placeholder, int focused);
 
+/* ---- vertical scrollbar ---------------------------------------
+ *
+ *   UiScroll sb = {0};
+ *   sb.total = rows; sb.page = rows_in_view; sb.pos = first_row;   // keep these three in step with your list
+ *   ui_scroll_draw(ui_rect(list.x + list.w - UI_SCROLL_W, list.y, UI_SCROLL_W, list.h), &sb);
+ *
+ * Units are yours (rows, lines, pixels): pos runs 0 .. total - page. Nothing is drawn while everything fits.
+ * The track is the area that takes the mouse (UI_SCROLL_W wide is comfortable); the bar drawn in it is thin
+ * and grows while the pointer is over it or it is dragged.
+ *
+ *   on press   : if (ui_scroll_press(&sb, x, y)) { list.first = sb.pos; redraw }       thumb: starts a drag; track: one page
+ *   on drag    : if (ui_scroll_drag(&sb, x, y, buttons)) { list.first = sb.pos; redraw } also called once on release
+ *   on hover   : if (ui_scroll_hover(&sb, x, y)) redraw the track                       x = -1 when the pointer left
+ *   on wheel   : ui_scroll_by(&sb, steps * rows_per_step)
+ * ui_scroll_press / _drag / _hover work on s->track, which ui_scroll_draw (or you) sets. */
+#define UI_SCROLL_W 12
+typedef struct
+{
+    int total;    /* size of the content */
+    int page;     /* how much of it fits in view */
+    int pos;      /* first visible unit, 0 .. total - page */
+    UiRect track; /* where it is (for hit tests) */
+    int hover;    /* the pointer is over the track, or the thumb is being dragged */
+    int dragging; /* the thumb is held */
+    int grab;     /* where in the thumb it was grabbed (pixels from its top) */
+} UiScroll;
+
+int ui_scroll_needed(const UiScroll *s);        /* 1 when the content is longer than the view */
+int ui_scroll_max(const UiScroll *s);           /* largest pos: total - page, never below 0 */
+int ui_scroll_set(UiScroll *s, int pos);        /* clamps; 1 if pos changed */
+int ui_scroll_by(UiScroll *s, int delta);       /* same, relative */
+UiRect ui_scroll_thumb(const UiScroll *s, UiRect track); /* the thumb inside a track (width 0 when not needed) */
+void ui_scroll_draw(UiRect track, UiScroll *s); /* remembers the track in s->track */
+int ui_scroll_press(UiScroll *s, int x, int y); /* left button went down: 1 if it was on the scrollbar (check pos for a change) */
+int ui_scroll_drag(UiScroll *s, int x, int y, unsigned buttons); /* 1 if pos changed or the drag ended: redraw */
+int ui_scroll_hover(UiScroll *s, int x, int y); /* 1 if the look changed: redraw the track */
+
 /* ---- single-line text input ----------------------------------
  *
  *   UiEdit e = {0};                       // empty

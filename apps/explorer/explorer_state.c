@@ -8,6 +8,7 @@ int EX_ITEMS[VFS_MAX_NODES];
 int EX_NITEMS;
 int EX_SEL = -1;
 int EX_SCROLL;
+UiScroll EX_SB;
 int EX_HIST[HIST_MAX];
 int EX_HIST_N;
 int EX_FWD[HIST_MAX];

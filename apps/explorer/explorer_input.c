@@ -129,6 +129,14 @@ int ex_press(Window *w, int x, int y)
     if (!ui_contains(l.list, x, y))
         return 0;
 
+    ex_sb_sync(&l); /* the scrollbar: grab the thumb (ex_drag follows it) or click the track to move a page */
+    if (ui_scroll_press(&EX_SB, x, y))
+    {
+        EX_SCROLL = EX_SB.pos;
+        wm_add_damage(l.list);
+        return (tip_was_shown && !tip_marked) ? 1 : 2;
+    }
+
     int row = EX_SCROLL + (y - l.list.y) / ROW_H;
     if (row < 0 || row >= EX_NITEMS)
     {
@@ -182,6 +190,17 @@ int ex_drag(Window *w, int x, int y, unsigned buttons)
         if (item >= 0)
             ex_menu_run(EX_MENU.items[item]);
         return 1;
+    }
+    if (EX_SB.dragging) /* the scrollbar's thumb is held: the list follows the pointer */
+    {
+        Layout l = ex_layout(wm_content(w));
+        ex_sb_sync(&l);
+        int changed = ui_scroll_drag(&EX_SB, x, y, buttons);
+        EX_SCROLL = EX_SB.pos;
+        if (!changed)
+            return 0;
+        wm_add_damage(l.list);
+        return 2;
     }
     if (EX_PRESS_PLACE >= 0 || EX_PRESS_HEAD >= 0)
     {
@@ -291,7 +310,7 @@ int ex_hover(Window *w, int x, int y)
     else if (x >= 0)
     {
         Layout l = ex_layout(wm_content(w));
-        if (ui_contains(l.list, x, y))
+        if (ui_contains(l.list, x, y) && x < l.list.x + l.list.w - UI_SCROLL_W) /* the scrollbar column is not a row */
         {
             int row = EX_SCROLL + (y - l.list.y) / ROW_H;
             EX_HOVER_ROW = row < EX_NITEMS ? row : -1;
@@ -304,11 +323,15 @@ int ex_hover(Window *w, int x, int y)
     }
     if (old_menu != EX_MENU.hover || old_crumb != EX_HOVER_CRUMB)
         return 1; /* menu and path bar: rare, redraw the whole window */
+    ex_sb_sync(&lay);
+    int sb_changed = ui_scroll_hover(&EX_SB, EX_MENU.open ? -1 : x, y); /* the bar widens under the pointer */
+    if (sb_changed)
+        wm_add_damage(EX_SB.track);
     int tip_gone = was_shown && !EX_TIP_SHOWN;
     if (tip_gone && !ex_tip_mark(w, 0)) /* the pointer left the button: only the tooltip's box is drawn again */
         return 1;
     if (old_row == EX_HOVER_ROW && old_place == EX_HOVER_PLACE)
-        return tip_gone ? 2 : 0;
+        return (tip_gone || sb_changed) ? 2 : 0;
 
     /* Only the highlight of a row or sidebar entry moved: redraw just those. A row's pixels are where the row is
      * now, also after the list scrolled (they moved with it). */

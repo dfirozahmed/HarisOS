@@ -139,6 +139,7 @@ extern int EX_ITEMS[VFS_MAX_NODES]; /* its children, in the sort order */
 extern int EX_NITEMS;
 extern int EX_SEL;                 /* selected row, -1 = none */
 extern int EX_SCROLL;              /* first visible row */
+extern UiScroll EX_SB;             /* the list's scrollbar: ex_sb_sync() fills it from EX_SCROLL, the layout and EX_NITEMS */
 extern int EX_HIST[HIST_MAX];      /* folders to go back to */
 extern int EX_HIST_N;
 extern int EX_FWD[HIST_MAX];       /* folders to go forward to after Back */
@@ -192,6 +193,7 @@ int ex_place_id(int i);                        /* node of a sidebar place (0 = T
 Layout ex_layout(UiRect body);
 int ex_visible_rows(const Layout *l);
 void ex_clamp_scroll(const Layout *l);
+void ex_sb_sync(const Layout *l);              /* scrollbar numbers and track from the list (call before using EX_SB) */
 void ex_select_row(UiRect body, int row);      /* select and scroll into view */
 
 /* ---- explorer_ops.c --------------------------------------------- */

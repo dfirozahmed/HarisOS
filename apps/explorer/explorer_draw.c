@@ -337,19 +337,9 @@ static void draw_list(const Layout *l, const UiTheme *t)
     }
     gfx_restore_clip(saved);
 
-    /* scrollbar */
-    if (EX_NITEMS > vis)
-    {
-        int track_h = l->list.h - 8;
-        int thumb_h = track_h * vis / EX_NITEMS;
-        if (thumb_h < 24)
-            thumb_h = 24;
-        int span = EX_NITEMS - vis;
-        int thumb_y = l->list.y + 4 + (track_h - thumb_h) * EX_SCROLL / span;
-        int tx = l->list.x + l->list.w - 9;
-        gfx_fill_round_rect_alpha(tx, l->list.y + 4, 4, track_h, 2, ui_color(t->surface_alt), 120);
-        gfx_fill_round_rect(tx, thumb_y, 4, thumb_h, 2, ui_color(t->text_dim));
-    }
+    /* scrollbar (the shared HarisUI one: thumb drag, page click, widens under the pointer) */
+    ex_sb_sync(l);
+    ui_scroll_draw(EX_SB.track, &EX_SB);
 }
 
 static void draw_status(const Layout *l, const UiTheme *t)

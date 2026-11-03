@@ -203,6 +203,15 @@ void ex_clamp_scroll(const Layout *l)
         EX_SCROLL = 0;
 }
 
+/* The wheel, the keys and selecting a row move EX_SCROLL directly, so the scrollbar is brought in step before every use. */
+void ex_sb_sync(const Layout *l)
+{
+    EX_SB.total = EX_NITEMS;
+    EX_SB.page = ex_visible_rows(l);
+    EX_SB.pos = EX_SCROLL;
+    EX_SB.track = ui_rect(l->list.x + l->list.w - UI_SCROLL_W, l->list.y, UI_SCROLL_W, l->list.h);
+}
+
 void ex_select_row(UiRect body, int row)
 {
     if (row < 0 || row >= EX_NITEMS)

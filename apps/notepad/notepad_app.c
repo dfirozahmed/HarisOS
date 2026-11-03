@@ -1215,6 +1215,16 @@ static int dlg_rows(const DlgLayout *l)
     return l->list.h / DLG_ROW;
 }
 
+/* The list's scrollbar. The wheel, the keys and entering a folder move NP_DLG_TOP directly, so it is brought in step before every use. */
+static UiScroll NP_DLG_SB;
+static void dlg_sb_sync(const DlgLayout *l)
+{
+    NP_DLG_SB.total = NP_DLG_N;
+    NP_DLG_SB.page = dlg_rows(l);
+    NP_DLG_SB.pos = NP_DLG_TOP;
+    NP_DLG_SB.track = ui_rect(l->list.x + l->list.w - UI_SCROLL_W - 1, l->list.y + 1, UI_SCROLL_W, l->list.h - 2);
+}
+
 /* show folder `dir`: read it from the drive again and list it */
 static void dlg_enter(int dir)
 {
@@ -1340,14 +1350,8 @@ static void dlg_draw(Window *w, UiRect body)
             ui_text_in_color(ui_rect(row.x + row.w - 76, row.y, 72, row.h), sz, UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
         }
     }
-    if (NP_DLG_N > rows && rows > 0) /* a thin scroll thumb */
-    {
-        int thumb = l.list.h * rows / NP_DLG_N;
-        if (thumb < 16)
-            thumb = 16;
-        int y = l.list.y + (l.list.h - thumb) * NP_DLG_TOP / (NP_DLG_N - rows);
-        gfx_fill_round_rect(l.list.x + l.list.w - 6, y, 3, thumb, 1, ui_color(t->border));
-    }
+    dlg_sb_sync(&l);
+    ui_scroll_draw(NP_DLG_SB.track, &NP_DLG_SB);
 
     ui_text_color(l.label.x, l.label.y, "File name", UI_TEXT_SMALL, t->text_dim);
     const char *hint = NP_DLG_MODE == NP_DLG_SAVE ? folder_problem(NP_DLG_DIR) : 0; /* this folder cannot take a file */
@@ -1507,6 +1511,12 @@ static int dlg_press(Window *w, int x, int y)
     DlgLayout l = dlg_layout(wm_content(w));
     if (ui_contains(l.list, x, y))
     {
+        dlg_sb_sync(&l); /* the scrollbar: grab the thumb (dlg_drag follows it) or click the track for a page */
+        if (ui_scroll_press(&NP_DLG_SB, x, y))
+        {
+            NP_DLG_TOP = NP_DLG_SB.pos;
+            return 1;
+        }
         int idx = NP_DLG_TOP + (y - l.list.y) / DLG_ROW;
         if ((y - l.list.y) / DLG_ROW >= dlg_rows(&l) || idx >= NP_DLG_N)
             return 0;
@@ -1537,11 +1547,27 @@ static int dlg_press(Window *w, int x, int y)
 
 static int dlg_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (NP_DLG_SB.dragging) /* the scrollbar's thumb is held */
+    {
+        DlgLayout l = dlg_layout(wm_content(w));
+        dlg_sb_sync(&l);
+        int changed = ui_scroll_drag(&NP_DLG_SB, x, y, buttons);
+        NP_DLG_TOP = NP_DLG_SB.pos;
+        return changed;
+    }
     if (!w->edits[0].dragging || !ui_edit_mouse(&w->edits[0], x, y, buttons))
         return 0;
     ui_caret_restart();
     wm_add_damage(ui_inset(w->edits[0].field, -3));
     return 2;
+}
+
+/* the scrollbar widens while the pointer is over it */
+static int dlg_hover(Window *w, int x, int y)
+{
+    DlgLayout l = dlg_layout(wm_content(w));
+    dlg_sb_sync(&l);
+    return ui_scroll_hover(&NP_DLG_SB, x, y);
 }
 
 static int dlg_wheel(Window *w, int steps)
@@ -1608,7 +1634,9 @@ static void open_path_dialog(int mode)
     win->on_press = dlg_press;
     win->on_drag = dlg_drag;
     win->on_wheel = dlg_wheel;
+    win->on_hover = dlg_hover;
     win->on_close = dlg_close;
+    NP_DLG_SB.dragging = NP_DLG_SB.hover = 0;
     win->edit_count = 1;
     win->focus = 0;
     win->caret = 1;

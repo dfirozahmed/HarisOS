@@ -107,6 +107,10 @@ int ui_clipboard_get(char *out, int cap)
     return n;
 }
 GfxColor ui_color(UiRgb c) { (void)c; return 0; }
+void ui_scroll_draw(UiRect t, UiScroll *s) { s->track = t; }
+int ui_scroll_press(UiScroll *s, int x, int y) { (void)s; (void)x; (void)y; return 0; }
+int ui_scroll_drag(UiScroll *s, int x, int y, unsigned b) { (void)s; (void)x; (void)y; (void)b; return 0; }
+int ui_scroll_hover(UiScroll *s, int x, int y) { (void)s; (void)x; (void)y; return 0; }
 int ui_contains(UiRect r, int x, int y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
 const Font *ui_font(UiTextStyle s) { (void)s; return 0; }
 UiRect ui_rect(int x, int y, int w, int h) { UiRect r = {x, y, w, h}; return r; }

@@ -283,6 +283,7 @@ set(KERNEL_SOURCES
     kernel/ui/ui_surfaces.c    # wallpaper, cards and window surfaces
     kernel/ui/ui_controls.c    # buttons and common controls
     kernel/ui/ui_edit.c        # text input and blinking caret
+    kernel/ui/ui_scroll.c      # vertical scrollbar (thumb maths, drag, page click, hover)
     kernel/ui/icons.c          # HarisUI: vector icons
     kernel/window/wm.c             # window manager: lifecycle and state
     kernel/window/wm_input.c       # window-manager mouse and keyboard input

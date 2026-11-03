@@ -316,6 +316,16 @@ static BrLayout br_layout(UiRect content)
 
 static int br_rows(const BrLayout *l) { return l->list.h / BR_ROW; }
 
+/* The list's scrollbar. The wheel, the keys and entering a folder move BR_TOP directly, so it is brought in step before every use. */
+static UiScroll BR_SB;
+static void br_sb_sync(const BrLayout *l)
+{
+    BR_SB.total = BR_N;
+    BR_SB.page = br_rows(l);
+    BR_SB.pos = BR_TOP;
+    BR_SB.track = ui_rect(l->list.x + l->list.w - UI_SCROLL_W - 1, l->list.y + 1, UI_SCROLL_W, l->list.h - 2);
+}
+
 /* show folder `dir`: read it from the drive again, keep the folders and the pictures */
 static void br_enter(int dir)
 {
@@ -373,14 +383,8 @@ static void br_draw(Window *w, UiRect body)
         ui_icon(n->is_dir ? UI_ICON_FILES : UI_ICON_DISPLAY, row.x + 16, row.y + row.h / 2, 18, t->text);
         ui_text_in(ui_rect(row.x + 34, row.y, row.w - 34, row.h), n->name, UI_TEXT_BODY, UI_ALIGN_LEFT);
     }
-    if (BR_N > rows && rows > 0) /* a thin scroll thumb */
-    {
-        int thumb = l.list.h * rows / BR_N;
-        if (thumb < 16)
-            thumb = 16;
-        int y = l.list.y + (l.list.h - thumb) * BR_TOP / (BR_N - rows);
-        gfx_fill_round_rect(l.list.x + l.list.w - 6, y, 3, thumb, 1, ui_color(t->border));
-    }
+    br_sb_sync(&l);
+    ui_scroll_draw(BR_SB.track, &BR_SB);
     if (BR_ERR)
         ui_text_in_color(l.err, BR_ERR, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->danger);
 }
@@ -466,6 +470,12 @@ static int br_press(Window *w, int x, int y)
     BrLayout l = br_layout(wm_content(w));
     if (!ui_contains(l.list, x, y))
         return 0;
+    br_sb_sync(&l); /* the scrollbar: grab the thumb (br_drag follows it) or click the track for a page */
+    if (ui_scroll_press(&BR_SB, x, y))
+    {
+        BR_TOP = BR_SB.pos;
+        return 1;
+    }
     int row = (y - l.list.y) / BR_ROW, idx = BR_TOP + row;
     if (row >= br_rows(&l) || idx >= BR_N)
         return 0;
@@ -477,6 +487,26 @@ static int br_press(Window *w, int x, int y)
     if (dbl)
         br_activate();
     return 1;
+}
+
+/* the thumb is held: the list follows the pointer */
+static int br_drag(Window *w, int x, int y, unsigned buttons)
+{
+    if (!BR_SB.dragging)
+        return 0;
+    BrLayout l = br_layout(wm_content(w));
+    br_sb_sync(&l);
+    int changed = ui_scroll_drag(&BR_SB, x, y, buttons);
+    BR_TOP = BR_SB.pos;
+    return changed;
+}
+
+/* the scrollbar widens while the pointer is over it */
+static int br_hover(Window *w, int x, int y)
+{
+    BrLayout l = br_layout(wm_content(w));
+    br_sb_sync(&l);
+    return ui_scroll_hover(&BR_SB, x, y);
 }
 
 static int br_wheel(Window *w, int steps)
@@ -557,7 +587,10 @@ static void browse_open(void)
     BR_WIN = win;
     win->on_key = br_key;
     win->on_press = br_press;
+    win->on_drag = br_drag;
+    win->on_hover = br_hover;
     win->on_wheel = br_wheel;
+    BR_SB.dragging = BR_SB.hover = 0;
     win->on_close = br_close;
 
     /* start in the folder of the picture in use, else on "This PC" */
