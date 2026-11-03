@@ -62,6 +62,15 @@ typedef struct {
     unsigned vram_mb;               /* native only */
 } DevmgrDisplay;
 
+#define DEVMGR_MAX_AUDIO 4
+
+/* An HD Audio controller the sound driver looked at (copied from hda.h). */
+typedef struct {
+    unsigned char bus, dev, fn;
+    int working;     /* it has a codec with an output the driver can play on */
+    char status[96]; /* the codecs found, their outputs, or why it stopped */
+} DevmgrAudio;
+
 /* What the drivers reported at boot (filled by kernel.c). */
 typedef struct {
     int keyboard_ps2;
@@ -83,6 +92,8 @@ typedef struct {
     unsigned char net_bus, net_dev, net_fn;
     char net_status[96]; /* one line: chip, link, counters, or why it did not start */
     char amd_status[96]; /* one line from the AMD GPU bring-up (amd_bringup.h), "" = no AMD GPU */
+    int audio_count;
+    DevmgrAudio audio[DEVMGR_MAX_AUDIO];
 } DevmgrInputs;
 
 /* Rebuilds the list from pci_count()/pci_get() and the inputs. Returns the entry count. */

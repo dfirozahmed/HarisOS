@@ -4,6 +4,7 @@
 #include "devmgr.h"
 #include "display.h"
 #include "amd_bringup.h"
+#include "hda.h"
 #include "i2c_hid.h"
 #include "mouse.h"
 #include "net.h"
@@ -72,6 +73,18 @@ int devmgr_refresh(void)
         in.net_fn = loc[2];
     }
     amd_gpu_bringup_summary(in.amd_status, sizeof in.amd_status);
+    in.audio_count = 0;
+    for (int i = 0; i < hda_count() && in.audio_count < DEVMGR_MAX_AUDIO; i++)
+    {
+        DevmgrAudio *a = &in.audio[in.audio_count];
+        unsigned char loc[3];
+        if (hda_status(i, loc, &a->working, a->status, sizeof a->status))
+            break;
+        a->bus = loc[0];
+        a->dev = loc[1];
+        a->fn = loc[2];
+        in.audio_count++;
+    }
     in.i2c_count = 0;
     for (int i = 0; i < i2c_hid_count() && in.i2c_count < DEVMGR_MAX_I2C; i++)
     {

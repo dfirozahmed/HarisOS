@@ -57,6 +57,12 @@ if(HARIS_AMD_GPU_PSP_LEVEL GREATER 0)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_PSP_LEVEL=${HARIS_AMD_GPU_PSP_LEVEL})
 endif()
 
+# A short 440 Hz tone at boot from the HD Audio driver (proof that sound works; turn off with -DHARIS_AUDIO_BOOT_TONE=OFF).
+option(HARIS_AUDIO_BOOT_TONE "Play a short test tone at boot through HD Audio" ON)
+if(HARIS_AUDIO_BOOT_TONE)
+    list(APPEND EFI_CFLAGS -DHARIS_AUDIO_BOOT_TONE=1)
+endif()
+
 # GPULOG.TXT: the AMD GPU bring-up writes what it did to the top folder of the boot drive (the EFI System Partition: its lock is opened
 # for that one file and closed again), before every step that writes to the GPU, so a hang still leaves the last line reached. OFF by
 # default because it writes to the boot drive on every boot; the text always goes to COM1 as well.
@@ -187,6 +193,8 @@ set(KERNEL_SOURCES
     kernel/drivers/net/rtl8821ce/rtl8821ce_link.c           # Realtek RTL8821CE Wi-Fi: keeping the connection, background start
     kernel/drivers/net/rtl8821ce/rtl8821ce_select.c         # Realtek RTL8821CE Wi-Fi: choosing a network at run time
     kernel/net/wpa.c                 # network: WPA2 crypto (SHA-1, HMAC, PBKDF2, AES, the 4-way handshake; host-tested)
+    kernel/drivers/audio/hda/hda_ctrl.c      # sound: Intel HD Audio controller (reset, CORB / RIRB, output stream; polled)
+    kernel/drivers/audio/hda/hda_codec.c     # sound: HD Audio codec graph (output paths pin <- DAC; host-tested)
     kernel/drivers/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)
     kernel/net/sock.c                # network: socket table for the system calls (SYS_SOCKET ...)
@@ -611,6 +619,15 @@ if(FW_CODE)
     message(STATUS "UEFI firmware: ${FW_CODE} (mode: ${FW_MODE})")
 endif()
 
+# Where QEMU's HD Audio card (intel-hda + hda-duplex) sends its sound: the speakers through DirectSound on Windows.
+# "wav" records instead (add path=... with -DQEMU_AUDIODEV="wav,path=tone.wav"), "none" plays nothing.
+if(WIN32)
+    set(QEMU_AUDIODEV_DEFAULT dsound)
+else()
+    set(QEMU_AUDIODEV_DEFAULT none)
+endif()
+set(QEMU_AUDIODEV ${QEMU_AUDIODEV_DEFAULT} CACHE STRING "QEMU -audiodev backend for the HD Audio card (dsound, sdl, wav, none ...)")
+
 if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
     add_custom_target(run
         COMMAND ${QEMU_EXECUTABLE} -machine q35 -m 256M -smp 4 -accel tcg
@@ -619,6 +636,7 @@ if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
                 -drive format=raw,file=fat:rw:esp
                 -nic user,model=e1000
                 -device qemu-xhci -device usb-mouse -device usb-kbd
+                -audiodev ${QEMU_AUDIODEV},id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
@@ -632,6 +650,7 @@ if(QEMU_EXECUTABLE AND FW_MODE STREQUAL "pflash")
                 -serial file:${CMAKE_BINARY_DIR}/serial.log
                 -nic user,model=e1000
                 -device qemu-xhci -device usb-mouse -device usb-kbd
+                -audiodev ${QEMU_AUDIODEV},id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
@@ -642,6 +661,7 @@ elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
                 -drive format=raw,file=fat:rw:esp
                 -nic user,model=e1000
                 -device qemu-xhci -device usb-mouse -device usb-kbd
+                -audiodev ${QEMU_AUDIODEV},id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)
@@ -652,6 +672,7 @@ elseif(QEMU_EXECUTABLE AND FW_MODE STREQUAL "bios")
                 -serial file:${CMAKE_BINARY_DIR}/serial.log
                 -nic user,model=e1000
                 -device qemu-xhci -device usb-mouse -device usb-kbd
+                -audiodev ${QEMU_AUDIODEV},id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
         DEPENDS haris
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL VERBATIM)

@@ -20,6 +20,7 @@
 #include "acpi.h"
 #include "aspace.h"
 #include "gfx.h"
+#include "hda.h"
 #include "heap.h"
 #include "heapmon.h"
 #include "idle.h"
@@ -327,6 +328,12 @@ void kernel_main(const BootInfo *info)
 #else
         if (net_present() && net_link_up()) /* a wired card has its link now; Wi-Fi gets its address from the main loop, once connected */
             net_configure();
+#endif
+
+        splash_progress(78, "Starting sound");
+        hda_init(); /* HD Audio controllers and their codecs; the result goes to COM1 and the Device Manager */
+#if HARIS_AUDIO_BOOT_TONE
+        hda_play_tone(440, 400); /* proof that sound works: blocks for about half a second */
 #endif
 
         /* SMEP / SMAP before anything touches user memory (the address space test below does). */

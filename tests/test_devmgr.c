@@ -49,6 +49,15 @@ static unsigned int fake_net(unsigned bus, unsigned dev, unsigned fn, unsigned o
     if (off == 0x0C) return 0;
     return 0xFFFFFFFFu;
 }
+static unsigned int fake_audio(unsigned bus, unsigned dev, unsigned fn, unsigned off)
+{
+    if (bus != 0 || fn != 0 || (dev != 0x1B && dev != 0x19))
+        return 0xFFFFFFFFu;
+    if (off == 0x00) return dev == 0x1B ? 0x293E8086u : 0x816810ECu;
+    if (off == 0x08) return dev == 0x1B ? 0x04030003u : 0x02000010u;
+    if (off == 0x0C) return 0;
+    return 0xFFFFFFFFu;
+}
 int main(void)
 {
     pci_scan_with(fake);
@@ -187,6 +196,30 @@ int main(void)
     nin.net_status[sizeof nin.net_status - 1] = 0;
     devmgr_build(&nin);
     CHECK(strlen(devmgr_get(0)->note) == strlen(nin.net_status) && sizeof devmgr_get(0)->note >= sizeof nin.net_status);
+
+    /* HD Audio: 00:1B.0 Intel controller (class 04, subclass 03), listed after 00:19.0 (not audio) */
+    pci_scan_with(fake_audio);
+    static DevmgrInputs ain;
+    CHECK(devmgr_build(&ain) == 2);
+    CHECK(strcmp(devmgr_get(1)->name, "Audio device") == 0 && !devmgr_get(1)->has_driver && devmgr_get(1)->note[0] == 0);
+    ain.audio_count = 1;
+    ain.audio[0].bus = 0;
+    ain.audio[0].dev = 0x1B;
+    ain.audio[0].fn = 0;
+    ain.audio[0].working = 1;
+    strcpy(ain.audio[0].status, "Codec 1AF4:0022: Line out; test tone played");
+    devmgr_build(&ain);
+    CHECK(devmgr_get(1)->has_driver && strcmp(devmgr_get(1)->note, ain.audio[0].status) == 0);
+    CHECK(!devmgr_get(0)->has_driver && strstr(devmgr_get(0)->note, "No driver") != NULL); /* the Ethernet card is untouched */
+    /* found but not working (an HDMI-only codec): no driver tick, the reason is shown */
+    ain.audio[0].working = 0;
+    strcpy(ain.audio[0].status, "Codec 1002:AA01: no analog output (HDMI?)");
+    devmgr_build(&ain);
+    CHECK(!devmgr_get(1)->has_driver && strstr(devmgr_get(1)->note, "HDMI") != NULL);
+    /* a different location is not matched */
+    ain.audio[0].dev = 0x1F;
+    devmgr_build(&ain);
+    CHECK(devmgr_get(1)->note[0] == 0);
     if (!fails) printf("devmgr tests passed\n");
     return fails ? 1 : 0;
 }

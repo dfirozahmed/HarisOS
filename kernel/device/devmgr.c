@@ -171,6 +171,15 @@ int devmgr_build(const DevmgrInputs *in)
                 copy(e->note, sizeof e->note, "No driver (wireless and other adapters are not supported)");
             }
         }
+        if (e && in && d->class_code == 0x04 && d->subclass == 0x03) {
+            /* an HD Audio controller: the sound driver's line (the codecs behind it) */
+            int n = in->audio_count < DEVMGR_MAX_AUDIO ? in->audio_count : DEVMGR_MAX_AUDIO;
+            for (int k = 0; k < n; k++)
+                if (in->audio[k].bus == d->bus && in->audio[k].dev == d->dev && in->audio[k].fn == d->fn) {
+                    e->has_driver = in->audio[k].working;
+                    copy(e->note, sizeof e->note, in->audio[k].status);
+                }
+        }
         if (e && in && d->class_code == 0x03) {
             const DevmgrDisplay *g = find_display(in, d);
             if (g)
