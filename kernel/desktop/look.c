@@ -1,9 +1,9 @@
 /* HarisOS desktop look: see include/look.h. */
 #include "look.h"
-#include "bmp.h"
 #include "exec.h"
 #include "gfx.h"
 #include "heap.h"
+#include "picture.h"
 #include "vfs.h"
 #include "wm.h"
 #include "desktop_internal.h"
@@ -35,12 +35,6 @@ static int same_ci(const char *a, const char *b)
     while (*a && lower(*a) == lower(*b))
         a++, b++;
     return !*a && !*b;
-}
-
-static int ends_with_ci(const char *s, const char *end)
-{
-    int n = slen(s), m = slen(end);
-    return n >= m && same_ci(s + n - m, end);
 }
 
 /* what follows `prefix` at the start of s (ignoring case), 0 if s does not start with it */
@@ -162,12 +156,12 @@ static int load_picture(int node)
         }
         done += (unsigned)got;
     }
-    int r = bmp_cover(file, size, pic, W, H);
+    int r = picture_cover(file, size, pic, W, H);
     kfree(file);
     if (r != 0)
     {
         kfree(pic);
-        MSG = "Not a picture this can show: a BMP of 24 or 32 bits, not compressed";
+        MSG = "Not a picture this can show: BMP (24 / 32 bit), PNG or JPEG (not progressive)";
         return -1;
     }
     ui_set_wallpaper_image(pic); /* the new one first: the old one is not in use any more when it is freed */
@@ -244,7 +238,7 @@ static int add_pictures(int dir, int *ids, int n, int max, int depth)
         const VfsNode *vn = vfs_node(list[i]);
         if (!vn)
             continue;
-        if (!vn->is_dir && ends_with_ci(vn->name, ".bmp"))
+        if (!vn->is_dir && picture_is_name(vn->name))
             ids[n++] = list[i];
         else if (vn->is_dir && depth == 0 && (same_ci(vn->name, "Pictures") || same_ci(vn->name, "Wallpapers")))
             n = add_pictures(list[i], ids, n, max, 1);

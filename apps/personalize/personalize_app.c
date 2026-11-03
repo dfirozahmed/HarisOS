@@ -1,4 +1,4 @@
-/* Personalize app: the theme (dark / light), the wallpaper (a ready-made one, with a preview of each, or a .bmp
+/* Personalize app: the theme (dark / light), the wallpaper (a ready-made one, with a preview of each, or a .bmp / .png / .jpg
  * picture from a drive, found in the list or chosen with "Browse...") and the accent colour (8 ready-made ones, the theme's own, or any colour from three R / G / B
  * sliders). A pick is shown at once and remembered in THEME.CFG (look.h does both). Esc closes the window.
  * An app uses only public headers (ui.h, wm.h, look.h, ...) - never desktop_internal.h. */
@@ -6,6 +6,7 @@
 #include "desktop.h"
 #include "gfx.h"
 #include "look.h"
+#include "picture.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "ui.h"
@@ -139,10 +140,10 @@ static void ps_draw(Window *w, UiRect body)
                          t->text_dim);
     }
 
-    ui_text_color(x, L.y_pics, "Pictures (.bmp found on your drives)", UI_TEXT_SMALL, t->text_dim);
+    ui_text_color(x, L.y_pics, "Pictures (.bmp .png .jpg found on your drives)", UI_TEXT_SMALL, t->text_dim);
     ui_button(L.browse, "Browse...", UI_BTN_SECONDARY, UI_STATE_NORMAL);
     if (NPICS == 0)
-        ui_text_in_color(ui_rect(x, L.y_pics + 24, body.w - 2 * M, 34), "No .bmp pictures found", UI_TEXT_BODY, UI_ALIGN_LEFT,
+        ui_text_in_color(ui_rect(x, L.y_pics + 24, body.w - 2 * M, 34), "No pictures found", UI_TEXT_BODY, UI_ALIGN_LEFT,
                          t->text_dim);
     for (int i = 0; i < NPICS; i++)
     {
@@ -278,7 +279,7 @@ static void ps_close(Window *w)
     DRAG = -1;
 }
 
-/* ---- the Browse dialog: folders and .bmp files only. One click selects, a double click (or Enter) opens a folder or
+/* ---- the Browse dialog: folders and picture files (.bmp .png .jpg) only. One click selects, a double click (or Enter) opens a folder or
  * picks the picture; "Select" picks the selected picture, "Up" goes to the parent folder (This PC = the drives). ---- */
 #define BR_W 520
 #define BR_H 440
@@ -315,15 +316,7 @@ static BrLayout br_layout(UiRect content)
 
 static int br_rows(const BrLayout *l) { return l->list.h / BR_ROW; }
 
-static int br_is_bmp(const char *s)
-{
-    int n = 0;
-    while (s[n])
-        n++;
-    return n >= 4 && s[n - 4] == '.' && (s[n - 3] | 32) == 'b' && (s[n - 2] | 32) == 'm' && (s[n - 1] | 32) == 'p';
-}
-
-/* show folder `dir`: read it from the drive again, keep the folders and the .bmp files */
+/* show folder `dir`: read it from the drive again, keep the folders and the pictures */
 static void br_enter(int dir)
 {
     int all[BR_MAX];
@@ -336,7 +329,7 @@ static void br_enter(int dir)
     for (int i = 0; i < k; i++)
     {
         const VfsNode *n = vfs_node(all[i]);
-        if (n && (n->is_dir || br_is_bmp(n->name)))
+        if (n && (n->is_dir || picture_is_name(n->name)))
             BR_ITEMS[BR_N++] = all[i];
     }
     BR_SEL = -1;
@@ -367,7 +360,7 @@ static void br_draw(Window *w, UiRect body)
     gfx_round_rect(l.list.x, l.list.y, l.list.w, l.list.h, t->radius_s, 1, ui_color(t->border));
     int rows = br_rows(&l);
     if (BR_N == 0)
-        ui_text_in_color(l.list, "No folders or .bmp pictures here", UI_TEXT_SMALL, UI_ALIGN_CENTER, t->text_dim);
+        ui_text_in_color(l.list, "No folders or pictures here", UI_TEXT_SMALL, UI_ALIGN_CENTER, t->text_dim);
     for (int r = 0; r < rows && BR_TOP + r < BR_N; r++)
     {
         int idx = BR_TOP + r;
@@ -398,7 +391,7 @@ static void br_ok(void)
     const VfsNode *n = BR_SEL >= 0 ? vfs_node(BR_ITEMS[BR_SEL]) : 0;
     if (!n || n->is_dir)
     {
-        BR_ERR = "Select a .bmp picture first";
+        BR_ERR = "Select a picture first";
         return;
     }
     if (look_set_picture(BR_ITEMS[BR_SEL]) != 0)

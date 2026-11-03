@@ -254,6 +254,9 @@ set(KERNEL_SOURCES
     kernel/graphics/gfx_shapes.c  # anti-aliased rounded rectangles and circles
     kernel/graphics/gfx_effects.c # gradients, shadows and glow effects
     kernel/graphics/bmp.c       # BMP pictures: read and scaled to cover the screen (wallpaper)
+    kernel/graphics/png.c       # PNG decoder (inflate + filters), for wallpapers
+    kernel/graphics/jpeg.c      # JPEG decoder (baseline Huffman, integer IDCT), for wallpapers
+    kernel/graphics/picture.c   # picture type by its first bytes; BMP / PNG / JPEG scaled to cover the screen
     kernel/graphics/gfx_cursor.c # software cursor save/restore and rendering
     kernel/graphics/gfx_lines.c  # anti-aliased lines and convex polygons
     kernel/graphics/gfx.c       # basic drawing primitives and alpha blending
