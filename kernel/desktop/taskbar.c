@@ -194,10 +194,9 @@ void taskbar_draw(void)
     G = light ? LIGHT_GLASS : DARK_GLASS;
     G.tint = light ? gfx_rgb(20, 36, 70) : gfx_rgb(255, 255, 255);
 
-    /* the bar: see-through, one even tone, a dark hairline then a light one on top */
+    /* the bar: see-through, one even tone, a faint light hairline on top */
     gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT, t->surface.r, t->surface.g, t->surface.b, G.bar);
-    gfx_fill_rect_alpha(0, by, W, 1, light ? 20 : 0, light ? 36 : 0, light ? 70 : 0, light ? 46 : 90);
-    gfx_fill_rect_alpha(0, by + 1, W, 1, 255, 255, 255, light ? 200 : 46);
+    gfx_fill_rect_alpha(0, by + 1, W, 1, 255, 255, 255, light ? 70 : 15);
 
     int x = 10;
 
