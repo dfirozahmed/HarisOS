@@ -78,29 +78,45 @@ static int refresh_wifi(void)
     return taskbar_set_wifi(!st.present ? -1 : st.state);
 }
 
-/* The battery for the tray icon, read every 5 seconds (each read is a handful of byte transfers with the embedded controller). A machine whose controller
- * layout is not known has no level: the icon stays plain. */
+/* The battery for the tray icon. The mains cable is looked at 5 times a second (one byte from the embedded controller), so that plugging it in or
+ * out shows at once, and every change of it reads everything again straight away; otherwise the whole reading (a handful of bytes) is once a second.
+ * A machine whose controller layout is not known has no level: the icon stays plain. */
 static int refresh_battery(void)
 {
-    static unsigned long long next_ms;
+    static unsigned long long next_ac_ms, next_full_ms;
     static unsigned fallback;
+    static int last_ac = -2;
     if (!battery_supported())
         return 0;
+    int full = 0;
     if (timer_ready())
     {
         unsigned long long now = timer_ms();
-        if (now < next_ms)
+        if (now < next_ac_ms)
             return 0;
-        next_ms = now + 5000;
+        next_ac_ms = now + 200;
+        int ac = battery_ac();
+        if (ac != last_ac || now >= next_full_ms)
+            full = 1;
+        last_ac = ac;
+        if (full)
+            next_full_ms = now + 1000;
     }
-    else if (++fallback < 65536u)
+    else if (++fallback < 4096u)
         return 0;
     else
+    {
         fallback = 0;
+        full = 1;
+    }
+    if (!full)
+        return 0;
     BatteryInfo b;
-    if (battery_read(&b) != 0 || !b.present)
-        return taskbar_set_battery(-1, 0);
-    return taskbar_set_battery(b.percent, b.charging);
+    if (battery_read(&b) != 0)
+        return taskbar_set_battery(-1, 0, 0);
+    if (!b.present) /* no battery in the bay: the cable may still be plugged in */
+        return taskbar_set_battery(-1, 0, b.ac);
+    return taskbar_set_battery(b.percent, b.charging, b.ac);
 }
 
 /* Called on every main-loop pass: updates the taskbar clock and makes the text

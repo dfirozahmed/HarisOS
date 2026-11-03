@@ -54,5 +54,8 @@ int battery_dsdt_matches(const unsigned char *dsdt, unsigned len);
 void battery_init(void);
 int battery_supported(void);
 int battery_read(BatteryInfo *out);
+/* Only the AC adapter: 1 plugged in, 0 not, -1 not supported / the controller did not answer. One byte from the controller, so it can be asked often
+ * (a plug that goes in or out should show at once, the rest of battery_read() can wait a second). */
+int battery_ac(void);
 
 #endif

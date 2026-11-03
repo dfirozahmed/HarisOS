@@ -122,6 +122,14 @@ static int rd16(unsigned reg)
     return lo < 0 || hi < 0 ? -1 : lo | hi << 8;
 }
 
+int battery_ac(void)
+{
+    if (!OK)
+        return -1;
+    int v = ec_read(EC_AC);
+    return v < 0 ? -1 : v & 1;
+}
+
 int battery_read(BatteryInfo *o)
 {
     if (!OK)

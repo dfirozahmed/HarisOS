@@ -144,6 +144,16 @@ static void icon_battery_level(const Frame *f, GfxColor c, int percent, int char
 
 static void icon_battery(const Frame *f, GfxColor c) { icon_battery_level(f, c, -1, 0); }
 
+/* a power plug pointing up: two thick prongs, a body that is wider than them, and the cable going down. At 20 px it must still read as a plug, so the
+ * parts are chunky and there is a gap between prongs and body. */
+static void icon_plug(const Frame *f, GfxColor c)
+{
+    rrect(f, 12, 2, 8, 16, 3, c);   /* left prong */
+    rrect(f, 28, 2, 8, 16, 3, c);   /* right prong */
+    rrect(f, 6, 20, 36, 18, 9, c);  /* body */
+    rrect(f, 19, 36, 10, 12, 4, c); /* cable */
+}
+
 static void icon_close(const Frame *f, GfxColor c)
 {
     line(f, 12, 12, 36, 36, 5, c);
@@ -557,6 +567,9 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_USB:
         icon_usb(&f, t);
+        break;
+    case UI_ICON_PLUG:
+        icon_plug(&f, t);
         break;
     default:
         break;

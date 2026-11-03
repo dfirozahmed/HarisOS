@@ -328,7 +328,8 @@ typedef enum
     UI_ICON_NOTEPAD, /* page with text lines */
     UI_ICON_KEYBOARD, /* keyboard outline with keys */
     UI_ICON_MOUSE,    /* mouse body with a button split */
-    UI_ICON_USB       /* USB trident symbol */
+    UI_ICON_USB,      /* USB trident symbol */
+    UI_ICON_PLUG      /* power plug: the mains cable is connected */
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

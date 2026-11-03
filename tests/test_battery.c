@@ -119,10 +119,24 @@ int main(void)
     EC_DEAD = -1;
     CHECK(battery_read(&b) == 0);
 
+    /* ---- the cable alone: one register, asked often ---- */
+    ec_set(1, 1, 2, 1350, 2700, 11426);
+    CHECK(battery_ac() == 1);
+    EC[0x40] = 0;
+    CHECK(battery_ac() == 0);
+    EC[0x40] = 0xFE; /* only bit 0 counts */
+    CHECK(battery_ac() == 0);
+    EC[0x40] = 0x09;
+    CHECK(battery_ac() == 1);
+    EC_DEAD = 0x40;
+    CHECK(battery_ac() == -1);
+    EC_DEAD = -1;
+
     /* ---- another machine: nothing is read ---- */
     make_dsdt("ACRSYS", "ACRPRDCT");
     battery_init();
     CHECK(!battery_supported() && battery_read(&b) == -1);
+    CHECK(battery_ac() == -1);
     NTAB = 0;
     battery_init();
     CHECK(!battery_supported());
