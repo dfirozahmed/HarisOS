@@ -168,6 +168,16 @@ int net_wifi_join_poll(int *result)
     return s;
 }
 
+int net_wifi_disconnect(void)
+{
+    if (!wifi_active())
+        return NET_WIFI_E_NO_ADAPTER;
+    int r = rtl8821ce_wifi_disconnect();
+    if (r == NET_WIFI_OK)
+        net_forget_address(); /* the address belonged to that network */
+    return r;
+}
+
 int net_wifi_connect(const char *ssid, const char *passphrase)
 {
     if (!wifi_active())

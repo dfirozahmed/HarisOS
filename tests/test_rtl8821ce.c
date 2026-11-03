@@ -3451,6 +3451,38 @@ int main(void)
             }
             CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
 
+            /* disconnecting: goodbye to the access point, the link ends and is not made again, the passphrase is forgotten; a second call is harmless; and the
+             * same network can be joined again afterwards */
+            {
+                int bye0 = 0;
+                for (int i = 0; i < TXLOG_N; i++)
+                    if (TXLOG[i].b[0] == 0xC0)
+                        bye0++;
+                int first_new2 = TXLOG_N;
+                CHECK(rtl8821ce_wifi_disconnect() == NET_WIFI_OK);
+                CHECK(TXLOG_N > first_new2 && TXLOG[first_new2].b[0] == 0xC0 && memcmp(TXLOG[first_new2].b + 4, AP_BSSID, 6) == 0);
+                int bye1 = 0;
+                for (int i = 0; i < TXLOG_N; i++)
+                    if (TXLOG[i].b[0] == 0xC0)
+                        bye1++;
+                CHECK(bye1 == bye0 + 1);
+                CHECK(!LINK.up && !LINK.want && CFG.psk_len == 0 && CFG.psk[0] == 0 && CFG.psk[5] == 0 && CFG.ssid[0] == 0);
+                NetWifiStatus ws2;
+                rtl8821ce_wifi_status(&ws2);
+                CHECK(ws2.present == 1 && ws2.state == 0 && ws2.ssid[0] == 0);
+                CHECK(NIC_RTL8821CE.send(arp, 42) == -1); /* nothing goes out any more */
+                NIC_RTL8821CE.recv(got, sizeof got);      /* the poll does not reconnect */
+                MS_JUMP += 5000;
+                NIC_RTL8821CE.recv(got, sizeof got);
+                CHECK(!LINK.up && !LINK.want);
+                int n_tx = TXLOG_N;
+                CHECK(rtl8821ce_wifi_disconnect() == NET_WIFI_OK && TXLOG_N == n_tx); /* nothing to leave: no second goodbye */
+                CHECK(rtl8821ce_wifi_connect("TestNet", "secret-pass-phrase") == NET_WIFI_OK && LINK.up && LINK.want);
+                rtl8821ce_wifi_status(&ws2);
+                CHECK(ws2.state == 1 && strcmp(ws2.ssid, "TestNet") == 0);
+                CHECK(NIC_RTL8821CE.send(arp, 42) == 0);
+            }
+
             /* a scan while connected: the radio goes through the channels and comes back; nothing is sent meanwhile, and the link stays */
             RXQ_N = RXQ_NEXT = 0;
             rxq_add_frame(bc, bl);

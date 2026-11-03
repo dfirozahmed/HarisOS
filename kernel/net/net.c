@@ -54,6 +54,16 @@ static unsigned char DNS_IP[4];
 
 static int IP_SOURCE; /* 0 = none yet, 1 = DHCP, 2 = the fixed fallback of the self test */
 int net_ip_source(void) { return IP_SOURCE; }
+
+/* The address, gateway and DNS server go: they were the network's (a Wi-Fi network that was left). The ARP cache goes too. */
+void net_forget_address(void)
+{
+    for (int i = 0; i < 4; i++)
+        OUR_IP[i] = GATEWAY[i] = DNS[i] = 0;
+    IP_SOURCE = 0;
+    for (int i = 0; i < ARP_CACHE_SIZE; i++)
+        CACHE[i].valid = 0;
+}
 const unsigned char *net_ip(void) { return OUR_IP; }
 const unsigned char *net_gateway(void) { return GATEWAY; }
 const unsigned char *net_dns(void) { return DNS; }

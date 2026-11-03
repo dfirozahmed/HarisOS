@@ -38,6 +38,7 @@ int rtl8821ce_ap_count(void);
 int rtl8821ce_ap(unsigned index, NetWifiAp *out);
 int rtl8821ce_wifi_rescan(void);
 int rtl8821ce_wifi_scan_start(void);
+int rtl8821ce_wifi_disconnect(void);
 int rtl8821ce_wifi_scan_progress(void);
 int rtl8821ce_wifi_connect(const char *ssid, const char *psk);
 int rtl8821ce_join_begin(const char *ssid, const char *psk);

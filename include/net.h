@@ -33,6 +33,7 @@ int net_link_up(void);
 int net_send(const void *frame, unsigned len);
 int net_recv(void *buf, unsigned max);
 const unsigned char *net_ip(void);
+void net_forget_address(void); /* drops the address, gateway and DNS server and the ARP cache (after leaving a Wi-Fi network) */
 int net_ip_source(void); /* 0 = no address, 1 = from DHCP, 2 = the fixed QEMU address used when DHCP failed */
 const char *net_driver_name(void); /* "Intel e1000", "Realtek RTL8168" ... ("none" without a working card) */
 const unsigned char *net_gateway(void);
@@ -102,6 +103,10 @@ int net_wifi_connect(const char *ssid, const char *passphrase);
 /* The same without holding the desktop up: _start() returns at once (NET_WIFI_OK, or a NET_WIFI_E_ code when it cannot begin) and a thread does the join.
  * _poll() returns 1 while it goes on; 0 when it has ended, with its NET_WIFI_OK / NET_WIFI_E_ code in *result (DHCP is asked for here, once); -1 when none is
  * going on or waiting to be reported. */
+/* Leave the network: the access point is told, the connection ends and is not made again, the passphrase is forgotten, and the machine's address (DHCP)
+ * is dropped. The card stays the adapter, so another network can be joined. NET_WIFI_OK (also when there was no connection), NET_WIFI_E_NO_ADAPTER, or
+ * NET_WIFI_E_BUSY while a scan or a join is going on. */
+int net_wifi_disconnect(void);
 int net_wifi_join_start(const char *ssid, const char *passphrase);
 int net_wifi_join_poll(int *result);
 int net_irq_init(void);

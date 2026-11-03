@@ -14,11 +14,12 @@
 #include "wm.h"
 
 #define ROW_H 46
-#define FOOT_H 112
+#define FOOT_H 136
 #define HEAD_H 76
 #define APS_MAX 32
 #define BTN_RESCAN 0
-#define BTN_CONNECT 1
+#define BTN_DISCONNECT 1
+#define BTN_CONNECT 2
 
 enum { OP_NONE, OP_SCAN, OP_JOIN_WAIT, OP_JOIN, OP_JOIN_RUN }; /* OP_SCAN: a scan in steps goes on in the driver; the join waits for a redraw first, starts, then a thread of its own does it (OP_JOIN_RUN) */
 static int SCAN_PCT = -1;
@@ -27,6 +28,7 @@ static Window *WF_WIN;
 static NetWifiAp APS[APS_MAX]; /* one row per network name: the nearest access point of it */
 static int NAPS;
 static int SEL = -1;
+static int SHOW_PASS; /* the passphrase is shown as typed instead of as stars (the "Show password" switch); off again whenever the field is wiped */
 static int SCROLL;
 static int OP;
 static char MSG[100];       /* the last result, under the passphrase field */
@@ -79,6 +81,7 @@ static void wipe_passphrase(Window *w)
         p[i] = 0;
     w->edits[0].flags = UI_EDIT_PASSWORD;
     w->edits[0].max = 63;
+    SHOW_PASS = 0;
 }
 
 /* ---- the list ---- */
@@ -160,6 +163,9 @@ static int visible_rows(const Layout *l)
     return n < 1 ? 1 : n;
 }
 
+/* the "Show password" switch and its label, under the passphrase field */
+static UiRect show_rect(const Layout *l) { return ui_rect(l->foot.x + 2, l->foot.y + 66, 200, 22); }
+
 static void keep_visible(const Layout *l)
 {
     int vis = visible_rows(l);
@@ -175,6 +181,7 @@ static void update_buttons(Window *w)
 {
     int busy = OP != OP_NONE;
     w->btn[BTN_RESCAN].enabled = !busy && ST.present;
+    w->btn[BTN_DISCONNECT].enabled = !busy && ST.present && ST.state != 0;
     w->btn[BTN_CONNECT].enabled = !busy && ST.present && SEL >= 0 && SEL < NAPS && joinable(&APS[SEL]) && w->edits[0].len >= 8;
 }
 
@@ -235,7 +242,7 @@ static void wf_draw(Window *w, UiRect body)
     else
         put_str(line, sizeof line, &n, "Not connected");
     ui_icon(UI_ICON_WIFI, l.head.x + 22, l.head.y + 22, 28, ST.state == 1 ? t->success : t->text_dim);
-    ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 2, l.head.w - 48 - 112, 26), line, UI_TEXT_TITLE, UI_ALIGN_LEFT, col);
+    ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 2, l.head.w - 48 - 240, 26), line, UI_TEXT_TITLE, UI_ALIGN_LEFT, col);
     line[0] = 0;
     n = 0;
     if (OP == OP_SCAN)
@@ -243,7 +250,7 @@ static void wf_draw(Window *w, UiRect body)
         put_str(line, sizeof line, &n, "Scanning the channels... ");
         put_dec(line, sizeof line, &n, (unsigned)(SCAN_PCT < 0 ? 0 : SCAN_PCT));
         put_str(line, sizeof line, &n, "%");
-        ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 112, 8), SCAN_PCT < 0 ? 0 : SCAN_PCT);
+        ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 240, 8), SCAN_PCT < 0 ? 0 : SCAN_PCT);
     }
     else if (OP == OP_JOIN_WAIT || OP == OP_JOIN || OP == OP_JOIN_RUN)
     {
@@ -274,7 +281,7 @@ static void wf_draw(Window *w, UiRect body)
     }
     else if (ST.present)
         put_str(line, sizeof line, &n, "Pick a network below.");
-    ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 32, l.head.w - 48 - 112, 22), line, UI_TEXT_DIM, UI_ALIGN_LEFT, t->text_dim);
+    ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 32, l.head.w - 48 - 240, 22), line, UI_TEXT_DIM, UI_ALIGN_LEFT, t->text_dim);
     ui_separator(l.head.x, l.head.y + l.head.h - 6, l.head.w);
 
     /* the list */
@@ -317,13 +324,16 @@ static void wf_draw(Window *w, UiRect body)
         put_str(lab, sizeof lab, &k, APS[SEL].ssid);
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 6, l.foot.w - 4, 22), lab, UI_TEXT_LABEL, UI_ALIGN_LEFT, t->text);
         ui_edit_draw(l.pass, &w->edits[0], "8 to 63 characters", OP == OP_NONE);
+        UiRect sw = show_rect(&l);
+        ui_toggle(ui_rect(sw.x, sw.y, 40, 22), SHOW_PASS);
+        ui_text_in_color(ui_rect(sw.x + 50, sw.y, sw.w - 50, 22), "Show password", UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
     }
     else if (SEL >= 0 && SEL < NAPS)
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 6, l.foot.w - 4, 22), "Only WPA2-Personal networks can be joined here.", UI_TEXT_BODY, UI_ALIGN_LEFT, t->warning);
     else
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 6, l.foot.w - 4, 22), "Select a network.", UI_TEXT_DIM, UI_ALIGN_LEFT, t->text_dim);
     if (MSG[0])
-        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 72, l.foot.w - 4, 34), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 92, l.foot.w - 4, 34), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
 }
 
 /* ---- the work ---- */
@@ -486,6 +496,34 @@ static void on_connect(UiButton *b, void *user)
     start_join((Window *)user);
 }
 
+static void on_disconnect(UiButton *b, void *user)
+{
+    (void)b;
+    Window *w = (Window *)user;
+    if (OP != OP_NONE || ST.state == 0)
+        return;
+    char name[33];
+    int k = 0;
+    name[0] = 0;
+    put_str(name, sizeof name, &k, ST.ssid);
+    int r = net_wifi_disconnect();
+    poll_status();
+    if (r == NET_WIFI_OK)
+    {
+        char m[100];
+        int n = 0;
+        m[0] = 0;
+        put_str(m, sizeof m, &n, "Disconnected from ");
+        put_str(m, sizeof m, &n, name);
+        put_str(m, sizeof m, &n, ".");
+        set_msg(1, m);
+    }
+    else
+        set_msg(2, r == NET_WIFI_E_BUSY ? "Busy - try again in a moment." : "No Wi-Fi adapter is in use.");
+    update_buttons(w);
+    wm_invalidate();
+}
+
 static int wf_press(Window *w, int x, int y)
 {
     if (OP != OP_NONE)
@@ -497,6 +535,12 @@ static int wf_press(Window *w, int x, int y)
         if ((y - l.list.y) / ROW_H >= visible_rows(&l) || row >= NAPS)
             return 0;
         select_row(w, row);
+        return 1;
+    }
+    if (SEL >= 0 && SEL < NAPS && joinable(&APS[SEL]) && ui_contains(show_rect(&l), x, y))
+    {
+        SHOW_PASS = !SHOW_PASS;
+        w->edits[0].flags = SHOW_PASS ? 0 : UI_EDIT_PASSWORD;
         return 1;
     }
     UiRect f = w->edits[0].field;
@@ -627,6 +671,7 @@ static void wifi_app_open(void)
 
     int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
     wm_add_button_ex(win, "Rescan", UI_BTN_SECONDARY, ui_rect(cw - 8 - 100, 8 + 14, 100, 34), WM_ANCHOR_RIGHT, on_rescan, win);
+    wm_add_button_ex(win, "Disconnect", UI_BTN_SECONDARY, ui_rect(cw - 8 - 100 - 8 - 124, 8 + 14, 124, 34), WM_ANCHOR_RIGHT, on_disconnect, win);
     wm_add_button_ex(win, "Connect", UI_BTN_PRIMARY, ui_rect(cw - 8 - 116, ch - 8 - FOOT_H + 28, 116, 32), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_connect,
                      win);
     poll_status();

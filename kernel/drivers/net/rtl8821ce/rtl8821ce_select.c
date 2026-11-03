@@ -272,6 +272,36 @@ int rtl8821ce_wifi_connect(const char *ssid, const char *psk)
     return result;
 }
 
+/* Leaves the network: goodbye (deauthentication) to the access point, the keys wiped from the chip, nobody reconnects, and the passphrase is forgotten
+ * (the file WIFI.CFG, if there is one, stays: it is only read at boot). The card stays the adapter without a connection, so the Wi-Fi window can pick
+ * another network. Not while the chip belongs to a thread (the first connection, a join) or a scan is going on. Without a connection it does nothing. */
+int rtl8821ce_wifi_disconnect(void)
+{
+    if (!LINK.adapter)
+        return NET_WIFI_E_NO_ADAPTER;
+    if (BOOT.busy || JOIN.busy || SCN.active)
+        return NET_WIFI_E_BUSY;
+    if (LINK.up)
+    {
+        u8 f[32];
+        unsigned n = build_deauth(f, CONN.bssid);
+        tx_mgmt(f, n, CONN.channel);
+        LINK.up = 0;
+        ra_stop();
+        ba_reset();
+        cam_clear();
+    }
+    LINK.want = 0;
+    LINK.fails = 0;
+    CONN.dropped = 0;
+    wipe(CFG.psk, sizeof CFG.psk);
+    CFG.psk_len = 0;
+    wipe(CFG.ssid, sizeof CFG.ssid);
+    CFG.ssid_len = 0;
+    CFG.state = CFG_NONE;
+    return NET_WIFI_OK;
+}
+
 /* A join in a thread of its own, like the first connection ("starting in the background"): connect_exchange() waits with udelay() for the access point
  * and the 4-way handshake for seconds, and in the main loop the whole desktop (mouse included) would stand still for that. begin() copies the
  * arguments and claims the chip (nobody else sends, receives or scans while busy), run() is the thread, poll() hands over the result once. */
