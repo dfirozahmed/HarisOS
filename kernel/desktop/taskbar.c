@@ -105,7 +105,6 @@ void taskbar_bounds(int *x, int *y, int *w, int *h)
 typedef struct
 {
     unsigned char bar;                  /* the bar's surface colour: 255 = solid; lower = more of the wallpaper */
-    unsigned char sheen;                /* white over the bar's upper half */
     GfxColor tint;                      /* what a pill is tinted with */
     unsigned char rest, hover, pressed; /* tint strength of a pill */
     unsigned char active;               /* accent strength behind the window in front */
@@ -113,9 +112,9 @@ typedef struct
 } Glass;
 
 /* light: white frost, pills a faint dark tint with a bright rim */
-static const Glass LIGHT_GLASS = {168, 36, 0, 18, 34, 58, 48, 150};
+static const Glass LIGHT_GLASS = {168, 0, 18, 34, 58, 48, 150};
 /* dark: smoky glass, pills a faint white tint with a thin highlight; pressed is the faintest (it goes in) */
-static const Glass DARK_GLASS = {196, 10, 0, 16, 30, 8, 84, 34};
+static const Glass DARK_GLASS = {196, 0, 16, 30, 8, 84, 34};
 static Glass G;
 
 static int is_light(UiRgb c) { return (c.r * 299 + c.g * 587 + c.b * 114) / 1000 > 160; }
@@ -195,9 +194,8 @@ void taskbar_draw(void)
     G = light ? LIGHT_GLASS : DARK_GLASS;
     G.tint = light ? gfx_rgb(20, 36, 70) : gfx_rgb(255, 255, 255);
 
-    /* the bar: see-through, a little brighter at the top, a dark hairline then a light one on top */
+    /* the bar: see-through, one even tone, a dark hairline then a light one on top */
     gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT, t->surface.r, t->surface.g, t->surface.b, G.bar);
-    gfx_fill_rect_alpha(0, by, W, TASKBAR_HEIGHT / 2, 255, 255, 255, G.sheen);
     gfx_fill_rect_alpha(0, by, W, 1, light ? 20 : 0, light ? 36 : 0, light ? 70 : 0, light ? 46 : 90);
     gfx_fill_rect_alpha(0, by + 1, W, 1, 255, 255, 255, light ? 200 : 46);
 
