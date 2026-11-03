@@ -88,6 +88,7 @@ const UiTheme ui_theme_light = {
 /* The desktop's look: a copy of the dark or light theme with the accent colour the user picked (ui_set_look). */
 static UiTheme LOOK;
 static int LOOK_DARK = 1;
+static unsigned LOOK_GEN;
 
 const UiTheme *THEME = &ui_theme_dark;
 
@@ -112,7 +113,9 @@ void ui_set_look(int dark, const UiRgb *accent)
         ui_accent_shades(*accent, &LOOK.accent_hi, &LOOK.text_on_accent);
     }
     THEME = &LOOK;
+    LOOK_GEN++;
 }
 
 int ui_look_dark(void) { return LOOK_DARK; }
+unsigned ui_look_gen(void) { return LOOK_GEN; }
 

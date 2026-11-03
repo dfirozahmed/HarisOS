@@ -254,7 +254,8 @@ static void look_of(const Window *w, int i, int top, unsigned part[WM_LOOK_COUNT
         part[k] = 0;
     part[WM_LOOK_SIZE] = (unsigned)w->r.w * 65536u + (unsigned)w->r.h;
     part[WM_LOOK_FOCUS] = i == top;
-    part[WM_LOOK_THEME] = (unsigned)(unsigned long long)ui_theme();
+    /* ui_set_look() rewrites the same theme struct, so the pointer alone misses a dark/light or accent change */
+    part[WM_LOOK_THEME] = (unsigned)(unsigned long long)ui_theme() ^ ui_look_gen() * 2654435761u;
     for (const char *s = w->title; *s; s++)
         MIX(*s);
     part[WM_LOOK_TITLE] = h;

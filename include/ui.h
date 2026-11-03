@@ -53,6 +53,7 @@ void ui_set_theme(const UiTheme *t); /* NULL = the desktop's look (ui_set_look),
  * theme in use. ui_accent_shades gives the brighter shade of an accent and the text colour that reads on it. */
 void ui_set_look(int dark, const UiRgb *accent);
 int ui_look_dark(void);
+unsigned ui_look_gen(void); /* counts ui_set_look() calls: the look changes in place, so its address says nothing */
 void ui_accent_shades(UiRgb accent, UiRgb *hi, UiRgb *on);
 
 /* ---- layout -------------------------------------------------- */
