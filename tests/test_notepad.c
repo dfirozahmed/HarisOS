@@ -107,6 +107,19 @@ int ui_clipboard_get(char *out, int cap)
     return n;
 }
 GfxColor ui_color(UiRgb c) { (void)c; return 0; }
+/* the pop-up menu (ui_menu.c has its own test): a menu that never opens */
+void ui_menu_clear(UiMenu *m) { m->open = 0; m->count = 0; m->hover = m->press = -1; }
+int ui_menu_add(UiMenu *m, int id, const char *l, const char *h, int f) { (void)id; (void)l; (void)h; (void)f; m->count++; return 0; }
+int ui_menu_separator(UiMenu *m) { (void)m; return 0; }
+void ui_menu_open(UiMenu *m, int x, int y, UiRect b) { (void)m; (void)x; (void)y; (void)b; }
+void ui_menu_close(UiMenu *m) { m->open = 0; }
+UiRect ui_menu_bounds(const UiMenu *m) { (void)m; UiRect r = {0, 0, 0, 0}; return r; }
+int ui_menu_press(UiMenu *m, int x, int y) { (void)m; (void)x; (void)y; return 0; }
+int ui_menu_release(UiMenu *m, int x, int y, unsigned b, int *id) { (void)m; (void)x; (void)y; (void)b; (void)id; return 0; }
+int ui_menu_hover(UiMenu *m, int x, int y) { (void)m; (void)x; (void)y; return 0; }
+int ui_menu_key(UiMenu *m, const KeyEvent *k, int *id) { (void)m; (void)k; (void)id; return 0; }
+void ui_menu_draw(const UiMenu *m) { (void)m; }
+Window *wm_top(void) { return 0; }
 void ui_scroll_draw(UiRect t, UiScroll *s) { s->track = t; }
 int ui_scroll_press(UiScroll *s, int x, int y) { (void)s; (void)x; (void)y; return 0; }
 int ui_scroll_drag(UiScroll *s, int x, int y, unsigned b) { (void)s; (void)x; (void)y; (void)b; return 0; }

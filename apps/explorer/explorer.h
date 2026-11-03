@@ -100,7 +100,7 @@ typedef struct
 
 #define PLACE_MAX (VFS_MAX_VOLUMES + 1) /* sidebar entries: This PC and the drives */
 
-/* ---- right-click menu: a small panel drawn inside the window ---- */
+/* ---- right-click menu: a HarisUI UiMenu (ui.h) drawn inside the window; these are the ids of its items ---- */
 enum
 {
     M_OPEN,
@@ -116,21 +116,8 @@ enum
     M_SORT_SIZE,
     M_SORT_TYPE,
     M_SORT_ASC,
-    M_SORT_DESC,
-    M_SEP /* a divider line, not selectable */
+    M_SORT_DESC
 };
-#define MENU_MAX 8
-typedef struct
-{
-    int open;
-    int kind; /* 0 = folder menu, 1 = entry menu, 2 = sort menu (check marks) */
-    int x, y;
-    int count;
-    int items[MENU_MAX];
-    int hover; /* index into items, -1 = none */
-    int press_on; /* the pointer is on that item right now */
-    int press; /* item the left button is held down on (it runs on release), -1 = none */
-} Menu;
 
 /* ---- shared state (explorer_state.c) ---------------------------- */
 extern Window *EX_WIN;
@@ -163,7 +150,7 @@ extern int EX_CLIP_CUT;            /* 1 = it moves on Paste, 0 = a copy is made 
 extern int EX_RENAME_ID;           /* node being renamed in its row (EX_WIN->edits[0] holds the text), -1 = none */
 extern int EX_ADDR_EDIT;           /* 1 = the path bar is a text field (EX_WIN->edits[0] holds the path) */
 extern int EX_HOVER_CRUMB;         /* node of the path bar name under the pointer, -1 = none */
-extern Menu EX_MENU;
+extern UiMenu EX_MENU;
 
 /* ---- explorer_util.c -------------------------------------------- */
 int ex_lower(int c);
@@ -222,9 +209,6 @@ int ex_lock_dialog_pending(void);
 /* ---- explorer_menu.c -------------------------------------------- */
 void ex_menu_open(int x, int y, int kind);
 void ex_menu_run(int item);
-void ex_menu_step(int dir);
-int ex_menu_hit(int x, int y);
-void ex_menu_draw(const UiTheme *t);
 
 /* ---- explorer_toolbar.c ----------------------------------------- */
 void ex_toolbar_create(Window *win, int content_w);

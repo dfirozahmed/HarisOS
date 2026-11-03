@@ -32,4 +32,4 @@ int EX_CLIP_CUT;
 int EX_RENAME_ID = -1;
 int EX_ADDR_EDIT;
 int EX_HOVER_CRUMB = -1;
-Menu EX_MENU;
+UiMenu EX_MENU;

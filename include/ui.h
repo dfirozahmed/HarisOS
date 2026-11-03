@@ -243,6 +243,65 @@ int ui_scroll_press(UiScroll *s, int x, int y); /* left button went down: 1 if i
 int ui_scroll_drag(UiScroll *s, int x, int y, unsigned buttons); /* 1 if pos changed or the drag ended: redraw */
 int ui_scroll_hover(UiScroll *s, int x, int y); /* 1 if the look changed: redraw the track */
 
+/* ---- pop-up menu (right-click menu, drop-down) ---------------------
+ *
+ * A small panel the app draws inside its own window, over its content (call ui_menu_draw last in the draw function).
+ *
+ *   UiMenu menu = {0};                                           // once; ui_menu_clear() also resets it
+ *   ui_menu_clear(&menu);                                        // on each right click: build the items for what was clicked
+ *   ui_menu_add(&menu, ID_COPY, "Copy", "Ctrl+C", has_sel ? 0 : UI_MENU_DISABLED);
+ *   ui_menu_separator(&menu);
+ *   ui_menu_add(&menu, ID_DELETE, "Delete", "Del", UI_MENU_DANGER);
+ *   ui_menu_open(&menu, x, y, wm_content(w));                    // kept inside that rectangle
+ *   wm_add_damage(ui_menu_bounds(&menu));                        // the area to draw again (also when it closes)
+ *
+ * Feed it input while menu.open (it swallows every click and key then):
+ *   on press : ui_menu_press(&menu, x, y)             0 = the click was outside and closed the menu (the app usually ignores that click)
+ *   on drag  : ui_menu_release(&menu, x, y, buttons, &id)   called while the button is held and once on release;
+ *                                                     2 = item `id` was chosen (menu closed), 1 = look changed, 0 = nothing
+ *   on hover : ui_menu_hover(&menu, x, y)             1 = highlight moved
+ *   on key   : ui_menu_key(&menu, &key, &id)          Up/Down/Home/End move, Enter chooses (2), Esc closes (1)
+ * An item runs when the button is released on the item it was pressed on, as in the toolbar buttons. Separators and disabled
+ * items are skipped by the keys and ignore the mouse. A leading, doubled or trailing separator is dropped. */
+#define UI_MENU_MAX 16
+#define UI_MENU_DISABLED 1 /* shown dim, cannot be chosen */
+#define UI_MENU_CHECKED 2  /* a check mark before the label (every label then makes room for it) */
+#define UI_MENU_DANGER 4   /* red label, for Delete */
+typedef struct
+{
+    int id;            /* what ui_menu_release / ui_menu_key report; yours to choose (>= 0) */
+    const char *label; /* not copied: a literal or a string that outlives the menu; NULL = separator */
+    const char *hint;  /* shortcut text at the right edge, may be NULL */
+    int flags;         /* UI_MENU_* */
+} UiMenuItem;
+
+typedef struct
+{
+    int open;
+    int x, y, w, h; /* where it is, from ui_menu_open */
+    int count;
+    UiMenuItem items[UI_MENU_MAX];
+    int hover;    /* highlighted item (an index), -1 = none */
+    int press;    /* item the left button is held on, -1 = none */
+    int press_on; /* the pointer is still on that item */
+    int checks;   /* some item is checked: labels are indented */
+} UiMenu;
+
+void ui_menu_clear(UiMenu *m);                                  /* no items, closed */
+int ui_menu_add(UiMenu *m, int id, const char *label, const char *hint, int flags); /* 0, or -1 when full */
+int ui_menu_separator(UiMenu *m);                               /* 0, or -1 when full (nothing to separate yet: 0, nothing added) */
+void ui_menu_open(UiMenu *m, int x, int y, UiRect bounds);      /* opens at (x, y), moved to stay inside bounds; no items = stays closed */
+void ui_menu_close(UiMenu *m);
+UiRect ui_menu_rect(const UiMenu *m);                           /* the panel */
+UiRect ui_menu_bounds(const UiMenu *m);                         /* the panel with its shadow: what to mark for redraw */
+UiRect ui_menu_item_rect(const UiMenu *m, int index);
+int ui_menu_hit(const UiMenu *m, int x, int y);                 /* the selectable item under (x, y), -1 = none */
+int ui_menu_press(UiMenu *m, int x, int y);
+int ui_menu_release(UiMenu *m, int x, int y, unsigned buttons, int *id);
+int ui_menu_hover(UiMenu *m, int x, int y);                     /* x < 0: the pointer left the window */
+int ui_menu_key(UiMenu *m, const KeyEvent *k, int *id);
+void ui_menu_draw(const UiMenu *m);                             /* nothing while closed */
+
 /* ---- single-line text input ----------------------------------
  *
  *   UiEdit e = {0};                       // empty

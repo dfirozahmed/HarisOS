@@ -54,13 +54,9 @@ int ex_press(Window *w, int x, int y)
     EX_TIP_BTN = -1; /* a click hides the tooltip until the pointer moves again */
     EX_TIP_SHOWN = 0;
     int tip_marked = tip_was_shown && ex_tip_mark(w, 0); /* its box is drawn again (the whole window if not known) */
-    if (EX_MENU.open) /* a click on an item runs it; a click anywhere else only closes the menu */
+    if (EX_MENU.open) /* a click on an item shows it pressed and it runs when the button is released (ex_drag); a click anywhere else only closes the menu */
     {
-        int hit = ex_menu_hit(x, y);
-        if (hit >= 0)
-            EX_MENU.press = hit, EX_MENU.press_on = 1; /* shown pressed; it runs when the button is released (ex_drag) */
-        else
-            EX_MENU.open = 0;
+        ui_menu_press(&EX_MENU, x, y);
         return 1;
     }
     if (EX_RENAME_ID >= 0)
@@ -176,20 +172,11 @@ int ex_drag(Window *w, int x, int y, unsigned buttons)
 {
     if (EX_MENU.open && EX_MENU.press >= 0)
     {
-        int hit = ex_menu_hit(x, y);
-        int on = hit == EX_MENU.press; /* the pointer is still on the pressed item */
-        if (buttons & 1)
-        {
-            int changed = on != EX_MENU.press_on;
-            EX_MENU.press_on = on;
-            return changed; /* pressed look follows the pointer on and off the item */
-        }
-        int item = on ? hit : -1;
-        EX_MENU.press = -1;
-        EX_MENU.press_on = 0;
-        if (item >= 0)
-            ex_menu_run(EX_MENU.items[item]);
-        return 1;
+        int id = -1;
+        int r = ui_menu_release(&EX_MENU, x, y, buttons, &id); /* 2 = released on the item it was pressed on */
+        if (r == 2)
+            ex_menu_run(id);
+        return r != 0;
     }
     if (EX_SB.dragging) /* the scrollbar's thumb is held: the list follows the pointer */
     {
@@ -306,7 +293,7 @@ int ex_hover(Window *w, int x, int y)
     }
     EX_HOVER_ROW = EX_HOVER_PLACE = -1;
     if (EX_MENU.open)
-        EX_MENU.hover = x < 0 ? -1 : ex_menu_hit(x, y);
+        ui_menu_hover(&EX_MENU, x, y);
     else if (x >= 0)
     {
         Layout l = ex_layout(wm_content(w));
@@ -430,14 +417,9 @@ void ex_key(Window *w, const KeyEvent *k)
     }
     if (EX_MENU.open)
     {
-        if (k->key == KEY_UP)
-            ex_menu_step(-1);
-        else if (k->key == KEY_DOWN)
-            ex_menu_step(1);
-        else if (k->key == KEY_ENTER && EX_MENU.hover >= 0)
-            ex_menu_run(EX_MENU.items[EX_MENU.hover]);
-        else if (k->key == KEY_ESC)
-            EX_MENU.open = 0;
+        int id = -1;
+        if (ui_menu_key(&EX_MENU, k, &id) == 2) /* Enter on an item */
+            ex_menu_run(id);
         return;
     }
 

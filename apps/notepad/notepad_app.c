@@ -39,6 +39,8 @@ static int NP_LEN;
 static int NP_CUR;     /* caret: 0..NP_LEN */
 static int NP_DESIRED; /* column the Up / Down keys try to keep */
 static int NP_TOP;     /* first visible line */
+static UiMenu NP_MENU; /* the right-click menu (Undo / Cut / Copy / Paste / Delete / Select all) */
+enum { NPM_UNDO, NPM_CUT, NPM_COPY, NPM_PASTE, NPM_DELETE, NPM_SELALL }; /* its item ids */
 static UiScroll NP_SB; /* the text's scrollbar: total and page are set at each draw, pos is NP_TOP (synced before each use) */
 static int NP_HSCROLL; /* pixels the text is scrolled to the left */
 static int NP_ROWS = 1; /* visible rows at the last draw (for PageUp / PageDown) */
@@ -692,7 +694,6 @@ static void bar_draw(UiRect body)
 
 static void np_draw(Window *w, UiRect body)
 {
-    (void)w;
     const UiTheme *t = ui_theme();
     const Font *f = np_font();
     int lh = np_line_h();
@@ -794,6 +795,9 @@ static void np_draw(Window *w, UiRect body)
     ui_text_in_color(status_rect(body), st, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
     if (NP_NOTE[0])
         ui_text_in_color(status_rect(body), NP_NOTE, UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
+    if (NP_MENU.open && w != wm_top())
+        ui_menu_close(&NP_MENU); /* focus moved elsewhere (another window or a dialog) */
+    ui_menu_draw(&NP_MENU);
 }
 
 /* ---- input ---- */
@@ -2232,11 +2236,23 @@ static void cmd_find(void)
 
 static void on_find(UiButton *b, void *user) { (void)b; (void)user; cmd_find(); }
 
+static void np_menu_run(Window *w, int id); /* (below) */
+
 static void np_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed)
     {
         wm_key_partial(); /* a release changes nothing: no redraw at all */
+        return;
+    }
+    if (NP_MENU.open) /* the menu has the keyboard: Up / Down / Enter / Esc, every other key is ignored */
+    {
+        int id = -1;
+        wm_add_damage(ui_menu_bounds(&NP_MENU));
+        int r = ui_menu_key(&NP_MENU, k, &id);
+        wm_key_partial();
+        if (r == 2)
+            np_menu_run(w, id);
         return;
     }
     NP_NOTE = ""; /* a message stays until the next key */
@@ -2432,8 +2448,98 @@ static int pos_at(UiRect in, int x, int y)
     return pos > row_last_pos(&r) ? row_last_pos(&r) : pos; /* not past the end of a wrapped row: that is the next row */
 }
 
+/* A menu command is the same as its keyboard shortcut: the key goes through np_key, which does the editing, the redraw marks, the
+ * title bar's star and the undo bookkeeping. */
+static void np_menu_run(Window *w, int id)
+{
+    KeyEvent k = {0, 0, 1, KMOD_CTRL};
+    switch (id)
+    {
+    case NPM_UNDO:
+        k.key = 'z';
+        break;
+    case NPM_CUT:
+        k.key = 'x';
+        break;
+    case NPM_COPY:
+        k.key = 'c';
+        break;
+    case NPM_PASTE:
+        k.key = 'v';
+        break;
+    case NPM_SELALL:
+        k.key = 'a';
+        break;
+    case NPM_DELETE:
+        k.key = KEY_DELETE;
+        k.mods = 0;
+        break;
+    default:
+        return;
+    }
+    np_key(w, &k);
+}
+
+/* right click in the text: the caret goes to the click unless it is inside the selection, then the menu opens there */
+static int np_rpress(Window *w, int x, int y)
+{
+    UiRect body = wm_content(w);
+    UiRect ta = text_area(body);
+    int was_open = NP_MENU.open;
+    if (was_open)
+    {
+        wm_add_damage(ui_menu_bounds(&NP_MENU));
+        ui_menu_close(&NP_MENU);
+    }
+    if (!ui_contains(ta, x, y))
+        return was_open ? 2 : 0; /* toolbar, status bar: no menu */
+    int left_bar = NP_FOCUS != 0; /* the keyboard comes back to the text: the find bar loses its caret */
+    NP_FOCUS = 0;
+
+    UiRect in = ui_inset(ta, NP_PAD);
+    set_geometry(body);
+    int a, b, has_sel = sel_range(&a, &b);
+    int pos = pos_at(in, x, y);
+    if (ui_contains(in, x, y) && !(has_sel && pos >= a && pos <= b))
+    {
+        int old_lo, old_hi;
+        sel_lines(&old_lo, &old_hi);
+        int old_lines = row_count();
+        int old_top = NP_TOP, old_hscroll = NP_HSCROLL;
+        NP_CUR = NP_ANCHOR = pos;
+        NP_LASTKIND = NP_KIND_NONE; /* a click ends a typing run */
+        NP_DESIRED = col_in_row();
+        NP_FOLLOW = 1;
+        ui_caret_restart();
+        NP_BLINK = 1;
+        mark_changed(w, old_lo, old_hi, old_lines, old_top, old_hscroll, 0);
+        has_sel = 0;
+    }
+
+    int n;
+    const char *clip = ui_clipboard_text(&n);
+    ui_menu_clear(&NP_MENU);
+    ui_menu_add(&NP_MENU, NPM_UNDO, "Undo", "Ctrl+Z", NP_UPOS > 0 ? 0 : UI_MENU_DISABLED);
+    ui_menu_separator(&NP_MENU);
+    ui_menu_add(&NP_MENU, NPM_CUT, "Cut", "Ctrl+X", has_sel ? 0 : UI_MENU_DISABLED);
+    ui_menu_add(&NP_MENU, NPM_COPY, "Copy", "Ctrl+C", has_sel ? 0 : UI_MENU_DISABLED);
+    ui_menu_add(&NP_MENU, NPM_PASTE, "Paste", "Ctrl+V", filter_clip(clip, n, 0, NP_LIMIT) > 0 ? 0 : UI_MENU_DISABLED);
+    ui_menu_add(&NP_MENU, NPM_DELETE, "Delete", "Del", has_sel ? 0 : UI_MENU_DISABLED);
+    ui_menu_separator(&NP_MENU);
+    ui_menu_add(&NP_MENU, NPM_SELALL, "Select all", "Ctrl+A", NP_LEN > 0 ? 0 : UI_MENU_DISABLED);
+    ui_menu_open(&NP_MENU, x, y, body);
+    wm_add_damage(ui_menu_bounds(&NP_MENU));
+    return left_bar ? 1 : 2;
+}
+
 static int np_press(Window *w, int x, int y)
 {
+    if (NP_MENU.open) /* a click on an item shows it pressed and it runs when the button is released (np_drag); a click anywhere else only closes the menu */
+    {
+        wm_add_damage(ui_menu_bounds(&NP_MENU));
+        ui_menu_press(&NP_MENU, x, y);
+        return 2;
+    }
     int on_bar = bar_press(w, x, y);
     if (on_bar)
         return on_bar;
@@ -2472,6 +2578,15 @@ static int np_press(Window *w, int x, int y)
 
 static int np_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (NP_MENU.open && NP_MENU.press >= 0) /* the button is held on a menu item: follows the pointer, runs on release */
+    {
+        int id = -1;
+        wm_add_damage(ui_menu_bounds(&NP_MENU));
+        int r = ui_menu_release(&NP_MENU, x, y, buttons, &id);
+        if (r == 2)
+            np_menu_run(w, id);
+        return r ? 2 : 0;
+    }
     if (NP_SB.dragging) /* the scrollbar's thumb is held: the text follows the pointer */
     {
         UiRect body = wm_content(w);
@@ -2524,6 +2639,11 @@ static int np_drag(Window *w, int x, int y, unsigned buttons)
 
 static int np_wheel(Window *w, int steps)
 {
+    if (NP_MENU.open)
+    {
+        wm_add_damage(ui_menu_bounds(&NP_MENU));
+        ui_menu_close(&NP_MENU);
+    }
     set_geometry(wm_content(w));
     int top = NP_TOP + steps * 3;
     if (top > row_count() - 1)
@@ -2541,6 +2661,13 @@ static int np_wheel(Window *w, int steps)
 /* the scrollbar widens while the pointer is over it */
 static int np_hover(Window *w, int x, int y)
 {
+    if (NP_MENU.open)
+    {
+        if (!ui_menu_hover(&NP_MENU, x, y))
+            return 0;
+        wm_add_damage(ui_menu_bounds(&NP_MENU));
+        return 2;
+    }
     NP_SB.track = sb_track(text_area(wm_content(w)));
     if (!ui_scroll_hover(&NP_SB, x, y))
         return 0;
@@ -2623,6 +2750,8 @@ static void notepad_app_open(void)
     win->on_drag = np_drag;
     win->on_wheel = np_wheel;
     win->on_hover = np_hover;
+    win->on_rpress = np_rpress;
+    ui_menu_clear(&NP_MENU);
     win->on_tick = np_tick;
     win->on_close = np_close;
     win->on_close_request = np_close_request;

@@ -431,7 +431,7 @@ void ex_draw(Window *w, UiRect body)
     draw_status(&l, t);
     if (EX_MENU.open && w != wm_top())
         EX_MENU.open = 0; /* focus moved elsewhere (another window or a dialog) */
-    ex_menu_draw(t);
+    ui_menu_draw(&EX_MENU);
     if (EX_TIP_SHOWN && !EX_MENU.open)
         ex_tip_draw(w, body, t);
 }
