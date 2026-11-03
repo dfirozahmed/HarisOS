@@ -1,5 +1,6 @@
 /* Taskbar clock polling and caret blink updates. */
 #include "audio.h"
+#include "battery.h"
 #include "net.h"
 #include "desktop.h"
 #include "guiapp.h"
@@ -77,6 +78,31 @@ static int refresh_wifi(void)
     return taskbar_set_wifi(!st.present ? -1 : st.state);
 }
 
+/* The battery for the tray icon, read every 5 seconds (each read is a handful of byte transfers with the embedded controller). A machine whose controller
+ * layout is not known has no level: the icon stays plain. */
+static int refresh_battery(void)
+{
+    static unsigned long long next_ms;
+    static unsigned fallback;
+    if (!battery_supported())
+        return 0;
+    if (timer_ready())
+    {
+        unsigned long long now = timer_ms();
+        if (now < next_ms)
+            return 0;
+        next_ms = now + 5000;
+    }
+    else if (++fallback < 65536u)
+        return 0;
+    else
+        fallback = 0;
+    BatteryInfo b;
+    if (battery_read(&b) != 0 || !b.present)
+        return taskbar_set_battery(-1, 0);
+    return taskbar_set_battery(b.percent, b.charging);
+}
+
 /* Called on every main-loop pass: updates the taskbar clock and makes the text
  * caret blink. Only the taskbar or small text field is redrawn when needed. */
 int desktop_tick(void)
@@ -84,6 +110,7 @@ int desktop_tick(void)
     int clock_changed = refresh_taskbar_clock();
     clock_changed |= taskbar_set_volume(audio_volume());
     clock_changed |= refresh_wifi();
+    clock_changed |= refresh_battery();
     volmenu_tick(); /* the volume may have been changed by a program (SYS_AUDIO_VOLUME) */
     int flipped = ui_caret_update();
     int ticked = gui_app_poll(); /* windows of user programs that appeared or went away */

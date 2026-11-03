@@ -173,6 +173,7 @@ set(KERNEL_SOURCES
     kernel/drivers/gpu/amd_3d.c             # AMD GPU: 3D pipeline (M1..M3: rectangles drawn by shaders)
     kernel/drivers/gpu/amd_comp.c           # AMD GPU: compositor (M4: many draws in one submission)
     kernel/drivers/gpu/amd_bringup.c        # AMD GPU: finds the GPU on PCI and runs the checks
+    kernel/device/battery.c         # battery level from the ACPI embedded controller (one known machine)
     kernel/device/devmgr.c             # Device Manager list (PCI + input devices)
     kernel/net/nic.c                 # network: picks the card driver, forwards net_send / net_recv ...
     kernel/drivers/net/e1000.c               # network: Intel e1000 NIC driver (interrupt or polled), raw Ethernet frames

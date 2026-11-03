@@ -1,4 +1,5 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
+#include "battery.h"
 #include "blk.h"
 #include "bootinfo.h"
 #include "bootsplash.h"
@@ -198,6 +199,7 @@ void kernel_main(const BootInfo *info)
 
     splash_progress(8, "Reading system tables");
     acpi_init(info->acpi_rsdp); /* device tables: where the I2C touchpad is described */
+    battery_init(); /* the tray's battery level: only on the machine whose controller layout is known (battery.h) */
 
     splash_progress(15, "Setting up memory");
     int pmm_ok = (pmm_init(info) == 0);

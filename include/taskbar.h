@@ -62,7 +62,11 @@ int taskbar_volume_center(void);
  * a click on it opens the Wi-Fi app (desktop_input.c). */
 int taskbar_set_wifi(int state);
 int taskbar_wifi_at(int x, int y);
-int taskbar_wifi_state(void); /* the state last set (-1 .. 2) */ /* x of the middle of the speaker (the volume popup opens above it) */
+int taskbar_wifi_state(void); /* the state last set (-1 .. 2) */
+
+/* The battery shown by the tray icon: percent 0..100 and whether it is charging; percent -1 = unknown (the plain icon, no number). Returns 1 if
+ * it changed, so the taskbar must be redrawn. */
+int taskbar_set_battery(int percent, int charging); /* x of the middle of the speaker (the volume popup opens above it) */
 
 void taskbar_set_time(int hour, int minute, int day, int month, int year);
 

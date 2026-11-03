@@ -334,4 +334,8 @@ typedef enum
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons
  * (files, terminal, browser, logo) have their own colors; the others use `tint`. */
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint);
+
+/* The battery icon with its charge: the fill is `percent` (0..100) of the body, green, amber below 30 and red below 15; `charging` puts a bolt
+ * on it. percent < 0 = unknown: the plain icon with a full green body. */
+void ui_icon_battery(int cx, int cy, int size, int percent, int charging, UiRgb tint);
 #endif

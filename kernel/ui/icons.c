@@ -113,12 +113,36 @@ static void icon_volume(const Frame *f, GfxColor c)
     gfx_restore_clip(saved);
 }
 
-static void icon_battery(const Frame *f, GfxColor c)
+/* percent < 0: a full green body (the plain icon); else the fill is that part of the body, in a colour that says how much is left */
+static void icon_battery_level(const Frame *f, GfxColor c, int percent, int charging)
 {
     gfx_round_rect(px(f, 2), py(f, 12), pl(f, 38), pl(f, 24), pl(f, 6), f->s >= 30 ? 2 : 1, c);
-    rrect(f, 41, 20, 5, 8, 2, c);                     /* contact */
-    rrect(f, 7, 17, 28, 14, 3, gfx_rgb(84, 214, 140)); /* charge */
+    rrect(f, 41, 20, 5, 8, 2, c); /* contact */
+    GfxColor fill = percent < 0 || percent >= 30 ? gfx_rgb(84, 214, 140) : percent >= 15 ? gfx_rgb(246, 190, 70) : gfx_rgb(238, 90, 90);
+    int w = percent < 0 ? 28 : 28 * (percent > 100 ? 100 : percent) / 100;
+    if (percent > 0 && w < 3)
+        w = 3; /* a nearly empty battery still shows a sliver */
+    if (w > 0)
+        rrect(f, 7, 17, w, 14, 3, fill); /* charge */
+    if (charging) /* a bolt: two triangles, white with a dark edge so that it shows on the fill and on the empty body */
+    {
+        static const int top[6] = {28, 13, 17, 26, 25, 26};
+        static const int bottom[6] = {23, 22, 32, 22, 21, 36};
+        int p[6];
+        for (int pass = 0; pass < 2; pass++)
+        {
+            const int *s = pass ? bottom : top;
+            for (int i = 0; i < 3; i++)
+            {
+                p[2 * i] = q(f, s[2 * i]);
+                p[2 * i + 1] = qy(f, s[2 * i + 1]);
+            }
+            gfx_fill_poly_q(p, 3, gfx_rgb(255, 255, 255), 255);
+        }
+    }
 }
+
+static void icon_battery(const Frame *f, GfxColor c) { icon_battery_level(f, c, -1, 0); }
 
 static void icon_close(const Frame *f, GfxColor c)
 {
@@ -399,6 +423,17 @@ static void icon_usb(const Frame *f, GfxColor c)
     rrect(f, 32, 6, 8, 8, 1, c);
     int tip[6] = {q(f, 24), qy(f, 2), q(f, 19), qy(f, 10), q(f, 29), qy(f, 10)};
     gfx_fill_poly_q(tip, 3, c, 255);
+}
+
+void ui_icon_battery(int cx, int cy, int size, int percent, int charging, UiRgb tint)
+{
+    if (size <= 0 || !gfx_ready())
+        return;
+    Frame f = {cx - size / 2, cy - size / 2, size};
+    GfxClip previous_clip = gfx_get_clip();
+    gfx_clip_intersect(f.ox, f.oy, size, size);
+    icon_battery_level(&f, ui_color(tint), percent, charging);
+    gfx_restore_clip(previous_clip);
 }
 
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)

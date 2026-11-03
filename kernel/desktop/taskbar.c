@@ -10,6 +10,7 @@
 
 static TaskbarApp APPS[MAX_APPS] = {};
 static int APP_COUNT = 4;
+static int BATTERY = -1, BAT_CHARGING; /* see taskbar_set_battery */
 static int WIFI = -1;        /* see taskbar_set_wifi */
 static int WIFI_X, WIFI_Y, WIFI_W, WIFI_H; /* the Wi-Fi icon's area, set by the last draw */
 static int VOLUME = -1;      /* percent, -1 = none */
@@ -139,6 +140,16 @@ int taskbar_set_wifi(int state)
     int v = state < 0 || state > 2 ? -1 : state;
     int changed = v != WIFI;
     WIFI = v;
+    return changed;
+}
+
+int taskbar_set_battery(int percent, int charging)
+{
+    int p = percent < 0 ? -1 : percent > 100 ? 100 : percent;
+    int c = p >= 0 && charging;
+    int changed = p != BATTERY || c != BAT_CHARGING;
+    BATTERY = p;
+    BAT_CHARGING = c;
     return changed;
 }
 
@@ -318,7 +329,24 @@ void taskbar_draw(void)
     ui_text_in(ui_rect(rx - cw, cy, cw, 18), dbuf, UI_TEXT_SMALL, UI_ALIGN_RIGHT);
 
     /* tray: wifi, volume, battery in one rounded pill */
-    int tray_w = 14 + 20 + 14 + 22 + 14 + 26 + 14;
+    char bat_txt[5];
+    int bat_w = 0;
+    if (BATTERY >= 0) /* the number beside the battery: "87%" */
+    {
+        int n = 0;
+        if (BATTERY >= 100)
+            bat_txt[n++] = '1', bat_txt[n++] = '0', bat_txt[n++] = '0';
+        else
+        {
+            if (BATTERY >= 10)
+                bat_txt[n++] = (char)('0' + BATTERY / 10);
+            bat_txt[n++] = (char)('0' + BATTERY % 10);
+        }
+        bat_txt[n++] = '%';
+        bat_txt[n] = 0;
+        bat_w = ui_text_width(bat_txt, UI_TEXT_SMALL) + 6;
+    }
+    int tray_w = 14 + 20 + 14 + 22 + 14 + 26 + 14 + bat_w;
     int tx = rx - cw - 14 - tray_w;
     if (tx > x)
     {
@@ -345,6 +373,8 @@ void taskbar_draw(void)
                 gfx_fill_round_rect(bx, by, 22 * VOLUME / 100 > 2 ? 22 * VOLUME / 100 : 2, 3, 1, ui_color(t->accent));
         }
         ix += 11 + 14 + 13;
-        ui_icon(UI_ICON_BATTERY, ix, cy, 26, t->text);
+        ui_icon_battery(ix, cy, 26, BATTERY, BAT_CHARGING, t->text);
+        if (bat_w)
+            ui_text_in(ui_rect(ix + 13 + 4, cy - 10, bat_w, 20), bat_txt, UI_TEXT_SMALL, UI_ALIGN_LEFT);
     }
 }
