@@ -43,6 +43,7 @@ try {
         @('I/O APIC tests', 'tests/run_ioapic_tests.sh'),
         @('SMP start-up tests', 'tests/run_smp_tests.sh'),
         @('HD Audio codec tests', 'tests/run_hda_tests.sh'),
+        @('WAV file tests', 'tests/run_wav_tests.sh'),
         @('Realtek RTL8168 driver tests', 'tests/run_rtl8168_tests.sh'),
         @('Realtek RTL8821CE identification tests', 'tests/run_rtl8821ce_tests.sh'),
         @('WPA2 crypto and handshake tests', 'tests/run_wpa_tests.sh'),

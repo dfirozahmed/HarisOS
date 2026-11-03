@@ -162,6 +162,10 @@
  *                  text (NUL-terminated; see net_wifi_scan_line in net.h): line 0 is a summary, lines 1 .. n one network each, the last a
  *                  count of frames per channel. Returns the length of the line, or -1 (no Wi-Fi adapter or no scan, no such line, bad buffer).
  *   SYS_CLOCK (61) no arguments: the milliseconds since the kernel started (it keeps counting; 0 if the timer is not running).
+ *   SYS_AUDIO_PLAY (63) rdi = pointer to a WAV file image in memory, rsi = its length (1 .. SYS_AUDIO_MAX): plays it on the sound hardware (PCM, 8 or
+ *                  16 bit, mono or stereo, 8000 .. 96000 Hz) and returns when it has finished. 0, or negative: -1 for a bad pointer or
+ *                  length, -101 .. -104 the file cannot be played (not WAV, not PCM, a format not supported, no samples), -110 no sound
+ *                  hardware, -111 busy or the stream stopped, -112 too long or no memory.
  *   SYS_TIME (62)  no arguments: the wall clock as Unix time, seconds since 1970-01-01 00:00:00, from the real-time clock (read as UTC).
  *                  -1 if there is no clock.
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
@@ -253,6 +257,8 @@
 #define SYS_WIFISCAN 60
 #define SYS_CLOCK 61
 #define SYS_TIME 62
+#define SYS_AUDIO_PLAY 63
+#define SYS_AUDIO_MAX (8u << 20) /* the largest WAV image SYS_AUDIO_PLAY takes */
 
 /* SYS_SOCKET types */
 #define SYS_SOCK_STREAM 1 /* TCP */

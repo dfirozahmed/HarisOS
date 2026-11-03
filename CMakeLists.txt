@@ -125,6 +125,7 @@ set(KERNEL_SOURCES
     kernel/syscall/sys_proc.c       # system calls: spawn, wait, fork, exec, dup2, signals, process list, brk
     kernel/syscall/sys_ipc.c        # system calls: shared memory, message queues, semaphores, mutexes, condition variables
     kernel/syscall/sys_net.c        # system calls: sockets
+    kernel/syscall/sys_audio.c      # system calls: sound
     kernel/syscall/sys_time.c       # system calls: clock and wall time
     kernel/syscall/sys_gui.c        # system calls: GUI windows
     kernel/userio/console.c           # console: character grid, cursor and line editor for a program's window (host-tested)
@@ -193,6 +194,8 @@ set(KERNEL_SOURCES
     kernel/drivers/net/rtl8821ce/rtl8821ce_link.c           # Realtek RTL8821CE Wi-Fi: keeping the connection, background start
     kernel/drivers/net/rtl8821ce/rtl8821ce_select.c         # Realtek RTL8821CE Wi-Fi: choosing a network at run time
     kernel/net/wpa.c                 # network: WPA2 crypto (SHA-1, HMAC, PBKDF2, AES, the 4-way handshake; host-tested)
+    kernel/audio/wav.c                       # sound: WAV file header and conversion to 48 kHz stereo (host-tested)
+    kernel/audio/audio.c                     # sound: audio_play_wav, the part programs use
     kernel/drivers/audio/hda/hda_ctrl.c      # sound: Intel HD Audio controller (reset, CORB / RIRB, output stream; polled)
     kernel/drivers/audio/hda/hda_codec.c     # sound: HD Audio codec graph (output paths pin <- DAC; host-tested)
     kernel/drivers/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
@@ -386,7 +389,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan gstest)
+set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan gstest play)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

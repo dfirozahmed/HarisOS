@@ -761,6 +761,29 @@ int rtc_read(RtcTime *out)
     *out = RTC;
     return 0;
 }
+/* sound: SYS_AUDIO_PLAY copies the image into pages from the page allocator and hands it to audio_play_wav */
+#include "audio.h"
+#include <stdlib.h>
+static int AUDIO_CALLS, AUDIO_RESULT;
+static unsigned long AUDIO_LEN;
+static unsigned char AUDIO_COPY[64];
+static int PMM_FAIL;
+unsigned long long pmm_alloc_contiguous_tag(unsigned long long count, PmmTag tag)
+{
+    (void)tag;
+    if (PMM_FAIL)
+        return 0;
+    void *raw = malloc((size_t)count * 4096 + 4096);
+    return ((unsigned long long)(size_t)raw + 4095) & ~4095ULL; /* (leaks: the test is short) */
+}
+void pmm_free_contiguous(unsigned long long phys, unsigned long long count) { (void)phys; (void)count; }
+int audio_play_wav(const unsigned char *file, unsigned long len)
+{
+    AUDIO_CALLS++;
+    AUDIO_LEN = len;
+    memcpy(AUDIO_COPY, file, len < sizeof AUDIO_COPY ? len : sizeof AUDIO_COPY);
+    return AUDIO_RESULT;
+}
 /* the Wi-Fi scan result the kernel would hold
 : a summary and two networks */
 static int WIFI_SCAN = 1;
@@ -2382,6 +2405,34 @@ int main(void)
         RTC_OK = 0;
         CHECK(call(SYS_TIME, 0, 0, 0) == -1);
         RTC_OK = 1;
+    }
+
+    /* ================= SYS_AUDIO_PLAY ================= */
+    reset();
+    {
+        static char wav[40] = "RIFFxxxxWAVEfmt data";
+        AUDIO_CALLS = 0;
+        AUDIO_RESULT = 0;
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == 0);
+        CHECK(AUDIO_CALLS == 1 && AUDIO_LEN == sizeof wav && memcmp(AUDIO_COPY, wav, 20) == 0); /* the player got a copy of the image */
+        CHECK(OK_VA == (ull)(size_t)wav && OK_LEN == sizeof wav && OK_WRITE == 0);               /* read access to the whole range was checked */
+        AUDIO_RESULT = -3; /* WAV_ERR_PARAMS */
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == -103);
+        AUDIO_RESULT = -10; /* no sound hardware */
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == -110);
+        AUDIO_RESULT = -11; /* busy */
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == -111);
+        AUDIO_RESULT = 0;
+        AUDIO_CALLS = 0;
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, 0, 0) == -1);                 /* nothing to play */
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, SYS_AUDIO_MAX + 1, 0) == -1); /* too long */
+        USER_OK = 0;
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == -1);        /* not readable user memory */
+        USER_OK = 1;
+        PMM_FAIL = 1;
+        CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == -1);        /* no memory for the copy */
+        PMM_FAIL = 0;
+        CHECK(AUDIO_CALLS == 0);
     }
 
     /* ================= SYS_WIFISCAN ================= */

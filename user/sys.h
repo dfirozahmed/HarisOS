@@ -69,6 +69,7 @@
 #define SYS_WIFISCAN 60
 #define SYS_CLOCK 61
 #define SYS_TIME 62
+#define SYS_AUDIO_PLAY 63
 #define SYS_SOCK_STREAM 1
 #define SYS_GUI_DESTROY 0
 #define SYS_GUI_SET_TITLE 1
@@ -219,6 +220,8 @@ static inline long long sys_accept(int fd, SockAddr *addr) { return syscall3(SYS
 /* line `index` of the last Wi-Fi scan into buf[cap] (cap 2 .. 256): its length, or -1 (no scan, no such line) */
 /* milliseconds since the kernel started */
 static inline long long sys_clock(void) { return syscall3(SYS_CLOCK, 0, 0, 0); }
+/* play a WAV file image (PCM 8/16 bit, mono/stereo, 8-96 kHz, at most 8 MiB); returns when done. 0, or a negative error (see include/syscall.h) */
+static inline long long sys_audio_play(const void *wav, usize len) { return syscall3(SYS_AUDIO_PLAY, (long long)(usize)wav, (long long)len, 0); }
 /* Unix time in seconds (the real-time clock read as UTC), or -1 */
 static inline long long sys_time(void) { return syscall3(SYS_TIME, 0, 0, 0); }
 static inline long long sys_wifiscan(unsigned index, char *buf, usize cap) { return syscall3(SYS_WIFISCAN, index, (long long)(usize)buf, (long long)cap); }

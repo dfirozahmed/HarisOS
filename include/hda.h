@@ -29,6 +29,11 @@ int hda_ready(void);
  * 0 = played, <0 = no output / the stream did not move. Blocks the caller. */
 int hda_play_tone(unsigned hz, unsigned ms);
 
+/* Plays `frames` frames of 48 kHz 16-bit stereo (left, right, left, ...) on every output. At most HDA_MAX_FRAMES
+ * (the sound is copied to one DMA buffer). Blocks the caller; a user thread sleeps between looks at the stream. */
+#define HDA_MAX_FRAMES (48000ul * 90)
+int hda_play_pcm(const short *stereo, unsigned long frames);
+
 /* Controllers found (0..HDA_MAX_CTRL). For each: PCI location (bus, dev, fn), whether it works, and one line. */
 int hda_count(void);
 int hda_status(int index, unsigned char loc[3], int *working, char *buf, int cap);

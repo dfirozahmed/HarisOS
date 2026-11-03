@@ -12,9 +12,12 @@
 #include "hda.h"
 #include "hda_internal.h"
 #include "io.h"
+#include "mem.h"
 #include "pci.h"
 #include "pmm.h"
 #include "serial.h"
+#include "process.h"
+#include "task.h"
 #include "timer.h"
 
 #define R_GCAP 0x00      /* 16: output streams 15:12, input streams 11:8, bidirectional 7:3, 64-bit 0 */
@@ -78,6 +81,8 @@ typedef struct
     int has_codec;   /* codec below holds the one with outputs */
     HdaCodec codec;
     int working;
+    int busy;        /* a sound is playing: there is one stream */
+    unsigned base_len; /* length of status without the last playback result */
     char status[96];
 } HdaCtrl;
 
@@ -402,6 +407,9 @@ static void bring_up(HdaCtrl *h, const PciDevice *pd)
         }
     }
     h->working = h->has_codec && h->oss > 0;
+    h->base_len = 0;
+    while (h->status[h->base_len])
+        h->base_len++;
 }
 
 void hda_init(void)
@@ -445,33 +453,13 @@ int hda_status(int index, unsigned char loc[3], int *working, char *buf, int cap
 
 /* ---- playback ---- */
 
-int hda_play_tone(unsigned hz, unsigned ms)
-{
-    if (PRIMARY < 0 || hz == 0 || hz >= RATE / 2 || ms == 0 || ms > 10000)
-        return -1;
-    HdaCtrl *h = &CTRL[PRIMARY];
-    u32 sd = R_SD0 + 0x20 * h->iss; /* the first output stream */
+#define SILENCE_BYTES (RATE / 10u * 4u) /* 100 ms of silence after the sound: the stream runs on through it, so the end is not cut */
 
-    /* one buffer: the tone, then 100 ms of silence, in two halves (the BDL needs at least two entries) */
-    u32 tone = RATE / 1000u * ms * 4u, total = tone + RATE / 10u * 4u;
-    u32 half = (total / 2u + 127u) & ~127u;
-    total = 2u * half;
-    unsigned pages = (total + PMM_PAGE_SIZE - 1u) / PMM_PAGE_SIZE;
-    u64 buf = pmm_alloc_contiguous_tag(pages, PMM_TAG_OTHER);
-    if (!buf)
-        return -1;
-    short *s = (short *)buf;
-    unsigned phase = 0, step = (unsigned)(((u64)hz << 32) / RATE);
-    for (u32 i = 0; i < total / 4u; i++)
-    {
-        int v = 0;
-        if (i * 4u < tone)
-        {
-            v = hda_sine_q15(phase) / 4; /* a quarter of full scale: -12 dB */
-            phase += step;
-        }
-        s[2 * i] = s[2 * i + 1] = (short)v;
-    }
+/* Plays total bytes of 48 kHz 16-bit stereo at buf (page aligned, `sound` bytes of sound, then silence) once. */
+static int play_buffer(HdaCtrl *h, u64 buf, u32 sound, u32 total)
+{
+    u32 sd = R_SD0 + 0x20 * h->iss; /* the first output stream */
+    u32 half = total / 2u;          /* total is a multiple of 256: two equal 128-byte aligned halves */
     volatile u32 *bdl = (volatile u32 *)(h->page + PG_BDL);
     for (int e = 0; e < 2; e++)
     {
@@ -502,11 +490,14 @@ int hda_play_tone(unsigned hz, unsigned ms)
     hda_codec_setup_outputs(&h->codec, STREAM_TAG, fmt, verb, h);
     wr8(h, sd + SD_CTL, CTL_RUN);
 
-    /* follow LPIB until the stream is inside the silence; give up if it stops moving for half a second */
+    /* follow LPIB until the stream is inside the silence; give up if it stops moving for half a second.
+     * A user thread sleeps between looks (other threads run); the boot code on the main loop cannot sleep and polls. */
     u32 last = rd32(h, sd + SD_LPIB), now = last, played = 0;
     int ok = 1;
-    while (played < tone + RATE / 20u * 4u)
+    while (played < sound + RATE / 20u * 4u)
     {
+        if (process_current())
+            task_sleep_ms(5);
         if (!HDA_WAIT((now = rd32(h, sd + SD_LPIB)) != last, 500))
         {
             ok = 0;
@@ -519,13 +510,72 @@ int hda_play_tone(unsigned hz, unsigned ms)
     wr8(h, sd + SD_CTL, 0);
     HDA_WAIT(!(rd8(h, sd + SD_CTL) & CTL_RUN), 10);
     hda_codec_stop_outputs(&h->codec, verb, h);
-    pmm_free_contiguous(buf, pages);
 
-    serial_puts(ok ? "HDA: tone played, " : "HDA: the stream stopped moving, ");
+    serial_puts(ok ? "HDA: played, " : "HDA: the stream stopped moving, ");
     serial_putd(played);
     serial_puts(" bytes");
     log_hex(", stream status ", sts);
     serial_puts("\n");
-    st_str(h, ok ? "; test tone played" : "; stream did not move");
     return ok ? 0 : -1;
+}
+
+/* The status line ends with the result of the last playback (replaced each time, so it does not grow). */
+static void st_result(HdaCtrl *h, const char *text)
+{
+    h->status[h->base_len] = 0;
+    st_str(h, text);
+}
+
+/* A DMA buffer for `sound` bytes plus the silence, rounded up to 256 bytes (two halves of 128). *pages gets its size. */
+static u64 dma_alloc(u32 sound, u32 *total, unsigned *pages)
+{
+    *total = (sound + SILENCE_BYTES + 255u) & ~255u;
+    *pages = (*total + PMM_PAGE_SIZE - 1u) / PMM_PAGE_SIZE;
+    u64 buf = pmm_alloc_contiguous_tag(*pages, PMM_TAG_OTHER);
+    if (buf)
+        memset((void *)buf, 0, (unsigned long)*pages * PMM_PAGE_SIZE); /* the silence, and whatever the rounding added */
+    return buf;
+}
+
+int hda_play_pcm(const short *stereo, unsigned long frames)
+{
+    if (PRIMARY < 0 || !frames || frames > HDA_MAX_FRAMES || CTRL[PRIMARY].busy)
+        return -1;
+    u32 sound = (u32)frames * 4u, total;
+    unsigned pages;
+    u64 buf = dma_alloc(sound, &total, &pages);
+    if (!buf)
+        return -1;
+    CTRL[PRIMARY].busy = 1;
+    memcpy((void *)buf, stereo, sound);
+    int r = play_buffer(&CTRL[PRIMARY], buf, sound, total);
+    pmm_free_contiguous(buf, pages);
+    st_result(&CTRL[PRIMARY], r == 0 ? "; played" : "; stream did not move");
+    CTRL[PRIMARY].busy = 0;
+    return r;
+}
+
+int hda_play_tone(unsigned hz, unsigned ms)
+{
+    if (PRIMARY < 0 || hz == 0 || hz >= RATE / 2 || ms == 0 || ms > 10000 || CTRL[PRIMARY].busy)
+        return -1;
+    u32 sound = RATE / 1000u * ms * 4u, total;
+    unsigned pages;
+    u64 buf = dma_alloc(sound, &total, &pages);
+    if (!buf)
+        return -1;
+    CTRL[PRIMARY].busy = 1;
+    short *s = (short *)buf;
+    unsigned phase = 0, step = (unsigned)(((u64)hz << 32) / RATE);
+    for (u32 i = 0; i < sound / 4u; i++)
+    {
+        int v = hda_sine_q15(phase) / 4; /* a quarter of full scale: -12 dB */
+        phase += step;
+        s[2 * i] = s[2 * i + 1] = (short)v;
+    }
+    int r = play_buffer(&CTRL[PRIMARY], buf, sound, total);
+    pmm_free_contiguous(buf, pages);
+    st_result(&CTRL[PRIMARY], r == 0 ? "; test tone played" : "; stream did not move");
+    CTRL[PRIMARY].busy = 0;
+    return r;
 }
