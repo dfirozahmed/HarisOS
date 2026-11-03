@@ -63,6 +63,8 @@ static Window *TM_WIN;
 static int TAB;
 static int SCROLL;  /* first visible row of the Processes / Threads list (back to 0 on a tab change) */
 static UiScroll SB; /* that list's scrollbar: sb_sync() fills it */
+static UiMenu TM_MENU; /* the right-click menu of an app row (Switch to / Minimize / End task); it acts on SEL_ID */
+enum { TMM_SWITCH, TMM_MIN, TMM_END }; /* its item ids */
 static int PERF = PERF_MEMORY;
 static unsigned char MEM_HIST[HIST_N]; /* used memory in percent, oldest first */
 static int MEM_HIST_N;
@@ -202,6 +204,7 @@ static void set_tab(int tab)
     TAB = tab;
     SCROLL = 0;
     SB.dragging = SB.hover = 0;
+    ui_menu_close(&TM_MENU);
 }
 
 static void draw_tabs(UiRect body)
@@ -985,7 +988,6 @@ static void draw_performance(UiRect body)
 static void tm_draw(Window *w, UiRect body)
 {
     revalidate();
-    (void)w;
     draw_tabs(body);
     if (TAB == TAB_PROCESSES)
         draw_processes(body);
@@ -993,6 +995,9 @@ static void tm_draw(Window *w, UiRect body)
         draw_threads(body);
     else
         draw_performance(body);
+    if (TM_MENU.open && (w != wm_top() || TAB != TAB_PROCESSES || sel_index() < 0))
+        ui_menu_close(&TM_MENU); /* focus moved elsewhere, or the app it is about has gone */
+    ui_menu_draw(&TM_MENU);
 }
 
 /* Windows close between two refreshes of the list, and the memory of a window that has been closed for a while goes back to the heap:
@@ -1020,6 +1025,32 @@ static void end_selected(void)
     reload();
 }
 
+/* the menu's commands: they act on the selected app (a right click selects the row it opens on) */
+static void menu_run(int id)
+{
+    int i = sel_index();
+    if (i < 0)
+        return;
+    Window *p = PROCS[i];
+    switch (id)
+    {
+    case TMM_SWITCH:
+        wm_activate(p); /* restores it if it is minimized, and brings it to the front */
+        break;
+    case TMM_MIN:
+        if (p->minimized)
+            wm_activate(p);
+        else
+            wm_minimize(p);
+        break;
+    case TMM_END:
+        end_selected();
+        break;
+    default:
+        break;
+    }
+}
+
 static void on_end_task(UiButton *b, void *user)
 {
     (void)b;
@@ -1030,6 +1061,11 @@ static void on_end_task(UiButton *b, void *user)
 static int tm_press(Window *w, int x, int y)
 {
     revalidate();
+    if (TM_MENU.open) /* a click on an item shows it pressed and it runs when the button is released (tm_drag); a click anywhere else only closes the menu */
+    {
+        ui_menu_press(&TM_MENU, x, y);
+        return 1;
+    }
     UiRect body = wm_content(w);
     for (int i = 0; i < TAB_COUNT; i++)
     {
@@ -1088,6 +1124,14 @@ static int tm_press(Window *w, int x, int y)
 /* the thumb is held: the list follows the pointer */
 static int tm_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (TM_MENU.open && TM_MENU.press >= 0)
+    {
+        int id = -1;
+        int r = ui_menu_release(&TM_MENU, x, y, buttons, &id); /* 2 = released on the item it was pressed on */
+        if (r == 2)
+            menu_run(id);
+        return r != 0;
+    }
     if (!SB.dragging)
         return 0;
     sb_sync(wm_content(w));
@@ -1099,6 +1143,8 @@ static int tm_drag(Window *w, int x, int y, unsigned buttons)
 /* the scrollbar widens while the pointer is over it */
 static int tm_hover(Window *w, int x, int y)
 {
+    if (TM_MENU.open)
+        return ui_menu_hover(&TM_MENU, x, y);
     sb_sync(wm_content(w));
     return ui_scroll_hover(&SB, x, y);
 }
@@ -1106,10 +1152,36 @@ static int tm_hover(Window *w, int x, int y)
 /* wheel over the Processes / Threads list: 3 rows per step */
 static int tm_wheel(Window *w, int steps)
 {
+    int had_menu = TM_MENU.open;
+    ui_menu_close(&TM_MENU); /* the rows move under it */
     sb_sync(wm_content(w));
     int changed = ui_scroll_by(&SB, steps * 3);
     SCROLL = SB.pos;
-    return changed;
+    return changed || had_menu;
+}
+
+/* right click on an app: select it and open its menu there. Anywhere else it only closes an open menu. */
+static int tm_rpress(Window *w, int x, int y)
+{
+    revalidate();
+    int was_open = TM_MENU.open;
+    ui_menu_close(&TM_MENU);
+    if (TAB != TAB_PROCESSES)
+        return was_open;
+    UiRect body = wm_content(w);
+    UiRect list = list_rect(body);
+    int row = SCROLL + (y - list.y) / ROW_H;
+    if (!ui_contains(list, x, y) || row < 0 || row >= NPROCS) /* the "Desktop and system" row is not an app */
+        return was_open;
+    const Window *p = PROCS[row];
+    SEL_ID = p->id;
+    ui_menu_clear(&TM_MENU);
+    ui_menu_add(&TM_MENU, TMM_SWITCH, "Switch to", 0, 0);
+    ui_menu_add(&TM_MENU, TMM_MIN, p->minimized ? "Restore" : "Minimize", 0, 0);
+    ui_menu_separator(&TM_MENU);
+    ui_menu_add(&TM_MENU, TMM_END, "End task", "Del", p == TM_WIN ? UI_MENU_DISABLED : UI_MENU_DANGER); /* it cannot end itself: see end_selected */
+    ui_menu_open(&TM_MENU, x, y, body);
+    return 1;
 }
 
 static void tm_key(Window *w, const KeyEvent *k)
@@ -1117,6 +1189,13 @@ static void tm_key(Window *w, const KeyEvent *k)
     if (!k->pressed)
         return;
     revalidate();
+    if (TM_MENU.open) /* the menu has the keyboard: Up / Down / Enter / Esc, every other key is ignored */
+    {
+        int id = -1;
+        if (ui_menu_key(&TM_MENU, k, &id) == 2)
+            menu_run(id);
+        return;
+    }
     switch (k->key)
     {
     case KEY_TAB:
@@ -1216,6 +1295,7 @@ static void taskmgr_open(void)
     }
     win->on_key = tm_key;
     win->on_press = tm_press;
+    win->on_rpress = tm_rpress;
     win->on_drag = tm_drag;
     win->on_hover = tm_hover;
     win->on_wheel = tm_wheel;
@@ -1224,6 +1304,7 @@ static void taskmgr_open(void)
     win->icon = TASKBAR_ICON_TASKMGR;
     TM_WIN = win;
     set_tab(TAB_PROCESSES);
+    ui_menu_clear(&TM_MENU);
     SEL_ID = -1;
     PERF = PERF_MEMORY;
     LAST_MS = timer_ms();
