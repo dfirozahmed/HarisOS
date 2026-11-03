@@ -3,6 +3,7 @@
 #include "desktop.h"
 #include "guiapp.h"
 #include "taskbar.h"
+#include "volmenu.h"
 #include "startmenu.h"
 #include "ui.h"
 #include "timer.h"
@@ -59,7 +60,8 @@ static int refresh_taskbar_clock(void)
 int desktop_tick(void)
 {
     int clock_changed = refresh_taskbar_clock();
-    clock_changed |= taskbar_set_volume(audio_volume()); /* the volume may have been changed by a program (SYS_AUDIO_VOLUME) */
+    clock_changed |= taskbar_set_volume(audio_volume());
+    volmenu_tick(); /* the volume may have been changed by a program (SYS_AUDIO_VOLUME) */
     int flipped = ui_caret_update();
     int ticked = gui_app_poll(); /* windows of user programs that appeared or went away */
     ticked |= wm_tick();        /* windows that wait for time (tooltips) */

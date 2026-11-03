@@ -2,6 +2,7 @@
 #include "appmenu.h"
 #include "startmenu.h"
 #include "taskbar.h"
+#include "volmenu.h"
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
@@ -81,6 +82,7 @@ void appmenu_open(Window *w, int anchor_x)
     if (!w)
         return;
     startmenu_close(); /* only one menu at a time */
+    volmenu_close();
     if (OPEN)
         appmenu_close();
     OPEN = 1;

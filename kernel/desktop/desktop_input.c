@@ -4,6 +4,7 @@
 #include "taskbar.h"
 #include "startmenu.h"
 #include "appmenu.h"
+#include "volmenu.h"
 #include "mouse.h"
 #include "ui.h"
 #include "wm.h"
@@ -23,6 +24,19 @@ int desktop_pointer(int x, int y, unsigned buttons)
     int to_windows = !(on_bar && !wm_dragging());
     /* The start menu is above the windows: while the pointer is over it the windows must not see the mouse. */
     if (startmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
+        to_windows = 0;
+    /* a click on the tray speaker opens the volume panel, or closes it if it is open (the panel's own "click away closes" must not
+     * run for this click, or the panel would close and open again at once) */
+    int vol_toggle = on_bar && !wm_dragging() && (buttons & MOUSE_LEFT) && !(LAST_BTN & MOUSE_LEFT) && taskbar_volume_at(x, y);
+    if (vol_toggle)
+    {
+        if (volmenu_is_open())
+            volmenu_close();
+        else
+            volmenu_open(taskbar_volume_center());
+        volmenu_pointer(-1, y, buttons); /* keeps its button memory current */
+    }
+    else if (volmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
         to_windows = 0;
     if (appmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
         to_windows = 0;
@@ -49,7 +63,7 @@ int desktop_pointer(int x, int y, unsigned buttons)
         shape = GFX_CURSOR_SIZE_H;
     else if (edge)
         shape = GFX_CURSOR_SIZE_V;
-    else if (to_windows && !wm_dragging() && !startmenu_is_open() && !appmenu_is_open())
+    else if (to_windows && !wm_dragging() && !startmenu_is_open() && !appmenu_is_open() && !volmenu_is_open())
         shape = wm_cursor_hint(x, y); /* inside a window: the app may want its own (a draggable divider) */
     gfx_cursor_set_shape(shape);
 
@@ -61,6 +75,12 @@ int desktop_pointer(int x, int y, unsigned buttons)
 
 int desktop_wheel(int x, int y, int steps)
 {
+    if (volmenu_is_open()) /* the volume panel: the wheel anywhere changes the volume */
+    {
+        audio_volume_step(-steps * VOLUME_STEP);
+        volmenu_tick();
+        return desktop_finish_input(0);
+    }
     if (startmenu_is_open() || appmenu_is_open())
         return 0;
     if (taskbar_volume_at(x, y)) /* wheel over the tray speaker: louder (up) / quieter (down), 5 points a step */
@@ -123,6 +143,8 @@ int desktop_key(const KeyEvent *k)
             if (w)
                 wm_set_maximized(w, !w->maximized);
         }
+        else if (volmenu_is_open())
+            volmenu_key(k);
         else if (appmenu_is_open())
             appmenu_key(k);
         else if (startmenu_is_open())
@@ -130,7 +152,7 @@ int desktop_key(const KeyEvent *k)
         else
             wm_key(k);
     }
-    else if (!startmenu_is_open() && !appmenu_is_open())
+    else if (!startmenu_is_open() && !appmenu_is_open() && !volmenu_is_open())
         wm_key(k);
     return desktop_finish_input(0);
 }

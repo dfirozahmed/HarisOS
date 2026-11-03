@@ -55,6 +55,7 @@ void taskbar_bounds(int *x, int *y, int *w, int *h);
  * the mouse wheel over it changes the volume (desktop_input.c). */
 int taskbar_set_volume(int percent);
 int taskbar_volume_at(int x, int y);
+int taskbar_volume_center(void); /* x of the middle of the speaker (the volume popup opens above it) */
 
 void taskbar_set_time(int hour, int minute, int day, int month, int year);
 

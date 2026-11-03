@@ -2,6 +2,7 @@
 #include "startmenu.h"
 #include "app.h"
 #include "appmenu.h"
+#include "volmenu.h"
 #include "desktop.h"
 #include "taskbar.h"
 #include "ui.h"
@@ -281,6 +282,7 @@ static void startmenu_open(void)
     if (OPEN)
         return;
     appmenu_close(); /* only one menu at a time */
+    volmenu_close();
     OPEN = 1;
     ui_edit_set_text(&SEARCH, "");
     FILTER_SIG = text_sig("");

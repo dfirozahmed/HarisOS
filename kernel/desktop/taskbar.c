@@ -145,6 +145,8 @@ int taskbar_volume_at(int x, int y)
     return VOL_W > 0 && x >= VOL_X && x < VOL_X + VOL_W && y >= VOL_Y && y < VOL_Y + VOL_H;
 }
 
+int taskbar_volume_center(void) { return VOL_X + VOL_W / 2; }
+
 void taskbar_set_time(int hour, int minute, int day, int month, int year)
 {
     HAS_TIME = 1;
