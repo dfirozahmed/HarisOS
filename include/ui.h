@@ -324,7 +324,10 @@ typedef enum
     UI_ICON_MEMORY,  /* RAM module */
     UI_ICON_CPU,     /* processor, outline */
     UI_ICON_DISK,    /* drive */
-    UI_ICON_NOTEPAD  /* page with text lines */
+    UI_ICON_NOTEPAD, /* page with text lines */
+    UI_ICON_KEYBOARD, /* keyboard outline with keys */
+    UI_ICON_MOUSE,    /* mouse body with a button split */
+    UI_ICON_USB       /* USB trident symbol */
 } UiIcon;
 
 /* Draw a vector icon centered at (cx, cy), `size` pixels wide. App icons

@@ -58,6 +58,48 @@ static int same_text(const char *a, const char *b)
     return *a == *b;
 }
 
+static int has_text(const char *s, const char *needle)
+{
+    for (; *s; s++)
+    {
+        const char *a = s, *b = needle;
+        while (*a && *b && *a == *b)
+            a++, b++;
+        if (!*b)
+            return 1;
+    }
+    return 0;
+}
+
+/* Icon for a category header; devices refine it by name (keyboard/mouse/audio). */
+static UiIcon category_icon(DevCategory c)
+{
+    switch (c)
+    {
+    case DEV_CAT_INPUT:
+        return UI_ICON_KEYBOARD;
+    case DEV_CAT_STORAGE:
+        return UI_ICON_DISK;
+    case DEV_CAT_NETWORK:
+        return UI_ICON_WIFI;
+    case DEV_CAT_DISPLAY:
+        return UI_ICON_DISPLAY;
+    case DEV_CAT_USB:
+        return UI_ICON_USB;
+    default:
+        return UI_ICON_DEVMGR;
+    }
+}
+
+static UiIcon device_icon(const DevEntry *e)
+{
+    if (e->category == DEV_CAT_INPUT && (has_text(e->name, "mouse") || has_text(e->name, "touchpad")))
+        return UI_ICON_MOUSE;
+    if (e->category == DEV_CAT_SYSTEM && (has_text(e->name, "udio") || has_text(e->name, "ound")))
+        return UI_ICON_VOLUME;
+    return category_icon(e->category);
+}
+
 static UiRect list_rect(UiRect body)
 {
     body = ui_inset(body, 8);
@@ -123,7 +165,8 @@ static void dm_draw(Window *w, UiRect body)
         UiRect r = ui_rect(list.x, list.y + i * ROW_H, list.w, ROW_H);
         if (row->dev < 0)
         {
-            ui_text_in(ui_rect(r.x + 4, r.y, r.w - 8, r.h), devmgr_category_name((DevCategory)row->cat),
+            ui_icon(category_icon((DevCategory)row->cat), r.x + 14, r.y + r.h / 2, 18, t->text_dim);
+            ui_text_in(ui_rect(r.x + 30, r.y, r.w - 34, r.h), devmgr_category_name((DevCategory)row->cat),
                        UI_TEXT_LABEL, UI_ALIGN_LEFT);
             continue;
         }
@@ -131,7 +174,8 @@ static void dm_draw(Window *w, UiRect body)
         if (ri == SEL)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 40);
         int status_w = 74;
-        ui_text_in(ui_rect(r.x + 22, r.y, r.w - 22 - status_w - 8, r.h), e->name, UI_TEXT_BODY, UI_ALIGN_LEFT);
+        ui_icon(device_icon(e), r.x + 30, r.y + (r.h - 2) / 2, 18, t->text);
+        ui_text_in(ui_rect(r.x + 46, r.y, r.w - 46 - status_w - 8, r.h), e->name, UI_TEXT_BODY, UI_ALIGN_LEFT);
         ui_text_in_color(ui_rect(r.x + r.w - status_w - 4, r.y, status_w, r.h),
                          e->has_driver ? "Driver" : "No driver", UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                          e->has_driver ? t->success : t->text_dim);
@@ -145,7 +189,8 @@ static void dm_draw(Window *w, UiRect body)
     {
         const DevEntry *e = devmgr_get(ROWS[SEL].dev);
         int tw = d.w - 8 - REFRESH_W - 8; /* leave room for the Refresh button */
-        ui_text_in(ui_rect(d.x + 4, d.y + 4, tw, 24), e->name, UI_TEXT_TITLE, UI_ALIGN_LEFT);
+        ui_icon(device_icon(e), d.x + 16, d.y + 16, 24, t->text);
+        ui_text_in(ui_rect(d.x + 36, d.y + 4, tw - 32, 24), e->name, UI_TEXT_TITLE, UI_ALIGN_LEFT);
         ui_text_in(ui_rect(d.x + 4, d.y + 30, tw, 20), e->detail, UI_TEXT_DIM, UI_ALIGN_LEFT);
         ui_text_in_color(ui_rect(d.x + 4, d.y + 52, tw, 20),
                          e->note[0] ? e->note : (e->has_driver ? "Driver loaded" : "No HarisOS driver for this device"),

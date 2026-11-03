@@ -367,6 +367,40 @@ static void icon_disk(const Frame *f, GfxColor c)
     gfx_fill_circle_q(q(f, 36), qy(f, 32), len_q(f, 3), c, 255);
 }
 
+/* a keyboard: outline with three rows of keys and a space bar */
+static void icon_keyboard(const Frame *f, GfxColor c)
+{
+    gfx_round_rect(px(f, 2), py(f, 10), pl(f, 44), pl(f, 28), pl(f, 5), f->s >= 30 ? 3 : 1, c);
+    for (int i = 0; i < 5; i++)
+        rrect(f, 7 + i * 8, 16, 5, 5, 1, c);
+    for (int i = 0; i < 4; i++)
+        rrect(f, 11 + i * 8, 24, 5, 5, 1, c);
+    rrect(f, 15, 32, 18, 3, 1, c);
+}
+
+/* a mouse: rounded body, a line between the buttons and the wheel */
+static void icon_mouse(const Frame *f, GfxColor c)
+{
+    gfx_round_rect(px(f, 12), py(f, 4), pl(f, 24), pl(f, 40), pl(f, 12), f->s >= 30 ? 3 : 1, c);
+    line(f, 12, 19, 36, 19, 3, c);
+    line(f, 24, 5, 24, 19, 3, c);
+}
+
+/* the USB symbol: a stem with a circle, a square and an arrow head on branches */
+static void icon_usb(const Frame *f, GfxColor c)
+{
+    line(f, 24, 8, 24, 40, 4, c);
+    gfx_fill_circle_q(q(f, 24), qy(f, 41), len_q(f, 5), c, 255);
+    line(f, 24, 28, 12, 20, 3, c);
+    line(f, 12, 20, 12, 15, 3, c);
+    gfx_fill_circle_q(q(f, 12), qy(f, 13), len_q(f, 4), c, 255);
+    line(f, 24, 22, 36, 15, 3, c);
+    line(f, 36, 15, 36, 12, 3, c);
+    rrect(f, 32, 6, 8, 8, 1, c);
+    int tip[6] = {q(f, 24), qy(f, 2), q(f, 19), qy(f, 10), q(f, 29), qy(f, 10)};
+    gfx_fill_poly_q(tip, 3, c, 255);
+}
+
 void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
 {
     /* A zero/negative size has no drawable area. Reject it before deriving
@@ -479,6 +513,15 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_NOTEPAD:
         icon_notepad(&f);
+        break;
+    case UI_ICON_KEYBOARD:
+        icon_keyboard(&f, t);
+        break;
+    case UI_ICON_MOUSE:
+        icon_mouse(&f, t);
+        break;
+    case UI_ICON_USB:
+        icon_usb(&f, t);
         break;
     default:
         break;
