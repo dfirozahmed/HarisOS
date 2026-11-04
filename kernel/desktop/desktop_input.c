@@ -109,7 +109,12 @@ int desktop_wheel(int x, int y, int steps)
         volmenu_tick();
         return desktop_finish_input(0);
     }
-    if (startmenu_is_open() || appmenu_is_open() || deskmenu_is_open())
+    if (startmenu_is_open()) /* the wheel scrolls its list */
+    {
+        startmenu_wheel(steps);
+        return desktop_finish_input(0);
+    }
+    if (appmenu_is_open() || deskmenu_is_open())
         return 0;
     if (taskbar_volume_at(x, y)) /* wheel over the tray speaker: louder (up) / quieter (down), 5 points a step */
     {

@@ -30,6 +30,9 @@ int startmenu_key(const KeyEvent *k);
 /* Call when the text caret blinked, so the search box is redrawn. */
 void startmenu_tick(int caret_flipped);
 
+/* The mouse wheel while the menu is open: scrolls the app list when not all rows fit (positive = down). */
+void startmenu_wheel(int steps);
+
 /* Draw the menu (does nothing when closed). Call after the windows, before the taskbar. */
 void startmenu_draw(void);
 /* Everything the open menu draws, its shadow included (for the compositor: the menu's surface). */

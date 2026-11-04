@@ -186,6 +186,7 @@ static int OPEN;
 static UiEdit SEARCH;
 static int VIS[MAX_ITEMS]; /* indexes into ITEMS that match the search */
 static int VN;
+static int SCROLL;                 /* the first row of VIS that is shown: on a short screen not all rows fit, the wheel and the arrows scroll */
 static int SEL;                    /* highlighted row (index into VIS), -1 = none */
 static int PRESS = -1;             /* row held down with the mouse */
 static int FOOT_HOVER, FOOT_PRESS; /* footer power buttons: 0 = none, 1 = Restart, 2 = Shut down */
@@ -199,7 +200,7 @@ static unsigned FILTER_SIG;
 
 /* ---- geometry (small functions: no big structs are copied) ---- */
 /* How many app rows fit above the taskbar: on a short screen the menu would otherwise run under the taskbar and
- * hide the footer (Restart / Shut down). The rest are still reachable through the search box. */
+ * hide the footer (Restart / Shut down). The rest are reached by scrolling (wheel, arrow keys) or the search box. */
 static int rows_shown(void)
 {
     int fixed = PAD + SEARCH_H + LABEL_GAP + LABEL_H + 8 + 1 + FOOT_H;
@@ -248,7 +249,13 @@ static int rows_y(void)
 static UiRect row_rect(int i)
 {
     UiRect m = menu_rect();
-    return ui_rect(m.x + 8, rows_y() + i * ROW_H, m.w - 16, ROW_H - 4);
+    return ui_rect(m.x + 8, rows_y() + (i - SCROLL) * ROW_H, m.w - 16, ROW_H - 4);
+}
+
+/* is row i of VIS in the part that is shown? */
+static int row_on(int i)
+{
+    return i >= SCROLL && i < VN && i < SCROLL + rows_shown();
 }
 
 static int foot_y(void) { return rows_y() + rows_shown() * ROW_H + 8; }
@@ -285,7 +292,7 @@ static void dmg_all(void)
 
 static void dmg_row(int i)
 {
-    if (i >= 0 && i < VN)
+    if (row_on(i))
         wm_add_screen_damage(row_rect(i));
 }
 
@@ -333,8 +340,7 @@ static unsigned text_sig(const char *s)
 static void refilter(int reset_selection)
 {
     VN = 0;
-    int cap = rows_shown();
-    for (int i = 0; i < item_count() && VN < cap; i++)
+    for (int i = 0; i < item_count(); i++)
     {
         MenuItem it = item_get(i);
         if (has_text(it.name, SEARCH.text) || has_text(it.desc, SEARCH.text))
@@ -344,6 +350,35 @@ static void refilter(int reset_selection)
         SEL = -1;
     else if (reset_selection || SEL < 0 || SEL >= VN)
         SEL = 0;
+    int most = VN - rows_shown(); /* the last position that still fills the rows */
+    SCROLL = reset_selection || most < 0 ? 0 : (SCROLL > most ? most : SCROLL);
+}
+
+/* scroll so that row i is shown; 1 = the list moved */
+static int scroll_to(int i)
+{
+    int old = SCROLL, rows = rows_shown();
+    if (i < 0 || i >= VN)
+        return 0;
+    if (i < SCROLL)
+        SCROLL = i;
+    else if (i >= SCROLL + rows)
+        SCROLL = i - rows + 1;
+    return SCROLL != old;
+}
+
+void startmenu_wheel(int steps)
+{
+    if (!OPEN || CTX.open)
+        return;
+    int most = VN - rows_shown(), old = SCROLL; /* (positive steps = down) */
+    SCROLL += steps;
+    if (SCROLL > most)
+        SCROLL = most;
+    if (SCROLL < 0)
+        SCROLL = 0;
+    if (SCROLL != old)
+        dmg_all();
 }
 
 /* ---- open / close / actions ---- */
@@ -489,6 +524,8 @@ int startmenu_key(const KeyEvent *k)
         FOOT_KEY = pos >= VN ? pos - VN + 1 : 0;
         if (!FOOT_KEY)
             SEL = pos;
+        if (!FOOT_KEY && scroll_to(SEL))
+            dmg_all();
         dmg_row(oldsel);
         dmg_row(SEL);
         dmg_power(oldfoot);
@@ -594,7 +631,7 @@ int startmenu_pointer(int x, int y, unsigned buttons)
 
     int hit = -1;
     if (over)
-        for (int i = 0; i < VN; i++)
+        for (int i = SCROLL; i < VN && i < SCROLL + rows_shown(); i++)
             if (ui_contains(row_rect(i), x, y))
                 hit = i;
     int foot = 0; /* which power button the pointer is on */
@@ -737,7 +774,7 @@ void startmenu_draw(void)
     if (VN == 0)
         ui_text_in_color(ui_rect(m.x + PAD, rows_y(), m.w - 2 * PAD, ROW_H * 2), "No apps found", UI_TEXT_BODY,
                          UI_ALIGN_CENTER, t->text_dim);
-    for (int i = 0; i < VN; i++)
+    for (int i = SCROLL; i < VN && i < SCROLL + rows_shown(); i++)
     {
         MenuItem item = item_get(VIS[i]);
         const MenuItem *it = &item;
@@ -751,6 +788,15 @@ void startmenu_draw(void)
         int tx = tile.x + tile.w + 12;
         ui_text_in(ui_rect(tx, r.y + 5, r.x + r.w - tx - 8, 22), it->name, UI_TEXT_LABEL, UI_ALIGN_LEFT);
         ui_text_in(ui_rect(tx, r.y + 26, r.x + r.w - tx - 8, 18), it->desc, UI_TEXT_SMALL, UI_ALIGN_LEFT);
+    }
+
+    if (VN > rows_shown()) /* more rows than fit: a thin scroll bar at the right edge */
+    {
+        int rows = rows_shown(), th = rows * ROW_H - 4;
+        int bh = th * rows / VN, most = VN - rows;
+        int by = rows_y() + (th - bh) * SCROLL / most;
+        gfx_fill_round_rect_alpha(m.x + m.w - 8, rows_y(), 3, th, 1, gfx_rgb(40, 60, 110), 30);
+        gfx_fill_round_rect_alpha(m.x + m.w - 8, by, 3, bh, 1, gfx_rgb(40, 60, 110), 130);
     }
 
     /* footer: a faint line, the user, and "Close all" */
