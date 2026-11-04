@@ -358,6 +358,21 @@ int amd_gpu_bringup(void)
                 }
                 else
                     serial_print("  DCN: registers not reachable\n");
+                /* read only, and only on the machine this was written for: the display micro-controller, the eDP link, the panel
+                 * power sequencer and the backlight, as the firmware left them */
+                if (g_target)
+                {
+                    uint32_t xv[AMD_DCN_X_COUNT];
+                    if (amd_dcn_probe_ext(mmio, xv))
+                    {
+                        serial_print("  DCN extended probe (read only):\n");
+                        for (int i = 0; i < AMD_DCN_X_COUNT; i++)
+                        {
+                            serial_print("    ");
+                            log_hex(amd_dcn_ext_name(i), xv[i]);
+                        }
+                    }
+                }
             }
         }
         return 1;

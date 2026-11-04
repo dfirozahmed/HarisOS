@@ -21,4 +21,19 @@ void amd_dcn_set_surface(uint64_t mmio, uint64_t mc_addr);
 /* HUBP0 DCSURF_FLIP_CONTROL (bit 0 = a flip is pending) and DCSURF_SURFACE_INUSE (the address being scanned out now). */
 uint32_t amd_dcn_flip_control(uint64_t mmio);
 uint32_t amd_dcn_surface_inuse(uint64_t mmio);
+
+/* Step 3 (READ ONLY): the rest of what a full display driver would take over from the firmware: DMCUB (display microcontroller),
+ * DIG0 / DP0 (the eDP link), the panel power sequencer, the backlight PWM, and the display clock. Each entry is one register, read
+ * by name; the log shows what the firmware left, so the next steps are written against real values. */
+enum {
+    AMD_DCN_X_DENTIST_DISPCLK, AMD_DCN_X_DCCG_GATE,
+    AMD_DCN_X_DMCUB_SEC, AMD_DCN_X_DMCUB_CNTL, AMD_DCN_X_DMCUB_SCRATCH0, AMD_DCN_X_DMCUB_SCRATCH1, AMD_DCN_X_DMCUB_SCRATCH2,
+    AMD_DCN_X_DIG_FE, AMD_DCN_X_DIG_BE, AMD_DCN_X_DIG_BE_EN,
+    AMD_DCN_X_DP_LINK, AMD_DCN_X_DP_CONFIG, AMD_DCN_X_DP_VID, AMD_DCN_X_DP_FRAMING, AMD_DCN_X_DP_DPHY, AMD_DCN_X_DP_SEC,
+    AMD_DCN_X_PWRSEQ_CNTL, AMD_DCN_X_PWRSEQ_STATE, AMD_DCN_X_BL_PWM_CNTL, AMD_DCN_X_BL_PWM_PERIOD,
+    AMD_DCN_X_COUNT
+};
+const char *amd_dcn_ext_name(int i);
+/* Fills v[AMD_DCN_X_COUNT]; 0 = registers not reachable. */
+int amd_dcn_probe_ext(uint64_t mmio, uint32_t *v);
 #endif
