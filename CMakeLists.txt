@@ -313,6 +313,7 @@ set(KERNEL_SOURCES
     apps/explorer/explorer_state.c    # File Explorer: shared state
     apps/explorer/explorer_util.c     # File Explorer: file kinds, size text
     apps/explorer/explorer_nav.c      # File Explorer: folder, history, sort, layout, selection
+    apps/explorer/explorer_select.c   # File Explorer: selection of one or several entries, clipboard list
     apps/explorer/explorer_ops.c      # File Explorer: rename, new, clipboard, delete
     apps/explorer/explorer_drive.c    # File Explorer: drives, lock, error messages
     apps/explorer/explorer_menu.c     # File Explorer: right-click and sort menus

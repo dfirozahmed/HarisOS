@@ -282,6 +282,107 @@ int deskfiles_send(int node)
     return copy;
 }
 
+static char *put_uint(char *o, int v)
+{
+    char t[12];
+    int k = 0;
+    if (v < 0)
+        v = 0;
+    do
+        t[k++] = (char)('0' + v % 10);
+    while ((v /= 10) > 0);
+    while (k)
+        *o++ = t[--k];
+    return o;
+}
+
+int deskfiles_send_many(const int *nodes, int n)
+{
+    if (n <= 0)
+        return 0;
+    if (n == 1)
+        return deskfiles_send(nodes[0]) >= 0;
+    int existing = deskfiles_folder();
+    int todo = 0, already = 0;
+    for (int i = 0; i < n; i++) /* what is there to copy? (nothing: the Desktop folder is not made for it) */
+    {
+        const VfsNode *v = vfs_node(nodes[i]);
+        if (!v || nodes[i] == VFS_ROOT || vfs_is_volume_root(nodes[i]))
+            continue;
+        if (existing >= 0 && vfs_is_under(nodes[i], existing))
+            already++;
+        else
+            todo++;
+    }
+    char msg[TOAST_TEXT_MAX + 1], *o = msg;
+    if (todo == 0)
+    {
+        if (already > 0)
+            toast_show(TOAST_INFO, "They are on the desktop already.");
+        else
+            toast_show(TOAST_WARNING, "Nothing to send: a drive cannot be sent to the desktop.");
+        return 0;
+    }
+    int dest = folder_or_make();
+    if (dest < 0)
+        return 0; /* the toast says why */
+    int ok = 0, failed = 0, first_err = 0;
+    for (int i = 0; i < n; i++)
+    {
+        const VfsNode *v = vfs_node(nodes[i]);
+        if (!v || nodes[i] == VFS_ROOT || vfs_is_volume_root(nodes[i]) || (existing >= 0 && vfs_is_under(nodes[i], existing)))
+            continue;
+        if (vfs_copy(nodes[i], dest) < 0)
+        {
+            if (!failed)
+                first_err = vfs_last_error();
+            failed++;
+        }
+        else
+            ok++;
+    }
+    if (failed == 0)
+    {
+        o = put(o, "Sent ");
+        o = put_uint(o, ok);
+        o = put(o, ok == 1 ? " item to the desktop" : " items to the desktop");
+        if (already > 0)
+        {
+            o = put(o, " (");
+            o = put_uint(o, already);
+            o = put(o, already == 1 ? " was" : " were");
+            o = put(o, " there already)");
+        }
+        o = put(o, ".");
+        *o = 0;
+        toast_show(TOAST_SUCCESS, msg);
+    }
+    else
+    {
+        if (ok == 0)
+        {
+            o = put(o, "Cannot send ");
+            o = put_uint(o, failed);
+            o = put(o, failed == 1 ? " item: " : " items: ");
+        }
+        else
+        {
+            o = put(o, "Sent ");
+            o = put_uint(o, ok);
+            o = put(o, " of ");
+            o = put_uint(o, ok + failed);
+            o = put(o, " items; the rest: ");
+        }
+        const char *why = vfs_error_text(first_err);
+        for (int i = 0; why[i] && o - msg < (int)sizeof msg - 1; i++)
+            *o++ = why[i];
+        *o = 0;
+        toast_show(ok == 0 ? TOAST_ERROR : TOAST_WARNING, msg);
+    }
+    rescan(0, 1); /* some copies may have been made even when others failed */
+    return ok;
+}
+
 /* ---- deleting ---- */
 void deskfiles_delete(int node)
 {

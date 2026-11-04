@@ -13,6 +13,7 @@ static void ex_close(Window *w)
     EX_SIDE_DRAG = 0;
     EX_ADDR_EDIT = 0;
     EX_HOVER_CRUMB = -1;
+    EX_MODS = 0;
 }
 
 static void explorer_app_open(void)
@@ -61,8 +62,9 @@ static void explorer_app_open(void)
     EX_CUR = VFS_ROOT;
     EX_HIST_N = 0;
     EX_FWD_N = 0;
-    EX_CLIP_ID = -1;
-    EX_SEL = -1;
+    EX_CLIP_N = 0;
+    ex_clear_sel();
+    EX_MODS = 0;
     EX_SCROLL = 0;
     EX_NOTE = 0;
     EX_LAST_ROW = -1;
@@ -72,7 +74,7 @@ static void explorer_app_open(void)
     EX_MENU.open = 0;
     ex_reload();
     if (EX_NITEMS > 0)
-        EX_SEL = 0;
+        ex_select_only(0);
 }
 
 /* the desktop (fileexplorer.h): open (or bring up) the Explorer and show that folder */

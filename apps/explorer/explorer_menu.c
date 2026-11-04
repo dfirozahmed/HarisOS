@@ -23,13 +23,14 @@ void ex_menu_open(int x, int y, int kind)
     }
     else if (kind == 1)
     {
-        add(M_OPEN, "Open", "Enter", 0);
+        int several = ex_sel_count() > 1; /* Open and Rename work on one entry */
+        add(M_OPEN, "Open", several ? 0 : "Enter", several ? UI_MENU_DISABLED : 0);
         add(M_SEND, "Send to desktop", 0, 0);
         ui_menu_separator(&EX_MENU);
         add(M_CUT, "Cut", "Ctrl+X", 0);
         add(M_COPY, "Copy", "Ctrl+C", 0);
         ui_menu_separator(&EX_MENU);
-        add(M_RENAME, "Rename", "F2", 0);
+        add(M_RENAME, "Rename", several ? 0 : "F2", several ? UI_MENU_DISABLED : 0);
         add(M_DELETE, "Delete", "Del", UI_MENU_DANGER);
     }
     else
@@ -37,7 +38,7 @@ void ex_menu_open(int x, int y, int kind)
         add(M_NEW_FOLDER, "New folder", "Ctrl+Shift+N", 0);
         add(M_NEW_FILE, "New text file", 0, 0);
         ui_menu_separator(&EX_MENU);
-        if (EX_CLIP_ID >= 0 && vfs_node(EX_CLIP_ID)) /* nothing to paste: no entry */
+        if (ex_clip_count() > 0) /* nothing to paste: no entry */
         {
             add(M_PASTE, "Paste", "Ctrl+V", 0);
             ui_menu_separator(&EX_MENU);
@@ -59,7 +60,7 @@ void ex_menu_run(int item)
         ex_start_rename(EX_SEL);
         break;
     case M_DELETE:
-        ex_ask_delete(EX_SEL);
+        ex_ask_delete();
         break;
     case M_NEW_FOLDER:
         ex_new_item(1);
@@ -80,8 +81,7 @@ void ex_menu_run(int item)
         ex_paste();
         break;
     case M_SEND:
-        if (EX_SEL >= 0 && EX_SEL < EX_NITEMS)
-            deskfiles_send(EX_ITEMS[EX_SEL]); /* a copy goes into the Desktop folder; a toast says how it went */
+        ex_send_selected(); /* a copy of each goes into the Desktop folder; a toast says how it went */
         break;
     case M_SORT_NAME:
         ex_set_sort(VFS_SORT_NAME, EX_SORT_DESC);

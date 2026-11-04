@@ -29,4 +29,8 @@ void deskfiles_delete(int node);     /* delete now, with no question; a toast sa
  * A toast says how it went. Returns the node of the copy, or -1 (nothing was copied: the toast says why). */
 int deskfiles_send(int node);
 
+/* The same for several entries (n of them): one Desktop folder made if needed, each copied by itself (one that cannot be copied does not stop
+ * the others), and ONE toast for all: "Sent 3 items to the desktop.", or how many could not be and why. Returns how many were copied. */
+int deskfiles_send_many(const int *nodes, int n);
+
 #endif

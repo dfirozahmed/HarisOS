@@ -298,7 +298,7 @@ static void draw_list(const Layout *l, const UiTheme *t)
         if (!n)
             continue;
         UiRect r = ui_rect(l->list.x + 6, l->list.y + i * ROW_H, l->list.w - 12 - 8, ROW_H - 2);
-        if (ri == EX_SEL)
+        if (ex_is_selected(ri))
         {
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 46);
             gfx_fill_round_rect(r.x, r.y + 7, 3, r.h - 14, 1, ui_color(t->accent_hi));
@@ -313,17 +313,17 @@ static void draw_list(const Layout *l, const UiTheme *t)
         }
         if (ex_is_drive(n))
         {
-            draw_drive_row(n, r, ri == EX_SEL, type_x, size_x, show_type, t);
+            draw_drive_row(n, r, ex_is_selected(ri), type_x, size_x, show_type, t);
             continue;
         }
         int kind = ex_kind_of(n);
         ex_draw_icon(r.x + 24, r.y + r.h / 2, ICON_PX, kind);
-        if (EX_CLIP_CUT && EX_ITEMS[ri] == EX_CLIP_ID) /* waiting to be moved: faded */
+        if (EX_CLIP_CUT && ex_clip_has(EX_ITEMS[ri])) /* waiting to be moved: faded */
             gfx_fill_round_rect_alpha(r.x + 12, r.y + 4, ICON_PX + 2, ICON_PX + 2, 4, ui_color(t->surface), 140);
         if (EX_ITEMS[ri] == EX_RENAME_ID && EX_WIN)
             ui_edit_draw(ui_rect(r.x + 40, r.y + 2, type_x - r.x - 46, r.h - 4), &EX_WIN->edits[0], "", 1);
         else
-            ui_text_in(ui_rect(r.x + 42, r.y, type_x - r.x - 46, r.h), n->name, ri == EX_SEL ? UI_TEXT_LABEL : UI_TEXT_BODY,
+            ui_text_in(ui_rect(r.x + 42, r.y, type_x - r.x - 46, r.h), n->name, ex_is_selected(ri) ? UI_TEXT_LABEL : UI_TEXT_BODY,
                        UI_ALIGN_LEFT);
         if (show_type)
             ui_text_in_color(ui_rect(type_x, r.y, TYPE_COL_W, r.h), ex_kind_name(kind), UI_TEXT_SMALL, UI_ALIGN_LEFT,
@@ -359,6 +359,31 @@ static void draw_status(const Layout *l, const UiTheme *t)
     {
         o = ex_put_str(line, 0, sizeof line, EX_NOTE);
         color = t->warning;
+    }
+    else if (ex_sel_count() > 1) /* several: how many, and the size of the files among them */
+    {
+        unsigned long long bytes = 0;
+        int files = 0;
+        for (int r = 0; r < EX_NITEMS; r++)
+            if (ex_is_selected(r))
+            {
+                const VfsNode *v = vfs_node(EX_ITEMS[r]);
+                if (v && !v->is_dir && !ex_is_drive(v))
+                {
+                    bytes += v->size;
+                    files++;
+                }
+            }
+        o = ex_put_uint(line, 0, ex_sel_count());
+        o = ex_put_str(line, o, sizeof line, " items selected");
+        if (files > 0)
+        {
+            char sz[24];
+            ex_fmt_size_big(bytes, sz);
+            o = ex_put_str(line, o, sizeof line, "   -   ");
+            o = ex_put_str(line, o, sizeof line, sz);
+        }
+        color = t->text;
     }
     else if (EX_SEL >= 0 && EX_SEL < EX_NITEMS && vfs_node(EX_ITEMS[EX_SEL]))
     {
@@ -431,6 +456,8 @@ void ex_draw(Window *w, UiRect body)
     draw_status(&l, t);
     if (EX_MENU.open && w != wm_top())
         EX_MENU.open = 0; /* focus moved elsewhere (another window or a dialog) */
+    if (w != wm_top())
+        EX_MODS = 0; /* a Shift or Ctrl let go in another window is not seen here */
     ui_menu_draw(&EX_MENU);
     if (EX_TIP_SHOWN && !EX_MENU.open)
         ex_tip_draw(w, body, t);

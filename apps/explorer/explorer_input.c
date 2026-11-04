@@ -28,10 +28,10 @@ static void mark_row(const Layout *l, int row)
     wm_add_damage(ui_rect(l->list.x, top, l->list.w, bottom - top));
 }
 
-/* a row is selected that the toolbar's Cut / Copy / Rename / Delete work on (see ex_sync_buttons) */
+/* something is selected that the toolbar's Cut / Copy / Rename / Delete work on (see ex_sync_buttons) */
 static int has_selection(void)
 {
-    return EX_SEL >= 0 && EX_SEL < EX_NITEMS && !ex_is_drive(vfs_node(EX_ITEMS[EX_SEL]));
+    return ex_sel_actionable() > 0;
 }
 
 /* pointer shape: a left-right double arrow on the divider, and for as long as it is being dragged */
@@ -137,16 +137,26 @@ int ex_press(Window *w, int x, int y)
     if (row < 0 || row >= EX_NITEMS)
     {
         int changed = EX_SEL >= 0 || EX_NOTE;
-        EX_SEL = -1;
+        ex_clear_sel();
         EX_NOTE = 0;
         EX_LAST_ROW = -1;
         return changed;
+    }
+    if (EX_MODS & (KMOD_CTRL | KMOD_SHIFT)) /* several: Shift takes the rows from the anchor to this one, Ctrl adds or drops this one */
+    {
+        EX_LAST_ROW = -1; /* not the first click of a double click */
+        EX_NOTE = 0;
+        if (EX_MODS & KMOD_SHIFT)
+            ex_select_range(row);
+        else
+            ex_select_toggle(row);
+        return 1; /* any number of rows changed: the whole window is drawn again */
     }
     unsigned long long now = timer_ms();
     int double_click = row == EX_LAST_ROW && now - EX_LAST_CLICK_MS <= DOUBLE_CLICK_MS;
     EX_LAST_ROW = row;
     EX_LAST_CLICK_MS = now;
-    int old_sel = EX_SEL, old_scroll = EX_SCROLL, had = has_selection();
+    int old_sel = EX_SEL, old_scroll = EX_SCROLL, had = has_selection(), had_many = ex_sel_count() > 1;
     ex_select_row(body, row);
     if (double_click)
     {
@@ -157,7 +167,7 @@ int ex_press(Window *w, int x, int y)
     /* A plain selection: only the row that lost it, the row that got it and the status bar (it names the selection)
      * look different; the toolbar too when Cut / Copy / Rename / Delete become usable or not. The whole window is
      * drawn again only when the list scrolled (a tooltip the click hid: only its box, marked above). */
-    if (EX_SCROLL != old_scroll || (tip_was_shown && !tip_marked))
+    if (EX_SCROLL != old_scroll || had_many || (tip_was_shown && !tip_marked)) /* (a click that ends a several-row selection changes rows all over) */
         return 1;
     mark_row(&l, old_sel);
     mark_row(&l, row);
@@ -262,12 +272,15 @@ int ex_rpress(Window *w, int x, int y)
     int row = ui_contains(l.list, x, y) ? EX_SCROLL + (y - l.list.y) / ROW_H : -1;
     if (row >= 0 && row < EX_NITEMS)
     {
-        ex_select_row(body, row);
+        if (!ex_is_selected(row)) /* an entry that is not selected becomes the selection; one that is keeps the selection it is in */
+            ex_select_row(body, row);
+        else
+            EX_NOTE = 0;
         ex_menu_open(x, y, 1);
     }
     else
     {
-        EX_SEL = -1;
+        ex_clear_sel();
         EX_NOTE = 0;
         ex_menu_open(x, y, 0);
     }
@@ -381,6 +394,11 @@ static void type_ahead(UiRect body, int c)
 
 void ex_key(Window *w, const KeyEvent *k)
 {
+    EX_MODS = k->mods & (KMOD_SHIFT | KMOD_CTRL); /* the mouse clicks that follow are Shift / Ctrl clicks */
+    if (k->key == KEY_SHIFT)
+        EX_MODS = k->pressed ? (EX_MODS | KMOD_SHIFT) : (EX_MODS & ~(unsigned)KMOD_SHIFT);
+    else if (k->key == KEY_CTRL)
+        EX_MODS = k->pressed ? (EX_MODS | KMOD_CTRL) : (EX_MODS & ~(unsigned)KMOD_CTRL);
     if (!k->pressed)
         return;
     UiRect body = wm_content(w);
@@ -449,19 +467,28 @@ void ex_key(Window *w, const KeyEvent *k)
         ex_refresh();
         return;
     case KEY_F2:
-        ex_start_rename(EX_SEL);
+        if (ex_sel_count() > 1)
+            EX_NOTE = "Select one item to rename it.";
+        else
+            ex_start_rename(EX_SEL);
         return;
     case KEY_DELETE:
-        ex_ask_delete(EX_SEL);
+        ex_ask_delete();
         return;
     case KEY_BACKSPACE:
         ex_go_up();
         return;
     case KEY_ENTER:
-        ex_open_item(EX_SEL);
+        if (ex_sel_count() <= 1) /* Open works on one entry */
+            ex_open_item(EX_SEL);
         return;
     default:
         break;
+    }
+    if ((k->mods & KMOD_CTRL) && !(k->mods & (KMOD_SHIFT | KMOD_ALT)) && k->key == 'a') /* select all */
+    {
+        ex_select_all();
+        return;
     }
     if ((k->mods & KMOD_CTRL) && !(k->mods & (KMOD_SHIFT | KMOD_ALT)) && (k->key == 'x' || k->key == 'c' || k->key == 'v'))
     {
@@ -483,30 +510,38 @@ void ex_key(Window *w, const KeyEvent *k)
     }
     if (EX_NITEMS == 0)
         return;
+    int target = -1; /* the row a movement key goes to */
     switch (k->key)
     {
     case KEY_UP:
-        ex_select_row(body, EX_SEL < 0 ? 0 : EX_SEL - 1);
+        target = EX_SEL < 0 ? 0 : EX_SEL - 1;
         break;
     case KEY_DOWN:
-        ex_select_row(body, EX_SEL < 0 ? 0 : EX_SEL + 1);
+        target = EX_SEL < 0 ? 0 : EX_SEL + 1;
         break;
     case KEY_PAGEUP:
-        ex_select_row(body, EX_SEL - page < 0 ? 0 : EX_SEL - page);
+        target = EX_SEL - page < 0 ? 0 : EX_SEL - page;
         break;
     case KEY_PAGEDOWN:
-        ex_select_row(body, EX_SEL + page >= EX_NITEMS ? EX_NITEMS - 1 : EX_SEL + page);
+        target = EX_SEL + page >= EX_NITEMS ? EX_NITEMS - 1 : EX_SEL + page;
         break;
     case KEY_HOME:
-        ex_select_row(body, 0);
+        target = 0;
         break;
     case KEY_END:
-        ex_select_row(body, EX_NITEMS - 1);
+        target = EX_NITEMS - 1;
         break;
     default:
         if (k->ch > ' ' && k->ch < 127 && !(k->mods & (KMOD_CTRL | KMOD_ALT)))
             type_ahead(body, k->ch);
         break;
+    }
+    if (target >= 0 && target < EX_NITEMS)
+    {
+        if (k->mods & KMOD_SHIFT) /* Shift: the selection grows from its anchor to the new row */
+            ex_extend_to(body, target);
+        else
+            ex_select_row(body, target);
     }
 }
 

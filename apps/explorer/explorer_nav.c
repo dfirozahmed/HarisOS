@@ -23,10 +23,10 @@ static void note_for_folder(void)
 
 void ex_reload(void)
 {
+    int focus = (EX_SEL >= 0 && EX_SEL < EX_NITEMS) ? EX_ITEMS[EX_SEL] : -1; /* by node: the rows may be in another order now */
     int total = vfs_list_by(EX_CUR, EX_ITEMS, VFS_MAX_NODES, EX_SORT_KEY, EX_SORT_DESC);
     EX_NITEMS = total < VFS_MAX_NODES ? total : VFS_MAX_NODES;
-    if (EX_SEL >= EX_NITEMS)
-        EX_SEL = EX_NITEMS - 1;
+    ex_fix_selection(focus); /* the selected entries stay selected, those that are gone are not */
     if (EX_SCROLL > EX_NITEMS - 1)
         EX_SCROLL = EX_NITEMS > 0 ? EX_NITEMS - 1 : 0;
     ex_update_nav_buttons();
@@ -37,16 +37,10 @@ void ex_refresh(void)
 {
     if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
         return;
-    int id = (EX_SEL >= 0 && EX_SEL < EX_NITEMS) ? EX_ITEMS[EX_SEL] : -1;
     EX_NOTE = 0;
     vfs_refresh(EX_CUR);
-    ex_reload();
+    ex_reload(); /* keeps the selection */
     note_for_folder();
-    int row = ex_row_of(id);
-    if (row >= 0)
-        EX_SEL = row;
-    else if (EX_SEL >= EX_NITEMS)
-        EX_SEL = EX_NITEMS - 1;
 }
 
 void ex_go_to(int dir, int push)
@@ -69,14 +63,14 @@ void ex_go_to(int dir, int push)
         EX_HIST[EX_HIST_N++] = EX_CUR;
     }
     EX_CUR = dir;
-    EX_SEL = -1;
+    ex_clear_sel();
     EX_SCROLL = 0;
     EX_LAST_ROW = -1;
     EX_NOTE = 0;
     ex_reload();
     note_for_folder();
     if (EX_NITEMS > 0)
-        EX_SEL = 0;
+        ex_select_only(0);
 }
 
 void ex_go_back(void)
@@ -103,7 +97,7 @@ void ex_go_up(void)
     ex_go_to(n->parent, 1);
     for (int i = 0; i < EX_NITEMS; i++) /* select the folder we just left */
         if (EX_ITEMS[i] == from)
-            EX_SEL = i;
+            ex_select_only(i);
 }
 
 /* A program (an ELF file): open a console window for it and start it. The program's thread runs by itself from here;
@@ -216,10 +210,17 @@ void ex_select_row(UiRect body, int row)
 {
     if (row < 0 || row >= EX_NITEMS)
         return;
+    ex_select_only(row);
+    EX_NOTE = 0;
+    ex_scroll_to(body, row);
+}
+
+void ex_scroll_to(UiRect body, int row)
+{
+    if (row < 0 || row >= EX_NITEMS)
+        return;
     Layout l = ex_layout(body);
     int vis = ex_visible_rows(&l);
-    EX_SEL = row;
-    EX_NOTE = 0;
     if (row < EX_SCROLL)
         EX_SCROLL = row;
     if (row >= EX_SCROLL + vis)
@@ -235,18 +236,16 @@ int ex_row_of(int id)
     return -1;
 }
 
-/* Change the order of the list; the selected entry stays selected (and in view). */
+/* Change the order of the list; the selected entries stay selected (the cursor one in view). */
 void ex_set_sort(int key, int desc)
 {
     if (EX_RENAME_ID >= 0 && !ex_end_rename(1))
         return;
-    int id = (EX_SEL >= 0 && EX_SEL < EX_NITEMS) ? EX_ITEMS[EX_SEL] : -1;
     EX_SORT_KEY = key;
     EX_SORT_DESC = desc;
     ex_reload();
-    int row = ex_row_of(id);
-    if (row >= 0 && EX_WIN)
-        ex_select_row(wm_content(EX_WIN), row);
+    if (EX_SEL >= 0 && EX_WIN)
+        ex_scroll_to(wm_content(EX_WIN), EX_SEL);
     EX_LAST_ROW = -1;
 }
 
@@ -280,15 +279,14 @@ int ex_sync_drives(void)
         if (vfs_node(EX_FWD[i]))
             EX_FWD[n++] = EX_FWD[i];
     EX_FWD_N = n;
-    if (EX_CLIP_ID >= 0 && !vfs_node(EX_CLIP_ID))
-        EX_CLIP_ID = -1;
+    ex_clip_count(); /* forgets clipboard entries that are gone */
     if (EX_RENAME_ID >= 0 && !vfs_node(EX_RENAME_ID))
         ex_end_rename(0);
 
     if (!vfs_node(EX_CUR))
     {
         EX_CUR = VFS_ROOT;
-        EX_SEL = -1;
+        ex_clear_sel();
         EX_SCROLL = 0;
         EX_NOTE = "The drive was removed.";
     }

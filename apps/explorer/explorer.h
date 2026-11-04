@@ -4,7 +4,8 @@
  *   explorer_app.c      the AppInfo, opening and closing the window
  *   explorer_state.c    the state every part shares (current folder, selection, history, clipboard ...)
  *   explorer_util.c     file kinds, size text, small string helpers
- *   explorer_nav.c      current folder, history, sorting, layout of the window, selection
+ *   explorer_nav.c      current folder, history, sorting, layout of the window, scrolling to a row
+ *   explorer_select.c   the selection (one entry or several), the clipboard's list, Send to desktop
  *   explorer_ops.c      rename, new folder / file, clipboard (cut / copy / paste), delete with its dialog
  *   explorer_drive.c    drives: the write lock, drive information, VFS error messages
  *   explorer_menu.c     the right-click menu and the sort menu
@@ -125,7 +126,11 @@ extern Window *EX_WIN;
 extern int EX_CUR;                 /* folder being shown */
 extern int EX_ITEMS[VFS_MAX_NODES]; /* its children, in the sort order */
 extern int EX_NITEMS;
-extern int EX_SEL;                 /* selected row, -1 = none */
+extern int EX_SEL;                 /* the selected row that counts (the cursor); with several selected one of them; -1 = none */
+extern unsigned char EX_MARK[VFS_MAX_NODES]; /* the selected entries, by node (explorer_select.c) */
+extern int EX_MARK_N;              /* how many are marked */
+extern int EX_ANCHOR;              /* the row a Shift range starts from */
+extern unsigned EX_MODS;           /* KMOD_SHIFT / KMOD_CTRL while held: a mouse click carries no modifiers, the key events say */
 extern int EX_SCROLL;              /* first visible row */
 extern UiScroll EX_SB;             /* the list's scrollbar: ex_sb_sync() fills it from EX_SCROLL, the layout and EX_NITEMS */
 extern int EX_HIST[HIST_MAX];      /* folders to go back to */
@@ -146,8 +151,10 @@ extern int EX_SORT_DESC;
 extern int EX_TIP_BTN;             /* toolbar button the pointer rests on, -1 = none */
 extern unsigned long long EX_TIP_SINCE; /* when it started resting there */
 extern int EX_TIP_SHOWN;           /* the tooltip is visible */
-extern int EX_CLIP_ID;             /* entry on the clipboard (Cut or Copy), -1 = empty */
-extern int EX_CLIP_CUT;            /* 1 = it moves on Paste, 0 = a copy is made */
+#define EX_SEL_MAX 256             /* entries one command (Cut, Copy, Delete, Send to desktop) works on */
+extern int EX_CLIP[EX_SEL_MAX];    /* entries on the clipboard (Cut or Copy) */
+extern int EX_CLIP_N;              /* how many; 0 = empty */
+extern int EX_CLIP_CUT;            /* 1 = they move on Paste, 0 = copies are made */
 extern int EX_RENAME_ID;           /* node being renamed in its row (EX_WIN->edits[0] holds the text), -1 = none */
 extern int EX_ADDR_EDIT;           /* 1 = the path bar is a text field (EX_WIN->edits[0] holds the path) */
 extern int EX_HOVER_CRUMB;         /* node of the path bar name under the pointer, -1 = none */
@@ -182,7 +189,26 @@ Layout ex_layout(UiRect body);
 int ex_visible_rows(const Layout *l);
 void ex_clamp_scroll(const Layout *l);
 void ex_sb_sync(const Layout *l);              /* scrollbar numbers and track from the list (call before using EX_SB) */
-void ex_select_row(UiRect body, int row);      /* select and scroll into view */
+void ex_select_row(UiRect body, int row);      /* select only this row, and scroll it into view */
+void ex_scroll_to(UiRect body, int row);       /* scroll a row into view, the selection is not touched */
+
+/* ---- explorer_select.c ------------------------------------------ */
+int ex_is_selected(int row);
+int ex_sel_count(void);                        /* how many entries are selected */
+void ex_clear_sel(void);                       /* nothing selected */
+void ex_select_only(int row);                  /* only this row (no scrolling); -1 = nothing */
+void ex_select_toggle(int row);                /* Ctrl+click: this row joins or leaves the selection */
+void ex_select_range(int to);                  /* Shift+click: the rows from the anchor to this one */
+void ex_extend_to(UiRect body, int row);       /* Shift+arrow: the same, and scroll to it */
+void ex_select_all(void);
+void ex_select_ids(const int *ids, int n);     /* exactly these entries (those in the list); the cursor on the first */
+void ex_fix_selection(int focus_id);           /* the list was made again: keep the selection by node */
+int ex_selected(int *ids, int max);            /* the selected entries a command works on (not drives), in list order */
+int ex_sel_actionable(void);                   /* how many of those */
+int ex_clip_count(void);                       /* entries on the clipboard that still exist */
+int ex_clip_has(int id);
+void ex_clip_drop_under(int id);               /* forget clipboard entries that are in (or are) this entry */
+void ex_send_selected(void);                   /* Send to desktop, for all the selected entries */
 
 /* ---- explorer_ops.c --------------------------------------------- */
 void ex_start_rename(int row);
@@ -190,7 +216,7 @@ int ex_end_rename(int commit);                 /* 0 only when the new name is re
 void ex_new_item(int is_dir);
 void ex_clip_set(int cut);
 void ex_paste(void);
-void ex_ask_delete(int row);
+void ex_ask_delete(void);                      /* asks about deleting the selected entries */
 int ex_delete_pending(void);                   /* the confirmation dialog is open */
 
 /* A drive that has a lock to show: one that can be locked (FAT32, exFAT, NTFS) or one on a disk that cannot be written at all,

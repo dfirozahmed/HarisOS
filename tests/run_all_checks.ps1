@@ -21,6 +21,7 @@ try {
         @('Desktop menu tests', 'tests/run_deskmenu_tests.sh'),
         @('Desktop icon tests', 'tests/run_deskicons_tests.sh'),
         @('Desktop folder tests', 'tests/run_deskfiles_tests.sh'),
+        @('Explorer selection tests', 'tests/run_exselect_tests.sh'),
         @('Toast tests', 'tests/run_toast_tests.sh'),
         @('Kernel heap tests', 'tests/run_heap_tests.sh'),
         @('CPU exception report tests', 'tests/run_fault_tests.sh'),

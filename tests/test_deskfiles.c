@@ -66,12 +66,13 @@ int vfs_add(int parent, const char *name, int is_dir, unsigned size)
     node_set(id, parent, name, is_dir);
     return id;
 }
+static unsigned COPY_FAIL_MASK, COPY_CALL; /* bit k set: the k-th copy since COPY_CALL was reset fails */
 int vfs_copy(int id, int dest)
 {
     COPIES++;
     COPIED = id;
     COPY_DEST = dest;
-    if (!COPY_OK)
+    if (!COPY_OK || ((COPY_FAIL_MASK >> COPY_CALL++) & 1u))
         return -1;
     int c = free_id();
     node_set(c, dest, NODES[id].name, NODES[id].is_dir);
@@ -455,6 +456,109 @@ int main(void)
     CHECK(deskfiles_send(21) == -1);
     CHECK(ADDS == 0 && COPIES == 0 && TOASTS == 1 && LAST_KIND == TOAST_WARNING && strstr(LAST_TEXT, "no drive") != 0);
     VOL_FOLDER = 1;
+
+
+    /* ================= Send to desktop, several at once ================= */
+    for (int i = 1; i < MAXN; i++) /* a clean slate: only the boot drive, a Desktop folder with a file in it, and some files to send */
+        NODES[i].used = 0;
+    node_set(1, 0, "HARISOS", 1);
+    node_set(5, 1, "Desktop", 1);
+    node_set(6, 5, "there.txt", 0);
+    node_set(20, 1, "Docs", 1);
+    node_set(21, 20, "a.txt", 0);
+    node_set(22, 20, "b.txt", 0);
+    node_set(23, 20, "c.txt", 0);
+    ADD_OK = COPY_OK = 1;
+    COPY_FAIL_MASK = COPY_CALL = 0;
+
+    /* nothing to send, one, several */
+    reset_counters();
+    ADDS = COPIES = 0;
+    int none[1] = {21};
+    CHECK(deskfiles_send_many(none, 0) == 0 && TOASTS == 0 && COPIES == 0);
+    int one[1] = {21};
+    CHECK(deskfiles_send_many(one, 1) == 1 && COPIES == 1 && strcmp(LAST_TEXT, "Sent a.txt to the desktop.") == 0); /* one: as deskfiles_send */
+
+    /* several: each copied, one toast for all, the icons told once */
+    reset_counters();
+    ADDS = COPIES = 0;
+    int three[3] = {21, 22, 23};
+    CHECK(deskfiles_send_many(three, 3) == 3);
+    CHECK(COPIES == 3 && ADDS == 0 && COPY_DEST == 5);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_SUCCESS && strcmp(LAST_TEXT, "Sent 3 items to the desktop.") == 0);
+    CHECK(SET_CALLS == 1);
+    int on_desk = 0;
+    for (int i = 0; i < SET_N; i++)
+        on_desk += strcmp(SET_FILES[i].name, "a.txt") == 0 || strcmp(SET_FILES[i].name, "b.txt") == 0 || strcmp(SET_FILES[i].name, "c.txt") == 0;
+    CHECK(on_desk >= 3);
+
+    /* some of them are on the desktop already: not copied again, and the message says so */
+    reset_counters();
+    ADDS = COPIES = 0;
+    int mixed[4] = {21, 6, 22, 23}; /* 6 is in the Desktop folder */
+    CHECK(deskfiles_send_many(mixed, 4) == 3 && COPIES == 3);
+    CHECK(LAST_KIND == TOAST_SUCCESS && strcmp(LAST_TEXT, "Sent 3 items to the desktop (1 was there already).") == 0);
+    int twice[3] = {6, 21, 6};
+    reset_counters();
+    COPIES = 0;
+    CHECK(deskfiles_send_many(twice, 3) == 1 && strstr(LAST_TEXT, "Sent 1 item to the desktop (2 were there already).") != 0);
+
+    /* all of them are on the desktop: nothing is copied, and no Desktop folder is made (there is one here, so look without) */
+    reset_counters();
+    ADDS = COPIES = 0;
+    node_set(7, 5, "also.txt", 0);
+    int there[2] = {6, 7};
+    CHECK(deskfiles_send_many(there, 2) == 0 && COPIES == 0 && TOASTS == 1 && LAST_KIND == TOAST_INFO);
+    CHECK(strcmp(LAST_TEXT, "They are on the desktop already.") == 0);
+
+    /* only a drive, or a node that is gone: nothing to send, and nothing made */
+    reset_counters();
+    ADDS = COPIES = 0;
+    int drives[2] = {1, 50};
+    CHECK(deskfiles_send_many(drives, 2) == 0 && COPIES == 0 && ADDS == 0);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_WARNING && strstr(LAST_TEXT, "Nothing to send") != 0);
+
+    /* the drive can take some copies and not others: the ones that went are counted, the first reason is told */
+    reset_counters();
+    ADDS = COPIES = 0;
+    COPY_CALL = 0;
+    COPY_FAIL_MASK = 2u; /* the second copy fails */
+    CHECK(deskfiles_send_many(three, 3) == 2 && COPIES == 3);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_WARNING && strstr(LAST_TEXT, "Sent 2 of 3 items; the rest: ") != 0 && strstr(LAST_TEXT, "locked") != 0);
+    CHECK(SET_CALLS == 1); /* it looked again: two copies were made */
+    COPY_FAIL_MASK = 0;
+
+    /* none could be copied */
+    reset_counters();
+    ADDS = COPIES = 0;
+    COPY_OK = 0;
+    CHECK(deskfiles_send_many(three, 3) == 0);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_ERROR && strstr(LAST_TEXT, "Cannot send 3 items: ") != 0 && strstr(LAST_TEXT, "locked") != 0);
+    COPY_OK = 1;
+
+    /* no Desktop folder: made once, for all of them */
+    for (int i = 1; i < MAXN; i++)
+        if (NODES[i].parent == 5)
+            node_del(i);
+    node_del(5);
+    reset_counters();
+    ADDS = COPIES = 0;
+    CHECK(deskfiles_send_many(three, 3) == 3);
+    CHECK(ADDS == 1 && ADDED_PARENT == 1 && strcmp(ADDED_NAME, "Desktop") == 0 && COPIES == 3);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_SUCCESS && strcmp(LAST_TEXT, "Sent 3 items to the desktop.") == 0);
+
+    /* no Desktop folder and none can be made (a locked drive): nothing is copied, the drive's words are the toast */
+    for (int i = 1; i < MAXN; i++)
+        if (NODES[i].parent == deskfiles_folder() && deskfiles_folder() > 0)
+            node_del(i);
+    if (deskfiles_folder() > 0)
+        node_del(deskfiles_folder());
+    reset_counters();
+    ADDS = COPIES = 0;
+    ADD_OK = 0;
+    CHECK(deskfiles_send_many(three, 3) == 0);
+    CHECK(ADDS == 1 && COPIES == 0 && TOASTS == 1 && LAST_KIND == TOAST_ERROR && strstr(LAST_TEXT, "Cannot make the Desktop folder") != 0);
+    ADD_OK = 1;
 
     printf("deskfiles tests passed\n");
     return 0;
