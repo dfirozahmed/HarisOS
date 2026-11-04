@@ -24,6 +24,9 @@ static Row ROWS[DEVMGR_MAX + DEV_CAT_COUNT];
 static int NROWS;
 static int SEL = -1;  /* selected row (always a device row), -1 = none */
 static int SCROLL;    /* first visible row */
+static UiMenu MENU;   /* the right-click menu: Copy name / Copy details of the device it was opened on, and Refresh */
+enum { DMM_COPY_NAME, DMM_COPY_DETAILS, DMM_REFRESH }; /* its item ids */
+static void menu_run(int id);
 static UiScroll SB;   /* the list's scrollbar: sb_sync() fills it from SCROLL, NROWS and the layout */
 
 static void rebuild_rows(void)
@@ -157,7 +160,8 @@ static void select_step(UiRect body, int dir)
 
 static void dm_draw(Window *w, UiRect body)
 {
-    (void)w;
+    if (MENU.open && w != wm_top())
+        ui_menu_close(&MENU); /* focus moved elsewhere (another window or a dialog) */
     const UiTheme *t = ui_theme();
     UiRect list = list_rect(body);
     int vis = visible_rows(body);
@@ -165,6 +169,7 @@ static void dm_draw(Window *w, UiRect body)
     if (NROWS == 0)
     {
         ui_text_in(list, "No devices found.", UI_TEXT_DIM, UI_ALIGN_CENTER);
+        ui_menu_draw(&MENU);
         return;
     }
     if (SCROLL > NROWS - 1)
@@ -210,10 +215,16 @@ static void dm_draw(Window *w, UiRect body)
                          e->note[0] ? e->note : (e->has_driver ? "Driver loaded" : "No HarisOS driver for this device"),
                          UI_TEXT_SMALL, UI_ALIGN_LEFT, e->has_driver ? t->success : t->warning);
     }
+    ui_menu_draw(&MENU);
 }
 
 static int dm_press(Window *w, int x, int y)
 {
+    if (MENU.open) /* a click on an item shows it pressed and it runs when the button is released (dm_drag); a click anywhere else only closes the menu */
+    {
+        ui_menu_press(&MENU, x, y);
+        return 1;
+    }
     UiRect body = wm_content(w);
     UiRect list = list_rect(body);
     sb_sync(body); /* the scrollbar: grab the thumb (dm_drag follows it) or click the track for a page */
@@ -234,6 +245,14 @@ static int dm_press(Window *w, int x, int y)
 /* the thumb is held: the list follows the pointer */
 static int dm_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (MENU.open && MENU.press >= 0)
+    {
+        int id = -1;
+        int r = ui_menu_release(&MENU, x, y, buttons, &id); /* 2 = released on the item it was pressed on */
+        if (r == 2)
+            menu_run(id);
+        return r != 0;
+    }
     if (!SB.dragging)
         return 0;
     sb_sync(wm_content(w));
@@ -245,6 +264,8 @@ static int dm_drag(Window *w, int x, int y, unsigned buttons)
 /* the scrollbar widens while the pointer is over it */
 static int dm_hover(Window *w, int x, int y)
 {
+    if (MENU.open)
+        return ui_menu_hover(&MENU, x, y);
     sb_sync(wm_content(w));
     return ui_scroll_hover(&SB, x, y);
 }
@@ -253,6 +274,8 @@ static int dm_hover(Window *w, int x, int y)
 #define WHEEL_ROWS 3
 static int dm_wheel(Window *w, int steps)
 {
+    int had_menu = MENU.open;
+    ui_menu_close(&MENU); /* the rows move under it */
     int max_scroll = NROWS - visible_rows(wm_content(w));
     if (max_scroll < 0)
         max_scroll = 0;
@@ -262,7 +285,7 @@ static int dm_wheel(Window *w, int steps)
         SCROLL = max_scroll;
     if (SCROLL < 0)
         SCROLL = 0;
-    return SCROLL != old;
+    return SCROLL != old || had_menu;
 }
 
 /* Ask the system again (PCI + drivers) and rebuild the rows. The selection stays on the same
@@ -298,6 +321,70 @@ static void refresh_list(void)
         select_to(wm_content(DM_WIN), SEL); /* keep the selection on screen */
 }
 
+/* the text of a menu command goes to the shared clipboard */
+static void clip_add(char *buf, int *n, const char *s)
+{
+    while (*s)
+        buf[(*n)++] = *s++;
+}
+
+static void menu_run(int id)
+{
+    switch (id)
+    {
+    case DMM_REFRESH:
+        refresh_list();
+        break;
+    case DMM_COPY_NAME:
+    case DMM_COPY_DETAILS:
+    {
+        if (SEL < 0 || SEL >= NROWS || ROWS[SEL].dev < 0)
+            break;
+        const DevEntry *e = devmgr_get(ROWS[SEL].dev);
+        char buf[sizeof e->name + sizeof e->detail + sizeof e->note + 4];
+        int n = 0;
+        clip_add(buf, &n, e->name);
+        if (id == DMM_COPY_DETAILS)
+        {
+            if (e->detail[0])
+            {
+                buf[n++] = '\n';
+                clip_add(buf, &n, e->detail);
+            }
+            if (e->note[0])
+            {
+                buf[n++] = '\n';
+                clip_add(buf, &n, e->note);
+            }
+        }
+        ui_clipboard_set(buf, n);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* right click on a device: select it and offer to copy its name or details; anywhere else only Refresh */
+static int dm_rpress(Window *w, int x, int y)
+{
+    UiRect body = wm_content(w);
+    UiRect list = list_rect(body);
+    int row = (y - list.y) / ROW_H + SCROLL;
+    int on_device = ui_contains(list, x, y) && row >= 0 && row < NROWS && ROWS[row].dev >= 0;
+    ui_menu_clear(&MENU);
+    if (on_device)
+    {
+        select_to(body, row);
+        ui_menu_add(&MENU, DMM_COPY_NAME, "Copy name", 0, 0);
+        ui_menu_add(&MENU, DMM_COPY_DETAILS, "Copy details", 0, 0);
+        ui_menu_separator(&MENU);
+    }
+    ui_menu_add(&MENU, DMM_REFRESH, "Refresh", "F5", 0);
+    ui_menu_open(&MENU, x, y, body);
+    return 1;
+}
+
 static void on_refresh(UiButton *b, void *user)
 {
     (void)b;
@@ -307,6 +394,13 @@ static void on_refresh(UiButton *b, void *user)
 
 static void dm_key(Window *w, const KeyEvent *k)
 {
+    if (MENU.open) /* the menu has the keyboard: Up / Down / Enter / Esc, every other key is ignored */
+    {
+        int id = -1;
+        if (ui_menu_key(&MENU, k, &id) == 2)
+            menu_run(id);
+        return;
+    }
     if (k->pressed && k->key == KEY_F5)
     {
         refresh_list();
@@ -394,6 +488,8 @@ static void devmgr_app_open(void)
     win->on_press = dm_press;
     win->on_wheel = dm_wheel;
     win->on_drag = dm_drag;
+    win->on_rpress = dm_rpress;
+    ui_menu_clear(&MENU);
     win->on_hover = dm_hover;
     SB.dragging = SB.hover = 0;
     win->on_close = dm_close;
