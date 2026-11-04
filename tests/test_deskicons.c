@@ -7,6 +7,7 @@
 #include "mouse.h"
 #include "taskbar.h"
 #include "timer.h"
+#include "toast.h"
 #include "vfs.h"
 #include "wm.h"
 #include <assert.h>
@@ -66,6 +67,7 @@ static int CFG_NODE = -1;
 static char CFG_TEXT[512];
 static char SAVED[512];
 static int SAVES;
+static int SAVE_RESULT; /* what vfs_save says: 0 = written */
 int exec_find(const char *name) { (void)name; return CFG_NODE; }
 int vfs_read(int id, unsigned off, void *buf, unsigned len)
 {
@@ -83,7 +85,16 @@ int vfs_save(int parent, const char *name, const void *buf, unsigned len)
     memcpy(SAVED, buf, len);
     SAVED[len] = 0;
     SAVES++;
-    return 0;
+    return SAVE_RESULT;
+}
+static int TOASTS;
+static ToastKind LAST_TOAST;
+static char LAST_TOAST_TEXT[TOAST_TEXT_MAX + 1];
+void toast_show(ToastKind kind, const char *text)
+{
+    TOASTS++;
+    LAST_TOAST = kind;
+    strncpy(LAST_TOAST_TEXT, text, TOAST_TEXT_MAX);
 }
 static int FOLDER = 7;
 int look_config_folder(void) { return FOLDER; }
@@ -285,11 +296,21 @@ int main(void)
         CHECK(at(0, i) == i);
     CHECK(at(1, 0) == 7);
     CHECK(SAVES == 1 && strstr(SAVED, "File Explorer=0,0\r\n") != 0 && strstr(SAVED, "Personalize=1,0\r\n") != 0);
-    FOLDER = -1; /* no drive that can be written: nothing is saved, nothing breaks */
+    CHECK(TOASTS == 0); /* every save so far worked: nothing was said */
+    FOLDER = -1; /* no drive that can be written (they start locked): nothing is saved, nothing breaks, and the user is told */
     SAVES = 0;
     deskicons_arrange();
     CHECK(SAVES == 0);
+    CHECK(TOASTS == 1 && LAST_TOAST == TOAST_WARNING && strstr(LAST_TOAST_TEXT, "not saved") != 0 && strstr(LAST_TOAST_TEXT, "Unlock") != 0);
     FOLDER = 7;
+    SAVE_RESULT = -1; /* a drive, but the file could not be written */
+    TOASTS = 0;
+    deskicons_arrange();
+    CHECK(TOASTS == 1 && LAST_TOAST == TOAST_ERROR && strstr(LAST_TOAST_TEXT, "ICONS.CFG") != 0);
+    SAVE_RESULT = 0;
+    TOASTS = 0;
+    deskicons_arrange();
+    CHECK(TOASTS == 0);
 
     /* ICONS.CFG: places are taken as written; a cell that is off the grid or already taken, an app with no line, and a line of an app
      * that does not exist all end up on the first free cell, and no two icons share one */

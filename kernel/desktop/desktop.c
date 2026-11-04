@@ -6,6 +6,7 @@
 #include "appmenu.h"
 #include "deskmenu.h"
 #include "deskicons.h"
+#include "toast.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "timer.h"
@@ -147,6 +148,7 @@ void desktop_draw(void)
     wm_draw();
     gfx_reset_clip();
     desktop_refresh_taskbar();
+    toast_draw();
     startmenu_draw();
     appmenu_draw();
     volmenu_draw();

@@ -6,6 +6,7 @@
 #include "guiapp.h"
 #include "taskbar.h"
 #include "volmenu.h"
+#include "toast.h"
 #include "startmenu.h"
 #include "ui.h"
 #include "timer.h"
@@ -131,6 +132,7 @@ int desktop_tick(void)
     int flipped = ui_caret_update();
     int ticked = gui_app_poll(); /* windows of user programs that appeared or went away */
     ticked |= wm_tick();        /* windows that wait for time (tooltips) */
+    ticked |= toast_tick();     /* a toast whose time is up */
     Window *top = wm_top();
     startmenu_tick(flipped);
 

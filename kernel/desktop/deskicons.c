@@ -6,6 +6,7 @@
 #include "mouse.h"
 #include "taskbar.h"
 #include "timer.h"
+#include "toast.h"
 #include "vfs.h"
 #include "wm.h"
 
@@ -172,8 +173,10 @@ static void save(void)
         o = put(o, "\r\n");
     }
     int dir = look_config_folder();
-    if (dir >= 0)
-        vfs_save(dir, CFG_NAME, text, (unsigned)(o - text)); /* no drive to write to, or it fails: the places last until the next boot */
+    if (dir < 0) /* the drives start locked: nothing can be written until one is unlocked */
+        toast_show(TOAST_WARNING, "Icon places not saved - no drive can be written to. Unlock one (the lock in File Explorer's status bar).");
+    else if (vfs_save(dir, CFG_NAME, text, (unsigned)(o - text)) < 0)
+        toast_show(TOAST_ERROR, "Icon places could not be saved: ICONS.CFG was not written.");
 }
 
 /* one number at *p (digits), then skips them; -1 if there is none */

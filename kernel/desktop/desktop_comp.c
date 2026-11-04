@@ -11,6 +11,7 @@
 #include "appmenu.h"
 #include "deskmenu.h"
 #include "deskicons.h"
+#include "toast.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "wm.h"
@@ -40,10 +41,11 @@ static UiRect taskbar_rect(void)
 }
 static int always(void) { return 1; }
 
-#define TOPS_N 6
+#define TOPS_N 7
 /* The desktop icons: a layer like the others but below the windows (just above the wallpaper). */
 static Top ICONS_TOP = {deskicons_visible, deskicons_bounds, deskicons_draw, 0, {0, 0, 0, 0}, 0};
 static Top TOPS[TOPS_N] = {
+    {toast_is_open, toast_bounds, toast_draw, 0, {0, 0, 0, 0}, 0}, /* below the menus */
     {startmenu_is_open, startmenu_bounds, startmenu_draw, 0, {0, 0, 0, 0}, 0},
     {appmenu_is_open, appmenu_bounds, appmenu_draw, 0, {0, 0, 0, 0}, 0},
     {volmenu_is_open, volmenu_bounds, volmenu_draw, 0, {0, 0, 0, 0}, 0},

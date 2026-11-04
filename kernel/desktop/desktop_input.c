@@ -6,6 +6,7 @@
 #include "appmenu.h"
 #include "deskmenu.h"
 #include "deskicons.h"
+#include "toast.h"
 #include "volmenu.h"
 #include "mouse.h"
 #include "ui.h"
@@ -53,6 +54,8 @@ int desktop_pointer(int x, int y, unsigned buttons)
         to_windows = 0;
     if (deskmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
         to_windows = 0;
+    if (toast_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
+        to_windows = 0; /* a toast is over the windows: a click on it only dismisses it */
     /* the desktop icons: a click on the bare desktop (nothing else under the pointer) selects, opens or drags them */
     int on_desktop = to_windows && !on_bar && !wm_dragging() && !wm_window_at(x, y);
     if (deskicons_pointer(x, y, buttons, on_desktop))

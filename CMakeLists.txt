@@ -304,6 +304,7 @@ set(KERNEL_SOURCES
     kernel/desktop/appmenu.c        # taskbar app right-click menu
     kernel/desktop/deskmenu.c       # desktop right-click menu (Personalize, Display settings, Refresh)
     kernel/desktop/deskicons.c      # desktop icons: app shortcuts on the wallpaper (click, double click, drag, ICONS.CFG)
+    kernel/desktop/toast.c          # desktop toast: a short message in the bottom right corner that goes away by itself
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c
     apps/app_registry.c             # list of installed apps (start menu reads it)
