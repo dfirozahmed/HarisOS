@@ -169,6 +169,7 @@ set(KERNEL_SOURCES
     kernel/drivers/gpu/amd_gpu.c            # AMD GPU: supported device list, BAR probe
     kernel/drivers/gpu/amd_firmware.c       # AMD GPU: firmware staging record
     kernel/drivers/gpu/amd_psp.c            # AMD GPU: PSP (security processor) mailbox / ring
+    kernel/drivers/gpu/amd_dcn.c            # AMD GPU: display core (DCN 2.1) read-only probe
     kernel/drivers/gpu/amd_native.c         # AMD GPU: Renoir GC / VM hubs / GART / CP ring
     kernel/drivers/gpu/amd_3d.c             # AMD GPU: 3D pipeline (M1..M3: rectangles drawn by shaders)
     kernel/drivers/gpu/amd_comp.c           # AMD GPU: compositor (M4: many draws in one submission)

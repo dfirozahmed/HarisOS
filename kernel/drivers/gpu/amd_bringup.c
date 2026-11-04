@@ -1,6 +1,7 @@
 #include "amd_bringup.h"
 #include "amd_gpu.h"
 #include "amd_native.h"
+#include "amd_dcn.h"
 #include "amd_3d.h"
 #include "amd_comp.h"
 #include "amd_psp.h"
@@ -335,6 +336,25 @@ int amd_gpu_bringup(void)
             amd_native_fault_probe(mmio);
             log_hex("  fault MM    ", amd_native_fault_mm_status());
             log_hex("  fault GC    ", amd_native_fault_gc_status());
+            {
+                /* Read-only: what the firmware left in display pipe 0 (OTG0 timing, HUBP0 scanout surface). */
+                AmdDcnProbe dp;
+                if (amd_dcn_probe(mmio, &dp))
+                {
+                    log_hex("  DCN OTG0_CONTROL  ", dp.otg_control);
+                    log_hex("  DCN OTG0_STATUS   ", dp.otg_status);
+                    log_hex("  DCN OTG0_H_TOTAL  ", dp.otg_h_total);
+                    log_hex("  DCN OTG0_V_TOTAL  ", dp.otg_v_total);
+                    log_hex("  DCN OTG0_H_BLANK  ", dp.otg_h_blank);
+                    log_hex("  DCN HUBP0_CNTL    ", dp.hubp_cntl);
+                    log_hex("  DCN HUBP0_CONFIG  ", dp.hubp_config);
+                    log_hex("  DCN HUBP0_PITCH   ", dp.hubp_pitch);
+                    log_hex("  DCN HUBP0_ADDR_LO ", dp.hubp_addr_lo);
+                    log_hex("  DCN HUBP0_ADDR_HI ", dp.hubp_addr_hi);
+                }
+                else
+                    serial_print("  DCN: registers not reachable\n");
+            }
         }
         return 1;
     }
