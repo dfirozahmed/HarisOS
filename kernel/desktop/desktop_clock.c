@@ -129,9 +129,9 @@ int desktop_tick(void)
     clock_changed |= taskbar_set_volume(audio_volume());
     clock_changed |= refresh_wifi();
     clock_changed |= refresh_battery();
-    volmenu_tick(); /* the volume may have been changed by a program (SYS_AUDIO_VOLUME) */
     int flipped = ui_caret_update();
-    int ticked = gui_app_poll(); /* windows of user programs that appeared or went away */
+    int ticked = volmenu_tick(); /* the volume may have been changed by a program (SYS_AUDIO_VOLUME); the panel slides open */
+    ticked |= gui_app_poll(); /* windows of user programs that appeared or went away */
     ticked |= wm_tick();        /* windows that wait for time (tooltips) */
     ticked |= toast_tick();     /* a toast whose time is up */
     ticked |= deskfiles_tick(); /* the Desktop folder has other files than a second ago */

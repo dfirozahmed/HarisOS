@@ -16,8 +16,9 @@ void volmenu_close(void);
 /* Same contract as startmenu_pointer(): returns 1 while the pointer is over the panel (or a slider drag is going on). */
 int volmenu_pointer(int x, int y, unsigned buttons);
 int volmenu_key(const KeyEvent *k);
-/* The volume was changed from elsewhere (keys, wheel, a program): redraw the panel if it shows another value. Call on every main-loop pass. */
-void volmenu_tick(void);
+/* The volume was changed from elsewhere (keys, wheel, a program): redraw the panel if it shows another value. Also steps the opening slide.
+ * Call on every main-loop pass; returns 1 when something needs drawing again. */
+int volmenu_tick(void);
 void volmenu_draw(void);     /* after the windows, before the taskbar */
 UiRect volmenu_bounds(void); /* everything the open panel draws, its shadow included */
 

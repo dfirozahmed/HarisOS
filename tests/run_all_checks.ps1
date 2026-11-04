@@ -16,6 +16,7 @@ try {
         @('Graphics regression tests', 'tests/run_gfx_tests.sh'),
         @('Font regression tests', 'tests/run_font_tests.sh'),
         @('Text input tests', 'tests/run_edit_tests.sh'),
+        @('Animation tests', 'tests/run_anim_tests.sh'),
         @('Scrollbar tests', 'tests/run_scroll_tests.sh'),
         @('Pop-up menu tests', 'tests/run_menu_tests.sh'),
         @('Desktop menu tests', 'tests/run_deskmenu_tests.sh'),

@@ -284,6 +284,7 @@ set(KERNEL_SOURCES
     kernel/ui/ui_surfaces.c    # wallpaper, cards and window surfaces
     kernel/ui/ui_controls.c    # buttons and common controls
     kernel/ui/ui_edit.c        # text input and blinking caret
+    kernel/ui/ui_anim.c        # animation: easing curves and time-based value glide (host-tested)
     kernel/ui/ui_scroll.c      # vertical scrollbar (thumb maths, drag, page click, hover)
     kernel/ui/ui_menu.c        # pop-up menu (right-click menu, drop-down)
     kernel/ui/icons.c          # HarisUI: vector icons

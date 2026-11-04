@@ -4,6 +4,8 @@
 #include "startmenu.h"
 #include "taskbar.h"
 #include "ui.h"
+#include "ui_anim.h"
+#include "timer.h"
 #include "volmenu.h"
 #include "deskmenu.h"
 #include "wm.h"
@@ -16,6 +18,8 @@
 #define TILE 40
 #define PCT_W 46
 #define STEP 5
+#define SLIDE_PX 14  /* the panel rises this far while it opens */
+#define SLIDE_MS 170
 
 static int OPEN;
 static int ANCHOR_X;
@@ -24,6 +28,8 @@ static int MUTE_HOVER, MUTE_PRESS;
 static int SHOWN = -1; /* the volume the panel was last drawn with */
 static int SAVED = 50; /* the volume before the mute button was pressed */
 static unsigned LAST_BUTTONS;
+static UiAnim SLIDE; /* panel offset below its resting place: SLIDE_PX -> 0 when it opens */
+static int DY;       /* SLIDE as of the last tick: one value for the whole frame, so the parts of the panel never disagree */
 
 /* ---- geometry ---- */
 static UiRect menu_rect(void)
@@ -37,7 +43,7 @@ static UiRect menu_rect(void)
     int y = H - TASKBAR_HEIGHT - MARGIN - MENU_H;
     if (y < 4)
         y = 4;
-    return ui_rect(x, y, MENU_W, MENU_H);
+    return ui_rect(x, y + DY, MENU_W, MENU_H);
 }
 
 UiRect volmenu_bounds(void)
@@ -116,17 +122,32 @@ void volmenu_open(int anchor_x)
     ANCHOR_X = anchor_x;
     DRAG = MUTE_HOVER = MUTE_PRESS = 0;
     SHOWN = audio_volume();
+    ui_anim_start(&SLIDE, SLIDE_PX, 0, SLIDE_MS, timer_ms());
+    DY = SLIDE_PX;
     dmg_all();
 }
 
-void volmenu_tick(void)
+int volmenu_tick(void)
 {
+    int redraw = 0;
     int v = audio_volume();
     if (OPEN && v != SHOWN)
     {
         SHOWN = v;
         dmg_panel();
+        redraw = 1;
     }
+    if (OPEN)
+    {
+        int dy = ui_anim_value(&SLIDE, timer_ms());
+        if (dy != DY) /* the panel moved by at least a pixel: draw it at its new place (volmenu_bounds covers the whole travel) */
+        {
+            DY = dy;
+            dmg_all();
+            redraw = 1;
+        }
+    }
+    return redraw;
 }
 
 /* ---- input ---- */
