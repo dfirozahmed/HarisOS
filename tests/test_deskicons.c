@@ -539,6 +539,45 @@ int main(void)
     CHECK(deskicons_is_file(at(1, 1)) && deskicons_is_file(at(1, 5)));
     deskicons_set_files(0, 0, 1);
 
+    /* rubber band: a press on the bare desktop that moves far enough selects every icon the box touches */
+    registry_order();
+    deskicons_select(-1);
+    CLIP = (GfxClip){0, 0, 1280, 800};
+    {
+        int bx, by;
+        center(5, 5, &bx, &by);
+        CHECK(deskicons_pointer(bx, by, MOUSE_LEFT, 1) == 0); /* the press itself is still the windows' */
+        CHECK(!deskicons_dragging());
+        CHECK(deskicons_pointer(bx + 2, by + 2, MOUSE_LEFT, 1) == 0); /* not far enough: a click */
+        center(0, 1, &x, &y);
+        CHECK(deskicons_pointer(x, y, MOUSE_LEFT, 1) == 1); /* from the bottom right, up and left over column 0 rows 1-3 */
+        CHECK(deskicons_dragging());
+        draw_counts();
+        CHECK(FILLS == 8 + 2 || FILLS >= 8 + 1); /* some selected */
+        center(0, 3, &x, &y);
+        int lx = x - 40, ly = y;
+        CHECK(deskicons_pointer(lx, 12 + 104 * 1 + 10, MOUSE_LEFT, 1) == 1);
+        CHECK(deskicons_pointer(lx, ly, MOUSE_LEFT, 1) == 1);
+        draw_counts();
+        int n_sel = FILLS - 8;
+        CHECK(n_sel >= 2);
+        deskicons_ghost_draw(); /* the box above the windows */
+        CHECK(deskicons_pointer(lx, ly, 0, 1) == 1); /* release */
+        CHECK(!deskicons_dragging());
+        draw_counts();
+        CHECK(FILLS - 8 == n_sel); /* the selection stays */
+        /* Delete takes every selected shortcut off the desktop */
+        ke.key = KEY_DELETE;
+        TOASTS = 0;
+        CHECK(deskicons_key(&ke) == 1);
+        CHECK(TOASTS == n_sel);
+        draw_counts();
+        CHECK(ICONS == 8 - n_sel);
+        /* a plain click clears the selection */
+        deskicons_select(-1);
+    }
+    registry_order();
+
     printf("deskicons tests passed\n");
     return 0;
 }

@@ -46,7 +46,12 @@ static unsigned char HIDDEN[APP_MAX]; /* app shortcuts taken off the desktop */
 static Pending PEND[DESK_FILES_MAX];
 static int PEND_N;
 static int SEL = -1, HOVER = -1;
-static int PRESS = -1;       /* the icon the left button went down on, -1 = none */
+static unsigned char MARK[MAX_ICONS]; /* 1 = selected (a rubber band can select several; SEL is the last of them, -1 = none) */
+static int BAND;                      /* rubber band: 0 = none, 1 = pressed on the bare desktop (not moved far yet), 2 = being drawn */
+static int BX, BY;                    /* where the band started */
+static UiRect BRECT;                  /* the band now (clamped to the desktop) */
+static int overlaps(UiRect a, UiRect b);
+static int PRESS = -1;      /* the icon the left button went down on, -1 = none */
 static int DRAGGING;         /* it has been moved far enough to be dragged */
 static int PX, PY;           /* where the button went down */
 static int GRABX, GRABY;     /* where in its cell the pointer took it */
@@ -243,6 +248,14 @@ static void assemble(const Icon *items, int n)
     int cap = capacity();
     if (n > cap)
         n = cap;
+    unsigned char was[MAX_ICONS]; /* which of the new icons were selected (the same icon, wherever it is now) */
+    for (int i = 0; i < n; i++)
+    {
+        was[i] = 0;
+        for (int j = 0; j < N; j++)
+            if (MARK[j] && same_icon(&IC[j], &items[i]))
+                was[i] = 1;
+    }
     for (int i = 0; i < n; i++)
     {
         IC[i] = items[i];
@@ -261,6 +274,8 @@ static void assemble(const Icon *items, int n)
         if (IC[i].col < 0)
             place_first_free(i);
     SEL = -1;
+    for (int i = 0; i < MAX_ICONS; i++)
+        MARK[i] = i < N ? was[i] : 0;
     if (had_sel)
         for (int i = 0; i < N; i++)
             if (same_icon(&IC[i], &key))
@@ -268,6 +283,7 @@ static void assemble(const Icon *items, int n)
     HOVER = -1;
     PRESS = -1; /* a drag in the middle of it is let go */
     DRAGGING = 0;
+    BAND = 0;
     LAST_CLICK = -1;
     wm_add_screen_damage(ui_rect(old.x, old.y, old.w + 8, old.h + 8));
     UiRect now = deskicons_bounds();
@@ -545,10 +561,21 @@ void deskicons_select(int icon)
     ensure();
     if (icon < 0 || icon >= N)
         icon = -1;
-    if (icon == SEL)
+    int several = 0; /* other icons are marked too: they have to be cleared even if `icon` is the SEL already */
+    for (int i = 0; i < N; i++)
+        if (MARK[i] && i != icon)
+            several = 1;
+    if (icon == SEL && !several && (icon < 0 || MARK[icon]))
         return;
-    dmg_icon(SEL);
+    for (int i = 0; i < N; i++)
+        if (MARK[i])
+        {
+            MARK[i] = 0;
+            dmg_icon(i);
+        }
     SEL = icon;
+    if (icon >= 0)
+        MARK[icon] = 1;
     dmg_icon(SEL);
 }
 
@@ -577,8 +604,12 @@ static void remove_icon(int i)
 {
     UiRect old = deskicons_bounds();
     for (int k = i; k < N - 1; k++)
+    {
         IC[k] = IC[k + 1];
+        MARK[k] = MARK[k + 1];
+    }
     N--;
+    MARK[N] = 0;
     if (SEL == i)
         SEL = -1;
     else if (SEL > i)
@@ -642,6 +673,7 @@ void deskicons_send_app(int app)
     IC[N].name[0] = 0;
     IC[N].wc = IC[N].wr = -1;
     IC[N].col = IC[N].row = -1;
+    MARK[N] = 0;
     N++;
     place_first_free(N - 1);
     deskicons_select(N - 1);
@@ -676,7 +708,9 @@ int deskicons_key(const KeyEvent *k)
         return 0;
     if (k->key == KEY_DELETE)
     {
-        deskicons_delete(SEL);
+        for (int i = N - 1; i >= 0; i--) /* every selected icon (from the end: a removal moves only the ones after it) */
+            if (MARK[i])
+                deskicons_delete(i);
         return 1;
     }
     if (k->key == KEY_ENTER)
@@ -747,7 +781,12 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop)
         int i = deskicons_at(x, y);
         deskicons_select(i);
         if (i < 0)
+        {
             LAST_CLICK = -1;
+            BAND = 1; /* maybe a rubber band: it shows once the pointer has moved */
+            BX = x;
+            BY = y;
+        }
         else
         {
             unsigned long long t = timer_ms();
@@ -768,6 +807,52 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop)
             DRAGGING = 0;
             return 1;
         }
+    }
+
+    if (BAND)
+    {
+        int shown = BAND == 2;
+        if (now && BAND == 1 && ((x - BX) * (x - BX) + (y - BY) * (y - BY) > DRAG_PX * DRAG_PX))
+        {
+            BAND = 2;
+            BRECT = ui_rect(0, 0, 0, 0);
+            shown = 1;
+        }
+        if (now && shown)
+        {
+            int W = (int)gfx_width(), H = (int)gfx_height() - TASKBAR_HEIGHT;
+            int cx = x < 0 ? 0 : (x >= W ? W - 1 : x), cy = y < 0 ? 0 : (y >= H ? H - 1 : y); /* the band stays on the desktop */
+            int x0 = BX < cx ? BX : cx, y0 = BY < cy ? BY : cy;
+            UiRect nr = ui_rect(x0, y0, (BX < cx ? cx - BX : BX - cx) + 1, (BY < cy ? cy - BY : BY - cy) + 1);
+            dmg_rect(BRECT);
+            dmg_rect(nr);
+            BRECT = nr;
+            SEL = -1;
+            for (int i = 0; i < N; i++) /* every icon whose cell the band touches is selected */
+            {
+                UiRect c = cell_rect(IC[i].col, IC[i].row);
+                int m = overlaps(nr, ui_rect(c.x + 4, c.y + 2, c.w - 8, c.h - 4));
+                if (m != MARK[i])
+                {
+                    MARK[i] = (unsigned char)m;
+                    dmg_icon(i);
+                }
+                if (m)
+                    SEL = i;
+            }
+            if (HOVER >= 0)
+            {
+                dmg_icon(HOVER);
+                HOVER = -1;
+            }
+        }
+        if (!now || released)
+        {
+            if (shown)
+                dmg_rect(BRECT);
+            BAND = 0;
+        }
+        return shown;
     }
 
     if (PRESS >= 0)
@@ -857,7 +942,7 @@ static void draw_name(const char *name, int x, int y, int w)
 static void draw_icon(int i, UiRect c)
 {
     const UiTheme *t = ui_theme();
-    if (i == SEL) /* selected: the accent behind the whole cell */
+    if (MARK[i]) /* selected: the accent behind the whole cell */
     {
         gfx_fill_round_rect_alpha(c.x + 4, c.y + 2, c.w - 8, c.h - 4, 10, ui_color(t->accent), 70);
         gfx_round_rect_alpha(c.x + 4, c.y + 2, c.w - 8, c.h - 4, 10, 1, ui_color(t->accent_hi), 150);
@@ -888,7 +973,7 @@ void deskicons_draw(void)
     }
 }
 
-int deskicons_dragging(void) { return DRAGGING; }
+int deskicons_dragging(void) { return DRAGGING || BAND == 2; }
 
 UiRect deskicons_ghost_bounds(void)
 {
@@ -897,10 +982,20 @@ UiRect deskicons_ghost_bounds(void)
 
 void deskicons_ghost_draw(void)
 {
-    if (!DRAGGING || !gfx_ready())
+    if ((!DRAGGING && BAND != 2) || !gfx_ready())
         return;
     GfxClip cl = gfx_get_clip();
     UiRect clip = ui_rect(cl.x0, cl.y0, cl.x1 - cl.x0, cl.y1 - cl.y0);
+    if (BAND == 2) /* the rubber band: a light fill and a border, above the windows */
+    {
+        if (overlaps(BRECT, clip))
+        {
+            const UiTheme *t = ui_theme();
+            gfx_fill_round_rect_alpha(BRECT.x, BRECT.y, BRECT.w, BRECT.h, 0, ui_color(t->accent), 60);
+            gfx_round_rect_alpha(BRECT.x, BRECT.y, BRECT.w, BRECT.h, 0, 1, ui_color(t->accent_hi), 200);
+        }
+        return;
+    }
     UiRect tc = cell_rect(TCOL, TROW); /* where it would land */
     if (overlaps(tc, clip))
         gfx_round_rect_alpha(tc.x + 4, tc.y + 2, tc.w - 8, tc.h - 4, 10, 2, gfx_rgb(255, 255, 255), 120);
