@@ -31,6 +31,10 @@ int look_picture(void);           /* the picture's node, -1 = none */
  * (at most max) */
 int look_find_pictures(int *ids, int max);
 
+/* The folder the settings files (THEME.CFG, ICONS.CFG) are written to: where THEME.CFG is, else the boot disk, else the first
+ * drive that can be written; -1 = none. A vfs node for vfs_save(). */
+int look_config_folder(void);
+
 /* What the last change did: "" when fine, else why it failed (no picture, not saved ...). */
 const char *look_message(void);
 

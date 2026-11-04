@@ -5,6 +5,7 @@
 #include "startmenu.h"
 #include "appmenu.h"
 #include "deskmenu.h"
+#include "deskicons.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "timer.h"
@@ -142,6 +143,7 @@ void desktop_draw(void)
     gfx_cache_save(); /* does nothing without a cache */
     WALL_VALID = gfx_cache_valid();
     WALL_GEN++;
+    deskicons_draw(); /* on the wallpaper, below the windows */
     wm_draw();
     gfx_reset_clip();
     desktop_refresh_taskbar();
@@ -149,5 +151,6 @@ void desktop_draw(void)
     appmenu_draw();
     volmenu_draw();
     deskmenu_draw();
+    deskicons_ghost_draw(); /* a dragged icon, above the windows */
     taskbar_draw();
 }

@@ -11,6 +11,8 @@
 int deskmenu_is_open(void);
 /* Open the menu with its corner at (x, y), moved to stay on the screen above the taskbar. */
 void deskmenu_open(int x, int y);
+/* The same for a right click on desktop icon `icon` (deskicons.h): "Open" comes first. */
+void deskmenu_open_icon(int x, int y, int icon);
 void deskmenu_close(void);
 
 /* Same contract as appmenu_pointer(): returns 1 while the pointer is over the menu. */

@@ -5,6 +5,7 @@
 #include "startmenu.h"
 #include "appmenu.h"
 #include "deskmenu.h"
+#include "deskicons.h"
 #include "volmenu.h"
 #include "mouse.h"
 #include "ui.h"
@@ -52,6 +53,10 @@ int desktop_pointer(int x, int y, unsigned buttons)
         to_windows = 0;
     if (deskmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
         to_windows = 0;
+    /* the desktop icons: a click on the bare desktop (nothing else under the pointer) selects, opens or drags them */
+    int on_desktop = to_windows && !on_bar && !wm_dragging() && !wm_window_at(x, y);
+    if (deskicons_pointer(x, y, buttons, on_desktop))
+        to_windows = 0;
 
     /* right click on a running app's taskbar button: its menu (Minimize / Maximize / Close) */
     int right_edge = (buttons & MOUSE_RIGHT) && !(LAST_BTN & MOUSE_RIGHT);
@@ -64,9 +69,13 @@ int desktop_pointer(int x, int y, unsigned buttons)
         if (w && taskbar_app_rect(idx, &bx, &by, &bw, &bh))
             appmenu_open(w, bx + bw / 2);
     }
-    /* right click on the bare desktop (not on the taskbar, a menu or a window): the desktop menu */
-    if (right_edge && !on_bar && to_windows && !wm_dragging() && !wm_window_at(x, y))
-        deskmenu_open(x, y);
+    /* right click on the bare desktop (not on the taskbar, a menu or a window): the desktop menu, with "Open" on an icon */
+    if (right_edge && on_desktop)
+    {
+        int icon = deskicons_at(x, y);
+        deskicons_select(icon);
+        deskmenu_open_icon(x, y, icon);
+    }
     wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
 
     /* pointer shape: a double arrow on a window edge or corner (and during a resize) */

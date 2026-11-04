@@ -91,6 +91,11 @@ static int cfg_folder(void)
     return -1;
 }
 
+int look_config_folder(void)
+{
+    return cfg_folder();
+}
+
 static void save(void)
 {
     char text[CFG_MAX], *o = text;

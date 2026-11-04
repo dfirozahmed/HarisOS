@@ -10,6 +10,7 @@
 #include "startmenu.h"
 #include "appmenu.h"
 #include "deskmenu.h"
+#include "deskicons.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "wm.h"
@@ -39,12 +40,15 @@ static UiRect taskbar_rect(void)
 }
 static int always(void) { return 1; }
 
-#define TOPS_N 5
+#define TOPS_N 6
+/* The desktop icons: a layer like the others but below the windows (just above the wallpaper). */
+static Top ICONS_TOP = {deskicons_visible, deskicons_bounds, deskicons_draw, 0, {0, 0, 0, 0}, 0};
 static Top TOPS[TOPS_N] = {
     {startmenu_is_open, startmenu_bounds, startmenu_draw, 0, {0, 0, 0, 0}, 0},
     {appmenu_is_open, appmenu_bounds, appmenu_draw, 0, {0, 0, 0, 0}, 0},
     {volmenu_is_open, volmenu_bounds, volmenu_draw, 0, {0, 0, 0, 0}, 0},
     {deskmenu_is_open, deskmenu_bounds, deskmenu_draw, 0, {0, 0, 0, 0}, 0},
+    {deskicons_dragging, deskicons_ghost_bounds, deskicons_ghost_draw, 0, {0, 0, 0, 0}, 0}, /* an icon being dragged */
     {always, taskbar_rect, taskbar_draw, 0, {0, 0, 0, 0}, 0},
 };
 
@@ -119,6 +123,9 @@ static void leave(void)
             ops->surface_free(TOPS[i].surf);
         TOPS[i].surf = TOPS[i].shown = 0;
     }
+    if (ops && ICONS_TOP.surf)
+        ops->surface_free(ICONS_TOP.surf);
+    ICONS_TOP.surf = ICONS_TOP.shown = 0;
     desktop_draw();
     gfx_present();
 }
@@ -326,13 +333,17 @@ int desktop_comp_frame(const UiRect *areas, int n)
     }
     if (wm_comp_update(ops, a, b, bytes) != 0)
         goto fail;
+    if (update_top(&ICONS_TOP, ops, a, b, bytes, areas, n, full) != 0)
+        goto fail;
     for (int i = 0; i < TOPS_N; i++)
         if (update_top(&TOPS[i], ops, a, b, bytes, areas, n, full) != 0)
             goto fail;
 
-    GfxCompItem items[1 + 60 + TOPS_N + 1];
+    GfxCompItem items[1 + 1 + 60 + TOPS_N + 1];
     int k = 0;
     items[k++] = (GfxCompItem){WALL_SURF, 0, 0, W, H, 0, 0, {0, 0, 0, 0}};
+    if (ICONS_TOP.shown)
+        items[k++] = (GfxCompItem){ICONS_TOP.surf, ICONS_TOP.r.x, ICONS_TOP.r.y, ICONS_TOP.r.w, ICONS_TOP.r.h, 1, 0, {0, 0, 0, 0}};
     k += wm_comp_items(items + k, 60);
     for (int i = 0; i < TOPS_N; i++)
         if (TOPS[i].shown)

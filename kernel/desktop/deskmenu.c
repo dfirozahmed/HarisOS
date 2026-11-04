@@ -1,6 +1,7 @@
 /* HarisOS desktop menu (right click on the empty desktop). The panel, its mouse and key handling and its drawing are the
  * HarisUI UiMenu (ui.h); this file decides when it opens, what is in it, and what the items do. */
 #include "deskmenu.h"
+#include "deskicons.h"
 #include "appmenu.h"
 #include "startmenu.h"
 #include "volmenu.h"
@@ -9,9 +10,10 @@
 #include "wm.h"
 #include "desktop_internal.h"
 
-enum { DM_PERSONALIZE, DM_DISPLAY, DM_REFRESH }; /* the item ids */
+enum { DM_OPEN, DM_PERSONALIZE, DM_DISPLAY, DM_ARRANGE, DM_REFRESH }; /* the item ids */
 
 static UiMenu M;
+static int ICON = -1; /* the desktop icon the menu was opened on, -1 = the bare desktop */
 static unsigned LAST_BUTTONS;
 
 /* the area to draw again: the panel and its shadow (also what a close has to clear) */
@@ -34,14 +36,26 @@ void deskmenu_close(void)
 
 void deskmenu_open(int x, int y)
 {
+    deskmenu_open_icon(x, y, -1);
+}
+
+void deskmenu_open_icon(int x, int y, int icon)
+{
     startmenu_close(); /* only one menu at a time */
     appmenu_close();
     volmenu_close();
     if (M.open)
         deskmenu_close();
     ui_menu_clear(&M);
+    ICON = icon;
+    if (icon >= 0)
+    {
+        ui_menu_add(&M, DM_OPEN, "Open", 0, 0);
+        ui_menu_separator(&M);
+    }
     ui_menu_add(&M, DM_PERSONALIZE, "Personalize", 0, 0);
     ui_menu_add(&M, DM_DISPLAY, "Display settings", 0, 0);
+    ui_menu_add(&M, DM_ARRANGE, "Arrange icons", 0, 0);
     ui_menu_separator(&M);
     ui_menu_add(&M, DM_REFRESH, "Refresh", 0, 0);
     ui_menu_open(&M, x, y, ui_rect(0, 0, (int)gfx_width(), (int)gfx_height() - TASKBAR_HEIGHT));
@@ -52,6 +66,12 @@ static void run(int id)
 {
     switch (id)
     {
+    case DM_OPEN:
+        deskicons_open(ICON);
+        break;
+    case DM_ARRANGE:
+        deskicons_arrange();
+        break;
     case DM_PERSONALIZE:
         desktop_open_settings();
         break;

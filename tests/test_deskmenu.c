@@ -26,7 +26,7 @@ unsigned gfx_width(void) { return 1280; }
 unsigned gfx_height(void) { return 800; }
 int gfx_ready(void) { return 1; }
 
-static int STARTMENU_CLOSES, APPMENU_CLOSES, VOLMENU_CLOSES, DAMAGES, INVALIDATES, SETTINGS_OPENS;
+static int STARTMENU_CLOSES, APPMENU_CLOSES, VOLMENU_CLOSES, DAMAGES, INVALIDATES, SETTINGS_OPENS, ICON_OPENED = -1, ARRANGES;
 static char OPENED_APP[64];
 static UiRect LAST_DAMAGE;
 void startmenu_close(void) { STARTMENU_CLOSES++; }
@@ -36,6 +36,8 @@ void wm_add_screen_damage(UiRect r) { DAMAGES++; LAST_DAMAGE = r; }
 void wm_invalidate(void) { INVALIDATES++; }
 void desktop_open_settings(void) { SETTINGS_OPENS++; }
 void desktop_open_app(const char *name) { strncpy(OPENED_APP, name, sizeof OPENED_APP - 1); }
+void deskicons_open(int icon) { ICON_OPENED = icon; }
+void deskicons_arrange(void) { ARRANGES++; }
 
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); return 1; } } while (0)
 
@@ -51,7 +53,8 @@ static int click(int x, int y)
 
 static void reset(void)
 {
-    STARTMENU_CLOSES = APPMENU_CLOSES = VOLMENU_CLOSES = DAMAGES = INVALIDATES = SETTINGS_OPENS = 0;
+    STARTMENU_CLOSES = APPMENU_CLOSES = VOLMENU_CLOSES = DAMAGES = INVALIDATES = SETTINGS_OPENS = ARRANGES = 0;
+    ICON_OPENED = -1;
     OPENED_APP[0] = 0;
     deskmenu_close();
     deskmenu_pointer(0, 0, 0); /* the button memory: nothing held */
@@ -77,11 +80,11 @@ int main(void)
     UiRect b = deskmenu_bounds();
     CHECK(b.x < 100 && b.y < 100 && b.w > 180 && b.h > 100);
     deskmenu_draw();
-    CHECK(DRAWN_LABELS == 3);
+    CHECK(DRAWN_LABELS == 4); /* Personalize, Display settings, Arrange icons, Refresh */
     CHECK(deskmenu_pointer(110, 110, 0) == 1);   /* over the menu */
     CHECK(deskmenu_pointer(900, 600, 0) == 0);   /* not over it */
 
-    /* rows: Personalize y+21, Display settings y+51, (separator), Refresh y+90 */
+    /* rows: Personalize y+21, Display settings y+51, Arrange icons y+81, (separator), Refresh y+120 */
     reset();
     deskmenu_open(100, 100);
     DAMAGES = 0;
@@ -101,13 +104,37 @@ int main(void)
 
     reset();
     deskmenu_open(100, 100);
-    click(140, 190);
+    click(140, 220);
     CHECK(INVALIDATES == 1 && !deskmenu_is_open());
+
+    reset();
+    deskmenu_open(100, 100);
+    click(140, 181);
+    CHECK(ARRANGES == 1 && !deskmenu_is_open() && ICON_OPENED == -1);
+
+    /* on a desktop icon: "Open" comes first and opens that icon */
+    reset();
+    deskmenu_open_icon(100, 100, 3);
+    CHECK(deskmenu_is_open());
+    DRAWN_LABELS = 0;
+    deskmenu_draw();
+    CHECK(DRAWN_LABELS == 5); /* Open and the four of the bare desktop */
+    click(140, 121);
+    CHECK(ICON_OPENED == 3 && !deskmenu_is_open() && SETTINGS_OPENS == 0);
+    reset();
+    deskmenu_open_icon(100, 100, 3);
+    click(140, 160); /* Open is 106..136, the separator 136..145, so Personalize is 145..175 */
+    CHECK(SETTINGS_OPENS == 1 && ICON_OPENED == -1);
+    reset();
+    deskmenu_open(100, 100); /* the bare desktop: no Open, even after an icon's menu */
+    DRAWN_LABELS = 0;
+    deskmenu_draw();
+    CHECK(DRAWN_LABELS == 4);
 
     /* the separator takes the press but runs nothing, and the menu stays */
     reset();
     deskmenu_open(100, 100);
-    click(140, 171);
+    click(140, 200);
     CHECK(deskmenu_is_open() && SETTINGS_OPENS == 0 && INVALIDATES == 0 && OPENED_APP[0] == 0);
 
     /* press on one item, release on another: nothing runs, the menu stays */

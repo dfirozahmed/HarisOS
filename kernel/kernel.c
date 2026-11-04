@@ -8,6 +8,7 @@
 #include "cpuload.h"
 #include "desktop.h"
 #include "look.h"
+#include "deskicons.h"
 #include "devmgr.h"
 #include "display.h"
 #include "amd_bringup.h"
@@ -647,6 +648,7 @@ void kernel_main(const BootInfo *info)
         task_reserve_boot_cpu(1);
 
     look_load(); /* the theme, accent and wallpaper of THEME.CFG (the drives are mounted now) */
+    deskicons_load(); /* where the desktop icons are (ICONS.CFG) */
     desktop_draw();
     gfx_present(); /* show the finished frame (does nothing without a back buffer) */
     /* AMD Radeon, opt-in (HARIS_AMD_GPU_PSP_LEVEL=4): the GPU paints stripes into the screen and times its 2D fill / copy against the

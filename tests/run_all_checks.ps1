@@ -19,6 +19,7 @@ try {
         @('Scrollbar tests', 'tests/run_scroll_tests.sh'),
         @('Pop-up menu tests', 'tests/run_menu_tests.sh'),
         @('Desktop menu tests', 'tests/run_deskmenu_tests.sh'),
+        @('Desktop icon tests', 'tests/run_deskicons_tests.sh'),
         @('Kernel heap tests', 'tests/run_heap_tests.sh'),
         @('CPU exception report tests', 'tests/run_fault_tests.sh'),
         @('Console tests', 'tests/run_console_tests.sh'),
