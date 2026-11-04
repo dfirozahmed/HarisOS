@@ -575,6 +575,30 @@ static void upload_shaders(void)
 /* One submission for a frame: the default context state stream (the Linux clear-state table, what a3d_default_state() sends on its
  * own) and then the frame, one after the other in the frame IB. Plain SET_CONTEXT_REG packets and a CONTEXT_CONTROL, so in one IB they
  * do what two IBs did, with one ring submission and one fence wait instead of two. Returns the fence number, 0 = not submitted. */
+static unsigned long long sub_t0, busy_tsc, busy_last_tsc, busy_last_busy;
+
+/* Waits for a frame's fence and counts the submit..fence time as GPU busy time (the Task Manager's load). */
+static int comp_fence_wait(uint32_t seq)
+{
+    int ok = amd_gpu_fence_wait(seq, 2000000u);
+    busy_tsc += comp_tsc() - sub_t0;
+    return ok;
+}
+
+/* GPU load in percent since the last call: time the compositor's submissions took / elapsed time (TSC), or the GRBM_STATUS snapshot if
+ * that is higher. -1 = registers not reachable. */
+int amd_comp_busy_percent(void)
+{
+    unsigned long long now = comp_tsc(), dt = now - busy_last_tsc, db = busy_tsc - busy_last_busy;
+    int snap = amd_gpu_busy_percent(), p;
+    busy_last_tsc = now;
+    busy_last_busy = busy_tsc;
+    if (snap < 0) return -1;
+    p = dt ? (int)(db * 100u / dt) : 0;
+    if (p > 100) p = 100;
+    return p > snap ? p : snap;
+}
+
 static uint32_t frame_submit(const uint32_t *ib, uint32_t n)
 {
     static uint32_t def[AMD_3D_DEFAULT_IB_MAX];
@@ -591,6 +615,7 @@ static uint32_t frame_submit(const uint32_t *ib, uint32_t n)
     amd_gpu_vram_write32(VRAM_COMP_SYNC_OFF, 0);
     amd_gpu_vram_write32(VRAM_COMP_SYNC2_OFF, 0);
     amd_gpu_wc_flush();                 /* the IB, and whatever the CPU wrote that the frame reads */
+    sub_t0 = comp_tsc();
     return amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), nd + n);
 }
 
@@ -932,7 +957,7 @@ int amd_comp_overlay_draw(int x, int y, int x0, int y0, int x1, int y1)
     n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
     if (!n || n > amd_gpu_frame_ib_max_dwords()) { oval[AMD_COMP_OV_FAILS]++; return -1; }
     seq = frame_submit(ib, n);          /* default state + frame, and the picture below the layer the CPU just wrote is flushed */
-    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) { oval[AMD_COMP_OV_FAILS]++; return -1; }
+    if (!seq || !comp_fence_wait(seq)) { oval[AMD_COMP_OV_FAILS]++; return -1; }
     oval[AMD_COMP_OV_DRAWS]++;
     oval[AMD_COMP_OV_DRAW_CYCLES] = (uint32_t)(comp_tsc() - t0);
     return 0;
@@ -1223,7 +1248,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     nb = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC2_OFF, 4u));   /* its own sync word */
     if (!nb) return -1;
     seq = frame_submit(ib, na + nb);
-    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) return -1;
+    if (!seq || !comp_fence_wait(seq)) return -1;
     scval[AMD_COMP_SC_FRAMES]++;
     scval[AMD_COMP_SC_DWORDS] = na + nb;
     scval[AMD_COMP_SC_CYCLES] = (uint32_t)(comp_tsc() - t0);
@@ -1414,7 +1439,7 @@ int amd_comp_surface_scroll(int id, int x, int y, int w, int h, int dy)
     nb = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC2_OFF, 4u));
     if (!nb) return -1;
     seq = frame_submit(ib, na + nb);
-    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) return -1;
+    if (!seq || !comp_fence_wait(seq)) return -1;
     scval[AMD_COMP_SC_SCROLLS]++;
     return 0;
 }
@@ -1483,7 +1508,7 @@ static int wall_paint(uint64_t rt_mc, uint32_t pitch_px, const GfxWallpaper *w)
     n = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u));
     if (!n) return -1;
     seq = frame_submit(ib, n);
-    if (!seq || !amd_gpu_fence_wait(seq, 2000000u)) return -1;
+    if (!seq || !comp_fence_wait(seq)) return -1;
     scval[AMD_COMP_SC_DRAWS] = f.draws;
     scval[AMD_COMP_SC_DWORDS] = n;
     return 0;

@@ -9,6 +9,7 @@
 #include "cpuload.h"
 #include "amd_gpu.h"
 #include "amd_native.h"
+#include "amd_comp.h"
 #include "desktop.h"
 #include "display.h"
 #include "gfx.h"
@@ -552,7 +553,7 @@ static void take_samples(unsigned long long dt_ms)
 {
     hist_push(MEM_HIST, &MEM_HIST_N, mem_used_percent());
     hist_push(CPU_HIST, &CPU_HIST_N, (unsigned)total_cpu_percent());
-    GPU_PCT = amd_gpu_busy_percent();
+    GPU_PCT = amd_comp_busy_percent();
     hist_push(GPU_HIST, &GPU_HIST_N, GPU_PCT > 0 ? (unsigned)GPU_PCT : 0);
     thread_samples(dt_ms);
     app_samples(dt_ms);

@@ -159,6 +159,7 @@ void amd_comp_surface_free(int id);
 int amd_comp_surface_upload(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque);
 int amd_comp_compose(const GfxCompItem *items, int n, const int *rects, int nr);
 int amd_comp_surface_scroll(int id, int x, int y, int w, int h, int dy); /* GfxCompOps.scroll */
+int amd_comp_busy_percent(void);     /* GPU load since the last call (compositor submit..fence time vs elapsed), -1 = not readable */
 void amd_comp_set_dim(int scale);    /* GfxCompOps.dim: the screen's brightness, 0 .. 256 */
 int amd_comp_scroll_test(void);       /* offscreen check before scroll is used: 1 = right */
 /* The wallpaper painted by the GPU (GfxCompOps.wallpaper): the frame builder (pure: gradient, lights, rectangles, the same order and
