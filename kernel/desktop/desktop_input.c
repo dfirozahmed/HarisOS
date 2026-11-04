@@ -178,8 +178,8 @@ int desktop_key(const KeyEvent *k)
             deskmenu_key(k);
         else if (startmenu_is_open())
             startmenu_key(k); /* the open menu has the keyboard */
-        else
-            wm_key(k);
+        else if (!wm_key(k) && !wm_top())
+            deskicons_key(k); /* no window has the keyboard: Delete and Enter act on the selected desktop icon */
     }
     else if (!startmenu_is_open() && !appmenu_is_open() && !volmenu_is_open() && !deskmenu_is_open())
         wm_key(k);

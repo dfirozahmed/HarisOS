@@ -303,7 +303,8 @@ set(KERNEL_SOURCES
     kernel/desktop/volmenu.c        # taskbar volume popup (click the tray speaker)
     kernel/desktop/appmenu.c        # taskbar app right-click menu
     kernel/desktop/deskmenu.c       # desktop right-click menu (Personalize, Display settings, Refresh)
-    kernel/desktop/deskicons.c      # desktop icons: app shortcuts on the wallpaper (click, double click, drag, ICONS.CFG)
+    kernel/desktop/deskicons.c      # desktop icons: app shortcuts and files on the wallpaper (click, double click, drag, ICONS.CFG)
+    kernel/desktop/deskfiles.c      # the Desktop folder: its files as icons, opening and deleting them
     kernel/desktop/toast.c          # desktop toast: a short message in the bottom right corner that goes away by itself
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c

@@ -67,8 +67,9 @@ static void show(int wallpaper_too)
     wm_invalidate(); /* every window, the taskbar and the menus */
 }
 
-/* the folder THEME.CFG goes in: where it is, else where the boot disk's files are, else the first drive that can be written */
-static int cfg_folder(void)
+/* the folder THEME.CFG goes in: where it is, else where the boot disk's files are, else the first drive (not the RAM Disk) that
+ * can be written; with writable = 0 a locked drive counts too (to read from it, no unlock is needed) */
+static int settings_folder(int writable)
 {
     static const char *const near[3] = {CFG_NAME, "WIFI.CFG", "INIT.ELF"};
     for (int i = 0; i < 3; i++)
@@ -78,22 +79,32 @@ static int cfg_folder(void)
         if (vn && vn->vol >= 0)
         {
             VfsVolInfo vi;
-            if (vfs_volume_info(vn->vol, &vi) == 0 && vi.writable && !vi.locked && !same_ci(vi.fs_name, "RAM"))
+            if (vfs_volume_info(vn->vol, &vi) == 0 && !same_ci(vi.fs_name, "RAM") && (!writable || (vi.writable && !vi.locked)))
                 return vn->parent;
         }
     }
     for (int v = 0; v < vfs_volume_count(); v++)
     {
         VfsVolInfo vi;
-        if (vfs_volume_info(v, &vi) == 0 && vi.writable && !vi.locked && !same_ci(vi.fs_name, "RAM"))
+        if (vfs_volume_info(v, &vi) == 0 && !same_ci(vi.fs_name, "RAM") && (!writable || (vi.writable && !vi.locked)))
             return vi.node;
     }
     return -1;
 }
 
+static int cfg_folder(void)
+{
+    return settings_folder(1);
+}
+
 int look_config_folder(void)
 {
-    return cfg_folder();
+    return settings_folder(1);
+}
+
+int look_data_folder(void)
+{
+    return settings_folder(0);
 }
 
 static void save(void)

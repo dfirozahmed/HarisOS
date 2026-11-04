@@ -2,6 +2,7 @@
  * HarisUI UiMenu (ui.h); this file decides when it opens, what is in it, and what the items do. */
 #include "deskmenu.h"
 #include "deskicons.h"
+#include "deskfiles.h"
 #include "appmenu.h"
 #include "startmenu.h"
 #include "volmenu.h"
@@ -10,7 +11,7 @@
 #include "wm.h"
 #include "desktop_internal.h"
 
-enum { DM_OPEN, DM_PERSONALIZE, DM_DISPLAY, DM_ARRANGE, DM_REFRESH }; /* the item ids */
+enum { DM_OPEN, DM_DELETE, DM_PERSONALIZE, DM_DISPLAY, DM_ARRANGE, DM_REFRESH }; /* the item ids */
 
 static UiMenu M;
 static int ICON = -1; /* the desktop icon the menu was opened on, -1 = the bare desktop */
@@ -50,7 +51,9 @@ void deskmenu_open_icon(int x, int y, int icon)
     ICON = icon;
     if (icon >= 0)
     {
-        ui_menu_add(&M, DM_OPEN, "Open", 0, 0);
+        int file = deskicons_is_file(icon);
+        ui_menu_add(&M, DM_OPEN, "Open", "Enter", 0);
+        ui_menu_add(&M, DM_DELETE, file ? "Delete" : "Remove from desktop", "Del", file ? UI_MENU_DANGER : 0);
         ui_menu_separator(&M);
     }
     ui_menu_add(&M, DM_PERSONALIZE, "Personalize", 0, 0);
@@ -69,6 +72,9 @@ static void run(int id)
     case DM_OPEN:
         deskicons_open(ICON);
         break;
+    case DM_DELETE:
+        deskicons_delete(ICON);
+        break;
     case DM_ARRANGE:
         deskicons_arrange();
         break;
@@ -79,7 +85,8 @@ static void run(int id)
         desktop_open_app("Display Settings");
         break;
     case DM_REFRESH:
-        wm_invalidate(); /* every window and the wallpaper are drawn again */
+        deskfiles_scan(1); /* the Desktop folder is read from the drive again */
+        wm_invalidate();   /* every window and the wallpaper are drawn again */
         break;
     default:
         break;

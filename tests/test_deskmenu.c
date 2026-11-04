@@ -38,6 +38,10 @@ void desktop_open_settings(void) { SETTINGS_OPENS++; }
 void desktop_open_app(const char *name) { strncpy(OPENED_APP, name, sizeof OPENED_APP - 1); }
 void deskicons_open(int icon) { ICON_OPENED = icon; }
 void deskicons_arrange(void) { ARRANGES++; }
+static int ICON_IS_FILE, ICON_DELETED = -1, SCANS, SCAN_FROM_DISK;
+int deskicons_is_file(int icon) { (void)icon; return ICON_IS_FILE; }
+void deskicons_delete(int icon) { ICON_DELETED = icon; }
+void deskfiles_scan(int from_disk) { SCANS++; SCAN_FROM_DISK = from_disk; }
 
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); return 1; } } while (0)
 
@@ -55,6 +59,9 @@ static void reset(void)
 {
     STARTMENU_CLOSES = APPMENU_CLOSES = VOLMENU_CLOSES = DAMAGES = INVALIDATES = SETTINGS_OPENS = ARRANGES = 0;
     ICON_OPENED = -1;
+    ICON_DELETED = -1;
+    ICON_IS_FILE = 0;
+    SCANS = 0;
     OPENED_APP[0] = 0;
     deskmenu_close();
     deskmenu_pointer(0, 0, 0); /* the button memory: nothing held */
@@ -106,6 +113,7 @@ int main(void)
     deskmenu_open(100, 100);
     click(140, 220);
     CHECK(INVALIDATES == 1 && !deskmenu_is_open());
+    CHECK(SCANS == 1 && SCAN_FROM_DISK == 1); /* the Desktop folder is read from the drive again */
 
     reset();
     deskmenu_open(100, 100);
@@ -118,13 +126,34 @@ int main(void)
     CHECK(deskmenu_is_open());
     DRAWN_LABELS = 0;
     deskmenu_draw();
-    CHECK(DRAWN_LABELS == 5); /* Open and the four of the bare desktop */
+    CHECK(DRAWN_LABELS == 8); /* Open and Delete with their keys (Enter, Del), then the four of the bare desktop */
     click(140, 121);
     CHECK(ICON_OPENED == 3 && !deskmenu_is_open() && SETTINGS_OPENS == 0);
+
+    /* Delete is the second row; the menu of an icon that is a file says "Delete", of an app shortcut "Remove from desktop" (the same command) */
     reset();
     deskmenu_open_icon(100, 100, 3);
-    click(140, 160); /* Open is 106..136, the separator 136..145, so Personalize is 145..175 */
-    CHECK(SETTINGS_OPENS == 1 && ICON_OPENED == -1);
+    click(140, 151);
+    CHECK(ICON_DELETED == 3 && !deskmenu_is_open() && ICON_OPENED == -1);
+    reset();
+    ICON_IS_FILE = 1;
+    deskmenu_open_icon(100, 100, 7);
+    click(140, 151);
+    CHECK(ICON_DELETED == 7 && !deskmenu_is_open());
+
+    /* below them: Open 106..136, Delete 136..166, the separator 166..175, so Personalize is 175..205 */
+    reset();
+    deskmenu_open_icon(100, 100, 3);
+    click(140, 190);
+    CHECK(SETTINGS_OPENS == 1 && ICON_OPENED == -1 && ICON_DELETED == -1);
+    reset();
+    deskmenu_open_icon(100, 100, 3);
+    k.key = KEY_DOWN;
+    deskmenu_key(&k);
+    deskmenu_key(&k); /* Open, then Delete */
+    k.key = KEY_ENTER;
+    deskmenu_key(&k);
+    CHECK(ICON_DELETED == 3 && !deskmenu_is_open());
     reset();
     deskmenu_open(100, 100); /* the bare desktop: no Open, even after an icon's menu */
     DRAWN_LABELS = 0;

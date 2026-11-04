@@ -3,6 +3,7 @@
 #include "app.h"
 #include "appmenu.h"
 #include "deskmenu.h"
+#include "deskicons.h"
 #include "volmenu.h"
 #include "desktop.h"
 #include "taskbar.h"
@@ -125,6 +126,10 @@ static int SEL;                    /* highlighted row (index into VIS), -1 = non
 static int PRESS = -1;             /* row held down with the mouse */
 static int FOOT_HOVER, FOOT_PRESS; /* footer power buttons: 0 = none, 1 = Restart, 2 = Shut down */
 static int FOOT_KEY;               /* footer power button with keyboard focus: 0 = none, 1 = Restart, 2 = Shut down */
+static UiMenu CTX;                 /* the right-click menu of an app row: Open, Send to desktop */
+static int CTX_APP = -1;           /* ... for this app (an index of the registry) */
+static unsigned LAST_RDOWN;        /* the right button at the last event */
+enum { SM_OPEN, SM_SEND };
 static unsigned LAST_DOWN;
 static unsigned FILTER_SIG;
 
@@ -272,6 +277,7 @@ void startmenu_close(void)
     if (!OPEN)
         return;
     OPEN = 0;
+    ui_menu_close(&CTX);
     SEARCH.dragging = 0;
     PRESS = -1;
     FOOT_HOVER = FOOT_PRESS = FOOT_KEY = 0;
@@ -286,6 +292,7 @@ static void startmenu_open(void)
     volmenu_close();
     deskmenu_close();
     OPEN = 1;
+    ui_menu_close(&CTX);
     ui_edit_set_text(&SEARCH, "");
     FILTER_SIG = text_sig("");
     refilter(1);
@@ -331,11 +338,36 @@ static void activate(int item)
     }
 }
 
+/* the right-click menu's commands */
+static void ctx_run(int id)
+{
+    int app = CTX_APP;
+    startmenu_close();
+    if (id == SM_SEND)
+        deskicons_send_app(app);
+    else if (id == SM_OPEN)
+    {
+        const AppInfo *a = app_get(app);
+        if (a && a->open)
+            a->open();
+    }
+}
+
 /* ---- keyboard ---- */
 int startmenu_key(const KeyEvent *k)
 {
     if (!OPEN || !k->pressed)
         return OPEN;
+    if (CTX.open) /* the menu has the keyboard: Up / Down / Enter / Esc */
+    {
+        int id = -1;
+        int r = ui_menu_key(&CTX, k, &id);
+        if (r)
+            dmg_all();
+        if (r == 2)
+            ctx_run(id);
+        return 1;
+    }
     switch (k->key)
     {
     case KEY_ESC:
@@ -410,8 +442,47 @@ int startmenu_pointer(int x, int y, unsigned buttons)
     unsigned down = buttons & 1u;
     int edge = down && !LAST_DOWN, release = !down && LAST_DOWN;
     LAST_DOWN = down;
+    int redge = (buttons & 2u) && !LAST_RDOWN; /* the right button went down just now */
+    LAST_RDOWN = (buttons & 2u) != 0;
     if (!OPEN)
         return 0;
+
+    if (CTX.open) /* the right-click menu of an app: it takes the mouse while it is open */
+    {
+        int vx = x >= 0;
+        int over_ctx = vx && ui_contains(ui_menu_rect(&CTX), x, y);
+        if (redge) /* a right click closes it, and may open another one below */
+        {
+            ui_menu_close(&CTX);
+            dmg_all();
+        }
+        else if (edge && !over_ctx) /* a click away only closes it */
+        {
+            ui_menu_close(&CTX);
+            dmg_all();
+            return 1;
+        }
+        else
+        {
+            if (ui_menu_hover(&CTX, vx ? x : -1, y))
+                dmg_all();
+            if (edge && over_ctx)
+            {
+                ui_menu_press(&CTX, x, y);
+                dmg_all();
+            }
+            if (CTX.press >= 0) /* held on an item: it runs on release */
+            {
+                int id = -1;
+                int r = ui_menu_release(&CTX, x, y, buttons, &id);
+                if (r)
+                    dmg_all();
+                if (r == 2)
+                    ctx_run(id);
+            }
+            return 1;
+        }
+    }
 
     int H = (int)gfx_height();
     int valid = x >= 0;
@@ -452,6 +523,21 @@ int startmenu_pointer(int x, int y, unsigned buttons)
         for (int i = 0; i < 2; i++)
             if (ui_contains(power_btn_rect(i), x, y))
                 foot = i + 1;
+
+    /* right click on an app row: Open, Send to desktop (the built-in rows - Welcome, Hello window, Settings - are not apps) */
+    if (redge && hit >= 0 && VIS[hit] >= BUILTIN_ITEMS)
+    {
+        CTX_APP = VIS[hit] - BUILTIN_ITEMS;
+        ui_menu_clear(&CTX);
+        ui_menu_add(&CTX, SM_OPEN, "Open", 0, 0);
+        ui_menu_add(&CTX, SM_SEND, "Send to desktop", 0, 0);
+        ui_menu_open(&CTX, x, y, menu_rect());
+        dmg_row(SEL);
+        SEL = hit;
+        dmg_row(SEL);
+        dmg_all();
+        return 1;
+    }
 
     /* hover: the row under the pointer becomes the highlighted one */
     if (hit >= 0 && (hit != SEL || FOOT_KEY) && PRESS < 0)
@@ -616,6 +702,8 @@ void startmenu_draw(void)
         gfx_fill_round_rect_alpha(tp.x, tp.y, tp.w, tp.h, 9, gfx_rgb(24, 32, 54), 232);
         ui_text_in_color(tp, power_label(tip), UI_TEXT_SMALL, UI_ALIGN_CENTER, ui_rgb(255, 255, 255));
     }
+
+    ui_menu_draw(&CTX); /* the right-click menu, over the rows (still in the light look) */
 
     ui_set_theme(prev);
 }

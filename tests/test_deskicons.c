@@ -1,6 +1,7 @@
 /* Host-side tests for the desktop icons (kernel/desktop/deskicons.c): the default grid, hit testing, select, double click, drag and drop
  * (snap, swap, clamp), the ICONS.CFG that is written and read, and what is drawn. Drawing and the disk are stubs. */
 #include "deskicons.h"
+#include "deskfiles.h"
 #include "app.h"
 #include "exec.h"
 #include "look.h"
@@ -45,7 +46,8 @@ static int FILLS, ROUNDS, ICONS, TEXTS;
 static char LAST_TEXTS[8][40];
 void gfx_fill_round_rect_alpha(int x, int y, int w, int h, int r, GfxColor c, unsigned char a) { (void)x; (void)y; (void)w; (void)h; (void)r; (void)c; (void)a; FILLS++; }
 void gfx_round_rect_alpha(int x, int y, int w, int h, int r, int t, GfxColor c, unsigned char a) { (void)x; (void)y; (void)w; (void)h; (void)r; (void)t; (void)c; (void)a; ROUNDS++; }
-void ui_icon(UiIcon i, int cx, int cy, int size, UiRgb t) { (void)i; (void)cx; (void)cy; (void)size; (void)t; ICONS++; }
+static UiIcon GLYPHS[96];
+void ui_icon(UiIcon i, int cx, int cy, int size, UiRgb t) { (void)cx; (void)cy; (void)size; (void)t; if (ICONS < 96) GLYPHS[ICONS] = i; ICONS++; }
 void ui_text_in_color(UiRect r, const char *s, UiTextStyle st, UiAlign a, UiRgb c)
 {
     (void)r; (void)st; (void)a; (void)c;
@@ -64,9 +66,12 @@ static int DAMAGES;
 void wm_add_screen_damage(UiRect r) { (void)r; DAMAGES++; }
 
 static int CFG_NODE = -1;
-static char CFG_TEXT[512];
-static char SAVED[512];
+static char CFG_TEXT[4096];
+static char SAVED[4096];
 static int SAVES;
+static int OPENED_NODE = -1, ASKED_NODE = -1;
+void deskfiles_open(int node) { OPENED_NODE = node; }
+void deskfiles_ask_delete(int node) { ASKED_NODE = node; }
 static int SAVE_RESULT; /* what vfs_save says: 0 = written */
 int exec_find(const char *name) { (void)name; return CFG_NODE; }
 int vfs_read(int id, unsigned off, void *buf, unsigned len)
@@ -113,6 +118,16 @@ static int click(int c, int r)
     int a = deskicons_pointer(x, y, MOUSE_LEFT, 1);
     deskicons_pointer(x, y, 0, 1);
     return a;
+}
+
+/* the icons in the registry's order again, at the default cells (sending an app back to the desktop puts it last) */
+static void registry_order(void)
+{
+    CFG_NODE = 5;
+    strcpy(CFG_TEXT, "File Explorer=0,0\r\nDevice Manager=0,1\r\nDisplay Settings=0,2\r\nTask Manager=0,3\r\n"
+                     "Notepad=0,4\r\nTerminal=0,5\r\nWi-Fi=0,6\r\nPersonalize=1,0\r\n");
+    deskicons_load();
+    CFG_NODE = -1;
 }
 
 static void draw_counts(void)
@@ -357,6 +372,172 @@ int main(void)
     deskicons_arrange();
     deskicons_load();
     CHECK(at(0, 0) == 0 && at(1, 0) == 7);
+
+    /* ================= the Desktop folder, Delete, Send to desktop ================= */
+    CFG_NODE = -1;
+    CFG_TEXT[0] = 0;
+    TOASTS = 0;
+    deskicons_load();
+    deskicons_arrange();
+    deskicons_set_files(0, 0, 1);
+    DeskFile files[5];
+    memset(files, 0, sizeof files);
+    files[0] = (DeskFile){10, 1, "Stuff"};
+    files[1] = (DeskFile){11, 0, "notes.txt"};
+    files[2] = (DeskFile){12, 0, "run.elf"};
+    files[3] = (DeskFile){13, 0, "photo.png"};
+    deskicons_set_files(files, 4, 1);
+
+    /* the files get the free cells after the apps, in the order of the folder (folders first); they are icons of their own kind */
+    CHECK(at(1, 1) == 8 && at(1, 2) == 9 && at(1, 3) == 10 && at(1, 4) == 11);
+    CHECK(!deskicons_is_file(at(0, 0)) && deskicons_is_file(at(1, 1)) && deskicons_is_file(at(1, 4)));
+    CHECK(!deskicons_is_file(-1) && !deskicons_is_file(99));
+    deskicons_select(-1); /* (an earlier test left one selected) */
+    draw_counts();
+    CHECK(ICONS == 12 && FILLS == 12);
+    CHECK(GLYPHS[8] == UI_ICON_FILES && GLYPHS[9] == UI_ICON_NOTEPAD && GLYPHS[10] == UI_ICON_TERMINAL && GLYPHS[11] == UI_ICON_DISPLAY);
+    CLIP = (GfxClip){12 + 96, 12 + 104 * 2, 12 + 2 * 96, 12 + 104 * 3}; /* the cell of "notes.txt" only: its name, as a shadow and as ink */
+    draw_counts();
+    CHECK(ICONS == 1 && TEXTS == 2 && strcmp(LAST_TEXTS[1], "notes.txt") == 0);
+    CLIP = (GfxClip){0, 0, 1280, 800};
+
+    /* a double click on a file opens it through deskfiles; Enter does too; Delete asks (nothing is deleted here) */
+    NOW += 1000;
+    click(1, 2);
+    NOW += 100;
+    click(1, 2);
+    CHECK(OPENED_NODE == 11);
+    OPENED_NODE = -1;
+    deskicons_select(10);
+    KeyEvent ke = {KEY_ENTER, 0, 1, 0};
+    CHECK(deskicons_key(&ke) == 1 && OPENED_NODE == 12);
+    ke.key = KEY_DELETE;
+    CHECK(deskicons_key(&ke) == 1 && ASKED_NODE == 12);
+    CHECK(at(1, 3) == 10); /* still there: the question is deskfiles' to ask and answer */
+    ke.pressed = 0;
+    ASKED_NODE = -1;
+    CHECK(deskicons_key(&ke) == 0 && ASKED_NODE == -1); /* a key release */
+    ke.pressed = 1;
+    ke.key = 'x';
+    CHECK(deskicons_key(&ke) == 0);
+    deskicons_select(-1);
+    ke.key = KEY_DELETE;
+    CHECK(deskicons_key(&ke) == 0 && ASKED_NODE == -1); /* nothing selected */
+
+    /* a dragged file stays where it was dropped when the folder is looked at again; a new file takes the first free cell; one that went is gone */
+    int fx, fy, gx, gy;
+    center(1, 2, &fx, &fy);
+    center(6, 3, &gx, &gy);
+    SAVES = 0;
+    NOW += 1000;
+    deskicons_pointer(fx, fy, MOUSE_LEFT, 1);
+    deskicons_pointer(gx, gy, MOUSE_LEFT, 1);
+    deskicons_pointer(gx, gy, 0, 1);
+    CHECK(at(6, 3) == 9 && at(1, 2) == -1 && SAVES == 1);
+    CHECK(strstr(SAVED, "file:notes.txt=6,3\r\n") != 0 && strstr(SAVED, "file:Stuff=1,1\r\n") != 0);
+    deskicons_set_files(files, 4, 1);
+    CHECK(deskicons_is_file(at(6, 3)));
+    CHECK(at(1, 2) == -1);
+    files[4] = (DeskFile){14, 0, "extra.txt"};
+    deskicons_set_files(files, 5, 1);
+    CHECK(deskicons_is_file(at(1, 2)));                /* the free cell the drag left */
+    DeskFile fewer[3] = {files[0], files[1], files[4]}; /* run.elf and photo.png were deleted */
+    deskicons_set_files(fewer, 3, 1);
+    CHECK(at(1, 3) == -1 && at(1, 4) == -1 && deskicons_is_file(at(6, 3)));
+    draw_counts();
+    CHECK(ICONS == 8 + 3);
+
+    /* the selected file is still selected after the folder is looked at again */
+    deskicons_select(at(6, 3));
+    draw_counts();
+    CHECK(FILLS == 8 + 3 + 1);
+    deskicons_set_files(fewer, 3, 1);
+    draw_counts();
+    CHECK(FILLS == 8 + 3 + 1);
+
+    /* places that ICONS.CFG gives to files that are not on the desktop (yet) are kept, and used when they come */
+    deskicons_set_files(0, 0, 1);
+    CFG_NODE = 5;
+    strcpy(CFG_TEXT, "file:later.txt=7,2\r\nfile:bad line\r\nfile:=3,3\r\nNotepad=hidden\r\n");
+    deskicons_load();
+    deskicons_set_files(0, 0, 0); /* there is no Desktop folder at the moment: nothing to forget */
+    SAVES = 0;
+    deskicons_arrange();
+    CHECK(strstr(SAVED, "file:later.txt=7,2\r\n") != 0 && strstr(SAVED, "Notepad=hidden\r\n") != 0);
+    DeskFile later[1] = {{20, 0, "later.txt"}};
+    deskicons_set_files(later, 1, 1);
+    CHECK(deskicons_is_file(at(7, 2)));
+    deskicons_set_files(0, 0, 1); /* the folder is there, and it does not have the file: its place is forgotten */
+    deskicons_arrange();
+    CHECK(strstr(SAVED, "later.txt") == 0);
+
+    /* "Notepad=hidden": no icon for it, and it stays hidden in what is written */
+    draw_counts();
+    CHECK(ICONS == 7);
+    CHECK(strstr(SAVED, "Notepad=hidden\r\n") != 0);
+
+    /* "Send to desktop" brings it back to the first free cell and selects it; once is enough */
+    TOASTS = 0;
+    SAVES = 0;
+    deskicons_send_app(4);
+    CHECK(TOASTS == 1 && LAST_TOAST == TOAST_SUCCESS && strstr(LAST_TOAST_TEXT, "Notepad is on the desktop") != 0);
+    CHECK(SAVES == 1 && strstr(SAVED, "Notepad=hidden") == 0 && strstr(SAVED, "Notepad=") != 0);
+    draw_counts();
+    CHECK(ICONS == 8 && FILLS == 8 + 1); /* selected */
+    deskicons_send_app(4);
+    CHECK(TOASTS == 2 && LAST_TOAST == TOAST_INFO && strstr(LAST_TOAST_TEXT, "already") != 0);
+    deskicons_send_app(99);
+    deskicons_send_app(-1);
+    CHECK(TOASTS == 2);
+
+    /* Delete on an app shortcut takes it off the desktop for good (the app stays), without a question */
+    registry_order();
+    TOASTS = 0;
+    SAVES = 0;
+    ASKED_NODE = -1;
+    deskicons_select(5); /* the Terminal: the sixth icon of the default order */
+    CHECK(!deskicons_is_file(5));
+    ke.key = KEY_DELETE;
+    CHECK(deskicons_key(&ke) == 1);
+    CHECK(ASKED_NODE == -1 && TOASTS == 1 && LAST_TOAST == TOAST_INFO && strstr(LAST_TOAST_TEXT, "off the desktop") != 0);
+    CHECK(strstr(LAST_TOAST_TEXT, "Terminal") != 0);
+    CHECK(SAVES == 1 && strstr(SAVED, "Terminal=hidden\r\n") != 0);
+    draw_counts();
+    CHECK(ICONS == 7);
+    deskicons_delete(-1);
+    deskicons_delete(500);
+    CHECK(TOASTS == 1);
+    deskicons_send_app(5);
+
+    /* when the places cannot be saved (the drive is locked) the warning stays as the toast: nothing replaces it with a cheerier message */
+    registry_order();
+    FOLDER = -1;
+    TOASTS = 0;
+    deskicons_select(5);
+    ke.key = KEY_DELETE;
+    CHECK(deskicons_key(&ke) == 1);
+    CHECK(TOASTS == 1 && LAST_TOAST == TOAST_WARNING && strstr(LAST_TOAST_TEXT, "not saved") != 0);
+    TOASTS = 0;
+    deskicons_send_app(5);
+    CHECK(TOASTS == 1 && LAST_TOAST == TOAST_WARNING && strstr(LAST_TOAST_TEXT, "not saved") != 0);
+    draw_counts();
+    CHECK(ICONS == 8); /* it is on the desktop anyway until the next boot */
+    FOLDER = 7;
+
+    /* deleting one in the middle of the list keeps the selection on the icon that was selected, not on whatever took its index */
+    registry_order();
+    deskicons_select(6); /* Wi-Fi */
+    deskicons_delete(2); /* Display Settings goes; Wi-Fi is icon 5 now */
+    draw_counts();
+    CHECK(ICONS == 7 && FILLS == 7 + 1);
+    deskicons_send_app(2);
+
+    /* Arrange icons: apps first, then the files in the order of the folder, from the first free cell */
+    deskicons_set_files(files, 5, 1);
+    deskicons_arrange();
+    CHECK(at(0, 0) == 0 && !deskicons_is_file(at(0, 0)));
+    CHECK(deskicons_is_file(at(1, 1)) && deskicons_is_file(at(1, 5)));
+    deskicons_set_files(0, 0, 1);
 
     printf("deskicons tests passed\n");
     return 0;

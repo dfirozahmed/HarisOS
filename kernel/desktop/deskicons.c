@@ -1,6 +1,7 @@
 /* HarisOS desktop icons: see include/deskicons.h. */
 #include "deskicons.h"
 #include "app.h"
+#include "deskfiles.h"
 #include "exec.h"
 #include "look.h"
 #include "mouse.h"
@@ -11,7 +12,7 @@
 #include "wm.h"
 
 #define CFG_NAME "ICONS.CFG"
-#define CFG_MAX 512
+#define CFG_MAX 4096
 #define CELL_W 96  /* a grid cell: the tile, the name under it, and some air around */
 #define CELL_H 104
 #define MARGIN 12  /* from the screen's top and left edge to the first cell */
@@ -19,15 +20,31 @@
 #define NAME_LINE_H 16
 #define DOUBLE_MS 400
 #define DRAG_PX 4  /* the pointer must move this far before a press becomes a drag */
+#define MAX_ICONS (APP_MAX + DESK_FILES_MAX)
 
 typedef struct
 {
-    const AppInfo *app;
-    int col, row; /* the grid cell; -1 while it is being placed */
+    int file;                  /* 0 = an app shortcut, 1 = a file or folder of the Desktop folder */
+    int app;                   /* app: its index in the registry */
+    int node;                  /* file: its vfs node */
+    int is_dir;                /* file: a folder */
+    char name[DESK_FILE_NAME]; /* file: its name */
+    int col, row;              /* the grid cell; -1 while it is being placed */
+    int wc, wr;                /* the cell it is asked for when the icons are put in order (-1 = none) */
 } Icon;
 
-static Icon IC[APP_MAX];
+typedef struct
+{
+    char name[DESK_FILE_NAME];
+    int col, row;
+} Pending; /* a place that ICONS.CFG gave a file that is not on the desktop (yet) */
+
+static Icon IC[MAX_ICONS];
+static Icon ITEMS[MAX_ICONS]; /* the icons being put in order (too big for the stack) */
 static int N, READY;
+static unsigned char HIDDEN[APP_MAX]; /* app shortcuts taken off the desktop */
+static Pending PEND[DESK_FILES_MAX];
+static int PEND_N;
 static int SEL = -1, HOVER = -1;
 static int PRESS = -1;       /* the icon the left button went down on, -1 = none */
 static int DRAGGING;         /* it has been moved far enough to be dragged */
@@ -57,6 +74,13 @@ static int same_ci(const char *a, const char *b)
     return !*a && !*b;
 }
 
+static int same(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+
 static char *put(char *o, const char *s)
 {
     while (*s)
@@ -78,6 +102,23 @@ static char *put_int(char *o, int v)
     return o;
 }
 
+static void copy_name(char *dst, const char *src)
+{
+    int k = 0;
+    for (; src[k] && k < DESK_FILE_NAME - 1; k++)
+        dst[k] = src[k];
+    dst[k] = 0;
+}
+
+/* does the name end in ".ext" (ignoring case)? */
+static int ext_is(const char *name, const char *ext)
+{
+    int n = slen(name), e = slen(ext);
+    if (n <= e + 1 || name[n - e - 1] != '.')
+        return 0;
+    return same_ci(name + n - e, ext);
+}
+
 /* ---- the grid ---- */
 static void grid(int *cols, int *rows)
 {
@@ -85,6 +126,13 @@ static void grid(int *cols, int *rows)
     int r = ((int)gfx_height() - TASKBAR_HEIGHT - MARGIN) / CELL_H;
     *cols = c < 1 ? 1 : c;
     *rows = r < 1 ? 1 : r;
+}
+
+static int capacity(void)
+{
+    int c, r;
+    grid(&c, &r);
+    return c * r < MAX_ICONS ? c * r : MAX_ICONS;
 }
 
 static UiRect cell_rect(int col, int row)
@@ -117,23 +165,49 @@ static void place_first_free(int i)
     IC[i].col = IC[i].row = 0;
 }
 
-static void default_layout(void)
+/* ---- what an icon is ---- */
+static const char *name_of(int i)
 {
-    for (int i = 0; i < N; i++)
-        IC[i].col = IC[i].row = -1;
-    for (int i = 0; i < N; i++)
-        place_first_free(i);
+    if (IC[i].file)
+        return IC[i].name;
+    const AppInfo *a = app_get(IC[i].app);
+    return a ? a->name : "";
 }
 
-static void ensure(void)
+static int same_icon(const Icon *a, const Icon *b)
 {
-    if (READY)
-        return;
-    READY = 1;
-    N = app_count() < APP_MAX ? app_count() : APP_MAX;
+    return a->file == b->file && (a->file ? same(a->name, b->name) : a->app == b->app);
+}
+
+static int icon_of_app(int app)
+{
     for (int i = 0; i < N; i++)
-        IC[i].app = app_get(i);
-    default_layout();
+        if (!IC[i].file && IC[i].app == app)
+            return i;
+    return -1;
+}
+
+static UiIcon icon_glyph(int i)
+{
+    if (!IC[i].file)
+    {
+        const AppInfo *a = app_get(IC[i].app);
+        return a ? a->icon : UI_ICON_LOGO;
+    }
+    const char *n = IC[i].name;
+    if (IC[i].is_dir)
+        return UI_ICON_FILES;
+    static const char *const TEXT[] = {"txt", "md", "ini", "log", "c", "h", "asm", 0};
+    for (int k = 0; TEXT[k]; k++)
+        if (ext_is(n, TEXT[k]))
+            return UI_ICON_NOTEPAD;
+    if (ext_is(n, "elf"))
+        return UI_ICON_TERMINAL;
+    if (ext_is(n, "bmp") || ext_is(n, "png") || ext_is(n, "jpg"))
+        return UI_ICON_DISPLAY;
+    if (ext_is(n, "wav") || ext_is(n, "mp3"))
+        return UI_ICON_VOLUME;
+    return UI_ICON_NOTEPAD; /* some file: a page */
 }
 
 /* ---- redraw marks ---- */
@@ -153,30 +227,150 @@ static void dmg_icon(int i)
         dmg_cell(IC[i].col, IC[i].row);
 }
 
-static void dmg_all(void)
+/* ---- putting the icons in order ---- */
+/* The icons of `items` (at most the room there is) become the desktop's icons. Each asks for a cell (wc, wr); it gets it if that is on
+ * the grid and no icon before it has it, else the first free cell. What was drawn before and what is drawn now is marked. */
+static void assemble(const Icon *items, int n)
 {
+    UiRect old = deskicons_bounds();
+    Icon key;
+    key.file = 0;
+    key.app = -1;
+    key.name[0] = 0;
+    int had_sel = SEL >= 0 && SEL < N;
+    if (had_sel)
+        key = IC[SEL];
+    int cap = capacity();
+    if (n > cap)
+        n = cap;
+    for (int i = 0; i < n; i++)
+    {
+        IC[i] = items[i];
+        IC[i].col = IC[i].row = -1;
+    }
+    N = n;
+    int cols, rows;
+    grid(&cols, &rows);
     for (int i = 0; i < N; i++)
-        dmg_icon(i);
+        if (IC[i].wc >= 0 && IC[i].wc < cols && IC[i].wr >= 0 && IC[i].wr < rows && who_in(IC[i].wc, IC[i].wr) < 0)
+        {
+            IC[i].col = IC[i].wc;
+            IC[i].row = IC[i].wr;
+        }
+    for (int i = 0; i < N; i++)
+        if (IC[i].col < 0)
+            place_first_free(i);
+    SEL = -1;
+    if (had_sel)
+        for (int i = 0; i < N; i++)
+            if (same_icon(&IC[i], &key))
+                SEL = i;
+    HOVER = -1;
+    PRESS = -1; /* a drag in the middle of it is let go */
+    DRAGGING = 0;
+    LAST_CLICK = -1;
+    wm_add_screen_damage(ui_rect(old.x, old.y, old.w + 8, old.h + 8));
+    UiRect now = deskicons_bounds();
+    wm_add_screen_damage(ui_rect(now.x, now.y, now.w + 8, now.h + 8));
+}
+
+/* the apps that are on the desktop, in the registry's order, with the cell they have now (from_now) or the one in wantc / wantr (-1 = none) */
+static int app_items(Icon *out, const int *wantc, const int *wantr, int from_now)
+{
+    int m = 0;
+    for (int a = 0; a < app_count() && a < APP_MAX; a++)
+    {
+        if (HIDDEN[a])
+            continue;
+        Icon it;
+        it.file = 0;
+        it.app = a;
+        it.node = -1;
+        it.is_dir = 0;
+        it.name[0] = 0;
+        it.col = it.row = -1;
+        it.wc = wantc ? wantc[a] : -1;
+        it.wr = wantr ? wantr[a] : -1;
+        if (from_now)
+        {
+            int i = icon_of_app(a);
+            if (i >= 0)
+            {
+                it.wc = IC[i].col;
+                it.wr = IC[i].row;
+            }
+        }
+        out[m++] = it;
+    }
+    return m;
+}
+
+static void ensure(void)
+{
+    if (READY)
+        return;
+    READY = 1;
+    Icon *items = ITEMS;
+    int m = app_items(items, 0, 0, 0);
+    assemble(items, m);
 }
 
 /* ---- ICONS.CFG ---- */
-static void save(void)
+/* Write ICONS.CFG. 1 = written; 0 = it could not be, and a toast says why (so a caller that has something to say itself keeps quiet then:
+ * the one toast on the screen must be the warning). */
+static int save(void)
 {
-    char text[CFG_MAX], *o = text;
-    for (int i = 0; i < N && o - text < CFG_MAX - 48; i++)
+    static char text[CFG_MAX];
+    char *o = text, *end = text + CFG_MAX - 3 * DESK_FILE_NAME;
+    for (int a = 0; a < app_count() && a < APP_MAX && o < end; a++)
     {
-        o = put(o, IC[i].app->name);
+        const AppInfo *ap = app_get(a);
+        int i = icon_of_app(a);
+        o = put(o, ap->name);
         *o++ = '=';
-        o = put_int(o, IC[i].col);
+        if (i < 0)
+            o = put(o, "hidden");
+        else
+        {
+            o = put_int(o, IC[i].col);
+            *o++ = ',';
+            o = put_int(o, IC[i].row);
+        }
+        o = put(o, "\r\n");
+    }
+    for (int i = 0; i < N && o < end; i++)
+        if (IC[i].file)
+        {
+            o = put(o, "file:");
+            o = put(o, IC[i].name);
+            *o++ = '=';
+            o = put_int(o, IC[i].col);
+            *o++ = ',';
+            o = put_int(o, IC[i].row);
+            o = put(o, "\r\n");
+        }
+    for (int p = 0; p < PEND_N && o < end; p++) /* places of files the desktop does not have (yet): kept */
+    {
+        o = put(o, "file:");
+        o = put(o, PEND[p].name);
+        *o++ = '=';
+        o = put_int(o, PEND[p].col);
         *o++ = ',';
-        o = put_int(o, IC[i].row);
+        o = put_int(o, PEND[p].row);
         o = put(o, "\r\n");
     }
     int dir = look_config_folder();
     if (dir < 0) /* the drives start locked: nothing can be written until one is unlocked */
+    {
         toast_show(TOAST_WARNING, "Icon places not saved - no drive can be written to. Unlock one (the lock in File Explorer's status bar).");
-    else if (vfs_save(dir, CFG_NAME, text, (unsigned)(o - text)) < 0)
+        return 0;
+    }
+    if (vfs_save(dir, CFG_NAME, text, (unsigned)(o - text)) < 0)
+    {
         toast_show(TOAST_ERROR, "Icon places could not be saved: ICONS.CFG was not written.");
+        return 0;
+    }
+    return 1;
 }
 
 /* one number at *p (digits), then skips them; -1 if there is none */
@@ -194,14 +388,28 @@ static int read_int(const char **p)
     return v;
 }
 
-/* apply the text of ICONS.CFG: a line names an app and its cell; a cell that is off the grid or taken by an earlier line, and an app
- * that is not named, get the first free cell */
+/* "col,row" at v; 0 if it is not that */
+static int read_cell(const char *v, int *c, int *r)
+{
+    *c = read_int(&v);
+    if (*c < 0 || *v != ',')
+        return 0;
+    v++;
+    *r = read_int(&v);
+    return *r >= 0;
+}
+
+/* Apply the text of ICONS.CFG: a line names an app ("Notepad=2,3", or "Notepad=hidden") or a file ("file:notes.txt=2,3") and its cell. A
+ * cell that is off the grid or taken by an icon before it, and an app that is not named, get the first free cell. */
 static void apply(char *text)
 {
-    int cols, rows, wc[APP_MAX], wr[APP_MAX];
-    grid(&cols, &rows);
-    for (int i = 0; i < N; i++)
+    int wc[APP_MAX], wr[APP_MAX];
+    for (int i = 0; i < APP_MAX; i++)
+    {
         wc[i] = wr[i] = -1;
+        HIDDEN[i] = 0;
+    }
+    PEND_N = 0;
     for (char *line = text; *line;)
     {
         char *end = line;
@@ -217,39 +425,60 @@ static void apply(char *text)
         {
             *eq = 0;
             const char *v = eq + 1;
-            int c = read_int(&v), r = -1;
-            if (c >= 0 && *v == ',')
+            int c, r;
+            if (line[0] == 'f' && line[1] == 'i' && line[2] == 'l' && line[3] == 'e' && line[4] == ':')
             {
-                v++;
-                r = read_int(&v);
-            }
-            for (int i = 0; i < N && r >= 0; i++)
-                if (same_ci(IC[i].app->name, line))
+                if (PEND_N < DESK_FILES_MAX && line[5] && slen(line + 5) < DESK_FILE_NAME && read_cell(v, &c, &r))
                 {
-                    wc[i] = c;
-                    wr[i] = r;
+                    copy_name(PEND[PEND_N].name, line + 5);
+                    PEND[PEND_N].col = c;
+                    PEND[PEND_N].row = r;
+                    PEND_N++;
                 }
+            }
+            else
+                for (int i = 0; i < app_count() && i < APP_MAX; i++)
+                    if (same_ci(app_get(i)->name, line))
+                    {
+                        if (same_ci(v, "hidden"))
+                            HIDDEN[i] = 1;
+                        else if (read_cell(v, &c, &r))
+                        {
+                            wc[i] = c;
+                            wr[i] = r;
+                        }
+                    }
         }
         *end = keep;
         line = *end ? end + 1 : end;
     }
-    for (int i = 0; i < N; i++)
-        IC[i].col = IC[i].row = -1;
-    for (int i = 0; i < N; i++)
-        if (wc[i] >= 0 && wc[i] < cols && wr[i] >= 0 && wr[i] < rows && who_in(wc[i], wr[i]) < 0)
+    Icon *items = ITEMS;
+    int m = app_items(items, wc, wr, 0);
+    int have_files = 0;
+    for (int i = 0; i < N; i++) /* files that are already on the desktop: the place of the config, else where they are */
+        if (IC[i].file && m < MAX_ICONS)
         {
-            IC[i].col = wc[i];
-            IC[i].row = wr[i];
+            Icon it = IC[i];
+            it.wc = IC[i].col;
+            it.wr = IC[i].row;
+            for (int p = 0; p < PEND_N; p++)
+                if (same(PEND[p].name, it.name))
+                {
+                    it.wc = PEND[p].col;
+                    it.wr = PEND[p].row;
+                }
+            items[m++] = it;
+            have_files = 1;
         }
-    for (int i = 0; i < N; i++)
-        if (IC[i].col < 0)
-            place_first_free(i);
+    if (have_files)
+        PEND_N = 0; /* the files are known already; the places of others are not needed */
+    assemble(items, m);
 }
 
 void deskicons_load(void)
 {
     ensure();
-    char text[CFG_MAX + 1];
+    static char text[CFG_MAX + 1];
     int node = exec_find(CFG_NAME);
     int got = node >= 0 ? vfs_read(node, 0, text, CFG_MAX) : -1;
     if (got > 0)
@@ -257,6 +486,42 @@ void deskicons_load(void)
         text[got] = 0;
         apply(text);
     }
+}
+
+/* the Desktop folder's contents changed (or are known for the first time) */
+void deskicons_set_files(const DeskFile *files, int n, int found)
+{
+    ensure();
+    Icon *items = ITEMS;
+    int m = app_items(items, 0, 0, 1);
+    for (int j = 0; j < n && m < MAX_ICONS; j++)
+    {
+        Icon it;
+        it.file = 1;
+        it.app = -1;
+        it.node = files[j].node;
+        it.is_dir = files[j].is_dir;
+        copy_name(it.name, files[j].name);
+        it.col = it.row = -1;
+        it.wc = it.wr = -1;
+        for (int i = 0; i < N; i++) /* where it was */
+            if (IC[i].file && same(IC[i].name, it.name))
+            {
+                it.wc = IC[i].col;
+                it.wr = IC[i].row;
+            }
+        if (it.wc < 0)
+            for (int p = 0; p < PEND_N; p++) /* where ICONS.CFG says it goes */
+                if (same(PEND[p].name, it.name))
+                {
+                    it.wc = PEND[p].col;
+                    it.wr = PEND[p].row;
+                }
+        items[m++] = it;
+    }
+    if (found)
+        PEND_N = 0;
+    assemble(items, m);
 }
 
 /* ---- using the icons ---- */
@@ -287,20 +552,139 @@ void deskicons_select(int icon)
     dmg_icon(SEL);
 }
 
+int deskicons_is_file(int icon)
+{
+    ensure();
+    return icon >= 0 && icon < N && IC[icon].file;
+}
+
 void deskicons_open(int icon)
 {
     ensure();
-    if (icon >= 0 && icon < N && IC[icon].app && IC[icon].app->open)
-        IC[icon].app->open();
+    if (icon < 0 || icon >= N)
+        return;
+    if (IC[icon].file)
+    {
+        deskfiles_open(IC[icon].node);
+        return;
+    }
+    const AppInfo *a = app_get(IC[icon].app);
+    if (a && a->open)
+        a->open();
+}
+
+static void remove_icon(int i)
+{
+    UiRect old = deskicons_bounds();
+    for (int k = i; k < N - 1; k++)
+        IC[k] = IC[k + 1];
+    N--;
+    if (SEL == i)
+        SEL = -1;
+    else if (SEL > i)
+        SEL--;
+    HOVER = -1;
+    PRESS = -1;
+    DRAGGING = 0;
+    LAST_CLICK = -1;
+    wm_add_screen_damage(ui_rect(old.x, old.y, old.w + 8, old.h + 8));
+}
+
+void deskicons_delete(int icon)
+{
+    ensure();
+    if (icon < 0 || icon >= N)
+        return;
+    if (IC[icon].file) /* a file: asked first (a window), and then deleted for good */
+    {
+        deskfiles_ask_delete(IC[icon].node);
+        return;
+    }
+    int a = IC[icon].app;
+    char msg[TOAST_TEXT_MAX + 1], *o = msg;
+    o = put(o, app_get(a)->name);
+    o = put(o, " is off the desktop. Start menu: right-click it, Send to desktop.");
+    *o = 0;
+    HIDDEN[a] = 1;
+    remove_icon(icon);
+    if (save()) /* (when it could not be saved the warning is the message) */
+        toast_show(TOAST_INFO, msg);
+}
+
+void deskicons_send_app(int app)
+{
+    ensure();
+    const AppInfo *ap = app_get(app);
+    if (!ap || app >= APP_MAX)
+        return;
+    char msg[TOAST_TEXT_MAX + 1], *o = msg;
+    o = put(o, ap->name);
+    int i = icon_of_app(app);
+    if (i >= 0) /* it is there already: show which */
+    {
+        deskicons_select(i);
+        o = put(o, " is on the desktop already.");
+        *o = 0;
+        toast_show(TOAST_INFO, msg);
+        return;
+    }
+    if (N >= capacity())
+    {
+        toast_show(TOAST_WARNING, "The desktop is full: delete an icon first.");
+        return;
+    }
+    UiRect old = deskicons_bounds();
+    HIDDEN[app] = 0;
+    IC[N].file = 0;
+    IC[N].app = app;
+    IC[N].node = -1;
+    IC[N].is_dir = 0;
+    IC[N].name[0] = 0;
+    IC[N].wc = IC[N].wr = -1;
+    IC[N].col = IC[N].row = -1;
+    N++;
+    place_first_free(N - 1);
+    deskicons_select(N - 1);
+    wm_add_screen_damage(ui_rect(old.x, old.y, old.w + 8, old.h + 8));
+    UiRect now = deskicons_bounds();
+    wm_add_screen_damage(ui_rect(now.x, now.y, now.w + 8, now.h + 8));
+    o = put(o, " is on the desktop.");
+    *o = 0;
+    if (save())
+        toast_show(TOAST_SUCCESS, msg);
 }
 
 void deskicons_arrange(void)
 {
     ensure();
-    dmg_all();
-    default_layout();
-    dmg_all();
+    Icon *items = ITEMS;
+    int m = 0;
+    for (int i = 0; i < N; i++) /* the order they have (the apps, then the files), but no wishes: the default places */
+    {
+        items[m] = IC[i];
+        items[m].wc = items[m].wr = -1;
+        m++;
+    }
+    assemble(items, m);
     save();
+}
+
+int deskicons_key(const KeyEvent *k)
+{
+    ensure();
+    if (!k->pressed || SEL < 0 || SEL >= N)
+        return 0;
+    if (k->key == KEY_DELETE)
+    {
+        deskicons_delete(SEL);
+        return 1;
+    }
+    if (k->key == KEY_ENTER)
+    {
+        deskicons_open(SEL);
+        return 1;
+    }
+    return 0;
 }
 
 /* the cell nearest to the dragged icon's middle */
@@ -367,7 +751,7 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop)
         else
         {
             unsigned long long t = timer_ms();
-            if (i == LAST_CLICK && t - LAST_CLICK_MS <= DOUBLE_MS) /* a double click opens the app (and does not start a drag) */
+            if (i == LAST_CLICK && t - LAST_CLICK_MS <= DOUBLE_MS) /* a double click opens it (and does not start a drag) */
             {
                 LAST_CLICK = -1;
                 deskicons_open(i);
@@ -433,7 +817,7 @@ static int overlaps(UiRect a, UiRect b)
 /* a name under the tile: white with a dark edge so it reads on any wallpaper; one line, or two when it does not fit and has a space */
 static void draw_name(const char *name, int x, int y, int w)
 {
-    char first[40];
+    char first[DESK_FILE_NAME];
     const char *a = name, *b = 0;
     int n = slen(name);
     if (ui_text_width(name, UI_TEXT_SMALL) > w && n < (int)sizeof first)
@@ -483,8 +867,8 @@ static void draw_icon(int i, UiRect c)
     int tx = c.x + (c.w - TILE) / 2, ty = c.y + 6;
     gfx_fill_round_rect_alpha(tx, ty, TILE, TILE, 14, gfx_rgb(16, 20, 36), 130);
     gfx_round_rect_alpha(tx, ty, TILE, TILE, 14, 1, gfx_rgb(255, 255, 255), 46);
-    ui_icon(IC[i].app->icon, tx + TILE / 2, ty + TILE / 2, 32, ui_rgb(236, 241, 255));
-    draw_name(IC[i].app->name, c.x + 2, ty + TILE + 6, c.w - 4);
+    ui_icon(icon_glyph(i), tx + TILE / 2, ty + TILE / 2, 32, ui_rgb(236, 241, 255));
+    draw_name(name_of(i), c.x + 2, ty + TILE + 6, c.w - 4);
 }
 
 void deskicons_draw(void)
@@ -527,7 +911,6 @@ void deskicons_ghost_draw(void)
 
 UiRect deskicons_bounds(void)
 {
-    ensure();
     int maxc = 0, maxr = 0;
     for (int i = 0; i < N; i++)
     {

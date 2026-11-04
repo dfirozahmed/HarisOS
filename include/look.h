@@ -34,6 +34,8 @@ int look_find_pictures(int *ids, int max);
 /* The folder the settings files (THEME.CFG, ICONS.CFG) are written to: where THEME.CFG is, else the boot disk, else the first
  * drive that can be written; -1 = none. A vfs node for vfs_save(). */
 int look_config_folder(void);
+/* The same folder for reading: a drive that is locked counts too (the Desktop folder is read from here; nothing needs to be unlocked). */
+int look_data_folder(void);
 
 /* What the last change did: "" when fine, else why it failed (no picture, not saved ...). */
 const char *look_message(void);

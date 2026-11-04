@@ -1,5 +1,6 @@
 /* File Explorer: the AppInfo and opening / closing the window. */
 #include "explorer.h"
+#include "fileexplorer.h"
 
 static void ex_close(Window *w)
 {
@@ -72,6 +73,14 @@ static void explorer_app_open(void)
     ex_reload();
     if (EX_NITEMS > 0)
         EX_SEL = 0;
+}
+
+/* the desktop (fileexplorer.h): open (or bring up) the Explorer and show that folder */
+void fileexplorer_open_folder(int node)
+{
+    explorer_app_open();
+    if (EX_WIN)
+        ex_go_to(node, 1);
 }
 
 const AppInfo APP_EXPLORER = {
