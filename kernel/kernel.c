@@ -27,6 +27,7 @@
 #include "heap.h"
 #include "heapmon.h"
 #include "idle.h"
+#include "screensleep.h"
 #include "ioapic.h"
 #include "keyboard.h"
 #include "mouse.h"
@@ -693,9 +694,11 @@ void kernel_main(const BootInfo *info)
         int worked = 0; /* this pass handled something: poll again at once instead of sleeping */
         if (have_mouse && mouse_poll(&m))
         {
+            int woke = screensleep_activity(); /* the event that switches the screen on again is only that */
             gfx_cursor_move(m.x, m.y);
-            desktop_pointer(m.x, m.y, m.buttons);
-            if (m.wheel)
+            if (!woke)
+                desktop_pointer(m.x, m.y, m.buttons);
+            if (m.wheel && !woke)
             {
                 wheel_pending += m.wheel;
                 wheel_x = m.x;
@@ -718,7 +721,8 @@ void kernel_main(const BootInfo *info)
          * produce repeats forever and never see the release. */
         for (int nkeys = 0; nkeys < 4 && gfx_ready() && keyboard_poll(&ke); nkeys++)
         {
-            desktop_key(&ke);
+            if (!screensleep_activity()) /* a key that wakes the screen is not used for anything else */
+                desktop_key(&ke);
             worked = 1;
         }
         if (pmm_ok && blk_generation() != blk_seen) /* a USB drive came or went (found inside mouse_poll) */
@@ -744,6 +748,7 @@ void kernel_main(const BootInfo *info)
             net_configure();
             worked = 1;
         }
+        screensleep_tick(); /* the screen goes off after the time set in Display Settings */
         if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
             worked = 1;
         int others = task_others_ready();

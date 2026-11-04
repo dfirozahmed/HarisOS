@@ -31,6 +31,10 @@ int look_picture(void);           /* the picture's node, -1 = none */
  * (at most max) */
 int look_find_pictures(int *ids, int max);
 
+/* Screen off after this many seconds without input, 0 = never (default 300); "screenoff=" in THEME.CFG. See screensleep.h. */
+int look_screenoff(void);
+void look_set_screenoff(int seconds);
+
 /* The folder the settings files (THEME.CFG, ICONS.CFG) are written to: where THEME.CFG is, else the boot disk, else the first
  * drive that can be written; -1 = none. A vfs node for vfs_save(). */
 int look_config_folder(void);

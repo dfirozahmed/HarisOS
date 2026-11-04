@@ -13,6 +13,7 @@
 #define PATH_MAX_LEN 192
 #define PICTURE_MAX_FILE (64u * 1024u * 1024u)
 
+static int SCREENOFF = 300; /* seconds, 0 = never */
 static int OWN_ACCENT;
 static UiRgb ACCENT;
 static unsigned int *PIC; /* the picture in use, screen size (ui_set_wallpaper_image) */
@@ -134,6 +135,17 @@ static void save(void)
     }
     else
         *o++ = (char)('0' + ui_wallpaper_current());
+    o = put(o, "\r\nscreenoff=");
+    {
+        char dg[12];
+        int k = 0;
+        unsigned v = (unsigned)SCREENOFF;
+        do
+            dg[k++] = (char)('0' + v % 10);
+        while ((v /= 10) != 0);
+        while (k)
+            *o++ = dg[--k];
+    }
     o = put(o, "\r\n");
     int dir = cfg_folder();
     if (dir < 0 || vfs_save(dir, CFG_NAME, text, (unsigned)(o - text)) < 0)
@@ -276,6 +288,14 @@ int look_find_pictures(int *ids, int max)
 }
 
 /* ---- THEME.CFG at boot ---- */
+int look_screenoff(void) { return SCREENOFF; }
+void look_set_screenoff(int seconds)
+{
+    SCREENOFF = seconds < 0 ? 0 : seconds;
+    MSG = "";
+    save();
+}
+
 void look_load(void)
 {
     char text[CFG_MAX + 1];
@@ -304,6 +324,14 @@ void look_load(void)
                     ACCENT = ui_rgb((unsigned char)(v[0] * 16 + v[1]), (unsigned char)(v[2] * 16 + v[3]), (unsigned char)(v[4] * 16 + v[5]));
                     OWN_ACCENT = 1;
                 }
+            }
+            else if ((val = after(line, "screenoff=")))
+            {
+                int v = 0, nd = 0;
+                for (; val[nd] >= '0' && val[nd] <= '9' && nd < 7; nd++)
+                    v = v * 10 + (val[nd] - '0');
+                if (nd > 0)
+                    SCREENOFF = v;
             }
             else if ((val = after(line, "wallpaper=")))
             {

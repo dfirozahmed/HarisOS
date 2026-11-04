@@ -78,6 +78,8 @@ int gfx_brightness(void);
 /* A real backlight (a driver that sets the panel's PWM): the slider then changes the light instead of dimming the picture.
  * `set` returns 0 when it took the level; `current` = the backlight now in percent (so the first change does not jump). */
 void gfx_backlight_driver(int (*set)(int percent), int current);
+int gfx_screen_sleep_supported(void);       /* 1 = a real backlight is there, so the screen can be switched off */
+int gfx_screen_sleep(int off);              /* 1 = backlight off, 0 = back to the brightness; 0 done, -1 not supported */
 int gfx_dim_percent(void); /* how much the PICTURE is dimmed, in percent: 100 when a real backlight does the work */
 
 /* ---- background cache ---------------------------------------

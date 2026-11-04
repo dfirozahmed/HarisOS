@@ -66,6 +66,14 @@ static int (*BL_SET)(int percent); /* a real backlight, see gfx_backlight_driver
 int gfx_brightness(void) { return BRIGHT; }
 int gfx_dim_percent(void) { return BL_SET ? GFX_BRIGHTNESS_MAX : BRIGHT; }
 
+int gfx_screen_sleep_supported(void) { return BL_SET != 0; }
+int gfx_screen_sleep(int off)
+{
+    if (!BL_SET)
+        return -1;
+    return BL_SET(off ? 0 : BRIGHT); /* the driver takes 0 as "off" */
+}
+
 void gfx_backlight_driver(int (*set)(int percent), int current)
 {
     BL_SET = set;

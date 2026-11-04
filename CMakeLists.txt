@@ -299,6 +299,7 @@ set(KERNEL_SOURCES
     kernel/desktop/desktop_clock.c
     kernel/desktop/desktop_windows.c
     kernel/desktop/desktop_power.c  # shut down / restart screen
+    kernel/desktop/screensleep.c    # screen off after a time without input (panel backlight)
     kernel/desktop/look.c           # theme, accent colour and wallpaper; THEME.CFG
     kernel/desktop/bootsplash.c     # "Welcome to HarisOS" screen with a progress bar while the kernel starts
     kernel/desktop/volmenu.c        # taskbar volume popup (click the tray speaker)

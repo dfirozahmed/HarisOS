@@ -109,7 +109,7 @@ int amd_dcn_backlight_set(uint64_t mmio, int percent)
 {
     uint32_t bits, period, duty, cntl;
     static int unlocked;
-    if (percent < 5) percent = 5; /* never a black screen */
+    if (percent != 0 && percent < 5) percent = 5; /* never a black screen by accident; 0 = the screen off (screensleep.h) */
     if (percent > 100) percent = 100;
     if (!bl_params(mmio, &bits, &period)) return -1;
     if (!unlocked) { /* Linux dce_panel_cntl_hw_init(): the group-1 register lock off, so a write takes effect */
