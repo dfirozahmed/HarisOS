@@ -14,6 +14,8 @@
 #define mmHUBPREQ0_DCSURF_SURFACE_PITCH 0x0607u
 #define mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS 0x060au
 #define mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH 0x060bu
+#define mmHUBPREQ0_DCSURF_FLIP_CONTROL 0x061bu
+#define mmHUBPREQ0_DCSURF_SURFACE_INUSE 0x0621u
 
 int amd_dcn_probe(uint64_t mmio, AmdDcnProbe *p)
 {
@@ -32,3 +34,12 @@ int amd_dcn_probe(uint64_t mmio, AmdDcnProbe *p)
     p->readable = 1;
     return 1;
 }
+
+void amd_dcn_set_surface(uint64_t mmio, uint64_t mc_addr)
+{
+    if (!mmio || !gpu_mmio_can_access(mmio)) return;
+    gpu_mmio_write32(mmio, DCN_REG(mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH), (uint32_t)(mc_addr >> 32) & 0xFFFFu);
+    gpu_mmio_write32(mmio, DCN_REG(mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS), (uint32_t)mc_addr);
+}
+uint32_t amd_dcn_flip_control(uint64_t mmio) { return gpu_mmio_read32(mmio, DCN_REG(mmHUBPREQ0_DCSURF_FLIP_CONTROL)); }
+uint32_t amd_dcn_surface_inuse(uint64_t mmio) { return gpu_mmio_read32(mmio, DCN_REG(mmHUBPREQ0_DCSURF_SURFACE_INUSE)); }

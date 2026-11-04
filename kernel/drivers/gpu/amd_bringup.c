@@ -10,6 +10,7 @@
 #include "gpu_mmio.h"
 #include "pci.h"
 #include "gfx.h"
+#include "timer.h"
 #include "vfs.h"
 #include "exec.h"
 #include "fbwc.h"
@@ -753,6 +754,60 @@ void amd_gpu_bringup_cp(void)
     }
 #endif
 #endif
+#endif
+}
+
+/* DCN page-flip test (HARIS_AMD_GPU_PSP_LEVEL >= 11). The CPU paints colour bars into a second 1920x1080 buffer in VRAM (224 MiB, free),
+ * HUBP0's scanout address is pointed at it for about 2 s, then back at the firmware framebuffer. The desktop memory is never touched,
+ * so the screen returns to normal. Logs the pending flag and the address in use after each flip. */
+int amd_gpu_bringup_flip(void)
+{
+#if HARIS_AMD_GPU_PSP_LEVEL >= 11
+    enum { ALT_OFF = 0x0E000000u };
+    AmdDcnProbe dp;
+    uint64_t orig, alt;
+    uint32_t w, h, x, y, pitch_px;
+    volatile uint32_t *p;
+    unsigned long long t;
+    int i;
+    if (!writes_allowed() || !amd_dcn_probe(g_mmio, &dp))
+        return 0;
+    w = 1920; h = 1080; pitch_px = dp.hubp_pitch & 0x3FFFu;
+    orig = ((uint64_t)(dp.hubp_addr_hi & 0xFFFFu) << 32) | dp.hubp_addr_lo;
+    /* only if the firmware really scans out a 1920x1080 surface at the start of VRAM (the probe of step 1 said so) */
+    if (!(dp.otg_control & 1u) || pitch_px != w || dp.hubp_addr_lo != 0 || (dp.hubp_addr_hi & 0xFFFFu) == 0 || gfx_width() != w || gfx_height() != h) {
+        serial_print("FLIP: skipped: the scanout is not the expected 1920x1080 at VRAM offset 0\n");
+        amd_gpu_log_save();
+        return 0;
+    }
+    p = amd_gpu_vram_ptr(ALT_OFF);
+    if (!p) { serial_print("FLIP: skipped: no CPU pointer to VRAM\n"); amd_gpu_log_save(); return 0; }
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++) {
+            uint32_t bar = x / 240u, c = (bar & 1u ? 0xFF0000u : 0u) | (bar & 2u ? 0x00FF00u : 0u) | (bar & 4u ? 0x0000FFu : 0u);
+            p[y * pitch_px + x] = (y < 8u || y >= h - 8u || x < 8u || x >= w - 8u) ? 0xFFFFFFu : c ? c : 0x404040u;
+        }
+    alt = orig + ALT_OFF;
+    serial_print("FLIP: about to scan out a second buffer for 2 s\n");
+    log_hex("  original address lo ", dp.hubp_addr_lo);
+    log_hex("  original address hi ", dp.hubp_addr_hi);
+    log_hex("  FLIP_CONTROL before ", amd_dcn_flip_control(g_mmio));
+    amd_gpu_log_save();
+    for (i = 0; i < 2; i++) {
+        amd_dcn_set_surface(g_mmio, i == 0 ? alt : orig);
+        t = timer_ms();
+        while (timer_ms() - t < 50) { }
+        log_hex(i == 0 ? "  after flip to alt: FLIP_CONTROL " : "  after flip back:   FLIP_CONTROL ", amd_dcn_flip_control(g_mmio));
+        log_hex("                     INUSE            ", amd_dcn_surface_inuse(g_mmio));
+        t = timer_ms();
+        while (timer_ms() - t < 2000) { }
+    }
+    log_hex("  INUSE at the end ", amd_dcn_surface_inuse(g_mmio));
+    serial_print("FLIP: done\n");
+    amd_gpu_log_save();
+    return 1;
+#else
+    return 0;
 #endif
 }
 

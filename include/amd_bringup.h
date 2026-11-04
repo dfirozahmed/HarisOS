@@ -30,6 +30,7 @@ void amd_gpu_bringup_cp(void);
  * the log. Only with HARIS_AMD_GPU_PSP_LEVEL 4 and after the CP tests passed. It leaves coloured stripes on the screen: the caller
  * redraws the desktop afterwards (gfx_repaint_all()). Call after the first desktop frame. Returns 1 if the GPU painted the screen. */
 int amd_gpu_bringup_screen(void);
+int amd_gpu_bringup_flip(void);   /* PSP_LEVEL 11: DCN page-flip test, scans out a second buffer for 2 s and back */
 
 /* The PSP steps (KM ring, SETUP_TMR, firmware load): only when built with HARIS_AMD_GPU_PSP_LEVEL 1 or 2. Runs before
  * amd_gpu_bringup_gart(), which has to stay off while the PSP gets physical addresses. */
