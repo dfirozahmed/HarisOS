@@ -198,9 +198,21 @@ static unsigned LAST_DOWN;
 static unsigned FILTER_SIG;
 
 /* ---- geometry (small functions: no big structs are copied) ---- */
+/* How many app rows fit above the taskbar: on a short screen the menu would otherwise run under the taskbar and
+ * hide the footer (Restart / Shut down). The rest are still reachable through the search box. */
+static int rows_shown(void)
+{
+    int fixed = PAD + SEARCH_H + LABEL_GAP + LABEL_H + 8 + 1 + FOOT_H;
+    int fit = ((int)gfx_height() - TASKBAR_HEIGHT - MARGIN - 4 - fixed) / ROW_H;
+    int n = item_count();
+    if (fit < 1)
+        fit = 1;
+    return n < fit ? n : fit;
+}
+
 static int menu_h(void)
 {
-    return PAD + SEARCH_H + LABEL_GAP + LABEL_H + item_count() * ROW_H + 8 + 1 + FOOT_H;
+    return PAD + SEARCH_H + LABEL_GAP + LABEL_H + rows_shown() * ROW_H + 8 + 1 + FOOT_H;
 }
 
 static UiRect menu_rect(void)
@@ -239,7 +251,7 @@ static UiRect row_rect(int i)
     return ui_rect(m.x + 8, rows_y() + i * ROW_H, m.w - 16, ROW_H - 4);
 }
 
-static int foot_y(void) { return rows_y() + item_count() * ROW_H + 8; }
+static int foot_y(void) { return rows_y() + rows_shown() * ROW_H + 8; }
 
 /* the two power buttons in the footer: i = 0 Restart, i = 1 Shut down (the right-most) */
 #define PBTN_W 40
@@ -321,7 +333,8 @@ static unsigned text_sig(const char *s)
 static void refilter(int reset_selection)
 {
     VN = 0;
-    for (int i = 0; i < item_count(); i++)
+    int cap = rows_shown();
+    for (int i = 0; i < item_count() && VN < cap; i++)
     {
         MenuItem it = item_get(i);
         if (has_text(it.name, SEARCH.text) || has_text(it.desc, SEARCH.text))
@@ -754,9 +767,12 @@ void startmenu_draw(void)
         UiRect b = power_btn_rect(i);
         int hot = FOOT_HOVER == i + 1 || FOOT_KEY == i + 1;
         UiRgb tint = i == 1 ? t->danger : t->accent; /* Shut down turns red */
+        /* always-visible backing: on the translucent glass a bare thin icon is hard to see */
+        gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, gfx_rgb(255, 255, 255), 215);
+        gfx_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, 1, ui_color(t->border), 170);
         if (hot)
-            gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, ui_color(tint), FOOT_PRESS == i + 1 ? 60 : 34);
-        GfxColor ic = ui_color(hot && i == 1 ? t->danger : t->text);
+            gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, ui_color(tint), FOOT_PRESS == i + 1 ? 90 : 55);
+        GfxColor ic = ui_color(i == 1 ? t->danger : t->text); /* Shut down is always red */
         if (i == 0)
             icon_restart(b.x + b.w / 2, b.y + b.h / 2, ic);
         else
