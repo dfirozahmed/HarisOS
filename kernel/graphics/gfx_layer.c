@@ -234,7 +234,7 @@ static int area_box(int *x0, int *y0, int *x1, int *y1)
 int gfx_overlay_show(const void *layer, int lw, int lh, int x, int y, int changed, int inset)
 {
     int ax0 = 0, ay0 = 0, ax1 = W, ay1 = H;
-    if (!OV_OPS || !BACK || !layer || lw <= 0 || lh <= 0 || gfx_brightness() < GFX_BRIGHTNESS_MAX ||
+    if (!OV_OPS || !BACK || !layer || lw <= 0 || lh <= 0 || gfx_dim_percent() < GFX_BRIGHTNESS_MAX ||
         !area_box(&ax0, &ay0, &ax1, &ay1))
     {
         OV.on = 0;
@@ -284,7 +284,7 @@ int gfx_internal_overlay_prepare(int x0, int y0, int x1, int y1)
     if (y1 > OV.y + OV.lh) y1 = OV.y + OV.lh;
     if (!area_box(&x0, &y0, &x1, &y1))
         return 0;
-    if (gfx_brightness() < GFX_BRIGHTNESS_MAX) /* the screen copy is scaled, a GPU paste would not be */
+    if (gfx_dim_percent() < GFX_BRIGHTNESS_MAX) /* the screen copy is scaled, a GPU paste would not be */
     {
         cpu_paste(x0, y0, x1, y1);
         return 0;

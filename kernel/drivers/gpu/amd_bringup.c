@@ -775,6 +775,21 @@ void amd_gpu_bringup_cp(void)
 #endif
 }
 
+/* The panel backlight (DCN BL_PWM): the Display app's slider and Ctrl+Alt+Up/Down then change the real light, not the picture. Only on the
+ * machine this was written for, and only if the firmware left the PWM running (read first). Call after the first frame. */
+static int bl_set(int percent) { return amd_dcn_backlight_set(g_mmio, percent); }
+int amd_gpu_bringup_backlight(void)
+{
+    int cur;
+    if (!g_target || !bringup_probed) return 0;
+    cur = amd_dcn_backlight_percent(g_mmio);
+    if (cur < 0) { serial_print("BACKLIGHT: the PWM is not running: the slider keeps dimming the picture\n"); return 0; }
+    gfx_backlight_driver(bl_set, cur);
+    serial_print("BACKLIGHT: the slider now sets the panel backlight\n");
+    log_hex("  backlight percent at start ", (uint32_t)cur);
+    return 1;
+}
+
 /* DCN page-flip test (HARIS_AMD_GPU_PSP_LEVEL >= 11). The CPU paints colour bars into a second 1920x1080 buffer in VRAM (224 MiB, free),
  * HUBP0's scanout address is pointed at it for about 2 s, then back at the firmware framebuffer. The desktop memory is never touched,
  * so the screen returns to normal. Logs the pending flag and the address in use after each flip. */

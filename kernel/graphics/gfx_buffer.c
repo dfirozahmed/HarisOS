@@ -61,11 +61,28 @@ int gfx_enable_backbuffer(void *memory)
  * screen is scaled. (Real panel backlights are driven through ACPI / GPU registers, which HarisOS
  * has no driver for.) */
 
+static int (*BL_SET)(int percent); /* a real backlight, see gfx_backlight_driver() */
+
 int gfx_brightness(void) { return BRIGHT; }
+int gfx_dim_percent(void) { return BL_SET ? GFX_BRIGHTNESS_MAX : BRIGHT; }
+
+void gfx_backlight_driver(int (*set)(int percent), int current)
+{
+    BL_SET = set;
+    if (set)
+    {
+        BRIGHT = current < GFX_BRIGHTNESS_MIN ? GFX_BRIGHTNESS_MIN : current > GFX_BRIGHTNESS_MAX ? GFX_BRIGHTNESS_MAX : current;
+        if (BACK && !gfx_backbuffer_detached())
+        {
+            gfx_internal_mark_dirty(0, 0, W, H); /* the picture was dimmed by the old setting: show it at full brightness */
+            gfx_present();
+        }
+    }
+}
 
 int gfx_internal_brightness_scale(void)
 {
-    return BRIGHT * 256 / GFX_BRIGHTNESS_MAX; /* 0..256 */
+    return gfx_dim_percent() * 256 / GFX_BRIGHTNESS_MAX; /* 0..256 */
 }
 
 int gfx_set_brightness(int percent)
@@ -79,6 +96,8 @@ int gfx_set_brightness(int percent)
     if (percent == BRIGHT)
         return 0;
     BRIGHT = percent;
+    if (BL_SET && BL_SET(percent) == 0)
+        return 0; /* the panel's own backlight did it: the picture stays as it is */
     if (gfx_backbuffer_detached())
         return 0; /* a compositor draws the screen: it dims it on its next frame (the back buffer is not the picture) */
     gfx_internal_mark_dirty(0, 0, W, H);
@@ -89,7 +108,7 @@ int gfx_set_brightness(int percent)
 /* Copies pixels [x0,x1) of one row to the screen, scaling the three color bytes by BRIGHT. */
 static void copy_row(volatile unsigned int *dst, volatile unsigned int *src, int x0, int x1)
 {
-    if (BRIGHT >= GFX_BRIGHTNESS_MAX)
+    if (gfx_dim_percent() >= GFX_BRIGHTNESS_MAX)
     {
         gfx_internal_copy_fb(dst + x0, src + x0, x1 - x0);
         return;

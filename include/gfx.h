@@ -75,6 +75,10 @@ int gfx_double_buffered(void);
 #define GFX_BRIGHTNESS_MAX 100
 int gfx_set_brightness(int percent);
 int gfx_brightness(void);
+/* A real backlight (a driver that sets the panel's PWM): the slider then changes the light instead of dimming the picture.
+ * `set` returns 0 when it took the level; `current` = the backlight now in percent (so the first change does not jump). */
+void gfx_backlight_driver(int (*set)(int percent), int current);
+int gfx_dim_percent(void); /* how much the PICTURE is dimmed, in percent: 100 when a real backlight does the work */
 
 /* ---- background cache ---------------------------------------
  */

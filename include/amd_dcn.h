@@ -36,4 +36,10 @@ enum {
 const char *amd_dcn_ext_name(int i);
 /* Fills v[AMD_DCN_X_COUNT]; 0 = registers not reachable. */
 int amd_dcn_probe_ext(uint64_t mmio, uint32_t *v);
+
+/* Step 4: the panel backlight (BL_PWM_CNTL / BL_PWM_PERIOD_CNTL, the eDP backlight PWM the firmware left running). Level = percent
+ * of the PWM duty. Linux dce_panel_cntl.c: bitcnt = BL_PWM_PERIOD_CNTL[19:16] (0 means 16), duty = BL_ACTIVE_INT_FRAC_CNT[15:0];
+ * 16-bit level = duty * 2^bitcnt / period. Both return -1 when the PWM is not running. */
+int amd_dcn_backlight_percent(uint64_t mmio);
+int amd_dcn_backlight_set(uint64_t mmio, int percent);
 #endif

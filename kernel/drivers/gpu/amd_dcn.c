@@ -78,3 +78,48 @@ int amd_dcn_probe_ext(uint64_t mmio, uint32_t *v)
         v[i] = gpu_mmio_read32(mmio, ext[i].seg == 1 ? DCN_REG1(ext[i].mm) : DCN_REG(ext[i].mm));
     return 1;
 }
+
+#define mmBL_PWM_CNTL           0x2888u
+#define mmBL_PWM_PERIOD_CNTL    0x288au
+#define mmBL_PWM_GRP1_REG_LOCK  0x288bu
+#define BL_PWM_EN               0x80000000u
+
+/* bitcnt and period of the running PWM; 0 when it is off or looks wrong */
+static int bl_params(uint64_t mmio, uint32_t *bits, uint32_t *period)
+{
+    uint32_t cntl, per;
+    if (!mmio || !gpu_mmio_can_access(mmio)) return 0;
+    cntl = gpu_mmio_read32(mmio, DCN_REG(mmBL_PWM_CNTL));
+    per = gpu_mmio_read32(mmio, DCN_REG(mmBL_PWM_PERIOD_CNTL));
+    *bits = (per >> 16) & 0xFu;
+    if (*bits == 0) *bits = 16;
+    *period = per & ((1u << *bits) - 1u);
+    return (cntl & BL_PWM_EN) && *period != 0;
+}
+
+int amd_dcn_backlight_percent(uint64_t mmio)
+{
+    uint32_t bits, period, duty;
+    if (!bl_params(mmio, &bits, &period)) return -1;
+    duty = gpu_mmio_read32(mmio, DCN_REG(mmBL_PWM_CNTL)) & 0xFFFFu;
+    return (int)(((unsigned long long)duty << bits) * 100u / ((unsigned long long)period << 16));
+}
+
+int amd_dcn_backlight_set(uint64_t mmio, int percent)
+{
+    uint32_t bits, period, duty, cntl;
+    static int unlocked;
+    if (percent < 5) percent = 5; /* never a black screen */
+    if (percent > 100) percent = 100;
+    if (!bl_params(mmio, &bits, &period)) return -1;
+    if (!unlocked) { /* Linux dce_panel_cntl_hw_init(): the group-1 register lock off, so a write takes effect */
+        gpu_mmio_write32(mmio, DCN_REG(mmBL_PWM_GRP1_REG_LOCK), gpu_mmio_read32(mmio, DCN_REG(mmBL_PWM_GRP1_REG_LOCK)) & ~1u);
+        unlocked = 1;
+    }
+    /* duty = level16 * period / 2^bits, with level16 = percent of 65535 */
+    duty = (uint32_t)((unsigned long long)((uint32_t)percent * 65535u / 100u) * period >> bits);
+    if (duty > 0xFFFFu) duty = 0xFFFFu;
+    cntl = gpu_mmio_read32(mmio, DCN_REG(mmBL_PWM_CNTL));
+    gpu_mmio_write32(mmio, DCN_REG(mmBL_PWM_CNTL), (cntl & ~0xFFFFu) | duty);
+    return 0;
+}

@@ -97,7 +97,7 @@ static void pointer_changed(int x, int y, int w, int h)
 }
 
 static int DIM_UP = -1; /* the brightness the driver was given (0 .. 256), -1 = none yet */
-static int dim_now(void) { return gfx_brightness() * 256 / GFX_BRIGHTNESS_MAX; }
+static int dim_now(void) { return gfx_dim_percent() * 256 / GFX_BRIGHTNESS_MAX; }
 
 int desktop_comp_pointer_pending(void) { return ON && (NPRECT > 0 || dim_now() != DIM_UP); }
 
