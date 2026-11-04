@@ -76,7 +76,8 @@ int desktop_pointer(int x, int y, unsigned buttons)
     if (right_edge && on_desktop)
     {
         int icon = deskicons_at(x, y);
-        deskicons_select(icon);
+        if (!deskicons_is_selected(icon)) /* right click on one of several selected keeps them: the menu acts on all */
+            deskicons_select(icon);
         deskmenu_open_icon(x, y, icon);
     }
     wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
@@ -145,6 +146,15 @@ static int SUPER_DOWN; /* the Windows key repeats while held: toggle once per pr
 int desktop_key(const KeyEvent *k)
 {
     ui_caret_restart(); /* typing: the caret is shown and its blink starts over */
+    {
+        /* the mouse carries no modifiers: the desktop icons learn Shift / Ctrl from the keys (a modifier's own event may not show itself) */
+        unsigned m = k->mods & (KMOD_SHIFT | KMOD_CTRL);
+        if (k->key == KEY_SHIFT)
+            m = k->pressed ? (m | KMOD_SHIFT) : (m & ~(unsigned)KMOD_SHIFT);
+        else if (k->key == KEY_CTRL)
+            m = k->pressed ? (m | KMOD_CTRL) : (m & ~(unsigned)KMOD_CTRL);
+        deskicons_set_mods(m);
+    }
     if (k->key == KEY_SUPER && !k->pressed)
         SUPER_DOWN = 0;
     if (k->pressed)

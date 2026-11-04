@@ -24,6 +24,10 @@ void deskfiles_open(int node);       /* what a double click does; says why in a 
 void deskfiles_ask_delete(int node); /* a window asks "Delete NAME?"; Delete there calls deskfiles_delete */
 void deskfiles_delete(int node);     /* delete now, with no question; a toast says how it went, and the icons follow */
 
+/* The same for several entries: ONE question ("Delete 3 items?") and ONE toast. */
+void deskfiles_ask_delete_many(const int *nodes, int n);
+void deskfiles_delete_many(const int *nodes, int n);
+
 /* Send a file or folder to the desktop: a copy of it goes into the Desktop folder (a name that is taken there becomes "name (2).ext").
  * With no Desktop folder yet it is made first, in the top folder of the boot disk (when that can be written: the drives start locked).
  * A toast says how it went. Returns the node of the copy, or -1 (nothing was copied: the toast says why). */

@@ -71,7 +71,14 @@ static char SAVED[4096];
 static int SAVES;
 static int OPENED_NODE = -1, ASKED_NODE = -1;
 void deskfiles_open(int node) { OPENED_NODE = node; }
+static int ASKED_MANY[64], ASKED_COUNT;
 void deskfiles_ask_delete(int node) { ASKED_NODE = node; }
+void deskfiles_ask_delete_many(const int *nodes, int n)
+{
+    ASKED_COUNT = n;
+    for (int i = 0; i < n && i < 64; i++)
+        ASKED_MANY[i] = nodes[i];
+}
 static int SAVE_RESULT; /* what vfs_save says: 0 = written */
 int exec_find(const char *name) { (void)name; return CFG_NODE; }
 int vfs_read(int id, unsigned off, void *buf, unsigned len)
@@ -570,13 +577,97 @@ int main(void)
         ke.key = KEY_DELETE;
         TOASTS = 0;
         CHECK(deskicons_key(&ke) == 1);
-        CHECK(TOASTS == n_sel);
+        CHECK(TOASTS == 1 && strstr(LAST_TOAST_TEXT, "shortcuts are off the desktop") != 0); /* one toast for all */
         draw_counts();
         CHECK(ICONS == 8 - n_sel);
         /* a plain click clears the selection */
         deskicons_select(-1);
     }
     registry_order();
+
+    /* Ctrl+click flips one icon; Shift+click adds one */
+    deskicons_select(-1);
+    deskicons_set_mods(KMOD_CTRL);
+    CHECK(click(0, 0) == 1 && click(0, 2) == 1);
+    CHECK(deskicons_is_selected(at(0, 0)) && deskicons_is_selected(at(0, 2)) && !deskicons_is_selected(at(0, 1)));
+    CHECK(click(0, 0) == 1); /* flips back */
+    CHECK(!deskicons_is_selected(at(0, 0)) && deskicons_is_selected(at(0, 2)));
+    deskicons_set_mods(KMOD_SHIFT);
+    click(0, 4);
+    CHECK(deskicons_is_selected(at(0, 2)) && deskicons_is_selected(at(0, 4)));
+    /* a Ctrl band keeps what was selected and flips what it touches (rows 2 and 3: row 2 goes, row 3 comes) */
+    deskicons_set_mods(KMOD_CTRL);
+    deskicons_pointer(5, 12 + 104 * 2 + 8, MOUSE_LEFT, 1); /* (the margin: the bare desktop) */
+    deskicons_pointer(60, 12 + 104 * 3 + 50, MOUSE_LEFT, 1);
+    deskicons_pointer(60, 12 + 104 * 3 + 50, 0, 1);
+    CHECK(!deskicons_is_selected(at(0, 2)) && deskicons_is_selected(at(0, 3)) && deskicons_is_selected(at(0, 4)));
+    deskicons_set_mods(0);
+    deskicons_select(-1);
+
+    /* dragging one of several selected icons moves them all, as a block */
+    registry_order();
+    deskicons_select(-1);
+    deskicons_set_mods(KMOD_CTRL);
+    click(0, 0);
+    click(0, 1);
+    deskicons_set_mods(0);
+    {
+        int ax, ay, tx, ty;
+        center(0, 1, &ax, &ay);
+        center(2, 1, &tx, &ty);
+        CHECK(deskicons_pointer(ax, ay, MOUSE_LEFT, 1) == 1);
+        CHECK(deskicons_is_selected(at(0, 0)) && deskicons_is_selected(at(0, 1))); /* the press keeps both */
+        deskicons_pointer(ax + 40, ay, MOUSE_LEFT, 1);
+        CHECK(deskicons_dragging());
+        deskicons_pointer(tx, ty, MOUSE_LEFT, 1);
+        deskicons_ghost_draw();
+        deskicons_pointer(tx, ty, 0, 1);
+        CHECK(at(0, 0) == -1 && at(0, 1) == -1);
+        CHECK(deskicons_is_selected(at(2, 0)) && deskicons_is_selected(at(2, 1)));
+        CHECK(!deskicons_is_selected(at(0, 2)));
+        /* dropped on top of other icons: they step aside to free cells, none is lost */
+        center(2, 1, &ax, &ay);
+        center(0, 3, &tx, &ty);
+        NOW += 1000; /* (not a double click) */
+        deskicons_pointer(ax, ay, MOUSE_LEFT, 1);
+        deskicons_pointer(ax - 40, ay, MOUSE_LEFT, 1);
+        deskicons_pointer(tx, ty, MOUSE_LEFT, 1);
+        deskicons_pointer(tx, ty, 0, 1);
+        draw_counts();
+        CHECK(ICONS == 8);
+        CHECK(deskicons_is_selected(at(0, 2)) && deskicons_is_selected(at(0, 3)));
+        /* a click without a drag on one of several selected leaves just that one */
+        NOW += 1000;
+        click(0, 3);
+        CHECK(deskicons_is_selected(at(0, 3)) && !deskicons_is_selected(at(0, 2)));
+    }
+
+    /* Ctrl+A selects all */
+    registry_order();
+    deskicons_select(-1);
+    {
+        KeyEvent ka = {'a', 'a', 1, KMOD_CTRL};
+        CHECK(deskicons_key(&ka) == 1);
+        draw_counts();
+        CHECK(FILLS == 16);
+    }
+
+    /* Delete with several files selected asks once for all of them */
+    registry_order();
+    deskicons_set_files(files, 5, 1);
+    deskicons_select(-1);
+    deskicons_set_mods(KMOD_CTRL);
+    {
+        ASKED_NODE = -1;
+        ASKED_COUNT = 0;
+        click(1, 1);
+        click(1, 2);
+        deskicons_set_mods(0);
+        KeyEvent kd = {KEY_DELETE, 0, 1, 0};
+        CHECK(deskicons_key(&kd) == 1);
+        CHECK(ASKED_NODE == -1 && ASKED_COUNT == 2);
+    }
+    deskicons_set_files(0, 0, 1);
 
     printf("deskicons tests passed\n");
     return 0;

@@ -377,6 +377,18 @@ int main(void)
     WIN.on_key(&WIN, &k);
     CHECK(WINS_CLOSED == 3 && REMOVED_NODE == 18);
 
+    /* several at once: one question, one toast */
+    reset_counters();
+    WINS_MADE = WINS_CLOSED = 0;
+    node_set(20, 5, "d.txt", 0);
+    node_set(21, 5, "e.txt", 0);
+    int two[3] = {20, 21, 31}; /* (31 is gone: it is left out) */
+    deskfiles_ask_delete_many(two, 3);
+    CHECK(WINS_MADE == 1 && REMOVED_NODE == -1 && BTN_N == 2);
+    BTN[1].fn(0, BTN[1].user);
+    CHECK(REMOVED_NODE == 21 && vfs_node(20) == 0 && vfs_node(21) == 0);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_SUCCESS && strcmp(LAST_TEXT, "Deleted 2 items") == 0);
+
     /* no window for the question: a toast says so and nothing is deleted */
     reset_counters();
     WIN_RESULT = 0;

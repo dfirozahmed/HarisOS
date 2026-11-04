@@ -51,6 +51,11 @@ static int BAND;                      /* rubber band: 0 = none, 1 = pressed on t
 static int BX, BY;                    /* where the band started */
 static UiRect BRECT;                  /* the band now (clamped to the desktop) */
 static int overlaps(UiRect a, UiRect b);
+static unsigned char BASE[MAX_ICONS]; /* the selection when a Ctrl / Shift band started: the band adds to it (Ctrl: flips) */
+static unsigned MODS;                 /* KMOD_SHIFT / KMOD_CTRL while held: a mouse event carries no modifiers, the key events say */
+static int GROUP;                     /* the drag moves every selected icon, not just the pressed one */
+static int GDC, GDR;                  /* a drag: how many columns / rows the icon (or the group) has moved from its cells */
+static int BAND_ADD;                  /* the band adds to the selection: 0 = no, 1 = Shift (adds), 2 = Ctrl (flips) */
 static int PRESS = -1;      /* the icon the left button went down on, -1 = none */
 static int DRAGGING;         /* it has been moved far enough to be dragged */
 static int PX, PY;           /* where the button went down */
@@ -282,7 +287,7 @@ static void assemble(const Icon *items, int n)
                 SEL = i;
     HOVER = -1;
     PRESS = -1; /* a drag in the middle of it is let go */
-    DRAGGING = 0;
+    DRAGGING = GROUP = 0;
     BAND = 0;
     LAST_CLICK = -1;
     wm_add_screen_damage(ui_rect(old.x, old.y, old.w + 8, old.h + 8));
@@ -579,6 +584,25 @@ void deskicons_select(int icon)
     dmg_icon(SEL);
 }
 
+void deskicons_set_mods(unsigned mods)
+{
+    MODS = mods & (KMOD_SHIFT | KMOD_CTRL);
+}
+
+int deskicons_is_selected(int icon)
+{
+    ensure();
+    return icon >= 0 && icon < N && MARK[icon];
+}
+
+static int marked_count(void)
+{
+    int c = 0;
+    for (int i = 0; i < N; i++)
+        c += MARK[i];
+    return c;
+}
+
 int deskicons_is_file(int icon)
 {
     ensure();
@@ -616,9 +640,39 @@ static void remove_icon(int i)
         SEL--;
     HOVER = -1;
     PRESS = -1;
-    DRAGGING = 0;
+    DRAGGING = GROUP = 0;
     LAST_CLICK = -1;
     wm_add_screen_damage(ui_rect(old.x, old.y, old.w + 8, old.h + 8));
+}
+
+/* Delete everything selected: the app shortcuts go at once (one save, one toast); the files are asked about together, once. */
+static void delete_selected(void)
+{
+    int nodes[DESK_FILES_MAX], nf = 0, apps = 0;
+    for (int i = 0; i < N; i++)
+        if (MARK[i] && IC[i].file && nf < DESK_FILES_MAX)
+            nodes[nf++] = IC[i].node;
+    for (int i = N - 1; i >= 0; i--) /* from the end: a removal moves only the ones after it */
+        if (MARK[i] && !IC[i].file)
+        {
+            HIDDEN[IC[i].app] = 1;
+            remove_icon(i);
+            apps++;
+        }
+    if (apps)
+    {
+        char msg[TOAST_TEXT_MAX + 1], *o = msg;
+        o = put_int(o, apps);
+        o = put(o, apps == 1 ? " shortcut is" : " shortcuts are");
+        o = put(o, " off the desktop. Start menu: right-click, Send to desktop.");
+        *o = 0;
+        if (save())
+            toast_show(TOAST_INFO, msg);
+    }
+    if (nf == 1)
+        deskfiles_ask_delete(nodes[0]);
+    else if (nf > 1)
+        deskfiles_ask_delete_many(nodes, nf);
 }
 
 void deskicons_delete(int icon)
@@ -626,6 +680,11 @@ void deskicons_delete(int icon)
     ensure();
     if (icon < 0 || icon >= N)
         return;
+    if (MARK[icon] && marked_count() > 1) /* part of a selection: the whole selection goes */
+    {
+        delete_selected();
+        return;
+    }
     if (IC[icon].file) /* a file: asked first (a window), and then deleted for good */
     {
         deskfiles_ask_delete(IC[icon].node);
@@ -704,13 +763,22 @@ void deskicons_arrange(void)
 int deskicons_key(const KeyEvent *k)
 {
     ensure();
+    if (k->pressed && (k->mods & KMOD_CTRL) && !(k->mods & (KMOD_SHIFT | KMOD_ALT)) && k->key == 'a' && N > 0) /* select all */
+    {
+        for (int i = 0; i < N; i++)
+            if (!MARK[i])
+            {
+                MARK[i] = 1;
+                dmg_icon(i);
+            }
+        SEL = N - 1;
+        return 1;
+    }
     if (!k->pressed || SEL < 0 || SEL >= N)
         return 0;
     if (k->key == KEY_DELETE)
     {
-        for (int i = N - 1; i >= 0; i--) /* every selected icon (from the end: a removal moves only the ones after it) */
-            if (MARK[i])
-                deskicons_delete(i);
+        deskicons_delete(SEL); /* (the whole selection when there are several) */
         return 1;
     }
     if (k->key == KEY_ENTER)
@@ -721,27 +789,108 @@ int deskicons_key(const KeyEvent *k)
     return 0;
 }
 
-/* the cell nearest to the dragged icon's middle */
+/* the cell nearest to the dragged icon's middle; a group moves as a block, so it stops where its outermost icon meets the grid's edge */
 static void target_cell(int *col, int *row)
 {
     int cols, rows;
     grid(&cols, &rows);
     int c = (DX + CELL_W / 2 - MARGIN) / CELL_W, r = (DY + CELL_H / 2 - MARGIN) / CELL_H; /* (the middle of the icon) */
-    *col = c < 0 ? 0 : (c >= cols ? cols - 1 : c);
-    *row = r < 0 ? 0 : (r >= rows ? rows - 1 : r);
+    if (DX + CELL_W / 2 < MARGIN)
+        c = -1; /* (integer division rounds toward zero) */
+    if (DY + CELL_H / 2 < MARGIN)
+        r = -1;
+    if (!GROUP)
+    {
+        *col = c < 0 ? 0 : (c >= cols ? cols - 1 : c);
+        *row = r < 0 ? 0 : (r >= rows ? rows - 1 : r);
+        return;
+    }
+    int dc = c - IC[PRESS].col, dr = r - IC[PRESS].row;
+    int c0 = cols, c1 = -1, r0 = rows, r1 = -1;
+    for (int i = 0; i < N; i++)
+        if (MARK[i])
+        {
+            c0 = IC[i].col < c0 ? IC[i].col : c0;
+            c1 = IC[i].col > c1 ? IC[i].col : c1;
+            r0 = IC[i].row < r0 ? IC[i].row : r0;
+            r1 = IC[i].row > r1 ? IC[i].row : r1;
+        }
+    if (c0 + dc < 0)
+        dc = -c0;
+    if (c1 + dc >= cols)
+        dc = cols - 1 - c1;
+    if (r0 + dr < 0)
+        dr = -r0;
+    if (r1 + dr >= rows)
+        dr = rows - 1 - r1;
+    *col = IC[PRESS].col + dc;
+    *row = IC[PRESS].row + dr;
 }
 
-static UiRect dragged_rect(void)
+static int moving(int i)
 {
-    return ui_rect(DX, DY, CELL_W, CELL_H);
+    return DRAGGING && (i == PRESS || (GROUP && MARK[i]));
 }
 
-/* the button came up after a drag: drop the icon in the cell it is over; the icon that was there takes its old place */
+/* where a lifted icon is drawn: its cell, moved as far as the pointer has moved the pressed one */
+static UiRect moved_rect(int i)
+{
+    UiRect o = cell_rect(IC[PRESS].col, IC[PRESS].row), c = cell_rect(IC[i].col, IC[i].row);
+    return ui_rect(c.x + DX - o.x, c.y + DY - o.y, CELL_W, CELL_H);
+}
+
+/* mark everything a drag draws or outlines now (the lifted icons and the cells they would land in) */
+static void dmg_moving(void)
+{
+    for (int i = 0; i < N; i++)
+        if (moving(i))
+        {
+            dmg_rect(moved_rect(i));
+            dmg_cell(IC[i].col + GDC, IC[i].row + GDR);
+        }
+}
+
+/* the button came up after a drag: drop the icon in the cell it is over; the icon that was there takes its old place. A group moves as a
+ * block: the icons that were in its way go to the first free cells. */
 static void drop(void)
 {
     int i = PRESS;
+    if (GROUP)
+    {
+        int nc[MAX_ICONS], nr[MAX_ICONS];
+        dmg_moving();
+        for (int k = 0; k < N; k++)
+        {
+            nc[k] = IC[k].col + GDC;
+            nr[k] = IC[k].row + GDR;
+        }
+        for (int j = 0; j < N; j++) /* an icon that is not moving and sits where one lands steps aside */
+            if (!MARK[j])
+                for (int k = 0; k < N; k++)
+                    if (MARK[k] && IC[j].col == nc[k] && IC[j].row == nr[k])
+                    {
+                        dmg_icon(j);
+                        IC[j].col = IC[j].row = -1;
+                    }
+        for (int k = 0; k < N; k++)
+            if (MARK[k])
+            {
+                dmg_icon(k);
+                IC[k].col = nc[k];
+                IC[k].row = nr[k];
+                dmg_icon(k);
+            }
+        for (int j = 0; j < N; j++)
+            if (IC[j].col < 0)
+            {
+                place_first_free(j);
+                dmg_icon(j);
+            }
+        save();
+        return;
+    }
     int c = TCOL, r = TROW;
-    dmg_rect(dragged_rect());
+    dmg_rect(moved_rect(i));
     dmg_cell(c, r);
     dmg_icon(i);
     int other = who_in(c, r);
@@ -779,11 +928,28 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop)
     if (pressed && on_desktop)
     {
         int i = deskicons_at(x, y);
-        deskicons_select(i);
+        int add = (MODS & (KMOD_CTRL | KMOD_SHIFT)) != 0;
+        if (i >= 0 && add) /* Ctrl+click flips this icon in the selection, Shift+click adds it; no drag, no double click */
+        {
+            MARK[i] = (MODS & KMOD_CTRL) ? (unsigned char)!MARK[i] : 1;
+            SEL = -1;
+            for (int k = 0; k < N; k++)
+                if (MARK[k])
+                    SEL = k;
+            dmg_icon(i);
+            LAST_CLICK = -1;
+            return 1;
+        }
+        if (i < 0 && add)
+            for (int k = 0; k < N; k++)
+                BASE[k] = MARK[k]; /* the band adds to what is selected */
+        else if (!(i >= 0 && MARK[i] && marked_count() > 1)) /* (a press on one of several selected keeps them, to drag them all) */
+            deskicons_select(i);
         if (i < 0)
         {
             LAST_CLICK = -1;
             BAND = 1; /* maybe a rubber band: it shows once the pointer has moved */
+            BAND_ADD = add ? ((MODS & KMOD_CTRL) ? 2 : 1) : 0;
             BX = x;
             BY = y;
         }
@@ -832,6 +998,10 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop)
             {
                 UiRect c = cell_rect(IC[i].col, IC[i].row);
                 int m = overlaps(nr, ui_rect(c.x + 4, c.y + 2, c.w - 8, c.h - 4));
+                if (BAND_ADD == 1)
+                    m |= BASE[i];
+                else if (BAND_ADD == 2)
+                    m ^= BASE[i];
                 if (m != MARK[i])
                 {
                     MARK[i] = (unsigned char)m;
@@ -860,11 +1030,15 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop)
         if (!DRAGGING && now && ((x - PX) * (x - PX) + (y - PY) * (y - PY) > DRAG_PX * DRAG_PX))
         {
             DRAGGING = 1; /* lifted: its cell is empty until it is dropped */
+            GROUP = MARK[PRESS] && marked_count() > 1;
             DX = x - GRABX;
             DY = y - GRABY;
             TCOL = IC[PRESS].col;
             TROW = IC[PRESS].row;
-            dmg_icon(PRESS);
+            GDC = GDR = 0;
+            for (int i = 0; i < N; i++)
+                if (moving(i))
+                    dmg_icon(i);
             if (HOVER >= 0)
             {
                 dmg_icon(HOVER);
@@ -873,19 +1047,21 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop)
         }
         if (DRAGGING && now)
         {
-            dmg_rect(dragged_rect());
-            dmg_cell(TCOL, TROW);
+            dmg_moving();
             DX = x - GRABX;
             DY = y - GRABY;
             target_cell(&TCOL, &TROW);
-            dmg_rect(dragged_rect());
-            dmg_cell(TCOL, TROW);
+            GDC = TCOL - IC[PRESS].col;
+            GDR = TROW - IC[PRESS].row;
+            dmg_moving();
         }
         if (released)
         {
             if (DRAGGING)
                 drop();
-            DRAGGING = 0;
+            else if (MARK[PRESS] && marked_count() > 1) /* a click (no drag) on one of several selected: just that one */
+                deskicons_select(PRESS);
+            DRAGGING = GROUP = 0;
             PRESS = -1;
         }
         return 1;
@@ -965,7 +1141,7 @@ void deskicons_draw(void)
     UiRect clip = ui_rect(cl.x0, cl.y0, cl.x1 - cl.x0, cl.y1 - cl.y0);
     for (int i = 0; i < N; i++)
     {
-        if (DRAGGING && i == PRESS)
+        if (moving(i))
             continue; /* it is lifted: deskicons_ghost_draw draws it, above the windows */
         UiRect c = cell_rect(IC[i].col, IC[i].row);
         if (overlaps(c, clip))
@@ -996,12 +1172,20 @@ void deskicons_ghost_draw(void)
         }
         return;
     }
-    UiRect tc = cell_rect(TCOL, TROW); /* where it would land */
-    if (overlaps(tc, clip))
-        gfx_round_rect_alpha(tc.x + 4, tc.y + 2, tc.w - 8, tc.h - 4, 10, 2, gfx_rgb(255, 255, 255), 120);
-    UiRect dr = dragged_rect();
-    if (overlaps(dr, clip))
-        draw_icon(PRESS, dr);
+    for (int i = 0; i < N; i++)
+        if (moving(i))
+        {
+            UiRect tc = cell_rect(IC[i].col + GDC, IC[i].row + GDR); /* where it would land */
+            if (overlaps(tc, clip))
+                gfx_round_rect_alpha(tc.x + 4, tc.y + 2, tc.w - 8, tc.h - 4, 10, 2, gfx_rgb(255, 255, 255), 120);
+        }
+    for (int i = 0; i < N; i++)
+        if (moving(i))
+        {
+            UiRect dr = moved_rect(i);
+            if (overlaps(dr, clip))
+                draw_icon(i, dr);
+        }
 }
 
 UiRect deskicons_bounds(void)

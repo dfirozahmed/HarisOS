@@ -5,9 +5,12 @@
  *   a file or folder of the Desktop folder (deskfiles.h), the way Windows shows its desktop.
  *
  *   Click    selects an icon, a click on the bare desktop selects none.
+ *   Drag on the bare desktop draws a rubber band: every icon it touches is selected. With Shift held it adds to the selection, with Ctrl
+ *            it flips the icons it touches. Ctrl+click flips one icon, Shift+click adds one; Ctrl+A selects all.
  *   Double click (or the menu's Open, or Enter) opens it.
- *   Drag     moves an icon; it snaps to the nearest cell of the grid on release. If that cell has an icon, the two swap places.
- *   Delete   (the menu, or the Delete key when no window has the keyboard): an app shortcut goes at once, a file asks first.
+ *   Drag     moves an icon (all selected icons together, when the icon is one of several); it snaps to the nearest cell of the grid on release. If that cell has an icon, the two swap places.
+ *   Delete   (the menu, or the Delete key when no window has the keyboard): an app shortcut goes at once, files ask first (once for all
+ *            the selected ones).
  *
  * Where each icon is stays in ICONS.CFG, next to THEME.CFG, read by deskicons_load() at boot and written after every change. One line
  * each: "File Explorer=0,1" (column 0, row 1), "Notepad=hidden" (removed from the desktop), "file:notes.txt=3,2" (a file).
@@ -46,7 +49,9 @@ int deskicons_pointer(int x, int y, unsigned buttons, int on_desktop);
 int deskicons_key(const KeyEvent *k);
 
 int deskicons_at(int x, int y);  /* the icon under (x, y), -1 = none */
-void deskicons_select(int icon); /* -1 = none */
+void deskicons_select(int icon); /* just this one selected, -1 = none */
+int deskicons_is_selected(int icon); /* it is among the selected icons */
+void deskicons_set_mods(unsigned mods); /* KMOD_SHIFT / KMOD_CTRL held now (the desktop tells it on every key): Shift / Ctrl clicks and bands */
 int deskicons_is_file(int icon); /* 1 = a file or folder of the Desktop folder, 0 = an app shortcut (or no such icon) */
 void deskicons_open(int icon);   /* open it */
 void deskicons_delete(int icon); /* an app shortcut goes from the desktop; a file asks (deskfiles_ask_delete) */

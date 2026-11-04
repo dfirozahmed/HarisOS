@@ -422,24 +422,90 @@ void deskfiles_delete(int node)
     rescan(0, 1); /* some of it may be gone even when it failed */
 }
 
+/* several at once: each is removed by itself (one that cannot be does not stop the others), ONE toast tells how it went */
+void deskfiles_delete_many(const int *nodes, int n)
+{
+    int ok = 0, failed = 0, first_err = 0;
+    for (int i = 0; i < n; i++)
+    {
+        if (!vfs_node(nodes[i]))
+            continue; /* gone already */
+        if (vfs_remove(nodes[i]) < 0)
+        {
+            if (!failed)
+                first_err = vfs_last_error();
+            failed++;
+        }
+        else
+            ok++;
+    }
+    char msg[TOAST_TEXT_MAX + 1], *o = msg;
+    if (failed == 0)
+    {
+        o = put(o, "Deleted ");
+        o = put_uint(o, ok);
+        o = put(o, ok == 1 ? " item" : " items");
+        *o = 0;
+        toast_show(TOAST_SUCCESS, msg);
+    }
+    else
+    {
+        o = put(o, "Deleted ");
+        o = put_uint(o, ok);
+        o = put(o, " of ");
+        o = put_uint(o, ok + failed);
+        o = put(o, " items; the rest: ");
+        const char *why = vfs_error_text(first_err);
+        for (int i = 0; why[i] && o - msg < (int)sizeof msg - 1; i++)
+            *o++ = why[i];
+        *o = 0;
+        toast_show(ok == 0 ? TOAST_ERROR : TOAST_WARNING, msg);
+    }
+    rescan(0, 1); /* some of it may be gone even when it failed */
+}
+
 /* The question: a small window with Delete and Cancel. One at a time: asking again replaces the question. */
 static Window *CONFIRM;
 static int ASK_NODE;
+static int ASK_NODES[DESK_FILES_MAX]; /* ASK_COUNT > 1: the entries the question is about */
+static int ASK_COUNT;
 static char ASK_NAME[DESK_FILE_NAME];
 static int ASK_DIR;
+
+static void ask_run(void)
+{
+    if (ASK_COUNT > 1)
+    {
+        int nodes[DESK_FILES_MAX], n = ASK_COUNT;
+        for (int i = 0; i < n; i++)
+            nodes[i] = ASK_NODES[i];
+        deskfiles_delete_many(nodes, n);
+    }
+    else
+        deskfiles_delete(ASK_NODE);
+}
 
 static void confirm_draw(Window *w, UiRect body)
 {
     (void)w;
     const UiTheme *t = ui_theme();
     char q[DESK_FILE_NAME + 16], *o = q;
-    o = put(o, "Delete \"");
-    o = put(o, ASK_NAME);
-    o = put(o, "\"?");
+    if (ASK_COUNT > 1)
+    {
+        o = put(o, "Delete ");
+        o = put_uint(o, ASK_COUNT);
+        o = put(o, " items?");
+    }
+    else
+    {
+        o = put(o, "Delete \"");
+        o = put(o, ASK_NAME);
+        o = put(o, "\"?");
+    }
     *o = 0;
     ui_text_in(ui_rect(body.x + 22, body.y + 20, body.w - 44, 26), q, UI_TEXT_TITLE, UI_ALIGN_LEFT);
     ui_text_in_color(ui_rect(body.x + 22, body.y + 52, body.w - 44, 22),
-                     ASK_DIR ? "The folder and everything in it will be deleted." : "The file will be deleted.", UI_TEXT_BODY,
+                     ASK_COUNT > 1 ? "The folders among them go with everything in them." : ASK_DIR ? "The folder and everything in it will be deleted." : "The file will be deleted.", UI_TEXT_BODY,
                      UI_ALIGN_LEFT, t->text);
     ui_text_in_color(ui_rect(body.x + 22, body.y + 76, body.w - 44, 22), "This cannot be undone: there is no Recycle Bin.", UI_TEXT_SMALL,
                      UI_ALIGN_LEFT, t->text_dim);
@@ -455,9 +521,8 @@ static void confirm_yes(UiButton *b, void *user)
 {
     (void)b;
     Window *w = (Window *)user;
-    int node = ASK_NODE;
     wm_close(w);
-    deskfiles_delete(node);
+    ask_run();
 }
 
 static void confirm_no(UiButton *b, void *user)
@@ -474,11 +539,12 @@ static void confirm_key(Window *w, const KeyEvent *k)
         wm_close(w);
     else if (k->key == KEY_ENTER)
     {
-        int node = ASK_NODE;
         wm_close(w);
-        deskfiles_delete(node);
+        ask_run();
     }
 }
+
+static void open_question(void);
 
 void deskfiles_ask_delete(int node)
 {
@@ -488,14 +554,40 @@ void deskfiles_ask_delete(int node)
         rescan(0, 1);
         return;
     }
-    if (CONFIRM)
-        wm_close(CONFIRM); /* the old question goes; this one replaces it */
+    ASK_COUNT = 1;
     ASK_NODE = node;
     ASK_DIR = n->is_dir;
     int k = 0;
     for (; n->name[k] && k < DESK_FILE_NAME - 1; k++)
         ASK_NAME[k] = n->name[k];
     ASK_NAME[k] = 0;
+    open_question();
+}
+
+void deskfiles_ask_delete_many(const int *nodes, int n)
+{
+    int m = 0;
+    for (int i = 0; i < n && m < DESK_FILES_MAX; i++)
+        if (vfs_node(nodes[i]))
+            ASK_NODES[m++] = nodes[i];
+    if (m == 0)
+    {
+        rescan(0, 1);
+        return;
+    }
+    if (m == 1)
+    {
+        deskfiles_ask_delete(ASK_NODES[0]);
+        return;
+    }
+    ASK_COUNT = m;
+    open_question();
+}
+
+static void open_question(void)
+{
+    if (CONFIRM)
+        wm_close(CONFIRM); /* the old question goes; this one replaces it */
 
     int W = (int)gfx_width(), H = (int)gfx_height();
     int w = 460, h = 220;
