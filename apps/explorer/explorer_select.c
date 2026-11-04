@@ -126,6 +126,71 @@ void ex_select_all(void)
         EX_ANCHOR = keep;
 }
 
+/* ---- the rubber band: rows are full width, so only the band's vertical span (in list space: y from the top of row 0) matters ---- */
+static unsigned char BASE[VFS_MAX_NODES]; /* what was selected when an additive band began */
+static int BASE_N;
+static int LAST_LO = -2, LAST_HI = -2;    /* the rows the band touched at the last update */
+
+int ex_band_rows(int c0, int c1, int n, int *lo, int *hi)
+{
+    if (c0 > c1)
+    {
+        int t = c0;
+        c0 = c1;
+        c1 = t;
+    }
+    if (n <= 0 || c1 < 0 || c0 >= n * ROW_H)
+        return 0;
+    if (c0 < 0)
+        c0 = 0;
+    if (c1 >= n * ROW_H)
+        c1 = n * ROW_H - 1;
+    *lo = c0 / ROW_H;
+    *hi = c1 / ROW_H;
+    return *hi - *lo + 1;
+}
+
+void ex_band_start(int additive)
+{
+    if (additive)
+    {
+        for (int i = 0; i < VFS_MAX_NODES; i++)
+            BASE[i] = EX_MARK[i];
+        BASE_N = EX_MARK_N;
+    }
+    else
+    {
+        ex_clear_sel();
+        for (int i = 0; i < VFS_MAX_NODES; i++)
+            BASE[i] = 0;
+        BASE_N = 0;
+    }
+    LAST_LO = LAST_HI = -2;
+}
+
+int ex_band_update(int c0, int c1)
+{
+    int lo = -1, hi = -1;
+    int n = ex_band_rows(c0, c1, EX_NITEMS, &lo, &hi);
+    if (n == 0)
+        lo = hi = -1;
+    if (lo == LAST_LO && hi == LAST_HI)
+        return 0;
+    LAST_LO = lo;
+    LAST_HI = hi;
+    for (int i = 0; i < VFS_MAX_NODES; i++)
+        EX_MARK[i] = BASE[i];
+    EX_MARK_N = BASE_N;
+    for (int r = lo; n > 0 && r <= hi; r++)
+        mark(EX_ITEMS[r], 1);
+    if (n > 0)
+        EX_SEL = c1 >= c0 ? hi : lo; /* the cursor is the row at the pointer's end of the band */
+    else
+        EX_SEL = first_marked();
+    EX_ANCHOR = EX_SEL;
+    return 1;
+}
+
 void ex_select_ids(const int *ids, int n)
 {
     clear_marks();

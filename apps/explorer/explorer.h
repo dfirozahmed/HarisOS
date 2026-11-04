@@ -130,6 +130,12 @@ extern int EX_SEL;                 /* the selected row that counts (the cursor);
 extern unsigned char EX_MARK[VFS_MAX_NODES]; /* the selected entries, by node (explorer_select.c) */
 extern int EX_MARK_N;              /* how many are marked */
 extern int EX_ANCHOR;              /* the row a Shift range starts from */
+extern int EX_BAND;                /* 1 while a rubber band is being dragged from empty space */
+extern int EX_BAND_X0, EX_BAND_Y0; /* where it started: screen x, y in the list's own space (row * ROW_H, so it stays put when the list scrolls) */
+extern int EX_BAND_X1, EX_BAND_Y1; /* where the pointer is now (same spaces) */
+extern int EX_DND_PEND;            /* 1 = the button went down on a row: past DND_START pixels of movement the entries are dragged out */
+extern int EX_DND;                 /* 1 = the selected entries are being dragged (dnd.h) */
+extern int EX_DND_X, EX_DND_Y, EX_DND_ROW; /* where / on which row the button went down */
 extern unsigned EX_MODS;           /* KMOD_SHIFT / KMOD_CTRL while held: a mouse click carries no modifiers, the key events say */
 extern int EX_SCROLL;              /* first visible row */
 extern UiScroll EX_SB;             /* the list's scrollbar: ex_sb_sync() fills it from EX_SCROLL, the layout and EX_NITEMS */
@@ -201,6 +207,9 @@ void ex_select_toggle(int row);                /* Ctrl+click: this row joins or 
 void ex_select_range(int to);                  /* Shift+click: the rows from the anchor to this one */
 void ex_extend_to(UiRect body, int row);       /* Shift+arrow: the same, and scroll to it */
 void ex_select_all(void);
+int ex_band_rows(int c0, int c1, int n, int *lo, int *hi); /* rows lo..hi that a band from c0 to c1 (list space) touches; their count, 0 = none */
+void ex_band_start(int additive);              /* a band begins: additive (Ctrl / Shift) keeps what is selected, else the selection is cleared */
+int ex_band_update(int c0, int c1);            /* select what the band touches (plus what was kept); 1 = the selection changed */
 void ex_select_ids(const int *ids, int n);     /* exactly these entries (those in the list); the cursor on the first */
 void ex_fix_selection(int focus_id);           /* the list was made again: keep the selection by node */
 int ex_selected(int *ids, int max);            /* the selected entries a command works on (not drives), in list order */

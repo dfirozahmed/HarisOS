@@ -7,6 +7,7 @@
 #include "deskmenu.h"
 #include "deskicons.h"
 #include "toast.h"
+#include "dnd.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "timer.h"
@@ -154,5 +155,6 @@ void desktop_draw(void)
     volmenu_draw();
     deskmenu_draw();
     deskicons_ghost_draw(); /* a dragged icon, above the windows */
+    dnd_draw();             /* files dragged out of a window */
     taskbar_draw();
 }

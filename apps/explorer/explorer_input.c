@@ -1,6 +1,9 @@
 /* File Explorer: mouse and keyboard handlers of the window. */
 #include "explorer.h"
 #include "taskbar.h"
+#include "dnd.h"
+
+#define DND_START 6 /* pixels the pointer must move with the button held on a row before the entries are dragged out */
 
 /* is (x, y) on the divider between the sidebar and the list (the grab zone for resizing the sidebar)? */
 static int on_divider(const Layout *l, int x, int y)
@@ -50,6 +53,7 @@ int ex_press(Window *w, int x, int y)
     UiRect body = wm_content(w);
     Layout l = ex_layout(body);
 
+    EX_BAND = EX_DND_PEND = 0; /* a new press: nothing of an earlier one is left (its release may have been missed) */
     int tip_was_shown = EX_TIP_SHOWN;
     EX_TIP_BTN = -1; /* a click hides the tooltip until the pointer moves again */
     EX_TIP_SHOWN = 0;
@@ -136,10 +140,22 @@ int ex_press(Window *w, int x, int y)
     int row = EX_SCROLL + (y - l.list.y) / ROW_H;
     if (row < 0 || row >= EX_NITEMS)
     {
-        int changed = EX_SEL >= 0 || EX_NOTE;
-        ex_clear_sel();
+        /* Empty space: a click there clears the selection; holding the button and moving draws a rubber band that selects the rows it
+         * touches (with Ctrl or Shift the band adds to what is selected). */
+        int additive = (EX_MODS & (KMOD_CTRL | KMOD_SHIFT)) != 0;
+        int changed = (!additive && EX_SEL >= 0) || EX_NOTE;
         EX_NOTE = 0;
         EX_LAST_ROW = -1;
+        if (EX_NITEMS > 0)
+        {
+            int cy = y - l.list.y + EX_SCROLL * ROW_H;
+            ex_band_start(additive);
+            EX_BAND = 1;
+            EX_BAND_X0 = EX_BAND_X1 = x;
+            EX_BAND_Y0 = EX_BAND_Y1 = cy;
+        }
+        else
+            ex_clear_sel();
         return changed;
     }
     if (EX_MODS & (KMOD_CTRL | KMOD_SHIFT)) /* several: Shift takes the rows from the anchor to this one, Ctrl adds or drops this one */
@@ -151,6 +167,14 @@ int ex_press(Window *w, int x, int y)
         else
             ex_select_toggle(row);
         return 1; /* any number of rows changed: the whole window is drawn again */
+    }
+    if (ex_is_selected(row) && ex_sel_count() > 1) /* one of several selected: keep them all, they may be dragged out; a click without a drag narrows the selection (ex_drag) */
+    {
+        EX_DND_PEND = 1;
+        EX_DND_X = x;
+        EX_DND_Y = y;
+        EX_DND_ROW = row;
+        return (tip_was_shown && !tip_marked) ? 1 : 0;
     }
     unsigned long long now = timer_ms();
     int double_click = row == EX_LAST_ROW && now - EX_LAST_CLICK_MS <= DOUBLE_CLICK_MS;
@@ -164,6 +188,10 @@ int ex_press(Window *w, int x, int y)
         ex_open_item(row);
         return 1;
     }
+    EX_DND_PEND = 1; /* the entry may be dragged out of the window (ex_drag) */
+    EX_DND_X = x;
+    EX_DND_Y = y;
+    EX_DND_ROW = row;
     /* A plain selection: only the row that lost it, the row that got it and the status bar (it names the selection)
      * look different; the toolbar too when Cut / Copy / Rename / Delete become usable or not. The whole window is
      * drawn again only when the list scrolled (a tooltip the click hid: only its box, marked above). */
@@ -180,6 +208,70 @@ int ex_press(Window *w, int x, int y)
 /* holding the button after a press in the rename field selects text */
 int ex_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (EX_DND) /* entries are being dragged: the desktop draws the card; letting go over the bare desktop sends them there */
+    {
+        if (buttons & 1)
+            dnd_move(x, y);
+        else
+        {
+            EX_DND = 0;
+            dnd_drop(x, y);
+        }
+        return 0;
+    }
+    if (EX_DND_PEND)
+    {
+        if (buttons & 1)
+        {
+            int dx = x - EX_DND_X, dy = y - EX_DND_Y;
+            if (dx * dx + dy * dy < DND_START * DND_START)
+                return 0;
+            EX_DND_PEND = 0;
+            int ids[EX_SEL_MAX];
+            int n = ex_selected(ids, EX_SEL_MAX);
+            if (n == 0) /* only a drive: nothing to carry */
+                return 0;
+            dnd_begin(ids, n, 0);
+            dnd_move(x, y);
+            EX_DND = 1;
+            return 0;
+        }
+        EX_DND_PEND = 0; /* released without a drag */
+        if (ex_sel_count() > 1) /* a plain click on one of several: that one alone stays selected */
+        {
+            EX_LAST_ROW = EX_DND_ROW;
+            EX_LAST_CLICK_MS = timer_ms();
+            ex_select_row(wm_content(w), EX_DND_ROW);
+            return 1;
+        }
+        return 0;
+    }
+    if (EX_BAND)
+    {
+        Layout l = ex_layout(wm_content(w));
+        if (!(buttons & 1))
+        {
+            EX_BAND = 0;
+            return 1;
+        }
+        if (y < l.list.y) /* above / below the list: it scrolls a row at a time while the pointer moves there */
+            EX_SCROLL--;
+        else if (y >= l.list.y + l.list.h)
+            EX_SCROLL++;
+        ex_clamp_scroll(&l);
+        int cx = x < l.list.x ? l.list.x : x >= l.list.x + l.list.w ? l.list.x + l.list.w - 1 : x;
+        int cy = (y < l.list.y ? l.list.y : y >= l.list.y + l.list.h ? l.list.y + l.list.h - 1 : y) - l.list.y + EX_SCROLL * ROW_H;
+        if (cx == EX_BAND_X1 && cy == EX_BAND_Y1)
+            return 0;
+        EX_BAND_X1 = cx;
+        EX_BAND_Y1 = cy;
+        ex_band_update(EX_BAND_Y0, EX_BAND_Y1);
+        EX_NOTE = 0;
+        wm_add_damage(l.list);
+        wm_add_damage(l.status);
+        wm_add_damage(l.toolbar); /* Cut / Copy / Delete become usable or not */
+        return 2;
+    }
     if (EX_MENU.open && EX_MENU.press >= 0)
     {
         int id = -1;
@@ -401,6 +493,12 @@ void ex_key(Window *w, const KeyEvent *k)
         EX_MODS = k->pressed ? (EX_MODS | KMOD_CTRL) : (EX_MODS & ~(unsigned)KMOD_CTRL);
     if (!k->pressed)
         return;
+    if ((EX_DND || EX_DND_PEND) && k->key == KEY_ESC) /* Esc while dragging: never mind */
+    {
+        dnd_cancel();
+        EX_DND = EX_DND_PEND = 0;
+        return;
+    }
     UiRect body = wm_content(w);
     Layout l = ex_layout(body);
     int page = ex_visible_rows(&l) - 1;

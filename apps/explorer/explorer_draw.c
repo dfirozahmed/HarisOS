@@ -335,6 +335,17 @@ static void draw_list(const Layout *l, const UiTheme *t)
             ui_text_in_color(ui_rect(size_x, r.y, SIZE_COL_W - 6, r.h), sz, UI_TEXT_SMALL, UI_ALIGN_RIGHT, t->text_dim);
         }
     }
+    if (EX_BAND) /* the rubber band (still inside the list's clip) */
+    {
+        int x0 = EX_BAND_X0 < EX_BAND_X1 ? EX_BAND_X0 : EX_BAND_X1, x1 = EX_BAND_X0 < EX_BAND_X1 ? EX_BAND_X1 : EX_BAND_X0;
+        int top = l->list.y - EX_SCROLL * ROW_H;
+        int y0 = (EX_BAND_Y0 < EX_BAND_Y1 ? EX_BAND_Y0 : EX_BAND_Y1) + top, y1 = (EX_BAND_Y0 < EX_BAND_Y1 ? EX_BAND_Y1 : EX_BAND_Y0) + top;
+        if (x1 - x0 > 2 || y1 - y0 > 2)
+        {
+            gfx_fill_rect_alpha(x0, y0, x1 - x0 + 1, y1 - y0 + 1, t->accent.r, t->accent.g, t->accent.b, 56);
+            gfx_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1, ui_color(t->accent_hi));
+        }
+    }
     gfx_restore_clip(saved);
 
     /* scrollbar (the shared HarisUI one: thumb drag, page click, widens under the pointer) */

@@ -6,6 +6,7 @@
 #include "deskmenu.h"
 #include "deskicons.h"
 #include "toast.h"
+#include "dnd.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "wm.h"
@@ -28,6 +29,7 @@ static void desktop_draw_region(UiRect r)
     volmenu_draw();
     deskmenu_draw();
     deskicons_ghost_draw(); /* a dragged icon, above the windows */
+    dnd_draw();             /* files dragged out of a window */
     taskbar_draw();
     gfx_reset_clip();
 }
@@ -58,7 +60,7 @@ int desktop_finish_input(int bar_changed)
     {
         int bx, by, bw, bh;
         taskbar_bounds(&bx, &by, &bw, &bh);
-        if (startmenu_is_open() || appmenu_is_open() || volmenu_is_open() || deskmenu_is_open() || deskicons_dragging() || toast_is_open())
+        if (startmenu_is_open() || appmenu_is_open() || volmenu_is_open() || deskmenu_is_open() || deskicons_dragging() || dnd_active() || toast_is_open())
             gfx_overlay_area(0, 0, 0, 0);
         else
             gfx_overlay_area(0, 0, (int)gfx_width(), by);

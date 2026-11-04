@@ -270,6 +270,37 @@ int main(void)
     ex_send_selected();
     CHECK(SEND_CALLS == 0 && EX_NOTE != 0 && strstr(EX_NOTE, "drive") != 0);
 
+    /* the rubber band: which rows a vertical span touches (rows are ROW_H tall, row 0 starts at 0) */
+    {
+        int lo = -9, hi = -9;
+        CHECK(ex_band_rows(0, 0, 8, &lo, &hi) == 1 && lo == 0 && hi == 0);
+        CHECK(ex_band_rows(ROW_H - 1, ROW_H, 8, &lo, &hi) == 2 && lo == 0 && hi == 1); /* touching the next row's first pixel */
+        CHECK(ex_band_rows(3 * ROW_H + 5, ROW_H, 8, &lo, &hi) == 3 && lo == 1 && hi == 3); /* drawn upwards: the same rows */
+        CHECK(ex_band_rows(-50, 10, 8, &lo, &hi) == 1 && lo == 0 && hi == 0); /* above the first row is clamped */
+        CHECK(ex_band_rows(7 * ROW_H, 99999, 8, &lo, &hi) == 1 && lo == 7 && hi == 7); /* below the last row too */
+        CHECK(ex_band_rows(8 * ROW_H, 9 * ROW_H, 8, &lo, &hi) == 0); /* entirely in the empty space under the list */
+        CHECK(ex_band_rows(-40, -2, 8, &lo, &hi) == 0);              /* entirely above */
+        CHECK(ex_band_rows(0, 100, 0, &lo, &hi) == 0);               /* an empty list */
+    }
+    list(10, 8);
+    ex_select_only(0);
+    ex_band_start(0); /* a plain band: the old selection goes */
+    CHECK(ex_sel_count() == 0 && EX_SEL == -1 && invariant());
+    CHECK(ex_band_update(8 * ROW_H + 4, 8 * ROW_H - 70) == 1); /* from the empty space under the list up over the last rows */
+    CHECK(rows_selected(5, 7) && EX_SEL == 5 && invariant());   /* upwards: the cursor is at the top end */
+    CHECK(ex_band_update(8 * ROW_H + 4, 8 * ROW_H - 70) == 0);  /* the same rows again: nothing changed */
+    CHECK(ex_band_update(8 * ROW_H + 4, 8 * ROW_H + 40) == 1);  /* back into the empty space: nothing touched */
+    CHECK(ex_sel_count() == 0 && EX_SEL == -1 && invariant());
+    ex_band_update(8 * ROW_H + 4, ROW_H + 2); /* all the way up */
+    CHECK(rows_selected(1, 7) && invariant());
+
+    ex_select_only(0); /* an additive band keeps what was selected (Ctrl) */
+    ex_band_start(1);
+    ex_band_update(8 * ROW_H + 4, 5 * ROW_H);
+    CHECK(ex_is_selected(0) && rows_selected(0, 0) == 0 && ex_is_selected(5) && ex_is_selected(7) && !ex_is_selected(3) && ex_sel_count() == 4 && invariant());
+    ex_band_update(8 * ROW_H + 4, 8 * ROW_H + 40); /* the band shrinks away: only the kept row is left */
+    CHECK(rows_selected(0, 0) && EX_SEL == 0 && invariant());
+
     printf("exselect tests passed\n");
     return 0;
 }
