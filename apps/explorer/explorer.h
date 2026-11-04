@@ -19,6 +19,7 @@
 
 #include "app.h"
 #include "desktop.h"
+#include "imageviewer.h"
 #include "notepad.h"
 #include "taskbar.h"
 #include "timer.h"

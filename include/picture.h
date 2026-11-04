@@ -17,4 +17,8 @@
 int picture_is_name(const char *name);
 int picture_cover(const unsigned char *file, unsigned size, unsigned int *out, int ow, int oh);
 
+/* The picture at its own size: a kmalloc'ed block of w x h pixels (0x00RRGGBB, w per row) that the caller frees with
+ * kfree. NULL when it is not a picture this can read, is over PICTURE_MAX_PIXELS, or there is no memory. */
+unsigned int *picture_decode(const unsigned char *file, unsigned size, int *w, int *h);
+
 #endif

@@ -137,6 +137,14 @@ void fileexplorer_open_folder(int node) { EXPLORER_NODE = node; }
 static char NOTEPAD_PATH[256];
 static const char *NOTEPAD_REASON;
 const char *notepad_open_file(const char *path) { strcpy(NOTEPAD_PATH, path); return NOTEPAD_REASON; }
+static char VIEWER_PATH[256];
+static const char *VIEWER_REASON;
+const char *imageviewer_open_file(const char *path) { strcpy(VIEWER_PATH, path); return VIEWER_REASON; }
+int picture_is_name(const char *name)
+{
+    size_t n = strlen(name);
+    return n >= 4 && (strcmp(name + n - 4, ".png") == 0 || strcmp(name + n - 4, ".bmp") == 0 || strcmp(name + n - 4, ".jpg") == 0);
+}
 static int CON_RESULT = 7, RUN_RESULT = 3, CON_WRITES, CON_FINISHED;
 static char CON_TITLE[96], RUN_NAME[96], CON_TEXT[160];
 int console_window_open(const char *title) { strcpy(CON_TITLE, title); return CON_RESULT; }
@@ -289,9 +297,14 @@ int main(void)
     node_set(13, 5, "photo.png", 0);
     node_set(14, 5, "weird", 0);
     node_set(15, 5, ".txt", 0);
+    deskfiles_open(13); /* a picture: the Image Viewer */
+    CHECK(TOASTS == 0 && strcmp(VIEWER_PATH, "/HARISOS/Desktop/photo.png") == 0);
+    VIEWER_REASON = "Viewer says no.";
     deskfiles_open(13);
-    CHECK(TOASTS == 1 && LAST_KIND == TOAST_INFO && strstr(LAST_TEXT, "No app can open") != 0);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_WARNING && strcmp(LAST_TEXT, "Viewer says no.") == 0);
+    VIEWER_REASON = 0;
     deskfiles_open(14);
+    CHECK(TOASTS == 2 && LAST_KIND == TOAST_INFO && strstr(LAST_TEXT, "No app can open") != 0);
     deskfiles_open(15);
     CHECK(TOASTS == 3 && NOTEPAD_PATH[0] == 0 && EXPLORER_NODE == -1);
 

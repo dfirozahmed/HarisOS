@@ -11,7 +11,7 @@
 
 #include "ui.h"
 
-#define APP_MAX 8
+#define APP_MAX 9
 
 typedef struct
 {

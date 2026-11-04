@@ -86,6 +86,22 @@ int main(void)
     check(worst_error(PNG_PAL4, sizeof PNG_PAL4, PW, PH, e_pal) == 0, "png: 4-bit palette");
     check(worst_error(PNG_GRAY1, sizeof PNG_GRAY1, PW, PH, e_one) == 0, "png: 1-bit grey");
 
+    {
+        int dw = 0, dh = 0;
+        unsigned *d = picture_decode(PNG_RGB, sizeof PNG_RGB, &dw, &dh);
+        int same = d && dw == PW && dh == PH;
+        for (int y = 0; same && y < PH; y++)
+            for (int x = 0; x < PW; x++)
+                if (d[y * PW + x] != e_rgb(x, y))
+                    same = 0;
+        check(same, "decode: a PNG at its own size, exact");
+        free(d);
+        d = picture_decode(JPEG_J1, sizeof JPEG_J1, &dw, &dh);
+        check(d && dw == 40 && dh == 24, "decode: a JPEG gives its own size");
+        free(d);
+        check(picture_decode(PNG_RGB, 3, &dw, &dh) == 0 && picture_decode((const unsigned char *)"hello world", 11, &dw, &dh) == 0,
+              "decode: broken / unknown input refused");
+    }
     int e1 = worst_error(JPEG_J1, sizeof JPEG_J1, 40, 24, e_j1), e2 = worst_error(JPEG_J2, sizeof JPEG_J2, 37, 23, e_j2);
     printf("  (jpeg worst errors: %d and %d)\n", e1, e2);
     check(e1 >= 0 && e1 <= 16, "jpeg: 40x24 4:2:0 close to the original");

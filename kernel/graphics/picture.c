@@ -97,3 +97,42 @@ int picture_cover(const unsigned char *file, unsigned size, unsigned int *out, i
     kfree(px);
     return 0;
 }
+
+unsigned int *picture_decode(const unsigned char *file, unsigned size, int *w, int *h)
+{
+    if (!file || !w || !h || size < 4)
+        return 0;
+    int pw = 0, ph = 0;
+    unsigned int *px = 0;
+    if (file[0] == 'B' && file[1] == 'M')
+    {
+        /* bmp_cover to the picture's own size samples exactly at the pixel centres, so it is a plain copy */
+        if (bmp_info(file, size, &pw, &ph) != 0 || (unsigned long long)pw * (unsigned)ph > PICTURE_MAX_PIXELS)
+            return 0;
+        px = kmalloc((unsigned long long)pw * (unsigned)ph * 4);
+        if (!px)
+            return 0;
+        if (bmp_cover(file, size, px, pw, ph) != 0)
+        {
+            kfree(px);
+            return 0;
+        }
+    }
+    else
+    {
+        if (file[0] == 0x89 && file[1] == 'P')
+            px = png_decode(file, size, &pw, &ph);
+        else if (file[0] == 0xFF && file[1] == 0xD8)
+            px = jpeg_decode(file, size, &pw, &ph);
+        if (!px)
+            return 0;
+        if (pw <= 0 || ph <= 0 || (unsigned long long)pw * (unsigned)ph > PICTURE_MAX_PIXELS)
+        {
+            kfree(px);
+            return 0;
+        }
+    }
+    *w = pw;
+    *h = ph;
+    return px;
+}

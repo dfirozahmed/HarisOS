@@ -20,7 +20,7 @@ int ex_kind_of(const VfsNode *n)
 {
     static const char *const TEXT[] = {"txt", "md", "ini", "log", 0};
     static const char *const CODE[] = {"c", "h", "asm", 0};
-    static const char *const IMAGE[] = {"bmp", "png", "jpg", 0};
+    static const char *const IMAGE[] = {"bmp", "png", "jpg", "jpeg", 0};
     static const char *const AUDIO[] = {"wav", "mp3", 0};
     if (n->is_dir)
         return FK_FOLDER;

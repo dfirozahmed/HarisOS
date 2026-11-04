@@ -6,7 +6,9 @@
 #include "exec.h"
 #include "fileexplorer.h"
 #include "look.h"
+#include "imageviewer.h"
 #include "notepad.h"
+#include "picture.h"
 #include "taskbar.h"
 #include "timer.h"
 #include "toast.h"
@@ -192,6 +194,15 @@ void deskfiles_open(int node)
                 toast_show(TOAST_WARNING, why);
             return;
         }
+    if (picture_is_name(n->name))
+    {
+        char path[256];
+        vfs_path(node, path, (int)sizeof path);
+        const char *why = imageviewer_open_file(path); /* NULL: opened */
+        if (why)
+            toast_show(TOAST_WARNING, why);
+        return;
+    }
     if (ext_is(n->name, "elf"))
     {
         run_program(node, n);
