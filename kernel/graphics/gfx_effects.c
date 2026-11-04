@@ -181,3 +181,109 @@ void gfx_gradient_h(int x, int y, int w, int h,
     }
     gfx_internal_mark_dirty(x0, y0, x1, y1);
 }
+
+/* ---- backdrop blur: frosted glass (see gfx.h) ---- */
+#define BLUR_MAX 2048
+#define BLUR_PASSES 3
+static unsigned int BLUR_LINE[BLUR_MAX]; /* one row or column being blurred */
+
+int gfx_backdrop_possible(void)
+{
+    return BACK && !gfx_backbuffer_detached();
+}
+
+/* One box blur along a line of n pixels: every pixel becomes the mean of the 2r+1 around it, the end pixels repeated beyond the line.
+ * The three colour bytes are blurred each by itself, so the order of red, green and blue does not matter. inv = 65536 / (2r+1). */
+static void box_line(const unsigned int *src, int n, int r, unsigned int *dst, int stride, int inv)
+{
+    int s0 = 0, s1 = 0, s2 = 0;
+    for (int k = -r; k <= r; k++)
+    {
+        unsigned int p = src[k < 0 ? 0 : (k >= n ? n - 1 : k)];
+        s0 += (int)(p & 255u);
+        s1 += (int)((p >> 8) & 255u);
+        s2 += (int)((p >> 16) & 255u);
+    }
+    for (int i = 0; i < n; i++)
+    {
+        dst[(long long)i * stride] = (unsigned int)((s0 * inv + 32768) >> 16) | ((unsigned int)((s1 * inv + 32768) >> 16) << 8) |
+                                     ((unsigned int)((s2 * inv + 32768) >> 16) << 16);
+        unsigned int pa = src[i + r + 1 >= n ? n - 1 : i + r + 1], pd = src[i - r < 0 ? 0 : i - r];
+        s0 += (int)(pa & 255u) - (int)(pd & 255u);
+        s1 += (int)((pa >> 8) & 255u) - (int)((pd >> 8) & 255u);
+        s2 += (int)((pa >> 16) & 255u) - (int)((pd >> 16) & 255u);
+    }
+}
+
+int gfx_backdrop_capture(int x, int y, int w, int h, int radius, unsigned int *out)
+{
+    if (!out || w <= 0 || h <= 0 || w > BLUR_MAX || h > BLUR_MAX || !gfx_backdrop_possible())
+        return -1;
+    if (x < 0 || y < 0 || x + w > W || y + h > H)
+        return -1;
+    if (radius < 1)
+        radius = 1;
+    if (radius > 64)
+        radius = 64;
+    int win = 2 * radius + 1;
+    int inv = (65536 + win / 2) / win; /* a uniform area stays exactly as it is: 255 * (2r+1) * inv + 32768 >> 16 == 255 */
+    for (int yy = 0; yy < h; yy++)
+    {
+        const volatile unsigned int *row = DRAW + (long long)(y + yy) * DPITCH + x;
+        unsigned int *o = out + (long long)yy * w;
+        for (int xx = 0; xx < w; xx++)
+            o[xx] = row[xx] & 0x00FFFFFFu;
+    }
+    for (int pass = 0; pass < BLUR_PASSES; pass++)
+    {
+        for (int yy = 0; yy < h; yy++) /* along the rows */
+        {
+            unsigned int *o = out + (long long)yy * w;
+            for (int xx = 0; xx < w; xx++)
+                BLUR_LINE[xx] = o[xx];
+            box_line(BLUR_LINE, w, radius, o, 1, inv);
+        }
+        for (int xx = 0; xx < w; xx++) /* down the columns */
+        {
+            for (int yy = 0; yy < h; yy++)
+                BLUR_LINE[yy] = out[(long long)yy * w + xx];
+            box_line(BLUR_LINE, h, radius, out + xx, w, inv);
+        }
+    }
+    return 0;
+}
+
+void gfx_backdrop_draw(const unsigned int *px, int x, int y, int w, int h, int corner)
+{
+    if (!px || w <= 0 || h <= 0 || !gfx_backdrop_possible())
+        return;
+    corner = clamp_radius(w, h, corner);
+    int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+    if (!gfx_internal_clip_box(&x0, &y0, &x1, &y1))
+        return;
+    for (int yy = y0; yy < y1; yy++)
+    {
+        volatile unsigned int *row = ROW(yy);
+        const unsigned int *src = px + (long long)(yy - y) * w - x; /* indexed by the screen's x */
+        int corner_row = yy < y + corner || yy >= y + h - corner;
+        for (int xx = x0; xx < x1; xx++)
+        {
+            unsigned int v = src[xx] & 0x00FFFFFFu;
+            if (corner_row && (xx < x + corner || xx >= x + w - corner))
+            {
+                int cov = 8 - rr_sd(xx, yy, x * 16, y * 16, w * 16, h * 16, corner * 16); /* 16 = fully inside, 0 = outside */
+                if (cov <= 0)
+                    continue;
+                if (cov < 16)
+                {
+                    unsigned char r, g, b;
+                    gfx_unpack(v, &r, &g, &b);
+                    gfx_internal_blend_ptr(row + xx, r, g, b, cov * 255 / 16);
+                    continue;
+                }
+            }
+            row[xx] = v;
+        }
+    }
+    gfx_internal_mark_dirty(x0, y0, x1, y1);
+}

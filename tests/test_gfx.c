@@ -367,6 +367,114 @@ int main(void)
         gfx_disable_backbuffer();
     }
 
+    /* backdrop blur ("frosted glass"): a blurred copy of what is behind a panel, drawn inside its rounded shape */
+    {
+        enum { SW = 64, SH = 48, RW = 40, RH = 30 };
+        static unsigned int fb[SW * SH], back[SW * SH], blur[RW * RH], solid[20 * 16], lay[8 * 8];
+        GfxColor black = gfx_rgb(0, 0, 0), white = gfx_rgb(255, 255, 255), red = gfx_rgb(255, 0, 0), green = gfx_rgb(0, 255, 0);
+        gfx_init(fb, SW, SH, SW, 1);
+        assert(!gfx_backdrop_possible());                                   /* drawing straight to the screen: not possible */
+        assert(gfx_backdrop_capture(0, 0, 10, 10, 3, blur) == -1);
+        gfx_backdrop_draw(solid, 0, 0, 10, 10, 2);                          /* does nothing */
+        assert(gfx_enable_backbuffer(back) == 0);
+        assert(gfx_backdrop_possible());
+
+        /* an area of one colour stays that colour, exactly, and what was captured from is not touched */
+        gfx_fill_rect(0, 0, SW, SH, gfx_rgb(0x20, 0x40, 0x60));
+        assert(gfx_backdrop_capture(5, 4, RW, RH, 7, blur) == 0);
+        for (int i = 0; i < RW * RH; ++i)
+            assert((blur[i] & 0xFFFFFFu) == (gfx_rgb(0x20, 0x40, 0x60) & 0xFFFFFFu));
+        for (int i = 0; i < SW * SH; ++i)
+            assert(back[i] == gfx_rgb(0x20, 0x40, 0x60));
+        assert(gfx_backdrop_capture(5, 4, RW, RH, 1, blur) == 0 && gfx_backdrop_capture(5, 4, RW, RH, 64, blur) == 0);
+        assert(gfx_backdrop_capture(5, 4, RW, RH, 500, blur) == 0 && gfx_backdrop_capture(5, 4, RW, RH, -3, blur) == 0); /* radius limited */
+
+        /* a thin bright stripe spreads out: lower and wider, the same amount of light, symmetric, nothing far away */
+        gfx_fill_rect(0, 0, SW, SH, black);
+        gfx_fill_rect(20, 0, 2, SH, white);                                  /* columns 20 and 21; the area starts at 5: columns 15, 16 */
+        assert(gfx_backdrop_capture(5, 4, RW, RH, 3, blur) == 0);
+        int sum = 0, peak = 0;
+        for (int x = 0; x < RW; ++x)
+        {
+            unsigned char r, g, b;
+            gfx_unpack(blur[15 * RW + x], &r, &g, &b);
+            assert(r == g && g == b);                                        /* grey stays grey: the three bytes are blurred alike */
+            sum += r;
+            if (r > peak)
+                peak = r;
+        }
+        assert(peak > 0 && peak < 255);
+        assert(sum >= 510 - 12 && sum <= 510 + 12);                          /* two columns of 255: the light is kept (rounding aside) */
+        assert((blur[15 * RW + 0] & 0xFFu) == 0 && (blur[15 * RW + RW - 1] & 0xFFu) == 0); /* 15 and 23 pixels from the stripe: past its reach (9) */
+        assert((blur[15 * RW + 15] & 0xFFu) == (blur[15 * RW + 16] & 0xFFu));  /* symmetric around the stripe's middle */
+        assert((blur[15 * RW + 12] & 0xFFu) == (blur[15 * RW + 19] & 0xFFu));
+        assert((blur[15 * RW + 12] & 0xFFu) > 0 && (blur[15 * RW + 9] & 0xFFu) < (blur[15 * RW + 12] & 0xFFu)); /* falls off with the distance */
+        for (int y = 1; y < RH; ++y)                                         /* the stripe is as tall as the area: every row is the same */
+            for (int x = 0; x < RW; ++x)
+                assert(blur[y * RW + x] == blur[x]);
+
+        /* not possible: off the screen, empty, too big, no place to put it */
+        assert(gfx_backdrop_capture(-1, 0, 10, 10, 3, blur) == -1);
+        assert(gfx_backdrop_capture(0, -1, 10, 10, 3, blur) == -1);
+        assert(gfx_backdrop_capture(SW - 9, 0, 10, 10, 3, blur) == -1);
+        assert(gfx_backdrop_capture(0, SH - 9, 10, 10, 3, blur) == -1);
+        assert(gfx_backdrop_capture(0, 0, 0, 10, 3, blur) == -1 && gfx_backdrop_capture(0, 0, 10, 0, 3, blur) == -1);
+        assert(gfx_backdrop_capture(0, 0, 2049, 10, 3, blur) == -1 && gfx_backdrop_capture(0, 0, 10, 2049, 3, blur) == -1);
+        assert(gfx_backdrop_capture(0, 0, 10, 10, 3, 0) == -1);
+
+        /* drawing it: opaque inside the rounded rectangle, nothing outside, smoothed corners */
+        for (int i = 0; i < 20 * 16; ++i)
+            solid[i] = green;
+        gfx_fill_rect(0, 0, SW, SH, red);
+        gfx_backdrop_draw(solid, 10, 8, 20, 16, 6);
+        assert(back[16 * SW + 20] == green && back[8 * SW + 20] == green && back[16 * SW + 10] == green); /* inside, and the straight edges */
+        assert(back[8 * SW + 10] == red && back[23 * SW + 29] == red && back[8 * SW + 29] == red && back[23 * SW + 10] == red); /* the corners */
+        assert(back[7 * SW + 20] == red && back[24 * SW + 20] == red && back[16 * SW + 9] == red && back[16 * SW + 30] == red);  /* outside */
+        int smoothed = 0;
+        for (int y = 8; y < 14; ++y)
+            for (int x = 10; x < 16; ++x)
+                smoothed += back[y * SW + x] != red && back[y * SW + x] != green;
+        assert(smoothed >= 3);                                               /* the corner curve has blended pixels */
+        assert(fb[16 * SW + 20] != green);                                   /* the back buffer only: nothing shown until it is presented */
+        gfx_present();
+        assert(fb[16 * SW + 20] == green && fb[8 * SW + 10] == red);
+
+        /* drawing is cut to the clip */
+        gfx_fill_rect(0, 0, SW, SH, red);
+        gfx_set_clip(14, 10, 4, 4);
+        gfx_backdrop_draw(solid, 10, 8, 20, 16, 6);
+        gfx_reset_clip();
+        int changed = 0;
+        for (int y = 0; y < SH; ++y)
+            for (int x = 0; x < SW; ++x)
+                if (back[y * SW + x] != red)
+                {
+                    changed++;
+                    assert(x >= 14 && x < 18 && y >= 10 && y < 14);
+                }
+        assert(changed == 16);
+
+        /* a picture that is bigger than the screen part drawn: only the part inside the screen */
+        gfx_fill_rect(0, 0, SW, SH, red);
+        gfx_backdrop_draw(solid, SW - 10, SH - 8, 20, 16, 4);               /* hangs over the right and bottom edges */
+        assert(back[(SH - 1) * SW + SW - 1] == green && back[(SH - 4) * SW + SW - 5] == green);
+
+        /* not into a layer (there is nothing behind it there), and not when a compositor draws the screen */
+        assert(gfx_layer_begin(lay, 8, 8, 0) == 0);
+        assert(!gfx_backdrop_possible() && gfx_backdrop_capture(0, 0, 4, 4, 1, blur) == -1);
+        gfx_backdrop_draw(solid, 0, 0, 4, 4, 1);
+        for (int i = 0; i < 64; ++i)
+            assert(lay[i] == 0);
+        gfx_layer_end();
+        assert(gfx_backdrop_possible());
+        gfx_backbuffer_detach(1);
+        assert(!gfx_backdrop_possible() && gfx_backdrop_capture(0, 0, 4, 4, 1, blur) == -1);
+        gfx_backbuffer_detach(0);
+        assert(gfx_backdrop_possible());
+        gfx_disable_backbuffer();
+        assert(!gfx_backdrop_possible());
+    }
+
     puts("Graphics regression tests passed.");
     return 0;
 }

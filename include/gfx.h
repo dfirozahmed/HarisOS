@@ -303,6 +303,21 @@ void gfx_fill_poly_q(const int *pts, int count, GfxColor c, unsigned char alpha)
  * (dx,dy) = offset; strength = 0..255 darkness at the edge. */
 void gfx_shadow(int x, int y, int w, int h, int radius, int blur, int dx, int dy, unsigned char strength);
 
+/* Frosted glass: a blurred copy of the picture behind a panel, to draw the panel's translucent fill over.
+ *   if (gfx_backdrop_possible()) { gfx_backdrop_capture(x, y, w, h, 7, buf); gfx_backdrop_draw(buf, x, y, w, h, corner); }
+ * The picture is what the back buffer holds, so this works only while the CPU draws the desktop into it: not while drawing into a
+ * layer (gfx_layer_begin: nothing behind), nor straight to the screen (slow to read), nor when a compositor draws the screen
+ * (the back buffer is not the picture then). gfx_backdrop_possible() says whether it works now.
+ * capture: copies the w*h pixels at (x, y) (all on the screen) into out (w*h pixels, row after row) and blurs them: three box blurs
+ * of radius `radius` (1..64; 7 is about a 7 pixel Gaussian), the edge pixels repeated beyond the rectangle. w and h up to 2048.
+ * 0 = done, -1 = not possible (or bad arguments); the picture is not changed.
+ * draw: puts that copy on the picture, inside the rounded rectangle (corner = the radius of its corners, edges smoothed), cut to the clip.
+ * Keep the copy while the picture behind does not change, and draw it again for each partial redraw: capturing needs the picture
+ * as it is without the panel. */
+int gfx_backdrop_possible(void);
+int gfx_backdrop_capture(int x, int y, int w, int h, int radius, unsigned int *out);
+void gfx_backdrop_draw(const unsigned int *px, int x, int y, int w, int h, int corner);
+
 /* Soft round light/glow: color fades from `alpha` at the center to 0 at the edge. */
 void gfx_glow(int cx, int cy, int radius, GfxColor c, unsigned char alpha);
 

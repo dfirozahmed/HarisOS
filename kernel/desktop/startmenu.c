@@ -10,6 +10,7 @@
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
+#include "heap.h"
 
 /* ---- look: always a light glass theme, whatever the desktop theme is; only the accent follows the desktop's ---- */
 #define RGB(r, g, b) {r, g, b}
@@ -44,7 +45,10 @@ static UiTheme MENU_THEME = {
     .font_heading = &font_bold_20,
 };
 
-#define PANEL_ALPHA 196 /* 255 = solid; lower = more see-through */
+#define PANEL_ALPHA 196 /* 255 = solid; lower = more see-through (the app menu's panel) */
+#define PANEL_ALPHA_FROST 172 /* the start menu's panel over its blurred backdrop: the blur hides what is behind, so it can be glassier */
+#define PANEL_ALPHA_PLAIN 232 /* ... when the backdrop cannot be blurred (a compositor draws the screen): nearly solid, so what is behind does not cloud the text */
+#define FROST_RADIUS 8        /* the blur: three box blurs of 17 pixels, about 8 pixels of Gaussian */
 #define MENU_W 340
 #define MARGIN 10 /* gap to the screen edge and to the taskbar */
 #define PAD 14
@@ -96,7 +100,8 @@ const UiTheme *startmenu_theme(void)
     return &MENU_THEME;
 }
 
-void startmenu_glass(UiRect r, int radius)
+/* the panel's glass with the fill at `alpha` */
+static void glass(UiRect r, int radius, int alpha)
 {
     /* The shadow is a set of faint rings OUTSIDE the panel, so nothing dark shows through the
      * translucent fill (gfx_shadow() would darken the panel's own edges). */
@@ -113,8 +118,67 @@ void startmenu_glass(UiRect r, int radius)
         gfx_round_rect_alpha(r.x - k, r.y - k, r.w + 2 * k, r.h + 2 * k, radius + k, 1, gfx_rgb(10, 20, 50),
                              (unsigned char)a);
     }
-    gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, radius, ui_color(MENU_THEME.surface), PANEL_ALPHA);
+    gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, radius, ui_color(MENU_THEME.surface), (unsigned char)alpha);
     gfx_round_rect_alpha(r.x, r.y, r.w, r.h, radius, 1, gfx_rgb(255, 255, 255), 235);
+}
+
+void startmenu_glass(UiRect r, int radius)
+{
+    glass(r, radius, PANEL_ALPHA);
+}
+
+/* ---- the blurred backdrop of the start menu's panel ----
+ * What is behind the panel (wallpaper, desktop icons, windows) is blurred and kept, and the panel's translucent fill is drawn over it: frosted
+ * glass. It needs the picture as the back buffer holds it, so it is captured when the panel is drawn on a picture that has no panel in it: the
+ * first time after it opens, and whenever the draw covers the whole panel (then the desktop has just been drawn again under it). A partial redraw
+ * (a row under the pointer) draws the kept blur again instead of capturing, because there the panel is already in the back buffer. */
+static unsigned int *FROST_PX; /* the blurred copy: FROST_W x FROST_H pixels */
+static unsigned long long FROST_N; /* pixels FROST_PX has room for */
+static int FROST_OK;           /* FROST_PX holds the backdrop of the panel at FROST_X, FROST_Y */
+static int FROST_X, FROST_Y, FROST_W, FROST_H;
+
+static void frost_free(void)
+{
+    if (FROST_PX)
+        kfree(FROST_PX);
+    FROST_PX = 0;
+    FROST_N = 0;
+    FROST_OK = 0;
+}
+
+/* Draws the blurred backdrop under the panel m. 1 = it did, 0 = it cannot (the panel then gets the plain, nearly solid fill). */
+static int frost(UiRect m)
+{
+    if (!gfx_backdrop_possible())
+        return 0;
+    GfxClip cl = gfx_get_clip();
+    if (cl.x0 >= m.x + m.w || cl.x1 <= m.x || cl.y0 >= m.y + m.h || cl.y1 <= m.y)
+        return FROST_OK; /* this draw does not reach the panel: nothing to do (and nothing is drawn of it either) */
+    unsigned long long need = (unsigned long long)m.w * (unsigned long long)m.h;
+    if (need > FROST_N)
+    {
+        frost_free();
+        FROST_PX = (unsigned int *)kmalloc(need * sizeof(unsigned int));
+        if (!FROST_PX)
+            return 0;
+        FROST_N = need;
+    }
+    int whole = cl.x0 <= m.x && cl.y0 <= m.y && cl.x1 >= m.x + m.w && cl.y1 >= m.y + m.h;
+    if (!FROST_OK || whole || m.x != FROST_X || m.y != FROST_Y || m.w != FROST_W || m.h != FROST_H)
+    {
+        if (gfx_backdrop_capture(m.x, m.y, m.w, m.h, FROST_RADIUS, FROST_PX) != 0)
+        {
+            FROST_OK = 0;
+            return 0;
+        }
+        FROST_OK = 1;
+        FROST_X = m.x;
+        FROST_Y = m.y;
+        FROST_W = m.w;
+        FROST_H = m.h;
+    }
+    gfx_backdrop_draw(FROST_PX, m.x, m.y, m.w, m.h, 18);
+    return 1;
 }
 
 /* ---- state ---- */
@@ -277,6 +341,7 @@ void startmenu_close(void)
     if (!OPEN)
         return;
     OPEN = 0;
+    frost_free(); /* the blurred backdrop is made again at the next opening */
     ui_menu_close(&CTX);
     SEARCH.dragging = 0;
     PRESS = -1;
@@ -292,6 +357,7 @@ static void startmenu_open(void)
     volmenu_close();
     deskmenu_close();
     OPEN = 1;
+    FROST_OK = 0;
     ui_menu_close(&CTX);
     ui_edit_set_text(&SEARCH, "");
     FILTER_SIG = text_sig("");
@@ -642,8 +708,9 @@ void startmenu_draw(void)
     const UiTheme *t = &MENU_THEME;
     UiRect m = menu_rect();
 
-    /* glass panel: soft shadow, translucent light fill, bright edge */
-    startmenu_glass(m, 18);
+    /* glass panel: the backdrop blurred, then a soft shadow, a translucent light fill and a bright edge over it */
+    int frosted = frost(m);
+    glass(m, 18, frosted ? PANEL_ALPHA_FROST : PANEL_ALPHA_PLAIN);
 
     /* search */
     UiRect s = search_rect();
