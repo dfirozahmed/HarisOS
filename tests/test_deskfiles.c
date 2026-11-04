@@ -17,7 +17,7 @@
 #include <string.h>
 
 /* ---- a tiny file system: nodes in the order a folder lists them (folders first, then by name, as the real vfs_list does) ---- */
-#define MAXN 32
+#define MAXN 64
 static VfsNode NODES[MAXN];
 static void node_set(int id, int parent, const char *name, int is_dir)
 {
@@ -44,6 +44,47 @@ int vfs_list(int dir, int *out, int max)
             }
     return total;
 }
+/* the rest of what "Send to desktop" uses */
+static int ADDS, ADD_OK = 1, ADDED_PARENT = -1, COPIES, COPY_OK = 1, COPIED = -1, COPY_DEST = -1;
+static char ADDED_NAME[VFS_NAME_MAX];
+static int free_id(void)
+{
+    for (int i = 22; i < MAXN; i++)
+        if (!NODES[i].used)
+            return i;
+    return -1;
+}
+int vfs_add(int parent, const char *name, int is_dir, unsigned size)
+{
+    (void)size;
+    ADDS++;
+    ADDED_PARENT = parent;
+    strcpy(ADDED_NAME, name);
+    if (!ADD_OK)
+        return -1;
+    int id = free_id();
+    node_set(id, parent, name, is_dir);
+    return id;
+}
+int vfs_copy(int id, int dest)
+{
+    COPIES++;
+    COPIED = id;
+    COPY_DEST = dest;
+    if (!COPY_OK)
+        return -1;
+    int c = free_id();
+    node_set(c, dest, NODES[id].name, NODES[id].is_dir);
+    return c;
+}
+int vfs_is_under(int id, int ancestor)
+{
+    for (int i = id; i > 0; i = NODES[i].parent)
+        if (i == ancestor)
+            return 1;
+    return 0;
+}
+int vfs_is_volume_root(int id) { return id == 1; } /* the boot drive */
 static int REFRESHES;
 int vfs_refresh(int dir) { (void)dir; REFRESHES++; return 0; }
 int vfs_path(int id, char *out, int cap)
@@ -331,6 +372,89 @@ int main(void)
     WIN_RESULT = &WIN;
     deskfiles_ask_delete(30); /* a node that is gone */
     CHECK(REMOVED_NODE == -1);
+
+    /* ================= Send to desktop ================= */
+    node_set(20, 1, "Docs", 1);
+    node_set(21, 20, "report.txt", 0);
+    reset_counters();
+    ADDS = COPIES = 0;
+    COPY_OK = ADD_OK = 1;
+    int desk = deskfiles_folder();
+    CHECK(desk == 5);
+
+    /* a copy goes into the Desktop folder, a toast says so, and the icons are told */
+    int c = deskfiles_send(21);
+    CHECK(COPIES == 1 && COPIED == 21 && COPY_DEST == 5 && ADDS == 0);
+    CHECK(c > 0 && vfs_node(c) && vfs_node(c)->parent == 5 && strcmp(vfs_node(c)->name, "report.txt") == 0);
+    CHECK(vfs_node(21) != 0 && vfs_node(21)->parent == 20); /* the original stays where it was */
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_SUCCESS && strcmp(LAST_TEXT, "Sent report.txt to the desktop.") == 0);
+    CHECK(SET_CALLS == 1 && SET_FOUND == 1);
+    int has_it = 0;
+    for (int i = 0; i < SET_N; i++)
+        has_it |= strcmp(SET_FILES[i].name, "report.txt") == 0;
+    CHECK(has_it); /* the new icon is in what deskicons was told */
+
+    /* a folder goes the same way */
+    reset_counters();
+    COPIES = 0;
+    c = deskfiles_send(20);
+    CHECK(COPIES == 1 && COPIED == 20 && vfs_node(c)->is_dir && TOASTS == 1 && LAST_KIND == TOAST_SUCCESS);
+
+    /* something that is on the desktop already (or the Desktop folder itself) is not copied */
+    reset_counters();
+    COPIES = 0;
+    CHECK(vfs_node(11) && vfs_node(11)->parent == 5); /* main.c: made earlier in this test, still there */
+    CHECK(deskfiles_send(11) == -1);
+    CHECK(COPIES == 0 && TOASTS == 1 && LAST_KIND == TOAST_INFO && strstr(LAST_TEXT, "main.c is on the desktop already") != 0);
+    CHECK(deskfiles_send(5) == -1 && COPIES == 0 && LAST_KIND == TOAST_INFO);
+
+    /* a drive, the root and a node that is gone */
+    reset_counters();
+    CHECK(deskfiles_send(1) == -1 && LAST_KIND == TOAST_WARNING && strstr(LAST_TEXT, "drive") != 0);
+    CHECK(deskfiles_send(60) == -1 && LAST_KIND == TOAST_WARNING && strstr(LAST_TEXT, "not there") != 0);
+    CHECK(COPIES == 0 && ADDS == 0);
+
+    /* the copy fails (a locked drive): the drive's words in a toast, and nothing is claimed */
+    reset_counters();
+    COPY_OK = 0;
+    CHECK(deskfiles_send(21) == -1);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_ERROR && strstr(LAST_TEXT, "Cannot send report.txt") != 0 && strstr(LAST_TEXT, "locked") != 0);
+    COPY_OK = 1;
+
+    /* no Desktop folder: it is made first, on the boot drive's top folder, then the copy goes in */
+    for (int i = 1; i < MAXN; i++) /* the folder and all that was in it go */
+        if (NODES[i].parent == 5)
+            node_del(i);
+    node_del(5);
+    CHECK(deskfiles_folder() == -1);
+    reset_counters();
+    ADDS = COPIES = 0;
+    c = deskfiles_send(21);
+    CHECK(ADDS == 1 && ADDED_PARENT == 1 && strcmp(ADDED_NAME, "Desktop") == 0);
+    int made = deskfiles_folder();
+    CHECK(made > 0 && NODES[made].is_dir && COPIES == 1 && COPY_DEST == made && c > 0);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_SUCCESS && SET_FOUND == 1 && SET_N == 1);
+
+    /* no Desktop folder and the drive cannot be written: the drive's own words, no copy, no half-made folder */
+    for (int i = 1; i < MAXN; i++)
+        if (NODES[i].parent == made)
+            node_del(i);
+    node_del(made);
+    reset_counters();
+    ADDS = COPIES = 0;
+    ADD_OK = 0;
+    CHECK(deskfiles_send(21) == -1);
+    CHECK(ADDS == 1 && COPIES == 0 && deskfiles_folder() == -1);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_ERROR && strstr(LAST_TEXT, "Cannot make the Desktop folder") != 0 && strstr(LAST_TEXT, "locked") != 0);
+    ADD_OK = 1;
+
+    /* no drive at all to make it on */
+    reset_counters();
+    ADDS = COPIES = 0;
+    VOL_FOLDER = -1;
+    CHECK(deskfiles_send(21) == -1);
+    CHECK(ADDS == 0 && COPIES == 0 && TOASTS == 1 && LAST_KIND == TOAST_WARNING && strstr(LAST_TEXT, "no drive") != 0);
+    VOL_FOLDER = 1;
 
     printf("deskfiles tests passed\n");
     return 0;

@@ -1,6 +1,7 @@
 /* File Explorer: the right-click menu and the sort menu. The panel itself (layout, mouse, keys, drawing) is the HarisUI UiMenu
  * (ui.h); this file fills it with the items for what was clicked and runs the one that is chosen. */
 #include "explorer.h"
+#include "deskfiles.h"
 
 static void add(int item, const char *label, const char *hint, int flags)
 {
@@ -23,6 +24,7 @@ void ex_menu_open(int x, int y, int kind)
     else if (kind == 1)
     {
         add(M_OPEN, "Open", "Enter", 0);
+        add(M_SEND, "Send to desktop", 0, 0);
         ui_menu_separator(&EX_MENU);
         add(M_CUT, "Cut", "Ctrl+X", 0);
         add(M_COPY, "Copy", "Ctrl+C", 0);
@@ -76,6 +78,10 @@ void ex_menu_run(int item)
         break;
     case M_PASTE:
         ex_paste();
+        break;
+    case M_SEND:
+        if (EX_SEL >= 0 && EX_SEL < EX_NITEMS)
+            deskfiles_send(EX_ITEMS[EX_SEL]); /* a copy goes into the Desktop folder; a toast says how it went */
         break;
     case M_SORT_NAME:
         ex_set_sort(VFS_SORT_NAME, EX_SORT_DESC);

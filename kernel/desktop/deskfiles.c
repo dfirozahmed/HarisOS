@@ -200,6 +200,88 @@ void deskfiles_open(int node)
     toast_show(TOAST_INFO, "No app can open this file yet.");
 }
 
+/* ---- sending ---- */
+/* the Desktop folder, made when there is none */
+static int folder_or_make(void)
+{
+    int dest = deskfiles_folder();
+    if (dest >= 0)
+        return dest;
+    int parent = look_data_folder();
+    if (parent < 0)
+    {
+        toast_show(TOAST_WARNING, "There is no drive to make a Desktop folder on.");
+        return -1;
+    }
+    dest = vfs_add(parent, FOLDER_NAME, 1, 0);
+    if (dest < 0) /* a locked drive, a file called Desktop ... */
+    {
+        char msg[TOAST_TEXT_MAX + 1], *o = msg;
+        o = put(o, "Cannot make the Desktop folder: ");
+        const char *why = vfs_error_text(vfs_last_error());
+        for (int i = 0; why[i] && o - msg < (int)sizeof msg - 1; i++)
+            *o++ = why[i];
+        *o = 0;
+        toast_show(TOAST_ERROR, msg);
+        return -1;
+    }
+    return dest;
+}
+
+int deskfiles_send(int node)
+{
+    const VfsNode *n = vfs_node(node);
+    if (!n)
+    {
+        toast_show(TOAST_WARNING, "That item is not there any more.");
+        return -1;
+    }
+    if (node == VFS_ROOT || vfs_is_volume_root(node))
+    {
+        toast_show(TOAST_WARNING, "A drive cannot be sent to the desktop.");
+        return -1;
+    }
+    char name[DESK_FILE_NAME];
+    int k = 0;
+    for (; n->name[k] && k < DESK_FILE_NAME - 1; k++)
+        name[k] = n->name[k];
+    name[k] = 0;
+    char msg[TOAST_TEXT_MAX + 1], *o = msg;
+    int existing = deskfiles_folder();
+    if (existing >= 0 && vfs_is_under(node, existing)) /* it is in the Desktop folder already (or is it) */
+    {
+        o = put(o, name);
+        o = put(o, " is on the desktop already.");
+        *o = 0;
+        toast_show(TOAST_INFO, msg);
+        return -1;
+    }
+    int dest = folder_or_make();
+    if (dest < 0)
+        return -1;
+    int copy = vfs_copy(node, dest);
+    if (copy < 0)
+    {
+        o = put(o, "Cannot send ");
+        o = put(o, name);
+        o = put(o, ": ");
+        const char *why = vfs_error_text(vfs_last_error());
+        for (int i = 0; why[i] && o - msg < (int)sizeof msg - 1; i++)
+            *o++ = why[i];
+        *o = 0;
+        toast_show(TOAST_ERROR, msg);
+        rescan(0, 1); /* the folder may have been made even so */
+        return -1;
+    }
+    o = put(o, "Sent ");
+    o = put(o, name);
+    o = put(o, " to the desktop.");
+    *o = 0;
+    toast_show(TOAST_SUCCESS, msg);
+    rescan(0, 1);
+    return copy;
+}
+
 /* ---- deleting ---- */
 void deskfiles_delete(int node)
 {
