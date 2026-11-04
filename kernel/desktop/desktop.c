@@ -4,6 +4,7 @@
 #include "taskbar.h"
 #include "startmenu.h"
 #include "appmenu.h"
+#include "deskmenu.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "timer.h"
@@ -110,6 +111,7 @@ static void on_taskbar_app(int i)
     startmenu_close();
     appmenu_close();
     volmenu_close();
+    deskmenu_close();
     if (i < 0 || i >= TB_N || !wm_is_open(TB_WIN[i]))
         return;
     Window *w = TB_WIN[i];
@@ -146,5 +148,6 @@ void desktop_draw(void)
     startmenu_draw();
     appmenu_draw();
     volmenu_draw();
+    deskmenu_draw();
     taskbar_draw();
 }

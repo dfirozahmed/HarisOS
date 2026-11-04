@@ -3,6 +3,7 @@
 #include "taskbar.h"
 #include "startmenu.h"
 #include "appmenu.h"
+#include "deskmenu.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "wm.h"
@@ -21,6 +22,7 @@ static void desktop_draw_region(UiRect r)
     startmenu_draw();
     appmenu_draw();
     volmenu_draw();
+    deskmenu_draw();
     taskbar_draw();
     gfx_reset_clip();
 }
@@ -51,7 +53,7 @@ int desktop_finish_input(int bar_changed)
     {
         int bx, by, bw, bh;
         taskbar_bounds(&bx, &by, &bw, &bh);
-        if (startmenu_is_open() || appmenu_is_open() || volmenu_is_open())
+        if (startmenu_is_open() || appmenu_is_open() || volmenu_is_open() || deskmenu_is_open())
             gfx_overlay_area(0, 0, 0, 0);
         else
             gfx_overlay_area(0, 0, (int)gfx_width(), by);

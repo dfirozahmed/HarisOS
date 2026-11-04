@@ -87,6 +87,11 @@ Window *wm_window_at_internal(int x, int y)
     return 0;
 }
 
+Window *wm_window_at(int x, int y)
+{
+    return wm_window_at_internal(x, y);
+}
+
 int wm_z_index_internal(const Window *w)
 {
     for (int i = 0; i < WM_ZN; i++)

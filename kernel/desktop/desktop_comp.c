@@ -9,6 +9,7 @@
 #include "taskbar.h"
 #include "startmenu.h"
 #include "appmenu.h"
+#include "deskmenu.h"
 #include "volmenu.h"
 #include "ui.h"
 #include "wm.h"
@@ -38,10 +39,12 @@ static UiRect taskbar_rect(void)
 }
 static int always(void) { return 1; }
 
-static Top TOPS[4] = {
+#define TOPS_N 5
+static Top TOPS[TOPS_N] = {
     {startmenu_is_open, startmenu_bounds, startmenu_draw, 0, {0, 0, 0, 0}, 0},
     {appmenu_is_open, appmenu_bounds, appmenu_draw, 0, {0, 0, 0, 0}, 0},
     {volmenu_is_open, volmenu_bounds, volmenu_draw, 0, {0, 0, 0, 0}, 0},
+    {deskmenu_is_open, deskmenu_bounds, deskmenu_draw, 0, {0, 0, 0, 0}, 0},
     {always, taskbar_rect, taskbar_draw, 0, {0, 0, 0, 0}, 0},
 };
 
@@ -110,7 +113,7 @@ static void leave(void)
     PTR_UP = 0;
     WALL_SURF = 0;
     WALL_KIND = 0;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < TOPS_N; i++)
     {
         if (ops && TOPS[i].surf)
             ops->surface_free(TOPS[i].surf);
@@ -323,15 +326,15 @@ int desktop_comp_frame(const UiRect *areas, int n)
     }
     if (wm_comp_update(ops, a, b, bytes) != 0)
         goto fail;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < TOPS_N; i++)
         if (update_top(&TOPS[i], ops, a, b, bytes, areas, n, full) != 0)
             goto fail;
 
-    GfxCompItem items[1 + 60 + 4 + 1];
+    GfxCompItem items[1 + 60 + TOPS_N + 1];
     int k = 0;
     items[k++] = (GfxCompItem){WALL_SURF, 0, 0, W, H, 0, 0, {0, 0, 0, 0}};
     k += wm_comp_items(items + k, 60);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < TOPS_N; i++)
         if (TOPS[i].shown)
             items[k++] = (GfxCompItem){TOPS[i].surf, TOPS[i].r.x, TOPS[i].r.y, TOPS[i].r.w, TOPS[i].r.h, 1, 0, {0, 0, 0, 0}};
     /* the pointer, on top of everything (its picture goes up again only when its shape changed) */

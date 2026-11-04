@@ -4,6 +4,7 @@
 #include "taskbar.h"
 #include "startmenu.h"
 #include "appmenu.h"
+#include "deskmenu.h"
 #include "volmenu.h"
 #include "mouse.h"
 #include "ui.h"
@@ -33,6 +34,7 @@ int desktop_pointer(int x, int y, unsigned buttons)
         startmenu_close();
         appmenu_close();
         volmenu_close();
+        deskmenu_close();
         desktop_open_wifi();
     }
     int vol_toggle = on_bar && !wm_dragging() && (buttons & MOUSE_LEFT) && !(LAST_BTN & MOUSE_LEFT) && taskbar_volume_at(x, y);
@@ -48,6 +50,8 @@ int desktop_pointer(int x, int y, unsigned buttons)
         to_windows = 0;
     if (appmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
         to_windows = 0;
+    if (deskmenu_pointer(wm_dragging() ? -1 : x, y, buttons) && !wm_dragging())
+        to_windows = 0;
 
     /* right click on a running app's taskbar button: its menu (Minimize / Maximize / Close) */
     int right_edge = (buttons & MOUSE_RIGHT) && !(LAST_BTN & MOUSE_RIGHT);
@@ -60,6 +64,9 @@ int desktop_pointer(int x, int y, unsigned buttons)
         if (w && taskbar_app_rect(idx, &bx, &by, &bw, &bh))
             appmenu_open(w, bx + bw / 2);
     }
+    /* right click on the bare desktop (not on the taskbar, a menu or a window): the desktop menu */
+    if (right_edge && !on_bar && to_windows && !wm_dragging() && !wm_window_at(x, y))
+        deskmenu_open(x, y);
     wm_pointer(to_windows ? x : -1, to_windows ? y : -1, buttons);
 
     /* pointer shape: a double arrow on a window edge or corner (and during a resize) */
@@ -71,7 +78,7 @@ int desktop_pointer(int x, int y, unsigned buttons)
         shape = GFX_CURSOR_SIZE_H;
     else if (edge)
         shape = GFX_CURSOR_SIZE_V;
-    else if (to_windows && !wm_dragging() && !startmenu_is_open() && !appmenu_is_open() && !volmenu_is_open())
+    else if (to_windows && !wm_dragging() && !startmenu_is_open() && !appmenu_is_open() && !volmenu_is_open() && !deskmenu_is_open())
         shape = wm_cursor_hint(x, y); /* inside a window: the app may want its own (a draggable divider) */
     gfx_cursor_set_shape(shape);
 
@@ -89,7 +96,7 @@ int desktop_wheel(int x, int y, int steps)
         volmenu_tick();
         return desktop_finish_input(0);
     }
-    if (startmenu_is_open() || appmenu_is_open())
+    if (startmenu_is_open() || appmenu_is_open() || deskmenu_is_open())
         return 0;
     if (taskbar_volume_at(x, y)) /* wheel over the tray speaker: louder (up) / quieter (down), 5 points a step */
     {
@@ -155,12 +162,14 @@ int desktop_key(const KeyEvent *k)
             volmenu_key(k);
         else if (appmenu_is_open())
             appmenu_key(k);
+        else if (deskmenu_is_open())
+            deskmenu_key(k);
         else if (startmenu_is_open())
             startmenu_key(k); /* the open menu has the keyboard */
         else
             wm_key(k);
     }
-    else if (!startmenu_is_open() && !appmenu_is_open() && !volmenu_is_open())
+    else if (!startmenu_is_open() && !appmenu_is_open() && !volmenu_is_open() && !deskmenu_is_open())
         wm_key(k);
     return desktop_finish_input(0);
 }

@@ -302,6 +302,7 @@ set(KERNEL_SOURCES
     kernel/desktop/bootsplash.c     # "Welcome to HarisOS" screen with a progress bar while the kernel starts
     kernel/desktop/volmenu.c        # taskbar volume popup (click the tray speaker)
     kernel/desktop/appmenu.c        # taskbar app right-click menu
+    kernel/desktop/deskmenu.c       # desktop right-click menu (Personalize, Display settings, Refresh)
     kernel/desktop/startmenu.c      # start menu (light translucent panel)
     kernel/desktop/taskbar.c
     apps/app_registry.c             # list of installed apps (start menu reads it)

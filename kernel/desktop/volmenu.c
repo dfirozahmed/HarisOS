@@ -5,6 +5,7 @@
 #include "taskbar.h"
 #include "ui.h"
 #include "volmenu.h"
+#include "deskmenu.h"
 #include "wm.h"
 #include "desktop_internal.h"
 
@@ -108,6 +109,7 @@ void volmenu_open(int anchor_x)
         return; /* no sound hardware: nothing to set */
     startmenu_close(); /* only one menu at a time */
     appmenu_close();
+    deskmenu_close();
     if (OPEN)
         volmenu_close();
     OPEN = 1;

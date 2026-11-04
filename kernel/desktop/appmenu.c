@@ -1,5 +1,6 @@
 /* HarisOS taskbar app menu (right click on a running app's button). */
 #include "appmenu.h"
+#include "deskmenu.h"
 #include "startmenu.h"
 #include "taskbar.h"
 #include "volmenu.h"
@@ -83,6 +84,7 @@ void appmenu_open(Window *w, int anchor_x)
         return;
     startmenu_close(); /* only one menu at a time */
     volmenu_close();
+    deskmenu_close();
     if (OPEN)
         appmenu_close();
     OPEN = 1;

@@ -257,6 +257,23 @@ void desktop_open_wifi(void)
     }
 }
 
+/* An app of the registry by its name ("Display Settings"); nothing happens if there is no such app. */
+void desktop_open_app(const char *name)
+{
+    for (int i = 0; i < app_count(); i++)
+    {
+        const AppInfo *a = app_get(i);
+        const char *n = a ? a->name : 0, *want = name;
+        while (n && *n && *n == *want)
+            n++, want++;
+        if (n && !*n && !*want && a->open)
+        {
+            a->open();
+            return;
+        }
+    }
+}
+
 /* "Settings": the Personalize app (theme, wallpaper, colours); without it, the old dark / light switch */
 void desktop_open_settings(void)
 {

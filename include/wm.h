@@ -127,6 +127,7 @@ void wm_set_maximized(Window *w, int on);
 UiRect wm_content(const Window *w); /* the content area, in screen coordinates */
 int wm_count(void);                 /* open windows */
 Window *wm_top(void);               /* focused window (topmost visible one), or NULL */
+Window *wm_window_at(int x, int y); /* the topmost visible (not minimized) window under the point, NULL = the bare desktop */
 
 /* Minimize / restore. wm_activate() restores a minimized window and brings it to the front. */
 void wm_minimize(Window *w);
