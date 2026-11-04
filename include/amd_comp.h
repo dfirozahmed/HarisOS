@@ -160,6 +160,7 @@ int amd_comp_surface_upload(int id, const void *px, int pitch, int x, int y, int
 int amd_comp_compose(const GfxCompItem *items, int n, const int *rects, int nr);
 int amd_comp_surface_scroll(int id, int x, int y, int w, int h, int dy); /* GfxCompOps.scroll */
 int amd_comp_busy_percent(void);     /* GPU load since the last call (compositor submit..fence time vs elapsed), -1 = not readable */
+void amd_comp_set_vsync(int on);     /* start the copy to the screen in vertical blank (DCN OTG0 read only), 1 = on */
 void amd_comp_set_dim(int scale);    /* GfxCompOps.dim: the screen's brightness, 0 .. 256 */
 int amd_comp_scroll_test(void);       /* offscreen check before scroll is used: 1 = right */
 /* The wallpaper painted by the GPU (GfxCompOps.wallpaper): the frame builder (pure: gradient, lights, rectangles, the same order and
@@ -185,6 +186,8 @@ typedef struct
     uint64_t pixels;             /* of the rectangles put together */
     uint64_t draws;
     uint64_t upload_bytes;
+    uint32_t vblank_waits, vblank_timeouts; /* tear-free copies: waited for vertical blank / gave up after 20 ms */
+    uint64_t vblank_us;                     /* total time spent waiting for the blank */
 } AmdSceneSums;
 void amd_comp_scene_sums(AmdSceneSums *out);
 

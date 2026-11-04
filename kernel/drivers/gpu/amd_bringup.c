@@ -134,6 +134,9 @@ static void amd_scene_report(const GfxCompStats *s)
     log_hex("  pixels per compose    ", (uint32_t)(g.pixels / c));
     log_hex("  draws per compose     ", (uint32_t)(g.draws / c));
     log_hex("  KiB uploaded          ", (uint32_t)(g.upload_bytes >> 10));
+    log_hex("  vblank waits          ", g.vblank_waits);
+    log_hex("  vblank wait gave up   ", g.vblank_timeouts);
+    log_hex("  vblank wait us, avg   ", (uint32_t)(g.vblank_us / (g.vblank_waits ? g.vblank_waits : 1u)));
     log_hex("  scrolls by the GPU    ", amd_comp_scene_value(AMD_COMP_SC_SCROLLS));
     /* where the requests to draw window content came from, then the windows that took the most drawing */
     for (int i = 0; i < s->nwhy; i++) {
@@ -930,6 +933,14 @@ int amd_gpu_bringup_screen(void)
             amd_gpu_log_save();
             int scene_ok = amd_comp_scene_test();
             log_comp_result(scene_ok);
+            {
+                /* the copy to the screen waits for vertical blank, if the firmware's display pipe 0 is running (read only) */
+                AmdDcnProbe vp;
+                if (scene_ok && amd_dcn_probe(g_mmio, &vp) && (vp.otg_control & 1u)) {
+                    amd_comp_set_vsync(1);
+                    serial_print("SCENE: copies to the screen start in vertical blank\n");
+                }
+            }
             if (scene_ok) {
                 serial_print("SCROLL: about to move rows inside a surface (up 10, down 7), all four bytes checked\n");
                 amd_gpu_log_save();

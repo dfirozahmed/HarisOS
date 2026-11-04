@@ -11,6 +11,7 @@
 #include "amd_3d_regs.h"
 #include "amd_native.h"
 #include "gfx.h"
+#include "timer.h"
 
 #define SGPR(n) ((uint32_t)(n)) /* source operand code of SGPR n */
 
@@ -1126,6 +1127,22 @@ static struct
 } sc;
 static uint32_t scval[AMD_COMP_SC_VALUES];
 static AmdSceneSums sums; /* since the last amd_comp_scene_sums() */
+
+/* Tear-free copy to the screen (DCN OTG0): the copy of the finished picture from the back buffer to the screen is started when the
+ * display is in vertical blank (OTG0_OTG_STATUS bit 0, Linux dcn_2_1_0_sh_mask.h OTG_V_BLANK), not while the beam is drawing. The
+ * scene is built first (its own submission) and only the copy waits. Reads only. OTG_STATUS = DCN seg2 0x34C0 + 0x1b49. */
+#define DCN_OTG0_STATUS_DW (0x34C0u + 0x1b49u)
+static int vsync_on;
+void amd_comp_set_vsync(int on) { vsync_on = on; }
+/* Spins until the display is in vertical blank (at most 20 ms: a frame is 16.7 ms). 1 = in blank, 0 = gave up. */
+static int wait_vblank(void)
+{
+    unsigned long long t = timer_us();
+    if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) return 1;
+    while (timer_us() - t < 20000u)
+        if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) return 1;
+    return 0;
+}
 void amd_comp_scene_sums(AmdSceneSums *out)
 {
     *out = sums;
@@ -1247,8 +1264,22 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     }
     nb = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC2_OFF, 4u));   /* its own sync word */
     if (!nb) return -1;
-    seq = frame_submit(ib, na + nb);
-    if (!seq || !comp_fence_wait(seq)) return -1;
+    if (vsync_on && rt_mc == sc.fb_mc) {
+        unsigned long long w0;
+        int in_blank;
+        seq = frame_submit(ib, na);                                  /* the scene into the back buffer */
+        if (!seq || !comp_fence_wait(seq)) return -1;
+        w0 = timer_us();
+        in_blank = wait_vblank();
+        sums.vblank_waits++;
+        if (!in_blank) sums.vblank_timeouts++;
+        sums.vblank_us += timer_us() - w0;
+        seq = frame_submit(ib + na, nb);                             /* the copy to the screen, started in the blank */
+        if (!seq || !comp_fence_wait(seq)) return -1;
+    } else {
+        seq = frame_submit(ib, na + nb);
+        if (!seq || !comp_fence_wait(seq)) return -1;
+    }
     scval[AMD_COMP_SC_FRAMES]++;
     scval[AMD_COMP_SC_DWORDS] = na + nb;
     scval[AMD_COMP_SC_CYCLES] = (uint32_t)(comp_tsc() - t0);
