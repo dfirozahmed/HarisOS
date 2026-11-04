@@ -30,6 +30,8 @@ static int NAPS;
 static int SEL = -1;
 static int SHOW_PASS; /* the passphrase is shown as typed instead of as stars (the "Show password" switch); off again whenever the field is wiped */
 static int SCROLL;
+static UiMenu MENU; /* the right-click menu of a network: Connect, Disconnect, Copy name, Rescan */
+enum { WFM_CONNECT, WFM_DISCONNECT, WFM_COPY, WFM_RESCAN }; /* its item ids */
 static UiScroll SB; /* the network list's scrollbar: sb_sync() fills it from SCROLL, NAPS and the layout */
 static int OP;
 static char MSG[100];       /* the last result, under the passphrase field */
@@ -347,6 +349,9 @@ static void wf_draw(Window *w, UiRect body)
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 6, l.foot.w - 4, 22), "Select a network.", UI_TEXT_DIM, UI_ALIGN_LEFT, t->text_dim);
     if (MSG[0])
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 92, l.foot.w - 4, 34), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
+    if (MENU.open && w != wm_top())
+        ui_menu_close(&MENU); /* focus moved elsewhere (another window or a dialog) */
+    ui_menu_draw(&MENU);
 }
 
 /* ---- the work ---- */
@@ -537,8 +542,70 @@ static void on_disconnect(UiButton *b, void *user)
     wm_invalidate();
 }
 
+/* the menu's commands are the buttons' and keys' own functions; the buttons' enabled flags say which of them can run now */
+static void menu_run(int id)
+{
+    Window *w = WF_WIN;
+    if (!w)
+        return;
+    switch (id)
+    {
+    case WFM_CONNECT:
+        start_join(w);
+        break;
+    case WFM_DISCONNECT:
+        on_disconnect(0, w);
+        break;
+    case WFM_RESCAN:
+        start_scan(w);
+        break;
+    case WFM_COPY:
+        if (SEL >= 0 && SEL < NAPS)
+        {
+            int len = 0;
+            while (APS[SEL].ssid[len])
+                len++;
+            ui_clipboard_set(APS[SEL].ssid, len);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* right click on a network: select it and open its menu; elsewhere in the list only Rescan. Nothing while a scan or a join is going on. */
+static int wf_rpress(Window *w, int x, int y)
+{
+    ui_menu_close(&MENU);
+    if (OP != OP_NONE)
+        return 1;
+    Layout l = layout(wm_content(w));
+    int row = SCROLL + (y - l.list.y) / ROW_H;
+    int on_net = ui_contains(l.list, x, y) && (y - l.list.y) / ROW_H < visible_rows(&l) && row >= 0 && row < NAPS;
+    if (!on_net && !ui_contains(l.list, x, y))
+        return 0; /* the header and the passphrase area have no menu */
+    if (on_net)
+        select_row(w, row);
+    ui_menu_clear(&MENU);
+    if (on_net)
+    {
+        ui_menu_add(&MENU, WFM_CONNECT, "Connect", "Enter", w->btn[BTN_CONNECT].enabled ? 0 : UI_MENU_DISABLED);
+        ui_menu_add(&MENU, WFM_DISCONNECT, "Disconnect", 0, w->btn[BTN_DISCONNECT].enabled ? 0 : UI_MENU_DISABLED);
+        ui_menu_add(&MENU, WFM_COPY, "Copy name", 0, 0);
+        ui_menu_separator(&MENU);
+    }
+    ui_menu_add(&MENU, WFM_RESCAN, "Rescan", "F5", w->btn[BTN_RESCAN].enabled ? 0 : UI_MENU_DISABLED);
+    ui_menu_open(&MENU, x, y, wm_content(w));
+    return 1;
+}
+
 static int wf_press(Window *w, int x, int y)
 {
+    if (MENU.open) /* a click on an item shows it pressed and it runs when the button is released (wf_drag); a click anywhere else only closes the menu */
+    {
+        ui_menu_press(&MENU, x, y);
+        return 1;
+    }
     Layout l = layout(wm_content(w));
     sb_sync(&l); /* the scrollbar: grab the thumb (wf_drag follows it) or click the track for a page; it works during a scan too */
     if (ui_scroll_press(&SB, x, y))
@@ -574,6 +641,14 @@ static int wf_press(Window *w, int x, int y)
 
 static int wf_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (MENU.open && MENU.press >= 0)
+    {
+        int id = -1;
+        int r = ui_menu_release(&MENU, x, y, buttons, &id); /* 2 = released on the item it was pressed on */
+        if (r == 2)
+            menu_run(id);
+        return r != 0;
+    }
     if (SB.dragging) /* the scrollbar's thumb is held: the list follows the pointer */
     {
         Layout l = layout(wm_content(w));
@@ -592,6 +667,8 @@ static int wf_drag(Window *w, int x, int y, unsigned buttons)
 /* the scrollbar widens while the pointer is over it */
 static int wf_hover(Window *w, int x, int y)
 {
+    if (MENU.open)
+        return ui_menu_hover(&MENU, x, y);
     Layout l = layout(wm_content(w));
     sb_sync(&l);
     return ui_scroll_hover(&SB, x, y);
@@ -599,6 +676,8 @@ static int wf_hover(Window *w, int x, int y)
 
 static int wf_wheel(Window *w, int steps)
 {
+    int had_menu = MENU.open;
+    ui_menu_close(&MENU); /* the rows move under it */
     Layout l = layout(wm_content(w));
     int max = NAPS - visible_rows(&l);
     if (max < 0)
@@ -609,13 +688,20 @@ static int wf_wheel(Window *w, int steps)
         SCROLL = max;
     if (SCROLL < 0)
         SCROLL = 0;
-    return SCROLL != old;
+    return SCROLL != old || had_menu;
 }
 
 static void wf_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed)
         return;
+    if (MENU.open) /* the menu has the keyboard: Up / Down / Enter / Esc, every other key is ignored */
+    {
+        int id = -1;
+        if (ui_menu_key(&MENU, k, &id) == 2)
+            menu_run(id);
+        return;
+    }
     if (k->key == KEY_ESC)
     {
         wm_close(w);
@@ -690,6 +776,8 @@ static void wifi_app_open(void)
     win->on_drag = wf_drag;
     win->on_wheel = wf_wheel;
     win->on_hover = wf_hover;
+    win->on_rpress = wf_rpress;
+    ui_menu_clear(&MENU);
     SB.dragging = SB.hover = 0;
     win->on_tick = wf_tick;
     win->on_close = wf_close;
