@@ -136,6 +136,10 @@ void ui_window_button_state(int hover, int pressed);
 /* Dialog frame: only a close button (no minimize / maximize). */
 UiRect ui_dialog(UiRect r, const char *title, int active);
 void ui_separator(int x, int y, int w);
+/* Fill a window's whole body (the rectangle ui_window returns) with one color. A normal window has round bottom corners, so a plain
+ * rectangle would poke out of the curve; round_bottom = 1 keeps the fill inside it. round_bottom = 0 (a maximized window or a dialog
+ * frame) is a plain rectangle. Use it instead of gfx_fill_rect for an app whose content reaches the bottom of the window. */
+void ui_fill_body(UiRect body, int round_bottom, UiRgb color);
 
 /* ---- controls ------------------------------------------------ */
 typedef enum

@@ -43,18 +43,7 @@ static void mark_cursor_row(Window *w)
 static void draw(Window *w, UiRect body)
 {
     int con = handle_of(w);
-    if (w->maximized || w->dialog)
-        gfx_fill_rect(body.x, body.y, body.w, body.h, ui_color(ui_rgb(18, 20, 28)));
-    else
-    {
-        /* The window's bottom corners are round (the body inside the 1px outline has radius_l - 1): a plain rectangle would poke
-         * out of the curve. Draw a taller rounded rect that reaches above the body and clip it to the body (as the Explorer's status bar). */
-        int rad = ui_theme()->radius_l - 1;
-        GfxClip saved = gfx_get_clip();
-        gfx_clip_intersect(body.x, body.y, body.w, body.h);
-        gfx_fill_round_rect(body.x, body.y - rad * 2, body.w, body.h + rad * 2, rad, ui_color(ui_rgb(18, 20, 28)));
-        gfx_restore_clip(saved);
-    }
+    ui_fill_body(body, !w->maximized && !w->dialog, ui_rgb(18, 20, 28));
     UiRgb text_rgb = ui_rgb(220, 224, 232);
     GfxColor text_color = ui_color(text_rgb);
     const Font *f = &font_ui_14;

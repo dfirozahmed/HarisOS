@@ -265,3 +265,19 @@ void ui_separator(int x, int y, int w)
 {
     gfx_hline(x, y, w, ui_color(THEME->border));
 }
+
+void ui_fill_body(UiRect body, int round_bottom, UiRgb color)
+{
+    if (!round_bottom)
+    {
+        gfx_fill_rect(body.x, body.y, body.w, body.h, ui_color(color));
+        return;
+    }
+    /* The body inside the 1px outline has radius_l - 1. Draw a taller rounded rect that reaches above the body and clip it to the
+     * body, so only the bottom corners are round (the same trick as the title bar in window_impl). */
+    int rad = THEME->radius_l - 1;
+    GfxClip saved = gfx_get_clip();
+    gfx_clip_intersect(body.x, body.y, body.w, body.h);
+    gfx_fill_round_rect(body.x, body.y - rad * 2, body.w, body.h + rad * 2, rad, ui_color(color));
+    gfx_restore_clip(saved);
+}
