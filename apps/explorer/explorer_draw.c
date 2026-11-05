@@ -353,10 +353,21 @@ static void draw_list(const Layout *l, const UiTheme *t)
     ui_scroll_draw(EX_SB.track, &EX_SB);
 }
 
-static void draw_status(const Layout *l, const UiTheme *t)
+static void draw_status(const Layout *l, const UiTheme *t, int round_bottom)
 {
     UiRect s = l->status;
-    gfx_fill_rect_alpha(s.x, s.y, s.w, s.h, t->surface_alt.r, t->surface_alt.g, t->surface_alt.b, 70);
+    if (round_bottom)
+    {
+        /* The window's bottom corners are round (the body inside the 1px outline has radius_l - 1), so a plain rectangle
+         * would poke out of the curve at the bottom-left / bottom-right. Draw a taller rounded rect and clip it to the bar. */
+        int rad = t->radius_l - 1;
+        GfxClip saved = gfx_get_clip();
+        gfx_clip_intersect(s.x, s.y, s.w, s.h);
+        gfx_fill_round_rect_alpha(s.x, s.y - rad * 2, s.w, s.h + rad * 2, rad, ui_color(t->surface_alt), 70);
+        gfx_restore_clip(saved);
+    }
+    else
+        gfx_fill_rect_alpha(s.x, s.y, s.w, s.h, t->surface_alt.r, t->surface_alt.g, t->surface_alt.b, 70);
     ui_separator(s.x, s.y, s.w);
 
     UiRect pill;
@@ -464,7 +475,7 @@ void ex_draw(Window *w, UiRect body)
     draw_sidebar(&l, t);
     draw_list(&l, t);
     ex_draw_toolbar(&l, t);
-    draw_status(&l, t);
+    draw_status(&l, t, !w->maximized && !w->dialog);
     if (EX_MENU.open && w != wm_top())
         EX_MENU.open = 0; /* focus moved elsewhere (another window or a dialog) */
     if (w != wm_top())
