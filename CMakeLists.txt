@@ -72,6 +72,13 @@ if(HARIS_AMD_GPU_LOG)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_LOG=1)
 endif()
 
+# The AMD GPU tests that draw on the real screen (stripes, a 2D benchmark, the 3D rectangles, the compositor test scene; the desktop is drawn
+# again afterwards). OFF by default: the offscreen tests already decide what the GPU is used for, and nothing flashes at boot.
+option(HARIS_AMD_GPU_SCREEN_TESTS "AMD GPU: also run the tests that draw on the real screen at boot" OFF)
+if(HARIS_AMD_GPU_SCREEN_TESTS)
+    list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_SCREEN_TESTS=1)
+endif()
+
 # helper: haris_efi_program
 function(haris_efi_program NAME SRC ENTRY OUTNAME)
     set(OBJ ${CMAKE_BINARY_DIR}/${NAME}.obj)

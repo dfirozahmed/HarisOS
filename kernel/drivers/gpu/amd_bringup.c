@@ -898,6 +898,10 @@ int amd_gpu_bringup_screen(void)
     }
     volatile unsigned int *fb = gfx_screen_base();
     uint32_t pitch = gfx_screen_pitch_bytes();
+    int result = 0;
+#if HARIS_AMD_GPU_SCREEN_TESTS
+    /* The tests that draw on the real screen (coloured stripes and rectangles until the desktop is drawn again): off by default, the offscreen
+     * ones already decide what is used. Turn them on with -DHARIS_AMD_GPU_SCREEN_TESTS=ON. */
     serial_print("SCREEN: about to let the GPU paint a strip of the screen\n");
     log_hex("  screen address ", (uint32_t)(unsigned long long)fb);
     log_hex("  pitch (bytes)  ", pitch);
@@ -915,7 +919,6 @@ int amd_gpu_bringup_screen(void)
     amd_gpu_log_save();
     if (!ok)
         return 0;
-    int result = 0;
 
     if (amd_gpu2d_ready()) {
     serial_print("SCREEN: about to run the GPU 2D benchmark (fill / copy on the bottom 128 rows)\n");
@@ -966,9 +969,11 @@ int amd_gpu_bringup_screen(void)
         }
     }
 #endif
+#endif /* HARIS_AMD_GPU_SCREEN_TESTS */
 #if HARIS_AMD_GPU_PSP_LEVEL >= 8
     /* M4a on the screen: the composited scene in the top right corner (only after it worked offscreen). */
     if (comp_ok) {
+#if HARIS_AMD_GPU_SCREEN_TESTS
         serial_print("COMP: about to composite 3 windows with shadows into the screen (one submission)\n");
         amd_gpu_log_save();
         int comp_screen_ok = amd_comp_test_screen((uint64_t)(unsigned long long)fb, pitch, gfx_width(), gfx_height(),
@@ -976,6 +981,9 @@ int amd_gpu_bringup_screen(void)
         log_comp_result(comp_screen_ok);
         amd_gpu_log_save();
         result = 1;
+#else
+        int comp_screen_ok = 1; /* the offscreen compose passed (comp_ok): no test scene is drawn on the screen */
+#endif
 #if HARIS_AMD_GPU_PSP_LEVEL >= 9
         /* M4b-2: from now on gfx_present() lets the GPU paste the window being dragged (the CPU does it if the GPU ever fails) */
         if (comp_screen_ok && layer_ok &&
