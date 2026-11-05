@@ -227,6 +227,11 @@ int devmgr_build(const DevmgrInputs *in)
         }
         for (int i = 0; i < in->usb_keyboards; i++)
             add(DEV_CAT_INPUT, "USB keyboard", "HID boot protocol (xHCI)", 1);
+        if (in->usb_audio) {
+            DevEntry *e = add(DEV_CAT_SYSTEM, "USB audio device", "USB Audio Class 1.0 (xHCI)", 1);
+            if (e)
+                copy(e->note, sizeof e->note, "Playback: 48 kHz 16-bit stereo; no volume control");
+        }
         /* I2C-HID devices from the ACPI tables; a started one is the touchpad in use */
         int n = in->i2c_count < DEVMGR_MAX_I2C ? in->i2c_count : DEVMGR_MAX_I2C;
         for (int i = 0; i < n; i++) {

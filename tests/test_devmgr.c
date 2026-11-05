@@ -99,6 +99,17 @@ int main(void)
     in.usb_mice = 1;
     in.usb_keyboards = 0;
 
+    /* a USB sound device: one System row with the playback note; none when it is unplugged */
+    in.usb_audio = 1;
+    int before = devmgr_build(&in);
+    int found = 0;
+    for (int i = 0; i < before; i++)
+        if (strcmp(devmgr_get(i)->name, "USB audio device") == 0 && devmgr_get(i)->has_driver && strstr(devmgr_get(i)->note, "48 kHz"))
+            found = 1;
+    CHECK(found);
+    in.usb_audio = 0;
+    CHECK(devmgr_build(&in) == before - 1);
+
     /* xHCI present but the driver did not start -> no driver */
     in.usb_running = 0;
     devmgr_build(&in);

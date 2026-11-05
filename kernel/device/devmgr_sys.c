@@ -24,6 +24,7 @@ int devmgr_refresh(void)
     in.mouse_sources = mouse_sources();
     in.usb_running = (mouse_sources() & MOUSE_SRC_USB) != 0;
     usb_hid_counts(&in.usb_mice, &in.usb_keyboards);
+    in.usb_audio = usb_audio_ready();
     for (int i = 0; i < DEVMGR_MAX_USB_MICE; i++)
     {
         in.usb_mouse_rp[i] = in.usb_mouse_wheel[i] = 0;

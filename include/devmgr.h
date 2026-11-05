@@ -80,6 +80,7 @@ typedef struct {
     int usb_mouse_rp[DEVMGR_MAX_USB_MICE];    /* per mouse: 1 = report protocol, 0 = boot protocol */
     int usb_mouse_wheel[DEVMGR_MAX_USB_MICE]; /* per mouse: its report has a scroll wheel */
     int usb_keyboards; /* USB keyboards attached right now */
+    int usb_audio;     /* a USB sound device (audio class, 48 kHz stereo playback) is attached */
     int i2c_count;
     DevmgrI2c i2c[DEVMGR_MAX_I2C];
     int storage_running; /* the AHCI / NVMe drivers ran */
