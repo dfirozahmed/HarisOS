@@ -406,7 +406,7 @@ static void bring_up(HdaCtrl *h, const PciDevice *pd)
         else if (e == HDA_ERR_TOO_BIG)
             st_str(h, " has too many widgets");
         else if (scratch.nouts == 0)
-            st_str(h, ": no analog output (HDMI?)");
+            st_str(h, ": HDMI/DP audio only (no analog output), not supported yet");
         else
         {
             st_str(h, ":");
