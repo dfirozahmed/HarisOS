@@ -408,7 +408,13 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
             c->full = 1;
         }
         c->m = m;
-        if (sig != c->sig)
+        /* Only the focus changed (a window was raised, or lost the focus): its title bar is the one thing that looks different (colours,
+         * the window buttons' symbols, the title's colour), so only that strip is drawn again. The shadow is the GPU's. */
+        int focus_only = !c->full && c->lk[WM_LOOK_SIZE] && part[WM_LOOK_FOCUS] != c->lk[WM_LOOK_FOCUS];
+        for (int k = 0; k < WM_LOOK_COUNT && focus_only; k++)
+            if (k != WM_LOOK_FOCUS && part[k] != c->lk[k])
+                focus_only = 0;
+        if (sig != c->sig && !focus_only)
             c->full = 1;
         if (c->full)
         {
@@ -429,36 +435,62 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
             }
             tally(c, w, (unsigned long long)lw * (unsigned long long)lh * 2ULL, timer_us() - t0); /* two passes */
         }
-        else if (c->dirty)
+        else
         {
-            /* The look is the same, only what it shows changed: one pass over whatever the buffer holds, inside the
-             * changed part, and of that only the opaque pieces go up (the shadow and the corners stay as they are) */
-            int op[3][4], no = opaque_rects(w, op);
-            unsigned long long px = 0;
-            for (int p = 0; p < c->dirty; p++) /* each changed part on its own (a list's new rows, its scrollbar) */
+            if (focus_only)
             {
-                const int *d = c->d[p];
-                if (gfx_layer_begin_at_keep(a, w->r.x - m, w->r.y - m, lw, lh) != 0)
-                    return -1;
-                gfx_clip_intersect(w->r.x + d[0], w->r.y + d[1], d[2] - d[0], d[3] - d[1]);
-                ui_window_shadows(0);
-                wm_draw_window_internal(w, i, top);
-                ui_window_shadows(1);
-                gfx_layer_end();
-                for (int k = 0; k < no; k++)
+                /* the title bar strip (and the line under it), drawn over black and over white into buffers of just its size, packed and
+                 * put into the surface as a layer (its round corners and outline included) */
+                int tb = ui_theme()->titlebar_h + 1;
+                void *buf[2] = {a, b};
+                for (int pass = 0; pass < 2; pass++)
                 {
-                    int x0 = op[k][0] > d[0] ? op[k][0] : d[0], y0 = op[k][1] > d[1] ? op[k][1] : d[1];
-                    int x1 = op[k][2] < d[2] ? op[k][2] : d[2], y1 = op[k][3] < d[3] ? op[k][3] : d[3];
-                    if (x1 <= x0 || y1 <= y0)
-                        continue;
-                    x0 += m; y0 += m; x1 += m; y1 += m; /* in the layer */
-                    if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, x1 - x0, y1 - y0, 1) != 0)
+                    if (gfx_layer_begin_at(buf[pass], w->r.x, w->r.y, w->r.w, tb, pass ? 0x00FFFFFFu : 0) != 0)
                         return -1;
+                    ui_window_shadows(0);
+                    wm_draw_frame_internal(w, i, top);
+                    ui_window_shadows(1);
+                    gfx_layer_end();
                 }
-                px += (unsigned long long)(d[2] - d[0]) * (unsigned long long)(d[3] - d[1]);
+                gfx_layer_pack(a, b, w->r.w, tb);
+                if (ops->upload(c->surf, a, w->r.w, 0, 0, w->r.w, tb, 0) != 0)
+                    return -1;
+                DRAWN_PART++;
+                c->ln[WM_LOOK_FOCUS]++;
+                asked(c, WM_WHY_COUNT, (unsigned long long)w->r.w * (unsigned long long)tb);
+                tally(c, w, (unsigned long long)w->r.w * (unsigned long long)tb * 2ULL, timer_us() - t0);
             }
-            DRAWN_PART++;
-            tally(c, w, px, timer_us() - t0);
+            if (c->dirty)
+            {
+                /* The look is the same, only what it shows changed: one pass over whatever the buffer holds, inside the
+                 * changed part, and of that only the opaque pieces go up (the shadow and the corners stay as they are) */
+                int op[3][4], no = opaque_rects(w, op);
+                unsigned long long px = 0;
+                for (int p = 0; p < c->dirty; p++) /* each changed part on its own (a list's new rows, its scrollbar) */
+                {
+                    const int *d = c->d[p];
+                    if (gfx_layer_begin_at_keep(a, w->r.x - m, w->r.y - m, lw, lh) != 0)
+                        return -1;
+                    gfx_clip_intersect(w->r.x + d[0], w->r.y + d[1], d[2] - d[0], d[3] - d[1]);
+                    ui_window_shadows(0);
+                    wm_draw_window_internal(w, i, top);
+                    ui_window_shadows(1);
+                    gfx_layer_end();
+                    for (int k = 0; k < no; k++)
+                    {
+                        int x0 = op[k][0] > d[0] ? op[k][0] : d[0], y0 = op[k][1] > d[1] ? op[k][1] : d[1];
+                        int x1 = op[k][2] < d[2] ? op[k][2] : d[2], y1 = op[k][3] < d[3] ? op[k][3] : d[3];
+                        if (x1 <= x0 || y1 <= y0)
+                            continue;
+                        x0 += m; y0 += m; x1 += m; y1 += m; /* in the layer */
+                        if (ops->upload(c->surf, (const unsigned int *)a + (long long)y0 * lw + x0, lw, x0, y0, x1 - x0, y1 - y0, 1) != 0)
+                            return -1;
+                    }
+                    px += (unsigned long long)(d[2] - d[0]) * (unsigned long long)(d[3] - d[1]);
+                }
+                DRAWN_PART++;
+                tally(c, w, px, timer_us() - t0);
+            }
         }
         c->sig = sig;
         for (int k = 0; k < WM_LOOK_COUNT; k++)

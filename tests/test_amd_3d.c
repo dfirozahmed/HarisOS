@@ -10,6 +10,8 @@
 /* the GPU side is not there: stand-ins so that amd_3d.c links */
 uint64_t amd_native_vram_mc_addr(uint32_t offset, uint32_t bytes) { (void)offset; (void)bytes; return 0; }
 unsigned long long timer_us(void) { return 0; }
+void idle_wait(void) {}
+void cpuload_note_idle(unsigned long long us) { (void)us; }
 int amd_gpu_busy_percent(void) { return -1; }
 int amd_gpu_ring_running(void) { return 0; }
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { (void)off; (void)v; }

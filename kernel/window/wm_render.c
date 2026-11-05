@@ -31,6 +31,19 @@ int wm_drag_memory(void **a, void **b, unsigned long long *bytes)
 /* ---- drawing ------------------------------------------------- */
 
 /* One window: frame, content, buttons and size grip. i is its place in WM_Z. */
+/* Just the frame (title bar with its buttons and title, the body's fill and the outline), none of the content: for redrawing a strip
+ * that only the focus changes (wm_comp.c). */
+void wm_draw_frame_internal(Window *w, int i, int top)
+{
+    ui_window_button_state(wm_titlebtn_hover(w), wm_titlebtn_pressed(w));
+    if (w->dialog)
+        ui_dialog(w->r, w->title, i == top);
+    else if (w->maximized)
+        ui_window_flat(w->r, w->title, i == top);
+    else
+        ui_window(w->r, w->title, i == top);
+}
+
 void wm_draw_window_internal(Window *w, int i, int top)
 {
     GfxClip saved = gfx_get_clip();
@@ -56,7 +69,7 @@ void wm_draw_window_internal(Window *w, int i, int top)
         for (int gy = 0; gy < 3; gy++)
             for (int gx = 0; gx + gy < 3; gx++)
                 gfx_fill_rect_alpha(w->r.x + w->r.w - 7 - 4 * gx, w->r.y + w->r.h - 7 - 4 * gy, 2, 2, c.r, c.g, c.b,
-                                    i == top ? 150 : 90);
+                                    120); /* the same focused or not: a focus change then redraws only the title bar */
         gfx_restore_clip(saved);
     }
 }

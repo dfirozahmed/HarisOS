@@ -4,6 +4,20 @@
 static unsigned long long WIN_START, BUSY_US;
 static int STARTED, PERCENT;
 
+static unsigned long long IDLE_US;
+
+void cpuload_note_idle(unsigned long long us)
+{
+    IDLE_US += us;
+}
+
+unsigned long long cpuload_take_idle(void)
+{
+    unsigned long long us = IDLE_US;
+    IDLE_US = 0;
+    return us;
+}
+
 void cpuload_add_busy(unsigned long long us)
 {
     BUSY_US += us;

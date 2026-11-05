@@ -762,7 +762,9 @@ void kernel_main(const BootInfo *info)
         unsigned long long pass_end = timer_us();
         /* everything except the sleep below is CPU time (see cpuload.h); what other threads used while we yielded is not the main loop's: the
          * timer ticks count it for the boot processor (task.c), and cpuload_boot_percent adds the two */
-        cpuload_add_busy(pass_end - pass_start - yielded_us);
+        unsigned long long halted_us = cpuload_take_idle(); /* halted inside the pass (a driver waiting for vertical blank) */
+        unsigned long long pass_us = pass_end - pass_start;
+        cpuload_add_busy(pass_us > yielded_us + halted_us ? pass_us - yielded_us - halted_us : 0);
         cpuload_poll(pass_end);
         for (int c = 0; c < smp_cpu_total(); c++) /* every processor: its busy ticks (see cpuload.h) */
         {

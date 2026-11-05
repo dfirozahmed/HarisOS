@@ -30,6 +30,9 @@ int main(void)
     cpuload_poll(1000);               /* clock went backwards: ignored */
     CHECK(cpuload_percent() == 16);
 
+    cpuload_note_idle(300); cpuload_note_idle(200);   /* halted inside a pass: taken once, then gone */
+    CHECK(cpuload_take_idle() == 500 && cpuload_take_idle() == 0);
+
     if (fails == 0)
         printf("cpuload tests passed\n");
     return fails ? 1 : 0;

@@ -44,6 +44,7 @@ Window *wm_blocker_internal(const Window *w);
 Window *wm_window_at_internal(int x, int y);
 void wm_input_forget_window(Window *w);
 void wm_layout_internal(Window *w);
+void wm_draw_frame_internal(Window *w, int i, int top); /* only the frame: title bar, fill, outline (no content, buttons, grip) */
 void wm_draw_window_internal(Window *w, int i, int top); /* frame, content, buttons and grip at w->r; i = its place in WM_Z */
 void wm_reclaim_internal(void); /* main loop only: gives back unused window memory */
 /* window-button state for drawing: 0 close, 1 minimize, 2 maximize, -1 none */

@@ -12,6 +12,8 @@
 #include "amd_native.h"
 #include "gfx.h"
 #include "timer.h"
+#include "idle.h"
+#include "cpuload.h"
 
 #define SGPR(n) ((uint32_t)(n)) /* source operand code of SGPR n */
 
@@ -1343,13 +1345,45 @@ static AmdSceneSums sums; /* since the last amd_comp_scene_sums() */
 #define DCN_OTG0_STATUS_DW (0x34C0u + 0x1b49u)
 static int vsync_on;
 void amd_comp_set_vsync(int on) { vsync_on = on; }
-/* Spins until the display is in vertical blank (at most 20 ms: a frame is 16.7 ms). 1 = in blank, 0 = gave up. */
+/* Waits for vertical blank without burning the CPU. A frame is about 16.7 ms and the blank only about 0.7 ms of it, so a 1 ms halt could step
+ * over it: the time of the last blank seen (taken when the wait began outside the blank, so the sighting is within microseconds of its
+ * start) and the frame period (measured over the blanks seen, 16.7 ms to start with) say when the next one comes. The CPU halts (idle_wait,
+ * at most 1 ms each, counted as idle: cpuload_note_idle) until about 2 ms before it, then polls the register for the rest. With no blank seen
+ * yet it only polls, as before. 1 = in blank, 0 = gave up. */
+#define VSYNC_MIN_PIXELS 32768u   /* changes smaller than this (in all the rectangles together) do not wait for the blank */
+#define VBLANK_PERIOD_US 16667u
+static unsigned long long vb_last;   /* timer_us() of the start of a blank seen, 0 = none yet */
+static unsigned long long vb_period = VBLANK_PERIOD_US;
+
 static int wait_vblank(void)
 {
-    unsigned long long t = timer_us();
-    if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) return 1;
+    unsigned long long t = timer_us(), slept = 0, now;
+    if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) return 1;    /* already in it (when it began is not known: no sighting kept) */
+    if (vb_last && t > vb_last) {
+        unsigned long long ahead = vb_period - (t - vb_last) % vb_period;   /* until the next blank starts */
+        while (ahead > 2000u) {
+            unsigned long long s0 = timer_us();
+            idle_wait();
+            now = timer_us();
+            slept += now - s0;
+            ahead = vb_period - (now - vb_last) % vb_period;
+        }
+    }
+    if (slept) cpuload_note_idle(slept);
+    t = timer_us();
     while (timer_us() - t < 20000u)
-        if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) return 1;
+        if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) {
+            now = timer_us();
+            if (vb_last && now > vb_last) {          /* the period: the time since the last sighting, split into whole frames */
+                unsigned long long dt = now - vb_last, n = (dt + vb_period / 2) / vb_period;
+                if (n >= 1 && n <= 600) {
+                    unsigned long long p = dt / n;
+                    if (p > 6000u && p < 40000u) vb_period = (vb_period * 3 + p) / 4;
+                }
+            }
+            vb_last = now;
+            return 1;
+        }
     return 0;
 }
 void amd_comp_scene_sums(AmdSceneSums *out)
@@ -1485,7 +1519,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     uint32_t na, nb, seq, draws = 0;
     uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
     unsigned long long t0 = comp_tsc();
-    int bi = -1, nrr = nr, ex0 = 0, ey0 = 0, ex1 = 0, ey1 = 0, sj = 0;
+    int bi = -1, nrr = nr, ex0 = 0, ey0 = 0, ex1 = 0, ey1 = 0, sj = 0, vsync_now;
     if (!sc.up || !amd_gpu_ring_running() || w > sc.bb.w || h > sc.bb.h || nr > 64) return -1;
 
     for (int i = 0; i < n; i++)
@@ -1557,7 +1591,15 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     }
     nb = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNC2_OFF, 4u));   /* its own sync word */
     if (!nb) return -1;
-    if (vsync_on && rt_mc == sc.fb_mc) {
+    /* Only a large change waits for the blank: a pointer's box or a hover highlight is too small for tearing to show, and waiting for each of
+     * those (they come with every mouse move) would keep the CPU busy for nothing. */
+    {
+        uint64_t area = 0;
+        for (int r = 0; r < nr; r++)
+            area += (uint64_t)(rects[4 * r + 2] - rects[4 * r]) * (uint64_t)(rects[4 * r + 3] - rects[4 * r + 1]);
+        if (area < VSYNC_MIN_PIXELS) vsync_now = 0; else vsync_now = 1;
+    }
+    if (vsync_on && vsync_now && rt_mc == sc.fb_mc) {
         unsigned long long w0;
         int in_blank;
         seq = frame_submit(ib, na);                                  /* the scene into the back buffer */

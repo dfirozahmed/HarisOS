@@ -124,6 +124,7 @@ int main(void){
   /* raising the first one: both change their look (focus) */
   wm_raise(w);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==8);
+  assert(!UP_OPAQUE && UP_X==0 && UP_Y==0 && UP_W==400 && UP_H==ui_theme()->titlebar_h+1);   /* the focus: only the title bar strip, as a layer */
   assert(wm_comp_items(items,8)==4 && items[3].surface==1);
   /* closing the second: its surface is freed */
   wm_close(w2);
@@ -132,7 +133,7 @@ int main(void){
   { int n = wm_comp_items(items,8); assert(n==4 && items[3].surface==2 && items[3].layer==3 && items[3].alpha>0 && items[3].alpha<255); }
   NOW += 200;
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==1 && FREED_ID==2);
-  { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==4 && cp==0); }  /* two windows drawn whole twice (a new one; the focus) */
+  { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==1 && cp==3); }  /* the second window drawn whole; three focus changes: only the title bar strip */
   int up = UPLOADS;
   /* an app asks for everything again: its look is the same, so one pass and the three opaque pieces, no shadow */
   wm_invalidate();

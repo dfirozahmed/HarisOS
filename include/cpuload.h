@@ -30,6 +30,11 @@ int cpuload_cpu_percent(int cpu);
  * (a user process, a kernel thread: cpuload_cpu_poll(0, ...) with the busy ticks of processor 0), at most 100. */
 int cpuload_boot_percent(void);
 
+/* Time the CPU spent halted inside a pass (a driver waiting for the display's vertical blank with idle_wait): not busy. The main loop takes it
+ * off the pass's length (cpuload_take_idle). */
+void cpuload_note_idle(unsigned long long us);
+unsigned long long cpuload_take_idle(void);
+
 void cpuload_add_busy(unsigned long long us);
 void cpuload_poll(unsigned long long now_us);
 int cpuload_percent(void);
