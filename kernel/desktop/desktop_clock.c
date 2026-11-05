@@ -6,6 +6,8 @@
 #include "guiapp.h"
 #include "taskbar.h"
 #include "volmenu.h"
+#include "appmenu.h"
+#include "deskmenu.h"
 #include "toast.h"
 #include "deskfiles.h"
 #include "startmenu.h"
@@ -125,6 +127,7 @@ static int refresh_battery(void)
  * caret blink. Only the taskbar or small text field is redrawn when needed. */
 int desktop_tick(void)
 {
+    unsigned long long now_ms = timer_ms();
     int clock_changed = refresh_taskbar_clock();
     clock_changed |= taskbar_set_volume(audio_volume());
     clock_changed |= refresh_wifi();
@@ -136,7 +139,15 @@ int desktop_tick(void)
     ticked |= toast_tick();     /* a toast whose time is up */
     ticked |= deskfiles_tick(); /* the Desktop folder has other files than a second ago */
     Window *top = wm_top();
-    startmenu_tick(flipped);
+    ticked |= startmenu_tick(flipped, now_ms);
+    ticked |= appmenu_tick(now_ms);
+    ticked |= deskmenu_tick(now_ms);
+    UiRect glow;
+    if (taskbar_tick(now_ms, &glow)) /* a taskbar button's hover tint moved one step */
+    {
+        wm_add_screen_damage(glow);
+        ticked = 1;
+    }
 
     if (clock_changed)
     {

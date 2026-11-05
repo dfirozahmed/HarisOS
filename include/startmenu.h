@@ -28,7 +28,7 @@ int startmenu_pointer(int x, int y, unsigned buttons);
 int startmenu_key(const KeyEvent *k);
 
 /* Call when the text caret blinked, so the search box is redrawn. */
-void startmenu_tick(int caret_flipped);
+int startmenu_tick(int caret_flipped, unsigned long long now_ms);
 
 /* The mouse wheel while the menu is open: scrolls the app list when not all rows fit (positive = down). */
 void startmenu_wheel(int steps);

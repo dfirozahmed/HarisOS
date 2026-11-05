@@ -9,6 +9,7 @@
 #define HARIS_UI_H
 
 #include "font.h"
+#include "ui_anim.h"
 #include "gfx.h"
 #include "keyboard.h"
 
@@ -155,6 +156,8 @@ typedef enum
 void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state);
 /* Same, with an icon (a UiIcon value, or -1 for none) before the label. An empty label centers the icon. */
 void ui_button_icon(UiRect r, const char *label, int icon, UiButtonKind kind, UiState state);
+/* Same, with the hover highlight at `glow` (0 = none .. 255 = full) instead of the all-or-nothing UI_STATE_HOVER. */
+void ui_button_glow(UiRect r, const char *label, int icon, UiButtonKind kind, UiState state, int glow);
 
 struct UiButton;
 typedef void (*UiButtonFn)(struct UiButton *btn, void *user);
@@ -171,6 +174,8 @@ typedef struct UiButton
     UiButtonFn on_leave; /* pointer left the button         (may be NULL) */
     void *user;          /* your own data, passed to every callback */
     int icon;            /* UiIcon + 1 drawn before the label, 0 = no icon */
+    UiFade glow;         /* hover highlight level, glides (ui_buttons_tick); zero = off */
+    int glow_shown;      /* the level the button was last drawn with: one value per frame */
 } UiButton;
 
 /* Static initializer: UiButton b = UI_BUTTON("Save", UI_BTN_PRIMARY, on_save, my_data); */
@@ -185,6 +190,7 @@ typedef struct
     int hover;   /* index under the pointer, -1 = none */
     int pressed; /* index being held down, -1 = none */
     unsigned last_buttons;
+    int animated; /* ui_buttons_tick has run: the hover highlight fades in and out (before that it switches at once) */
 } UiButtonSet;
 
 void ui_buttons_init(UiButtonSet *s);
@@ -197,6 +203,9 @@ int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons);
 /* Same, but says how much to redraw: 0 = nothing changed, 1 = redraw the whole window (a click or another
  * callback ran, which may have changed anything), 2 = only a hover / press highlight changed: redraw *dirty. */
 int ui_buttons_pointer_dirty(UiButtonSet *s, int x, int y, unsigned buttons, UiRect *dirty);
+/* Call on every main-loop pass: moves the hover highlights one step. Returns 1 when a button must be drawn again
+ * and sets *dirty to the area (screen coordinates, like the buttons' rectangles). now_ms is timer_ms(). */
+int ui_buttons_tick(UiButtonSet *s, unsigned long long now_ms, UiRect *dirty);
 /* Union of all button rectangles (to clear before a partial redraw). */
 UiRect ui_buttons_bounds(const UiButtonSet *s);
 
@@ -285,6 +294,9 @@ typedef struct
     int press;    /* item the left button is held on, -1 = none */
     int press_on; /* the pointer is still on that item */
     int checks;   /* some item is checked: labels are indented */
+    int animated; /* ui_menu_tick has run: the hover highlight fades (before that it switches at once) */
+    UiFade fade[UI_MENU_MAX]; /* per item: the hover highlight level, gliding */
+    int shown[UI_MENU_MAX];   /* the level each item was last drawn with */
 } UiMenu;
 
 void ui_menu_clear(UiMenu *m);                                  /* no items, closed */
@@ -300,6 +312,14 @@ int ui_menu_press(UiMenu *m, int x, int y);
 int ui_menu_release(UiMenu *m, int x, int y, unsigned buttons, int *id);
 int ui_menu_hover(UiMenu *m, int x, int y);                     /* x < 0: the pointer left the window */
 int ui_menu_key(UiMenu *m, const KeyEvent *k, int *id);
+/* Call on every main-loop pass while the menu is open: moves the hover highlights one step. Returns 1 when the menu must be
+ * drawn again (mark ui_menu_bounds or just the item); *dirty = the changed items' area. now_ms is timer_ms(). A menu that is never
+ * ticked still works: its highlight just switches on and off at once. */
+int ui_menu_tick(UiMenu *m, unsigned long long now_ms, UiRect *dirty);
+/* Call on every main-loop pass while the menu is open: moves the hover highlights one step. Returns 1 when something must be
+ * drawn again, *dirty = the changed items' area. now_ms is timer_ms(). A menu that is never ticked still works: its highlight
+ * just switches on and off at once. */
+int ui_menu_tick(UiMenu *m, unsigned long long now_ms, UiRect *dirty);
 void ui_menu_draw(const UiMenu *m);                             /* nothing while closed */
 
 /* ---- single-line text input ----------------------------------

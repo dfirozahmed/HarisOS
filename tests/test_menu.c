@@ -214,6 +214,28 @@ int main(void)
     ui_menu_draw(&m);
     CHECK(SHADOWS == 0);
 
+    /* animated highlight: ticking makes the hover fade in and out instead of switching */
+    build(&m);
+    ui_menu_open(&m, 100, 50, AREA);
+    UiRect dirty;
+    CHECK(!ui_menu_tick(&m, 1000, &dirty)); /* nothing hovered: nothing to draw */
+    ui_menu_hover(&m, 120, 70);
+    int hi = m.hover;
+    CHECK(!ui_menu_tick(&m, 2000, &dirty)); /* the fade starts at level 0 */
+    CHECK(ui_menu_tick(&m, 2040, &dirty) && m.shown[hi] > 0 && m.shown[hi] < 255);
+    UiRect ir = ui_menu_item_rect(&m, hi);
+    CHECK(dirty.x == ir.x && dirty.y == ir.y && dirty.w == ir.w && dirty.h == ir.h);
+    SHADOWS = ALPHAS = SEPS = ICONS = LABELS = DIM_LABELS = 0;
+    ui_menu_draw(&m);
+    CHECK(ALPHAS == 1); /* the part-way highlight is drawn */
+    CHECK(ui_menu_tick(&m, 2300, &dirty) && m.shown[hi] == 255);
+    CHECK(!ui_menu_tick(&m, 2400, &dirty)); /* settled: no more redraws */
+    ui_menu_hover(&m, -1, -1);
+    ui_menu_tick(&m, 2500, &dirty);
+    CHECK(ui_menu_tick(&m, 2540, &dirty) && m.shown[hi] < 255);
+    CHECK(ui_menu_tick(&m, 2700, &dirty) && m.shown[hi] == 0);
+    ui_menu_close(&m);
+
     /* the redraw area covers the panel and its shadow */
     ui_menu_open(&m, 100, 50, AREA);
     UiRect b = ui_menu_bounds(&m), p = ui_menu_rect(&m);

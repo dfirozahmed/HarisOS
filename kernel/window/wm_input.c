@@ -511,6 +511,15 @@ int wm_tick(void)
     for (int i = 0; i < WM_ZN; i++)
     {
         Window *w = WM_Z[i];
+        if (!w->minimized)
+        {
+            UiRect glow_area;
+            if (ui_buttons_tick(&w->set, timer_ms(), &glow_area)) /* a button's hover highlight moved one step */
+            {
+                wm_add_damage(glow_area);
+                changed = 1;
+            }
+        }
         if (w->minimized || !w->on_tick)
             continue;
         int r = WM_TIMED(w, w->on_tick(w));

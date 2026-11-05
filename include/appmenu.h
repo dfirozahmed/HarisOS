@@ -16,6 +16,8 @@ void appmenu_close(void);
 /* Same contract as startmenu_pointer(): returns 1 while the pointer is over the menu. */
 int appmenu_pointer(int x, int y, unsigned buttons);
 int appmenu_key(const KeyEvent *k);
+/* Every main-loop pass: the opening slide and the row highlights move one step. 1 = draw again. */
+int appmenu_tick(unsigned long long now_ms);
 void appmenu_draw(void); /* after the windows, before the taskbar */
 UiRect appmenu_bounds(void); /* everything the open menu draws, its shadow included */
 

@@ -3,6 +3,8 @@
 #ifndef HARIS_TASKBAR_H
 #define HARIS_TASKBAR_H
 
+#include "ui.h"
+
 #define TASKBAR_HEIGHT 52
 
 typedef enum
@@ -41,6 +43,8 @@ void taskbar_set_callbacks(TaskbarStartFn on_start, TaskbarAppFn on_app);
  * should be redrawn. Click callbacks run inside. Pass x = -1 when the pointer
  * must be ignored (e.g. while a window is being dragged). */
 int taskbar_pointer(int x, int y, unsigned buttons);
+/* Every main-loop pass: moves the buttons' hover tint one step. 1 = draw again, *dirty = the area. */
+int taskbar_tick(unsigned long long now_ms, UiRect *dirty);
 
 /* Which app button is at (x, y): its index, or -1. taskbar_app_rect() gives its rectangle
  * (valid after the taskbar was drawn once); returns 0 if there is no such app. */

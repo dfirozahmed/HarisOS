@@ -197,6 +197,11 @@ static unsigned LAST_RDOWN;        /* the right button at the last event */
 enum { SM_OPEN, SM_SEND };
 static unsigned LAST_DOWN;
 static unsigned FILTER_SIG;
+/* hover highlights that fade (startmenu_tick): the row under SEL, and the two footer buttons. *_SHOWN is the level they were last drawn with. */
+static UiFade ROW_F[MAX_ITEMS];
+static int ROW_SHOWN[MAX_ITEMS];
+static UiFade FOOT_F[2];
+static int FOOT_SHOWN[2];
 
 /* ---- geometry (small functions: no big structs are copied) ---- */
 /* How many app rows fit above the taskbar: on a short screen the menu would otherwise run under the taskbar and
@@ -406,6 +411,16 @@ static void startmenu_open(void)
     deskmenu_close();
     OPEN = 1;
     FROST_OK = 0;
+    for (int i = 0; i < MAX_ITEMS; i++)
+    {
+        ui_fade_reset(&ROW_F[i]);
+        ROW_SHOWN[i] = 0;
+    }
+    for (int i = 0; i < 2; i++)
+    {
+        ui_fade_reset(&FOOT_F[i]);
+        FOOT_SHOWN[i] = 0;
+    }
     ui_menu_close(&CTX);
     ui_edit_set_text(&SEARCH, "");
     FILTER_SIG = text_sig("");
@@ -698,10 +713,51 @@ int startmenu_pointer(int x, int y, unsigned buttons)
     return over;
 }
 
-void startmenu_tick(int caret_flipped)
+int startmenu_tick(int caret_flipped, unsigned long long now_ms)
 {
-    if (OPEN && caret_flipped)
+    if (!OPEN)
+        return 0;
+    int redraw = 0;
+    if (caret_flipped)
+    {
         dmg_search();
+        redraw = 1;
+    }
+    UiRect cd;
+    if (ui_menu_tick(&CTX, now_ms, &cd)) /* the right-click menu of a row */
+    {
+        wm_add_screen_damage(cd);
+        redraw = 1;
+    }
+    for (int i = 0; i < MAX_ITEMS; i++) /* rows past the end of the list fade out at once, so they start from nothing when they come back */
+    {
+        int on = i < VN && i == SEL && !FOOT_KEY;
+        if (i >= VN && ROW_SHOWN[i] == 0 && ROW_F[i].target == 0)
+            continue;
+        if (i >= VN)
+            ui_fade_reset(&ROW_F[i]);
+        else
+            ui_fade_to(&ROW_F[i], on ? 255 : 0, UI_FADE_MS, now_ms);
+        int lv = ui_fade_level(&ROW_F[i], now_ms);
+        if (lv != ROW_SHOWN[i])
+        {
+            ROW_SHOWN[i] = lv;
+            dmg_row(i);
+            redraw = 1;
+        }
+    }
+    for (int i = 0; i < 2; i++)
+    {
+        ui_fade_to(&FOOT_F[i], FOOT_HOVER == i + 1 || FOOT_KEY == i + 1 ? 255 : 0, UI_FADE_MS, now_ms);
+        int lv = ui_fade_level(&FOOT_F[i], now_ms);
+        if (lv != FOOT_SHOWN[i])
+        {
+            FOOT_SHOWN[i] = lv;
+            wm_add_screen_damage(power_btn_rect(i));
+            redraw = 1;
+        }
+    }
+    return redraw;
 }
 
 /* ---- drawing ---- */
@@ -779,8 +835,9 @@ void startmenu_draw(void)
         MenuItem item = item_get(VIS[i]);
         const MenuItem *it = &item;
         UiRect r = row_rect(i);
-        if (i == SEL && !FOOT_KEY)
-            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_m, ui_color(t->accent), PRESS == i ? 56 : 30);
+        if (ROW_SHOWN[i] > 0) /* the highlight fades in and out (startmenu_tick) */
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_m, ui_color(t->accent),
+                                      (unsigned char)((PRESS == i ? 56 : 30) * ROW_SHOWN[i] / 255));
         UiRect tile = ui_rect(r.x + 8, r.y + (r.h - 38) / 2, 38, 38);
         gfx_fill_round_rect_alpha(tile.x, tile.y, tile.w, tile.h, 11, gfx_rgb(255, 255, 255), 215);
         gfx_round_rect_alpha(tile.x, tile.y, tile.w, tile.h, 11, 1, ui_color(t->border), 150);
@@ -811,13 +868,13 @@ void startmenu_draw(void)
     for (int i = 0; i < 2; i++)
     {
         UiRect b = power_btn_rect(i);
-        int hot = FOOT_HOVER == i + 1 || FOOT_KEY == i + 1;
         UiRgb tint = i == 1 ? t->danger : t->accent; /* Shut down turns red */
         /* always-visible backing: on the translucent glass a bare thin icon is hard to see */
         gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, gfx_rgb(255, 255, 255), 215);
         gfx_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, 1, ui_color(t->border), 170);
-        if (hot)
-            gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, ui_color(tint), FOOT_PRESS == i + 1 ? 90 : 55);
+        if (FOOT_SHOWN[i] > 0)
+            gfx_fill_round_rect_alpha(b.x, b.y, b.w, b.h, t->radius_m, ui_color(tint),
+                                      (unsigned char)((FOOT_PRESS == i + 1 ? 90 : 55) * FOOT_SHOWN[i] / 255));
         GfxColor ic = ui_color(i == 1 ? t->danger : t->text); /* Shut down is always red */
         if (i == 0)
             icon_restart(b.x + b.w / 2, b.y + b.h / 2, ic);

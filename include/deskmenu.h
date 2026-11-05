@@ -18,6 +18,10 @@ void deskmenu_close(void);
 /* Same contract as appmenu_pointer(): returns 1 while the pointer is over the menu. */
 int deskmenu_pointer(int x, int y, unsigned buttons);
 int deskmenu_key(const KeyEvent *k);
+/* Every main-loop pass: the hover highlight fades. 1 = draw again. */
+int deskmenu_tick(unsigned long long now_ms);
+/* Every main-loop pass: the hover highlight fades. 1 = draw again. */
+int deskmenu_tick(unsigned long long now_ms);
 void deskmenu_draw(void);     /* after the windows and the other menus, before the taskbar */
 UiRect deskmenu_bounds(void); /* everything the open menu draws, its shadow included */
 

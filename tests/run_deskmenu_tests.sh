@@ -8,5 +8,6 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/tests/test_deskmenu.c" \
   "$ROOT/kernel/desktop/deskmenu.c" \
   "$ROOT/kernel/ui/ui_menu.c" \
+  "$ROOT/kernel/ui/ui_anim.c" \
   -o "$OUT"
 "$OUT"

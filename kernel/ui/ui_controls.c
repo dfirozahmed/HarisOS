@@ -12,7 +12,20 @@ void ui_button(UiRect r, const char *label, UiButtonKind kind, UiState state)
 
 void ui_button_icon(UiRect r, const char *label, int icon, UiButtonKind kind, UiState state)
 {
+    ui_button_glow(r, label, icon, kind, state, state == UI_STATE_HOVER ? 255 : 0);
+}
+
+/* The hover highlight is a lightening of the button's colours by `glow`/255 of the full amount, so it can fade;
+ * a ghost button has no fill at rest, so its highlight fades by alpha instead. */
+void ui_button_glow(UiRect r, const char *label, int icon, UiButtonKind kind, UiState state, int glow)
+{
     const UiTheme *t = THEME;
+    if (state == UI_STATE_HOVER)
+        state = UI_STATE_NORMAL; /* the glow carries the hover look from here on */
+    if (glow < 0)
+        glow = 0;
+    if (glow > 255)
+        glow = 255;
     int rad = t->radius_m;
     if (rad > r.h / 2)
         rad = r.h / 2;
@@ -41,15 +54,17 @@ void ui_button_icon(UiRect r, const char *label, int icon, UiButtonKind kind, Ui
         text = t->text;
         break;
     }
-    if (state == UI_STATE_HOVER)
-    {
-        top = lighten(top, 22);
-        bottom = lighten(bottom, 22);
-    }
-    else if (state == UI_STATE_PRESSED)
+    int part = 0; /* a ghost button part-way to its hover fill: drawn with alpha, it has no fill to lighten */
+    if (state == UI_STATE_PRESSED)
     {
         top = darken(top, 22);
         bottom = darken(bottom, 22);
+    }
+    else if (state == UI_STATE_NORMAL && glow > 0)
+    {
+        top = lighten(top, 22 * glow / 255);
+        bottom = lighten(bottom, 22 * glow / 255);
+        part = kind == UI_BTN_GHOST && glow < 255;
     }
     else if (disabled)
     {
@@ -59,10 +74,12 @@ void ui_button_icon(UiRect r, const char *label, int icon, UiButtonKind kind, Ui
 
     if ((kind == UI_BTN_PRIMARY || kind == UI_BTN_DANGER) && !disabled && state != UI_STATE_PRESSED)
         gfx_shadow(r.x, r.y, r.w, r.h, rad, 4, 0, 2, 30);
-    if (kind == UI_BTN_GHOST && (state == UI_STATE_NORMAL || disabled))
+    if (kind == UI_BTN_GHOST && ((state == UI_STATE_NORMAL && glow == 0) || disabled))
     {
         /* nothing behind the label */
     }
+    else if (part)
+        gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, rad, ui_color(bottom), (unsigned char)glow);
     else
     {
         //for a solid color, use the line below:
@@ -96,6 +113,7 @@ void ui_buttons_init(UiButtonSet *s)
     s->hover = -1;
     s->pressed = -1;
     s->last_buttons = 0;
+    s->animated = 0;
 }
 
 void ui_buttons_clear(UiButtonSet *s) { ui_buttons_init(s); }
@@ -114,13 +132,16 @@ void ui_buttons_draw(const UiButtonSet *s)
     {
         const UiButton *b = s->items[i];
         UiState st = UI_STATE_NORMAL;
+        int glow = 0;
         if (!b->enabled)
             st = UI_STATE_DISABLED;
         else if (i == s->pressed)
             st = UI_STATE_PRESSED;
+        else if (s->animated)
+            glow = b->glow_shown; /* fading in or out (ui_buttons_tick) */
         else if (i == s->hover && s->pressed < 0)
-            st = UI_STATE_HOVER;
-        ui_button_icon(b->r, b->label, b->icon - 1, b->kind, st);
+            glow = 255;
+        ui_button_glow(b->r, b->label, b->icon - 1, b->kind, st, glow);
     }
 }
 
@@ -234,6 +255,30 @@ int ui_buttons_pointer_dirty(UiButtonSet *s, int x, int y, unsigned buttons, UiR
         return 1;
     *dirty = d;
     return 2;
+}
+
+int ui_buttons_tick(UiButtonSet *s, unsigned long long now_ms, UiRect *dirty)
+{
+    int have = 0;
+    UiRect d = ui_rect(0, 0, 0, 0);
+    s->animated = 1;
+    for (int i = 0; i < s->count; i++)
+    {
+        UiButton *b = s->items[i];
+        int want = b->enabled && i == s->hover && s->pressed < 0 ? 255 : 0;
+        if (s->pressed >= 0 && i == s->pressed)
+            want = 255; /* held: the pressed look has taken over; keep the glow so a release on the button does not dip */
+        ui_fade_to(&b->glow, want, UI_FADE_MS, now_ms);
+        int level = ui_fade_level(&b->glow, now_ms);
+        if (level != b->glow_shown)
+        {
+            b->glow_shown = level;
+            dirty_add(&d, &have, b);
+        }
+    }
+    if (have && dirty)
+        *dirty = d;
+    return have;
 }
 
 int ui_buttons_pointer(UiButtonSet *s, int x, int y, unsigned buttons)

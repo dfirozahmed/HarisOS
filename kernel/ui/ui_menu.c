@@ -19,7 +19,13 @@ void ui_menu_clear(UiMenu *m)
     m->hover = m->press = -1;
     m->press_on = 0;
     m->checks = 0;
+    m->animated = 0;
     m->x = m->y = m->w = m->h = 0;
+    for (int i = 0; i < UI_MENU_MAX; i++)
+    {
+        ui_fade_reset(&m->fade[i]);
+        m->shown[i] = 0;
+    }
 }
 
 int ui_menu_add(UiMenu *m, int id, const char *label, const char *hint, int flags)
@@ -64,6 +70,11 @@ void ui_menu_open(UiMenu *m, int x, int y, UiRect bounds)
     ui_menu_close(m);
     if (m->count == 0)
         return;
+    for (int i = 0; i < UI_MENU_MAX; i++) /* opens with no highlight */
+    {
+        ui_fade_reset(&m->fade[i]);
+        m->shown[i] = 0;
+    }
 
     int indent = m->checks ? 34 : 12;
     int wl = 0, wh = 0, h = MENU_PAD * 2;
@@ -227,6 +238,39 @@ int ui_menu_key(UiMenu *m, const KeyEvent *k, int *id)
     }
 }
 
+int ui_menu_tick(UiMenu *m, unsigned long long now_ms, UiRect *dirty)
+{
+    m->animated = 1;
+    if (!m->open)
+        return 0;
+    int have = 0;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    for (int i = 0; i < m->count; i++)
+    {
+        ui_fade_to(&m->fade[i], i == m->hover && selectable(&m->items[i]) ? 255 : 0, UI_FADE_MS, now_ms);
+        int lv = ui_fade_level(&m->fade[i], now_ms);
+        if (lv == m->shown[i])
+            continue;
+        m->shown[i] = lv;
+        UiRect r = ui_menu_item_rect(m, i);
+        if (!have)
+        {
+            x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+            have = 1;
+        }
+        else
+        {
+            if (r.x < x0) x0 = r.x;
+            if (r.y < y0) y0 = r.y;
+            if (r.x + r.w > x1) x1 = r.x + r.w;
+            if (r.y + r.h > y1) y1 = r.y + r.h;
+        }
+    }
+    if (have && dirty)
+        *dirty = ui_rect(x0, y0, x1 - x0, y1 - y0);
+    return have;
+}
+
 void ui_menu_draw(const UiMenu *m)
 {
     if (!m->open)
@@ -248,7 +292,9 @@ void ui_menu_draw(const UiMenu *m)
         int off = it->flags & UI_MENU_DISABLED;
         if (!off && i == m->press && m->press_on) /* held down: darker than hover */
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 110);
-        else if (!off && i == m->hover)
+        else if (!off && m->animated && m->shown[i] > 0) /* fading in or out (ui_menu_tick) */
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), (unsigned char)(60 * m->shown[i] / 255));
+        else if (!off && !m->animated && i == m->hover)
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h - 2, t->radius_s, ui_color(t->accent), 60);
         UiRgb c = off ? t->text_dim : (it->flags & UI_MENU_DANGER) ? t->danger : t->text;
         if (it->flags & UI_MENU_CHECKED)

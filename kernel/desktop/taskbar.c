@@ -76,6 +76,12 @@ int taskbar_pointer(int x, int y, unsigned buttons)
     return ui_buttons_pointer(&SET, x, y, buttons);
 }
 
+int taskbar_tick(unsigned long long now_ms, UiRect *dirty)
+{
+    init_set();
+    return ui_buttons_tick(&SET, now_ms, dirty);
+}
+
 int taskbar_app_at(int x, int y)
 {
     init_set();
@@ -127,7 +133,8 @@ static int is_light(UiRgb c) { return (c.r * 299 + c.g * 587 + c.b * 114) / 1000
 /* a pill behind a button (idx < 0 = not a button: search, tray), the accent behind the active window */
 static void pill(int x, int y, int w, int h, int radius, int idx, int active, const UiTheme *t)
 {
-    int a = idx < 0 ? G.rest : SET.pressed == idx ? G.pressed : SET.hover == idx && SET.pressed < 0 ? G.hover : G.rest;
+    /* the hover tint fades in and out (taskbar_tick); a press shows at once */
+    int a = idx < 0 ? G.rest : SET.pressed == idx ? G.pressed : G.rest + ((int)G.hover - (int)G.rest) * ITEM[idx].glow_shown / 255;
     if (active)
         gfx_fill_round_rect_alpha(x, y, w, h, radius, ui_color(t->accent), (unsigned char)(G.active + (a - G.rest)));
     else
@@ -288,7 +295,7 @@ void taskbar_draw(void)
     {
         int icx = x + slot / 2;
         ITEM[1 + i].r = ui_rect(x, cy - SLOT / 2 + 2, slot, SLOT - 4);
-        if (APPS[i].active || SET.hover == 1 + i || SET.pressed == 1 + i)
+        if (APPS[i].active || ITEM[1 + i].glow_shown > 0 || SET.pressed == 1 + i)
             pill(x, cy - SLOT / 2 + 2, slot, SLOT - 4, t->radius_m, 1 + i, APPS[i].active, t);
         ui_icon(app_icon(APPS[i].icon), icx, cy - 1, isz, APPS[i].minimized ? t->text_dim : t->text);
         if (APPS[i].active)

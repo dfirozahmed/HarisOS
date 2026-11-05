@@ -36,4 +36,23 @@ int ui_anim_value(const UiAnim *a, unsigned long long now_ms);
 /* 1 while the value is still on its way (the caller should draw again). */
 int ui_anim_active(const UiAnim *a, unsigned long long now_ms);
 
+/* ---- UiFade: a 0..255 level that follows an on/off target (hover highlights, pressed glow) ----
+ *
+ *   ui_fade_to(&f, hovered ? 255 : 0, UI_FADE_MS, now);   // every frame is fine: nothing happens while the target is the same
+ *   int level = ui_fade_level(&f, now);                    // 0..255: scale the highlight's alpha / colour by it
+ *
+ * Turning around half way starts from where the level is now, so a quick in-and-out never jumps. A zeroed UiFade is level 0. */
+#define UI_FADE_MS 130
+
+typedef struct
+{
+    UiAnim a;
+    int target;
+} UiFade;
+
+void ui_fade_reset(UiFade *f); /* level 0, nothing running */
+void ui_fade_to(UiFade *f, int target, unsigned dur_ms, unsigned long long now_ms);
+int ui_fade_level(const UiFade *f, unsigned long long now_ms);
+int ui_fade_active(const UiFade *f, unsigned long long now_ms);
+
 #endif

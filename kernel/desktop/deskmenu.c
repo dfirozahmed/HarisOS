@@ -25,6 +25,15 @@ static void dmg(void)
 
 int deskmenu_is_open(void) { return M.open; }
 
+int deskmenu_tick(unsigned long long now_ms)
+{
+    UiRect d;
+    if (!ui_menu_tick(&M, now_ms, &d))
+        return 0;
+    wm_add_screen_damage(d);
+    return 1;
+}
+
 UiRect deskmenu_bounds(void) { return ui_menu_bounds(&M); }
 
 void deskmenu_close(void)

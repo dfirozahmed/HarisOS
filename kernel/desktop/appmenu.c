@@ -5,6 +5,7 @@
 #include "taskbar.h"
 #include "volmenu.h"
 #include "ui.h"
+#include "timer.h"
 #include "wm.h"
 #include "desktop_internal.h"
 
@@ -21,6 +22,12 @@ static int ANCHOR_X;
 static int SEL = -1;
 static int PRESS = -1;
 static unsigned LAST_BUTTONS;
+static UiAnim SLIDE;        /* the panel rises SLIDE_PX while it opens */
+static int DY;              /* SLIDE as of the last tick: one value for the whole frame */
+static UiFade ROW_F[ROWS];  /* the highlight of a row fades in and out (appmenu_tick) */
+static int ROW_SHOWN[ROWS]; /* ... and this is the level it was last drawn with */
+#define SLIDE_PX 14
+#define SLIDE_MS 170
 
 /* ---- geometry ---- */
 static int menu_h(void) { return PAD + HEAD_H + 10 + ROWS * ROW_H + 8 + PAD; }
@@ -37,7 +44,7 @@ static UiRect menu_rect(void)
     int y = H - TASKBAR_HEIGHT - MARGIN - h;
     if (y < 4)
         y = 4;
-    return ui_rect(x, y, MENU_W, h);
+    return ui_rect(x, y + DY, MENU_W, h);
 }
 /* Everything the open menu draws, its shadow included (the same area its redraws mark). */
 UiRect appmenu_bounds(void)
@@ -91,7 +98,40 @@ void appmenu_open(Window *w, int anchor_x)
     WIN = w;
     ANCHOR_X = anchor_x;
     SEL = PRESS = -1;
+    for (int i = 0; i < ROWS; i++)
+    {
+        ui_fade_reset(&ROW_F[i]);
+        ROW_SHOWN[i] = 0;
+    }
+    ui_anim_start(&SLIDE, SLIDE_PX, 0, SLIDE_MS, timer_ms());
+    DY = SLIDE_PX;
     dmg_all();
+}
+
+int appmenu_tick(unsigned long long now_ms)
+{
+    if (!OPEN)
+        return 0;
+    int redraw = 0;
+    int dy = ui_anim_value(&SLIDE, now_ms);
+    if (dy != DY) /* moved by a pixel: appmenu_bounds covers the whole travel */
+    {
+        DY = dy;
+        dmg_all();
+        redraw = 1;
+    }
+    for (int i = 0; i < ROWS; i++)
+    {
+        ui_fade_to(&ROW_F[i], i == SEL ? 255 : 0, UI_FADE_MS, now_ms);
+        int lv = ui_fade_level(&ROW_F[i], now_ms);
+        if (lv != ROW_SHOWN[i])
+        {
+            ROW_SHOWN[i] = lv;
+            dmg_row(i);
+            redraw = 1;
+        }
+    }
+    return redraw;
 }
 
 static void activate(int row)
@@ -264,8 +304,9 @@ void appmenu_draw(void)
     {
         UiRect r = row_rect(i);
         UiRgb tint = i == 2 ? t->danger : t->accent;
-        if (i == SEL)
-            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_m, ui_color(tint), PRESS == i ? 56 : 30);
+        if (ROW_SHOWN[i] > 0)
+            gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_m, ui_color(tint),
+                                      (unsigned char)((PRESS == i ? 56 : 30) * ROW_SHOWN[i] / 255));
         ui_text_in_color(ui_rect(r.x + 12, r.y, r.w - 24, r.h), label[i], UI_TEXT_LABEL, UI_ALIGN_LEFT,
                          i == 2 ? t->danger : t->text);
     }

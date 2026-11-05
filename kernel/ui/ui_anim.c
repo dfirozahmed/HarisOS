@@ -57,3 +57,31 @@ int ui_anim_active(const UiAnim *a, unsigned long long now_ms)
 {
     return a->dur_ms != 0 && now_ms < a->start_ms + a->dur_ms;
 }
+
+void ui_fade_to(UiFade *f, int target, unsigned dur_ms, unsigned long long now_ms)
+{
+    if (target < 0)
+        target = 0;
+    if (target > 255)
+        target = 255;
+    if (target == f->target)
+        return;
+    ui_anim_start(&f->a, ui_anim_value(&f->a, now_ms), target, dur_ms, now_ms);
+    f->target = target;
+}
+
+int ui_fade_level(const UiFade *f, unsigned long long now_ms)
+{
+    return ui_anim_value(&f->a, now_ms);
+}
+
+int ui_fade_active(const UiFade *f, unsigned long long now_ms)
+{
+    return ui_anim_active(&f->a, now_ms);
+}
+
+void ui_fade_reset(UiFade *f)
+{
+    ui_anim_set(&f->a, 0);
+    f->target = 0;
+}
