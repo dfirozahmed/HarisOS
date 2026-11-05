@@ -281,9 +281,42 @@ static void shadow_axis(uint32_t *code, uint32_t *n, uint32_t vpos, uint32_t vou
     code[(*n)++] = a3d_vop2(A3D_OP2_MUL_F32, vout, vout, SGPR(4));               /* vout *= 1 / r              */
     code[(*n)++] = a3d_vop2(A3D_OP2_MIN_F32, vout, vout, A3D_SRC_ONE_F);         /* vout = min(1.0, vout)      */
     code[(*n)++] = a3d_vop2(A3D_OP2_MAX_F32, vout, vout, A3D_SRC_ZERO);          /* vout = max(0.0, vout)      */
+    for (uint32_t pass = 0; pass < 2; pass++) /* smoothstep twice (as gfx_shadow on the CPU): a long, soft tail, no visible edge */
+    {
+        code[(*n)++] = a3d_vop2(A3D_OP2_MUL_F32, 5, vout, A3D_SRC_VGPR(vout));   /* v5 = f * f                 */
+        code[(*n)++] = a3d_vop2(A3D_OP2_SUB_F32, vout, vout, A3D_SRC_ONE_F);     /* vout = 1 - f               */
+        code[(*n)++] = a3d_vop2(A3D_OP2_ADD_F32, vout, vout, A3D_SRC_VGPR(vout)); /* vout = 2 (1 - f)          */
+        code[(*n)++] = a3d_vop2(A3D_OP2_ADD_F32, vout, vout, A3D_SRC_ONE_F);     /* vout = 3 - 2 f             */
+        code[(*n)++] = a3d_vop2(A3D_OP2_MUL_F32, vout, vout, A3D_SRC_VGPR(5));   /* vout = f * f * (3 - 2 f)   */
+    }
 }
 
-/* A soft black shadow: alpha = s5 * fx * fy (the same formula as the M3 shadow shader, which amd_3d_shadow_alpha() checks). */
+/* The alpha (0 .. 255) the compositor's shadow shader gives pixel (x, y) of the job's rectangle, in integers: the distance to the nearer
+ * edge in half pixels, clamped to 0 .. 2R, as a fraction u of 16 bits, smoothstep twice per axis, alpha = a * fx * fy. */
+static uint32_t smooth16(uint32_t u)
+{
+    uint64_t s = ((uint64_t)u * u >> 16) * (3u * 65536u - 2u * u) >> 16;
+    return (uint32_t)s;
+}
+
+uint32_t amd_comp_shadow_alpha(const Amd3dJob *job, uint32_t x, uint32_t y)
+{
+    int r2 = 2 * (int)job->shadow_r;
+    int tx = 2 * ((int)x - (int)job->x0) + 1, tx2 = 2 * ((int)job->x1 - (int)x) - 1;
+    int ty = 2 * ((int)y - (int)job->y0) + 1, ty2 = 2 * ((int)job->y1 - (int)y) - 1;
+    if (!r2) return job->a;
+    if (tx2 < tx) tx = tx2;
+    if (ty2 < ty) ty = ty2;
+    if (tx < 0) tx = 0;
+    if (tx > r2) tx = r2;
+    if (ty < 0) ty = 0;
+    if (ty > r2) ty = r2;
+    uint32_t fx = smooth16(smooth16((uint32_t)tx * 65536u / (uint32_t)r2));
+    uint32_t fy = smooth16(smooth16((uint32_t)ty * 65536u / (uint32_t)r2));
+    return (uint32_t)(((uint64_t)job->a * fx * fy + (1ull << 31)) >> 32);
+}
+
+/* A soft black shadow: alpha = s5 * fx * fy (the M3 shadow shader's formula with a smoother ramp; amd_comp_shadow_alpha() checks it). */
 uint32_t amd_comp_build_ps_shadow(uint32_t *code)
 {
     uint32_t n = 0;
@@ -905,7 +938,7 @@ static uint32_t scene_px(uint32_t x, uint32_t y, int bgr)
         shadow_rect(k, &s.x0, &s.y0, &s.x1, &s.y1);
         s.shadow_r = SHADOW_R; s.a = SHADOW_A;
         if (x >= s.x0 && x < s.x1 && y >= s.y0 && y < s.y1)
-            v = amd_3d_blend_px(0, v, amd_3d_shadow_alpha(&s, x, y));
+            v = amd_3d_blend_px(0, v, amd_comp_shadow_alpha(&s, x, y));
         if (x >= win[k].x0 && x < win[k].x1 && y >= win[k].y0 && y < win[k].y1) {
             uint32_t t = win_texel(k, x - win[k].x0, y - win[k].y0, bgr);
             v = win[k].opacity >= 255 ? t : amd_3d_blend_px(t, v, win[k].opacity);
@@ -1730,7 +1763,7 @@ static uint32_t sc_want(const uint32_t *lay, uint32_t x, uint32_t y, int *in)
     if ((int)x >= SC_SH_X0 && (int)x < SC_SH_X1 && (int)y >= SC_SH_Y0 && (int)y < SC_SH_Y1) {
         Amd3dJob s = { 0 };
         s.x0 = SC_SH_X0; s.y0 = SC_SH_Y0; s.x1 = SC_SH_X1; s.y1 = SC_SH_Y1; s.shadow_r = SC_SH_R; s.a = SC_SH_A;
-        v = amd_3d_blend_px(0, v, amd_3d_shadow_alpha(&s, x, y));
+        v = amd_3d_blend_px(0, v, amd_comp_shadow_alpha(&s, x, y));
         *in = 1;
     }
     if (x >= 40u && x < 136u && y >= 30u && y < 94u) {

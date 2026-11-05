@@ -477,6 +477,27 @@ int main(void)
         check(amd_3d_shadow_alpha(&sj, 128, 32) == 160 && amd_3d_shadow_alpha(&sj, 24, 32) == 10 && amd_3d_shadow_alpha(&sj, 24, 8) == 1,
               "shadow alpha: 160 in the middle, 10 at the left edge, 1 in the corner");
         check(amd_3d_build_ps(sps, &sj) <= AMD_3D_PS_MAX, "shadow pixel shader fits");
+
+        /* the compositor's shadow: smoothstep twice per axis, integer alpha against the float formula for every pixel */
+        worst = 0;
+        for (y = sj.y0; y < sj.y1; y++)
+            for (x = sj.x0; x < sj.x1; x++) {
+                float px = (float)x + 0.5f, py = (float)y + 0.5f, fx, fy, al;
+                uint32_t want, got = amd_comp_shadow_alpha(&sj, x, y);
+                int pass;
+                fx = px - (float)sj.x0 < (float)sj.x1 - px ? px - (float)sj.x0 : (float)sj.x1 - px;
+                fy = py - (float)sj.y0 < (float)sj.y1 - py ? py - (float)sj.y0 : (float)sj.y1 - py;
+                fx /= 8.0f; fy /= 8.0f;
+                if (fx > 1.0f) fx = 1.0f;
+                if (fy > 1.0f) fy = 1.0f;
+                for (pass = 0; pass < 2; pass++) { fx = fx * fx * (3.0f - 2.0f * fx); fy = fy * fy * (3.0f - 2.0f * fy); }
+                al = 160.0f * fx * fy;
+                want = (uint32_t)(al + 0.5f);
+                if ((got > want ? got - want : want - got) > worst) worst = got > want ? got - want : want - got;
+            }
+        check(worst <= 1, "compositor shadow: integer alpha within 1 of the smoothstep-twice formula for every pixel");
+        check(amd_comp_shadow_alpha(&sj, 128, 32) == 160 && amd_comp_shadow_alpha(&sj, 24, 32) < 10 && amd_comp_shadow_alpha(&sj, 24, 8) == 0,
+              "compositor shadow alpha: 160 in the middle, a soft tail at the edge");
     }
 
     /* M3 blur: the expected value inside one checker cell, and across a cell edge (3 texels of one colour, 6 of the other per 3 x 3) */

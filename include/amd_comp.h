@@ -9,6 +9,7 @@
 #define HARIS_AMD_COMP_H
 
 #include "gpu_types.h"
+#include "amd_3d.h"
 
 /* A picture in VRAM: linear, 8-8-8-8, the same byte order as the target. */
 typedef struct
@@ -38,6 +39,7 @@ uint32_t amd_comp_build_vs(uint32_t *code);         /* rectangle from user SGPRs
 uint32_t amd_comp_build_ps_fill(uint32_t *code);    /* s0 = (r, g), s1 = (b, a) as halves */
 uint32_t amd_comp_build_ps_image(uint32_t *code);   /* s0..s7 = image resource, s8 / s9 = surface x / y minus screen x / y, s10 = opacity */
 uint32_t amd_comp_build_ps_shadow(uint32_t *code);  /* s0..s3 = x0, y0, x1, y1, s4 = 1 / r, s5 = alpha (floats) */
+uint32_t amd_comp_shadow_alpha(const Amd3dJob *job, uint32_t x, uint32_t y); /* what that shader gives a pixel, in integers (for the checks) */
 uint32_t amd_comp_build_ps_layer(uint32_t *code);   /* s0..s7 = image resource (alpha from the 4th byte), s8 / s9 as for the image */
 uint32_t amd_comp_build_ps_fade(uint32_t *code);    /* as layer, faded: colour times s10 (0 .. 1, a float), what shows through 1 - s10 * (1 - a) (a window opening / closing) */
 /* One axis of a 3-tap box blur (frosted glass): s0..s7 = image, s8 / s9 = texel offset, s10 = tap spacing k (integer), s11 / s12 = lowest /
