@@ -180,7 +180,7 @@ int console_window_open_for(const char *title, int subsystem)
 {
     if (subsystem == ELF_SUBSYS_CONSOLE)
         return console_window_open(title);
-    return console_open_hidden(title);
+    return console_open_hidden(title, subsystem == ELF_SUBSYS_GUI);
 }
 
 int console_windows_poll(void)

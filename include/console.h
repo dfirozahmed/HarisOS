@@ -35,8 +35,8 @@ int console_valid(int con);
 /* A console that has no window until its program needs one. The window is wanted when the program writes, reads, or ends with a
  * non-zero code. console_take_pending (called from the desktop tick, never from a system call) hands out the handle of one such
  * console, now no longer hidden, so the caller can give it a window; -1 = none. A hidden console whose program ended without
- * ever asking for a window is closed there. This is how a GUI program that prints nothing opens no empty Console window. */
-int console_open_hidden(const char *title);
+ * ever asking for a window (or, for a quiet one, ended cleanly) is closed there. This is how a GUI program that prints nothing opens no empty Console window. */
+int console_open_hidden(const char *title, int quiet); /* quiet = 1: if the program ends with code 0 before a window opened, even printed text is dropped */
 int console_take_pending(void);
 
 /* Output: returns the number of bytes taken (n), or -1 for an invalid handle. */

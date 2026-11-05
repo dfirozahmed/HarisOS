@@ -249,8 +249,8 @@ int main(void)
     /* hidden consoles: no window until the program prints, reads, or fails */
     {
         int p;
-        int a1 = console_open_hidden("silent"), a2 = console_open_hidden("prints"), a3 = console_open_hidden("reads");
-        int a4 = console_open_hidden("fails"), a5 = console_open_hidden("empty write");
+        int a1 = console_open_hidden("silent", 0), a2 = console_open_hidden("prints", 0), a3 = console_open_hidden("reads", 0);
+        int a4 = console_open_hidden("fails", 0), a5 = console_open_hidden("empty write", 0);
         CHECK(a1 >= 0 && a2 >= 0 && a3 >= 0 && a4 >= 0 && a5 >= 0);
         CHECK(console_take_pending() == -1);                       /* nobody asked yet */
         console_write(a2, "hi\n", 3);
@@ -273,6 +273,21 @@ int main(void)
         console_close(a2);
         console_close(a3);
         console_close(a4);
+
+        /* a quiet (GUI) console: a goodbye line printed just before a clean exit opens no window; a failure, or text while it runs, does */
+        int q1 = console_open_hidden("gui bye", 1), q2 = console_open_hidden("gui fails", 1), q3 = console_open_hidden("gui prints", 1);
+        console_write(q1, "bye\n", 4);
+        console_finish(q1, 0);
+        console_write(q2, "bye\n", 4);
+        console_finish(q2, 1);
+        console_write(q3, "debug\n", 6);                          /* still running */
+        int seen[3], m = 0;
+        while ((p = console_take_pending()) >= 0 && m < 3)
+            seen[m++] = p;
+        CHECK(!console_valid(q1));                                 /* closed without a window */
+        CHECK(m == 2 && ((seen[0] == q2 && seen[1] == q3) || (seen[0] == q3 && seen[1] == q2))); /* the failure and the running one get a window */
+        console_close(q2);
+        console_close(q3);
     }
 
     /* all slots in use */
