@@ -159,6 +159,8 @@ int devmgr_build(const DevmgrInputs *in)
         if (in && in->storage_running && d->class_code == 0x01 &&
             ((d->subclass == 0x06 && d->prog_if == 0x01) || (d->subclass == 0x08 && d->prog_if == 0x02)))
             driver = 1;
+        if (in && in->storage_running && d->vendor_id == 0x1AF4 && (d->device_id == 0x1001 || d->device_id == 0x1042))
+            driver = 1; /* virtio-blk */
         DevEntry *e = add(pci_category(d), pci_class_name(d->class_code, d->subclass), detail, driver);
         if (e && in && d->class_code == 0x02) {
             /* a network card: the driver says how it is doing; without one, the note says what is supported */
@@ -166,7 +168,7 @@ int devmgr_build(const DevmgrInputs *in)
                 e->has_driver = in->net_working;
                 copy(e->note, sizeof e->note, in->net_status);
             } else if (d->subclass == 0x00) {
-                copy(e->note, sizeof e->note, "No driver (supported: Intel e1000, Realtek RTL8168)");
+                copy(e->note, sizeof e->note, "No driver (supported: Intel e1000, Realtek RTL8168, virtio-net)");
             } else {
                 copy(e->note, sizeof e->note, "No driver (wireless and other adapters are not supported)");
             }

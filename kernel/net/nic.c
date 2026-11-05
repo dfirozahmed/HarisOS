@@ -4,7 +4,7 @@
 #include "pci.h"
 #include "task.h"
 
-static const NicDriver *const DRIVERS[] = {&NIC_E1000, &NIC_RTL8168, &NIC_RTL8821CE};
+static const NicDriver *const DRIVERS[] = {&NIC_E1000, &NIC_RTL8168, &NIC_RTL8821CE, &NIC_VIRTIO};
 #define NDRIVERS ((int)(sizeof DRIVERS / sizeof DRIVERS[0]))
 
 static const NicDriver *ACTIVE;  /* the driver of the card in use */

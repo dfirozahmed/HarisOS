@@ -18,7 +18,8 @@ enum
     BLK_SATA,
     BLK_RAM, /* tests */
     BLK_PART,
-    BLK_USB /* USB mass storage (pen drive, external disk): can be unplugged, see blk_remove() */
+    BLK_USB, /* USB mass storage (pen drive, external disk): can be unplugged, see blk_remove() */
+    BLK_VIRTIO /* the virtual disk of QEMU / KVM (virtio_blk.c) */
 };
 
 /* what a partition holds, from its type (GPT type GUID or MBR type byte) */

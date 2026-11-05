@@ -162,6 +162,8 @@ const char *blk_kind_name(int kind)
         return "Partition";
     case BLK_USB:
         return "USB drive";
+    case BLK_VIRTIO:
+        return "Virtual disk";
     default:
         return "Disk";
     }
