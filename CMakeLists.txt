@@ -459,7 +459,7 @@ foreach(PROG ${USER_PROGRAMS})
         OUTPUT  ${PROG_OBJ}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
         COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
-        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fsutil.h ${CMAKE_SOURCE_DIR}/user/fputest.h
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/mp3dec.c ${CMAKE_SOURCE_DIR}/user/mp3dec.h ${CMAKE_SOURCE_DIR}/user/mp3tab.h ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fsutil.h ${CMAKE_SOURCE_DIR}/user/fputest.h
         COMMENT "Compiling user/${PROG}.c"
         VERBATIM
     )
