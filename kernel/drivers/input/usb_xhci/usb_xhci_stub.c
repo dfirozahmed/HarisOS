@@ -11,6 +11,12 @@ int usb_mouse_info(int index, int *report_protocol, int *has_wheel)
     return -1;
 }
 int usb_audio_ready(void) { return 0; }
+int usb_audio_volume(void) { return -1; }
+int usb_audio_set_volume(int percent)
+{
+    (void)percent;
+    return -1;
+}
 int usb_audio_play_pcm(const short *stereo48, unsigned long frames)
 {
     (void)stereo48; (void)frames;

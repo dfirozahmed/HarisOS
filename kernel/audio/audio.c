@@ -5,15 +5,15 @@
 #include "usb.h"
 #include "wav.h"
 
-int audio_volume(void) { return hda_ready() ? hda_volume() : -1; }
+/* Volume belongs to the device that plays: HD Audio when there is one, else the USB sound device (if it has a volume control). */
+int audio_volume(void) { return hda_ready() ? hda_volume() : usb_audio_volume(); }
 
-int audio_set_volume(int percent) { return hda_ready() ? hda_set_volume(percent) : -1; }
+int audio_set_volume(int percent) { return hda_ready() ? hda_set_volume(percent) : usb_audio_set_volume(percent); }
 
 int audio_volume_step(int delta)
 {
-    if (!hda_ready())
-        return -1;
-    return hda_set_volume(hda_volume() + delta);
+    int cur = audio_volume();
+    return cur < 0 ? -1 : audio_set_volume(cur + delta);
 }
 
 int audio_play_wav(const unsigned char *file, unsigned long len)

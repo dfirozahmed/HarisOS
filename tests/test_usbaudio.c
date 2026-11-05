@@ -40,6 +40,10 @@ static void fmt(u8 ch, u8 subframe, u8 bits, unsigned nfreq, const unsigned *fre
 }
 static void ep(u8 addr, u8 attr, unsigned mps, u8 interval) { u8 d[9] = {9, 5, addr, attr, (u8)mps, (u8)(mps >> 8), interval, 0, 0}; put(d, 9); }
 
+static void it(u8 id, unsigned type) { u8 d[12] = {12, 0x24, 2, id, (u8)type, (u8)(type >> 8), 0, 2, 3, 0, 0, 0}; put(d, 12); }
+static void ot(u8 id, unsigned type, u8 src) { u8 d[9] = {9, 0x24, 3, id, (u8)type, (u8)(type >> 8), 0, src, 0}; put(d, 9); }
+static void fu(u8 id, u8 src, u8 master, u8 left, u8 right) { u8 d[10] = {10, 0x24, 6, id, src, 1, master, left, right, 0}; put(d, 10); }
+
 static int find(AudDesc *ad)
 {
     Xhci x;
@@ -86,6 +90,45 @@ int main(void)
     /* not an audio streaming interface at all (a HID interface with an endpoint) */
     N = 0; iface(0, 0, 1, 3, 1); ep(0x81, 0x03, 8, 10);
     CHECK(find(&ad) == 0);
+
+    /* ---- volume / mute: the Feature Unit that feeds the speaker ---- */
+    /* playback chain USB in (1) -> FU 2 -> speaker (3), and a microphone chain FU 5 -> USB out (6) that must be ignored */
+    N = 0;
+    iface(0, 0, 0, 1, 1);
+    it(1, 0x0101); fu(2, 1, 3, 0, 0); ot(3, 0x0301, 2);
+    it(4, 0x0201); fu(5, 4, 3, 0, 0); ot(6, 0x0101, 5);
+    iface(1, 1, 1, 1, 2); fmt(2, 2, 16, 1, f48); ep(0x01, 0x05, 196, 1);
+    CHECK(find(&ad) == 1 && ad.ac_iface == 0 && ad.fu_id == 2 && ad.mute_ch == 0 && ad.vol_ch == 0);
+    /* controls only on the channels, not on the master: left channel is used */
+    N = 0;
+    iface(0, 0, 0, 1, 1);
+    it(1, 0x0101); fu(2, 1, 0, 3, 3); ot(3, 0x0302, 2);
+    iface(1, 1, 1, 1, 2); fmt(2, 2, 16, 1, f48); ep(0x01, 0x05, 196, 1);
+    CHECK(find(&ad) == 1 && ad.fu_id == 2 && ad.mute_ch == 1 && ad.vol_ch == 1);
+    /* mute without volume */
+    N = 0;
+    iface(0, 0, 0, 1, 1);
+    it(1, 0x0101); fu(2, 1, 1, 0, 0); ot(3, 0x0301, 2);
+    iface(1, 1, 1, 1, 2); fmt(2, 2, 16, 1, f48); ep(0x01, 0x05, 196, 1);
+    CHECK(find(&ad) == 1 && ad.mute_ch == 0 && ad.vol_ch == -1);
+    /* a mixer between the unit and the speaker: no volume control is claimed */
+    N = 0;
+    iface(0, 0, 0, 1, 1);
+    it(1, 0x0101); fu(2, 1, 3, 0, 0); ot(3, 0x0301, 9);
+    iface(1, 1, 1, 1, 2); fmt(2, 2, 16, 1, f48); ep(0x01, 0x05, 196, 1);
+    CHECK(find(&ad) == 1 && ad.fu_id == 0 && ad.vol_ch == -1 && ad.mute_ch == -1);
+    /* no AudioControl descriptors at all (the earlier cases): streaming still found, no volume */
+    N = 0; iface(1, 1, 1, 1, 2); fmt(2, 2, 16, 1, f48); ep(0x01, 0x05, 196, 1);
+    CHECK(find(&ad) == 1 && ad.fu_id == 0);
+
+    /* percent <-> 1/256 dB over a device range of -100 dB .. 0 dB */
+    CHECK(aud_percent_to_db(-25600, 0, 0) == -25600 && aud_percent_to_db(-25600, 0, 100) == 0 && aud_percent_to_db(-25600, 0, 50) == -12800);
+    CHECK(aud_percent_to_db(-25600, 0, -5) == -25600 && aud_percent_to_db(-25600, 0, 400) == 0); /* clamped */
+    CHECK(aud_percent_to_db(-5120, 2560, 100) == 2560 && aud_percent_to_db(-5120, 2560, 0) == -5120); /* a range that goes above 0 dB */
+    for (int p = 0; p <= 100; p++)
+        CHECK(aud_db_to_percent(-25600, 0, aud_percent_to_db(-25600, 0, p)) == p); /* the two directions agree */
+    CHECK(aud_db_to_percent(-25600, 0, -30000) == 0 && aud_db_to_percent(-25600, 0, 500) == 100);
+    CHECK(aud_db_to_percent(5, 5, 5) == 100); /* a range without width cannot be scaled */
 
     if (fails) { printf("%d check(s) failed\n", fails); return 1; }
     printf("usbaudio tests passed\n");

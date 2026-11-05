@@ -177,6 +177,9 @@ typedef struct
 {
     int iface, alt, addr; /* AudioStreaming interface, the alternate setting that plays 48 kHz stereo 16-bit, endpoint address */
     unsigned mps, interval;
+    /* volume / mute: the Feature Unit between the USB streaming input and the speaker / headphone output (AudioControl interface) */
+    int ac_iface, fu_id;      /* fu_id 0 = none found */
+    int mute_ch, vol_ch;      /* channel the control sits on (0 = master, 1 = left), -1 = the unit has no such control */
 } AudDesc;
 
 typedef struct
@@ -186,6 +189,10 @@ typedef struct
     int slot, dev, dci;
     Ring ring;
     u64 buf_phys[2];
+    int ac_iface, fu_id, mute_ch, vol_ch;
+    int vol_min, vol_max; /* volume range in 1/256 dB (signed), valid when vol_ch >= 0 */
+    int percent;          /* last volume set (or read at start), 0..100 */
+    int pending;          /* a volume change asked for while playing: applied by the play loop */
 } Aud;
 
 /* The bulk endpoints of the first bulk-only mass-storage interface (alternate setting 0). */
@@ -248,6 +255,8 @@ extern Aud AUD;
 int aud_find(Xhci *x, u32 total, AudDesc *ad);
 int aud_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const AudDesc *ad);
 void aud_release(void);
+int aud_percent_to_db(int vmin, int vmax, int percent);
+int aud_db_to_percent(int vmin, int vmax, int v);
 
 /* ---- usb_xhci_dev.c ---- */
 int bring_up(Xhci *x, const Loc *L);

@@ -24,6 +24,9 @@ int aud_find(Xhci *x, u32 total, AudDesc *ad)
 {
     int in_as = 0, ok_fmt = 0, iface = -1, alt = 0;
     int have = 0;
+    int ac_iface = -1, in_ac = 0, out_src = 0; /* AudioControl interface; source id of the speaker / headphone output terminal */
+    struct { int id, src, mute_ch, vol_ch; } fu[4];
+    int nfu = 0;
     for (u32 off = 0; off + 2 <= total && x->dma[off] >= 2; off += x->dma[off])
     {
         u8 len = x->dma[off], type = x->dma[off + 1];
@@ -32,9 +35,38 @@ int aud_find(Xhci *x, u32 total, AudDesc *ad)
         if (type == 4 && len >= 9) /* interface: class 1 (audio), subclass 2 (streaming) */
         {
             in_as = x->dma[off + 5] == 1 && x->dma[off + 6] == 2;
+            in_ac = x->dma[off + 5] == 1 && x->dma[off + 6] == 1;
+            if (in_ac && ac_iface < 0)
+                ac_iface = x->dma[off + 2];
             ok_fmt = 0;
             iface = x->dma[off + 2];
             alt = x->dma[off + 3];
+        }
+        else if (type == 0x24 && in_ac && len >= 9 && x->dma[off + 2] == 3) /* Output Terminal: type 0x03xx = speaker, headphones ... */
+        {
+            unsigned tt = x->dma[off + 4] | (unsigned)x->dma[off + 5] << 8;
+            if ((tt >> 8) == 3 && !out_src)
+                out_src = x->dma[off + 7]; /* bSourceID (off + 8 is iTerminal) */
+        }
+        else if (type == 0x24 && in_ac && len >= 8 && x->dma[off + 2] == 6 && nfu < 4) /* Feature Unit: id, source, control size, controls */
+        {
+            unsigned cs = x->dma[off + 5];
+            fu[nfu].id = x->dma[off + 3];
+            fu[nfu].src = x->dma[off + 4];
+            fu[nfu].mute_ch = fu[nfu].vol_ch = -1;
+            if (cs >= 1 && cs <= 2 && off + 6u + cs <= off + len)
+            {
+                unsigned nch = (len - 7u) / cs; /* bmaControls[0] is the master, then one per channel (the last byte is iFeature) */
+                for (unsigned c = 0; c < nch && c < 3; c++)
+                {
+                    unsigned bits = x->dma[off + 6 + c * cs];
+                    if ((bits & 1) && fu[nfu].mute_ch < 0)
+                        fu[nfu].mute_ch = (int)c;
+                    if ((bits & 2) && fu[nfu].vol_ch < 0)
+                        fu[nfu].vol_ch = (int)c;
+                }
+            }
+            nfu++;
         }
         else if (type == 0x24 && len >= 8 && in_as && x->dma[off + 2] == 2 && x->dma[off + 3] == 1) /* FORMAT_TYPE, type I (PCM) */
         {
@@ -66,7 +98,133 @@ int aud_find(Xhci *x, u32 total, AudDesc *ad)
             }
         }
     }
+    if (have)
+    {
+        ad->ac_iface = ac_iface;
+        ad->fu_id = 0;
+        ad->mute_ch = ad->vol_ch = -1;
+        for (int i = 0; i < nfu && out_src; i++) /* the unit that feeds the speaker; with a mixer in between we leave the volume alone */
+            if (fu[i].id == out_src && ac_iface >= 0)
+            {
+                ad->fu_id = fu[i].id;
+                ad->mute_ch = fu[i].mute_ch;
+                ad->vol_ch = fu[i].vol_ch;
+            }
+    }
     return have;
+}
+
+/* Volume is a signed 16 bit number in 1/256 dB; the percentage runs linearly over the device's own range. */
+int aud_percent_to_db(int vmin, int vmax, int percent)
+{
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+    return vmin + (int)(((long long)(vmax - vmin) * percent + 50) / 100);
+}
+
+int aud_db_to_percent(int vmin, int vmax, int v)
+{
+    if (vmax <= vmin)
+        return 100;
+    if (v < vmin)
+        v = vmin;
+    if (v > vmax)
+        v = vmax;
+    return (int)(((long long)(v - vmin) * 100 + (vmax - vmin) / 2) / (vmax - vmin));
+}
+
+/* ---- volume and mute: class requests to the Feature Unit (UAC 1.0 section 5.2.2.4). Mute selector 1 (1 byte, 1 = muted), volume
+ * selector 2 (signed 16 bit, 1/256 dB). wValue = selector << 8 | channel, wIndex = unit id << 8 | AudioControl interface. ---- */
+#define UAC_SET_CUR 0x01
+#define UAC_GET_CUR 0x81
+#define UAC_GET_MIN 0x82
+#define UAC_GET_MAX 0x83
+
+static int aud_ctl(Aud *a, u8 req, u8 sel, int ch, u8 *data, int len)
+{
+    Xhci *x = a->x;
+    Dev *d = &DEV[a->dev];
+    int in = (req & 0x80) != 0;
+    if (!in)
+        for (int i = 0; i < len; i++)
+            x->dma[i] = data[i];
+    int code = control(x, a->slot, &d->ep0, in ? 0xA1 : 0x21, req, (u16)(sel << 8 | ch), (u16)(a->fu_id << 8 | a->ac_iface), (u16)len, in);
+    if (!ctrl_ok(code))
+        return -1;
+    if (in)
+        for (int i = 0; i < len; i++)
+            data[i] = x->dma[i];
+    return 0;
+}
+
+static int aud_get_vol(Aud *a, u8 req, int *out)
+{
+    u8 b[2];
+    if (aud_ctl(a, req, 2, a->vol_ch, b, 2) != 0)
+        return -1;
+    *out = (short)(b[0] | b[1] << 8);
+    return 0;
+}
+
+/* Send the stored percentage to the device: volume over the device's range, muted at 0 %. */
+static void aud_apply(Aud *a)
+{
+    int p = a->percent;
+    if (a->vol_ch >= 0)
+    {
+        int v = aud_percent_to_db(a->vol_min, a->vol_max, p);
+        u8 b[2] = {(u8)v, (u8)(v >> 8)};
+        aud_ctl(a, UAC_SET_CUR, 2, a->vol_ch, b, 2);
+    }
+    if (a->mute_ch >= 0)
+    {
+        u8 m = p == 0;
+        aud_ctl(a, UAC_SET_CUR, 1, a->mute_ch, &m, 1);
+    }
+}
+
+/* Learn the range and the current setting. A control that does not answer is given up (volume then stays at the device's own level). */
+static void aud_volume_init(Aud *a)
+{
+    a->percent = 100;
+    if (a->vol_ch >= 0)
+    {
+        int cur;
+        if (aud_get_vol(a, UAC_GET_MIN, &a->vol_min) != 0 || aud_get_vol(a, UAC_GET_MAX, &a->vol_max) != 0 || a->vol_max <= a->vol_min ||
+            aud_get_vol(a, UAC_GET_CUR, &cur) != 0)
+            a->vol_ch = -1;
+        else
+            a->percent = aud_db_to_percent(a->vol_min, a->vol_max, cur);
+    }
+    if (a->mute_ch >= 0)
+    {
+        u8 m;
+        if (aud_ctl(a, UAC_GET_CUR, 1, a->mute_ch, &m, 1) != 0)
+            a->mute_ch = -1;
+        else if (m)
+            a->percent = 0;
+    }
+}
+
+int usb_audio_volume(void)
+{
+    Aud *a = &AUD;
+    return (a->active && (a->vol_ch >= 0 || a->mute_ch >= 0)) ? a->percent : -1;
+}
+
+int usb_audio_set_volume(int percent)
+{
+    Aud *a = &AUD;
+    if (!a->active || (a->vol_ch < 0 && a->mute_ch < 0))
+        return -1;
+    a->percent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+    if (a->busy) /* the play loop owns the event ring right now: it applies the change itself */
+        a->pending = 1;
+    else
+        aud_apply(a);
+    return a->percent;
 }
 
 /* Configure the isochronous endpoint of the device in DEV[di], select the configuration and the playing alternate setting.
@@ -114,6 +272,12 @@ int aud_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const AudDesc *ad)
     }
     if (ok)
     {
+        a->ac_iface = ad->ac_iface;
+        a->fu_id = ad->fu_id;
+        a->mute_ch = ad->fu_id ? ad->mute_ch : -1;
+        a->vol_ch = ad->fu_id ? ad->vol_ch : -1;
+        a->pending = 0;
+        aud_volume_init(a);
         a->active = 1; /* from here dev_remove() takes care of it */
         return 1;
     }
@@ -171,6 +335,11 @@ int usb_audio_play_pcm(const short *pcm, unsigned long frames)
         {
             gone = 1;
             break;
+        }
+        if (a->pending)
+        {
+            a->pending = 0;
+            aud_apply(a);
         }
         unsigned long long el = timer_ms() - start;
         if (el > queued) /* we are late: the controller played silence; do not rush to catch up (the buffer is small) */

@@ -39,5 +39,9 @@ int usb_mouse_info(int index, int *report_protocol, int *has_wheel);
  * (left, right, ...) and blocks until they have been sent; 0 = played, <0 = no device / busy / unplugged. */
 int usb_audio_ready(void);
 int usb_audio_play_pcm(const short *stereo48, unsigned long frames);
+/* Volume of the USB sound device in percent (0 = muted), or -1 when it has no volume / mute control. usb_audio_set_volume() clamps to
+ * 0..100, applies it (also while playing) and returns the new value, -1 without such a control. */
+int usb_audio_volume(void);
+int usb_audio_set_volume(int percent);
 
 #endif
