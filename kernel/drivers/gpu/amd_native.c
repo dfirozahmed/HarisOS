@@ -2181,6 +2181,16 @@ int amd_gpu_ring_init(uint64_t mmio)
     return 1;
 }
 
+int amd_gpu_fence_done(uint32_t seq)
+{
+    uint32_t v;
+    if (!rg_up || rg_dead) return 0;
+    v = rg_fence_read(0);
+    rg_last_fence = v;
+    if ((int32_t)(v - seq) >= 0) { hdp_invalidate(); return 1; }
+    return 0;
+}
+
 int amd_gpu_fence_wait(uint32_t seq, uint32_t loops)
 {
     uint32_t i;

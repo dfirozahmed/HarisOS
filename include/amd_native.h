@@ -141,6 +141,7 @@ int      amd_gpu_ring_init(uint64_t mmio);
 uint32_t amd_gpu_submit_ib(uint64_t ib_va, uint32_t ib_dwords);  /* 0 = error, else fence seq */
 uint32_t amd_gpu_submit_raw(const uint32_t *dw, uint32_t n);   /* packets straight into the ring + fence; 0 = error, else fence seq */
 int      amd_gpu_fence_wait(uint32_t seq, uint32_t loops);       /* 1 reached, 0 timeout */
+int      amd_gpu_fence_done(uint32_t seq);                       /* 1 if the fence has reached seq (one look, no timeout, nothing marked dead) */
 int      amd_gpu_ring_selftest(uint64_t mmio);
 /* The persistent ring is up and not wedged; CPU access to VRAM (byte offset) and to the 4 KiB IB page the ring runs (for amd_3d.c) */
 int      amd_gpu_ring_running(void);

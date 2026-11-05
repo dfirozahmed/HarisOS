@@ -13,6 +13,7 @@ unsigned long long timer_us(void) { return 0; }
 void idle_wait(void) {}
 void cpuload_note_idle(unsigned long long us) { (void)us; }
 int amd_gpu_busy_percent(void) { return -1; }
+int amd_gpu_fence_done(uint32_t seq) { (void)seq; return 1; }
 int amd_gpu_ring_running(void) { return 0; }
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { (void)off; (void)v; }
 uint32_t amd_gpu_vram_read32(uint32_t off) { (void)off; return 0; }

@@ -786,6 +786,9 @@ static void upload_shaders(void)
  * own) and then the frame, one after the other in the frame IB. Plain SET_CONTEXT_REG packets and a CONTEXT_CONTROL, so in one IB they
  * do what two IBs did, with one ring submission and one fence wait instead of two. Returns the fence number, 0 = not submitted. */
 static unsigned long long sub_t0, busy_tsc, busy_last_tsc, busy_last_busy;
+/* where the CPU time of the composes went (microseconds, since the last amd_comp_scene_sums): halted, polling for the blank, spinning on
+ * fences, building the frames, submitting them (writing the IB, ringing the doorbell) */
+static unsigned long long t_idle_us, t_poll_us, t_fence_us, t_build_us, t_submit_us;
 
 /* Waits for a frame's fence and counts the submit..fence time as GPU busy time (the Task Manager's load). */
 static int comp_fence_wait(uint32_t seq)
@@ -793,6 +796,32 @@ static int comp_fence_wait(uint32_t seq)
     int ok = amd_gpu_fence_wait(seq, 2000000u);
     busy_tsc += comp_tsc() - sub_t0;
     return ok;
+}
+
+/* Like comp_fence_wait, but halts between looks once the frame has taken more than a few tens of microseconds: for the scene frame of a
+ * composed frame that then waits for the blank anyway, so the time it takes is not lost to the screen but is not spent spinning either. The halted
+ * time is counted idle (cpuload_note_idle). A frame that never finishes ends in amd_gpu_fence_wait's timeout as before. */
+static unsigned long long vblank_ahead_us(void);   /* below, with the wait for the blank */
+
+static int comp_fence_wait_sleepy(uint32_t seq)
+{
+    unsigned long long t0 = timer_us(), slept = 0, s0, now;
+    int may_sleep = vblank_ahead_us() > 3000u;   /* a halt is up to a millisecond too long: not when the blank is about to start */
+    for (;;) {
+        if (amd_gpu_fence_done(seq)) break;
+        now = timer_us();
+        if (now - t0 > 200000u) return comp_fence_wait(seq);   /* very long: the plain wait decides (and gives up for good if it is lost) */
+        if (may_sleep && now - t0 > 40u) {
+            s0 = now;
+            idle_wait();
+            slept += timer_us() - s0;
+        }
+    }
+    busy_tsc += comp_tsc() - sub_t0;
+    if (slept) cpuload_note_idle(slept);
+    t_idle_us += slept;
+    t_fence_us += timer_us() - t0 - slept;
+    return 1;
 }
 
 /* GPU load in percent since the last call: time the compositor's submissions took / elapsed time (TSC), or the GRBM_STATUS snapshot if
@@ -1355,13 +1384,21 @@ void amd_comp_set_vsync(int on) { vsync_on = on; }
 static unsigned long long vb_last;   /* timer_us() of the start of a blank seen, 0 = none yet */
 static unsigned long long vb_period = VBLANK_PERIOD_US;
 
+/* Microseconds until the next blank starts by the sightings so far; 0 when none has been seen (then nothing is known). */
+static unsigned long long vblank_ahead_us(void)
+{
+    unsigned long long t = timer_us();
+    if (!vb_last || t <= vb_last) return 0;
+    return vb_period - (t - vb_last) % vb_period;
+}
+
 static int wait_vblank(void)
 {
     unsigned long long t = timer_us(), slept = 0, now;
     if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) return 1;    /* already in it (when it began is not known: no sighting kept) */
     if (vb_last && t > vb_last) {
         unsigned long long ahead = vb_period - (t - vb_last) % vb_period;   /* until the next blank starts */
-        while (ahead > 2000u) {
+        while (ahead > 1300u) {   /* then poll for the last 1.3 ms at most: a halt lasts up to 1 ms, so it cannot step over the blank */
             unsigned long long s0 = timer_us();
             idle_wait();
             now = timer_us();
@@ -1370,10 +1407,12 @@ static int wait_vblank(void)
         }
     }
     if (slept) cpuload_note_idle(slept);
+    t_idle_us += slept;
     t = timer_us();
     while (timer_us() - t < 20000u)
         if (amd_gpu_reg_read32(DCN_OTG0_STATUS_DW) & 1u) {
             now = timer_us();
+            t_poll_us += now - t;
             if (vb_last && now > vb_last) {          /* the period: the time since the last sighting, split into whole frames */
                 unsigned long long dt = now - vb_last, n = (dt + vb_period / 2) / vb_period;
                 if (n >= 1 && n <= 600) {
@@ -1388,6 +1427,9 @@ static int wait_vblank(void)
 }
 void amd_comp_scene_sums(AmdSceneSums *out)
 {
+    sums.idle_us = t_idle_us; sums.poll_us = t_poll_us; sums.fence_us = t_fence_us;
+    sums.build_us = t_build_us; sums.submit_us = t_submit_us;
+    t_idle_us = t_poll_us = t_fence_us = t_build_us = t_submit_us = 0;
     *out = sums;
     sums = (AmdSceneSums){ 0 };
 }
@@ -1518,7 +1560,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     AmdCompFrame f;
     uint32_t na, nb, seq, draws = 0;
     uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
-    unsigned long long t0 = comp_tsc();
+    unsigned long long t0 = comp_tsc(), u0 = timer_us();
     int bi = -1, nrr = nr, ex0 = 0, ey0 = 0, ex1 = 0, ey1 = 0, sj = 0, vsync_now;
     if (!sc.up || !amd_gpu_ring_running() || w > sc.bb.w || h > sc.bb.h || nr > 64) return -1;
 
@@ -1602,18 +1644,30 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
     if (vsync_on && vsync_now && rt_mc == sc.fb_mc) {
         unsigned long long w0;
         int in_blank;
+        t_build_us += timer_us() - u0;
+        w0 = timer_us();
         seq = frame_submit(ib, na);                                  /* the scene into the back buffer */
-        if (!seq || !comp_fence_wait(seq)) return -1;
+        t_submit_us += timer_us() - w0;
+        if (!seq || !comp_fence_wait_sleepy(seq)) return -1;
         w0 = timer_us();
         in_blank = wait_vblank();
         sums.vblank_waits++;
         if (!in_blank) sums.vblank_timeouts++;
         sums.vblank_us += timer_us() - w0;
+        w0 = timer_us();
         seq = frame_submit(ib + na, nb);                             /* the copy to the screen, started in the blank */
+        t_submit_us += timer_us() - w0;
+        w0 = timer_us();
         if (!seq || !comp_fence_wait(seq)) return -1;
+        t_fence_us += timer_us() - w0;
     } else {
+        unsigned long long w0 = timer_us();
+        t_build_us += w0 - u0;
         seq = frame_submit(ib, na + nb);
+        t_submit_us += timer_us() - w0;
+        w0 = timer_us();
         if (!seq || !comp_fence_wait(seq)) return -1;
+        t_fence_us += timer_us() - w0;
     }
     scval[AMD_COMP_SC_FRAMES]++;
     scval[AMD_COMP_SC_DWORDS] = na + nb;

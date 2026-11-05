@@ -138,6 +138,12 @@ static void amd_scene_report(const GfxCompStats *s)
     log_hex("  vblank wait gave up   ", g.vblank_timeouts);
     log_hex("  vblank wait us, avg   ", (uint32_t)(g.vblank_us / (g.vblank_waits ? g.vblank_waits : 1u)));
     log_hex("  scrolls by the GPU    ", amd_comp_scene_value(AMD_COMP_SC_SCROLLS));
+    /* the CPU time of the composes, per compose (us): the halted part is not busy; the others are */
+    log_hex("  per compose, halted us", (uint32_t)(g.idle_us / c));
+    log_hex("  per compose, blank poll", (uint32_t)(g.poll_us / c));
+    log_hex("  per compose, fence spin", (uint32_t)(g.fence_us / c));
+    log_hex("  per compose, build us ", (uint32_t)(g.build_us / c));
+    log_hex("  per compose, submit us", (uint32_t)(g.submit_us / c));
     /* where the requests to draw window content came from, then the windows that took the most drawing */
     for (int i = 0; i < s->nwhy; i++) {
         char label[32];

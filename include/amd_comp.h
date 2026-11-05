@@ -218,6 +218,9 @@ typedef struct
     uint64_t upload_bytes;
     uint32_t vblank_waits, vblank_timeouts; /* tear-free copies: waited for vertical blank / gave up after 20 ms */
     uint64_t vblank_us;                     /* total time spent waiting for the blank */
+    /* where the composes' CPU time went, in microseconds: halted (not busy), polling for the blank, spinning on fences, building the
+     * frames (items to IB dwords), submitting them (writing the IB, the ring) */
+    uint64_t idle_us, poll_us, fence_us, build_us, submit_us;
 } AmdSceneSums;
 void amd_comp_scene_sums(AmdSceneSums *out);
 
