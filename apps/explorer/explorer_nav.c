@@ -2,6 +2,7 @@
 #include "explorer.h"
 #include "console.h"
 #include "exec.h"
+#include "player.h"
 
 void ex_update_nav_buttons(void)
 {
@@ -150,6 +151,12 @@ void ex_open_item(int row)
         char path[UI_EDIT_MAX + 1];
         vfs_path(EX_ITEMS[row], path, (int)sizeof path);
         EX_NOTE = imageviewer_open_file(path); /* NULL: opened */
+    }
+    else if (kind == FK_AUDIO)
+    {
+        char path[UI_EDIT_MAX + 1];
+        vfs_path(EX_ITEMS[row], path, (int)sizeof path);
+        EX_NOTE = player_open_file(path); /* NULL: the Player window opens by itself */
     }
     else if (kind == FK_PROGRAM)
         EX_NOTE = run_program(EX_ITEMS[row], n);

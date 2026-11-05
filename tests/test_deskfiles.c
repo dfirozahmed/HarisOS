@@ -140,6 +140,9 @@ const char *notepad_open_file(const char *path) { strcpy(NOTEPAD_PATH, path); re
 static char VIEWER_PATH[256];
 static const char *VIEWER_REASON;
 const char *imageviewer_open_file(const char *path) { strcpy(VIEWER_PATH, path); return VIEWER_REASON; }
+static char PLAYER_PATH[256];
+static const char *PLAYER_REASON;
+const char *player_open_file(const char *path) { strcpy(PLAYER_PATH, path); return PLAYER_REASON; }
 int picture_is_name(const char *name)
 {
     size_t n = strlen(name);
@@ -309,6 +312,19 @@ int main(void)
     CHECK(TOASTS == 2 && LAST_KIND == TOAST_INFO && strstr(LAST_TEXT, "No app can open") != 0);
     deskfiles_open(15);
     CHECK(TOASTS == 3 && NOTEPAD_PATH[0] == 0 && EXPLORER_NODE == -1);
+
+    /* songs: the Player (a .mp3 or .wav file, any case) */
+    node_set(18, 5, "song.mp3", 0);
+    node_set(19, 5, "CLIP.WAV", 0);
+    reset_counters();
+    deskfiles_open(18);
+    CHECK(TOASTS == 0 && strcmp(PLAYER_PATH, "/HARISOS/Desktop/song.mp3") == 0);
+    deskfiles_open(19);
+    CHECK(TOASTS == 0 && strcmp(PLAYER_PATH, "/HARISOS/Desktop/CLIP.WAV") == 0);
+    PLAYER_REASON = "Player says no.";
+    deskfiles_open(18);
+    CHECK(TOASTS == 1 && LAST_KIND == TOAST_WARNING && strcmp(LAST_TEXT, "Player says no.") == 0);
+    PLAYER_REASON = 0;
 
     /* a program (.elf) runs in a console window, named after it */
     reset_counters();

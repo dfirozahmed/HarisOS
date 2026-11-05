@@ -786,6 +786,11 @@ int audio_set_volume(int percent)
     CHECK(percent >= 0 && percent <= 100); /* the call clamps before it gets here */
     return VOLUME = percent;
 }
+static int STOP_ARG = -1;
+void audio_stop(int request) { STOP_ARG = request; }
+int audio_stop_requested(void) { return 0; }
+static unsigned SLEPT_MS;
+void task_sleep_ms(unsigned ms) { SLEPT_MS = ms; }
 int audio_play_wav(const unsigned char *file, unsigned long len)
 {
     AUDIO_CALLS++;
@@ -1387,6 +1392,15 @@ int main(void)
     DONE_CODE = -1;
     BLOCKS = 0;
     CHECK(call(SYS_WAIT, 201, U(&st), 0) == 201 && st == -1 && BLOCKS == 0);
+    /* no-hang wait: still running -> 0 and the child stays waitable; ended -> the pid and the code, once */
+    PROC.child[2] = 203;
+    DONE_PID = 0;
+    BLOCKS = 0;
+    CHECK(call(SYS_WAIT, 203, U(&st), 1) == 0 && BLOCKS == 0 && PROC.child[2] == 203);
+    DONE_PID = 203;
+    DONE_CODE = 7;
+    CHECK(call(SYS_WAIT, 203, U(&st), 1) == 203 && st == 7 && PROC.child[2] == 0);
+    CHECK(call(SYS_WAIT, 203, U(&st), 1) == -1);
     PROC.child[2] = 202;
     DONE_PID = 202;
     DONE_CODE = 9;
@@ -2442,6 +2456,16 @@ int main(void)
         CHECK(call(SYS_AUDIO_PLAY, (ull)(size_t)wav, sizeof wav, 0) == -1);        /* no memory for the copy */
         PMM_FAIL = 0;
         CHECK(AUDIO_CALLS == 0);
+    }
+
+    /* ================= SYS_AUDIO_STOP / SYS_SLEEP ================= */
+    {
+        CHECK(call(SYS_AUDIO_STOP, 1, 0, 0) == 0 && STOP_ARG == 1);
+        CHECK(call(SYS_AUDIO_STOP, 0, 0, 0) == 0 && STOP_ARG == 0);
+        CHECK(call(SYS_AUDIO_STOP, 77, 0, 0) == 0 && STOP_ARG == 1); /* any non-zero value asks */
+        CHECK(call(SYS_SLEEP, 20, 0, 0) == 0 && SLEPT_MS == 20);
+        CHECK(call(SYS_SLEEP, 0, 0, 0) == 0 && SLEPT_MS == 1);       /* at least one millisecond */
+        CHECK(call(SYS_SLEEP, 999999, 0, 0) == 0 && SLEPT_MS == 5000); /* at most five seconds */
     }
 
     /* ================= SYS_AUDIO_VOLUME ================= */

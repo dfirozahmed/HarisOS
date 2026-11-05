@@ -7,6 +7,7 @@
 #include "fileexplorer.h"
 #include "look.h"
 #include "imageviewer.h"
+#include "player.h"
 #include "notepad.h"
 #include "picture.h"
 #include "taskbar.h"
@@ -199,6 +200,15 @@ void deskfiles_open(int node)
         char path[256];
         vfs_path(node, path, (int)sizeof path);
         const char *why = imageviewer_open_file(path); /* NULL: opened */
+        if (why)
+            toast_show(TOAST_WARNING, why);
+        return;
+    }
+    if (ext_is(n->name, "mp3") || ext_is(n->name, "wav"))
+    {
+        char path[256];
+        vfs_path(node, path, (int)sizeof path);
+        const char *why = player_open_file(path); /* NULL: the Player window opens by itself */
         if (why)
             toast_show(TOAST_WARNING, why);
         return;

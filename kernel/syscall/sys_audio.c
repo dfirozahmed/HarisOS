@@ -29,6 +29,13 @@ long long sys_audio_play(const SyscallFrame *f)
     return r == 0 ? 0 : -100 + r; /* -101 .. -104 file errors, -110 none, -111 busy, -112 memory */
 }
 
+/* SYS_AUDIO_STOP: rdi = 1 asks the sound that plays (or the next one that starts) to stop, rdi = 0 takes the request back. See audio.h. */
+long long sys_audio_stop(const SyscallFrame *f)
+{
+    audio_stop(f->rdi != 0);
+    return 0;
+}
+
 /* SYS_AUDIO_VOLUME: rdi = -1 (ask) or the new volume in percent (clamped to 0 .. 100). The volume now in force, or -1 without sound hardware. */
 long long sys_audio_volume(const SyscallFrame *f)
 {

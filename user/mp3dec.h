@@ -63,6 +63,10 @@ typedef struct
 } Mp3Dec;
 
 void mp3_init(Mp3Dec *d);
+/* pcm == NULL: only locate and describe the frame (info filled in, the decoder state untouched), returns its samples per channel. */
 int mp3_decode_frame(Mp3Dec *d, const unsigned char *data, int bytes, short *pcm, Mp3Info *info);
+
+/* The length of the stream in milliseconds (Xing / Info / VBRI tag, else bitrate and size); 0 = unknown. */
+long long mp3_estimate_ms(const unsigned char *data, int bytes, long long audio_bytes);
 
 #endif

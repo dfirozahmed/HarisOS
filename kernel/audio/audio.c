@@ -16,8 +16,24 @@ int audio_volume_step(int delta)
     return cur < 0 ? -1 : audio_set_volume(cur + delta);
 }
 
+static volatile int STOP_REQUEST;
+
+void audio_stop(int request) { STOP_REQUEST = request != 0; }
+int audio_stop_requested(void) { return STOP_REQUEST; }
+
+/* A request that was seen is used up: the sound it stopped (or the one it kept from starting) reports AUDIO_ERR_STOPPED once. */
+static int stopped(void)
+{
+    if (!STOP_REQUEST)
+        return 0;
+    STOP_REQUEST = 0;
+    return 1;
+}
+
 int audio_play_wav(const unsigned char *file, unsigned long len)
 {
+    if (stopped())
+        return AUDIO_ERR_STOPPED;
     WavInfo wi;
     int e = wav_parse(file, len, &wi);
     if (e)
@@ -36,5 +52,7 @@ int audio_play_wav(const unsigned char *file, unsigned long len)
     wav_to_48k_stereo16(file, &wi, (short *)buf, frames);
     int r = use_hda ? hda_play_pcm((const short *)buf, frames) : usb_audio_play_pcm((const short *)buf, frames); /* HD Audio first, else a USB sound device */
     pmm_free_contiguous(buf, pages);
+    if (stopped())
+        return AUDIO_ERR_STOPPED;
     return r == 0 ? 0 : AUDIO_ERR_BUSY; /* the only way to fail here is a stream that is in use or does not move */
 }

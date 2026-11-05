@@ -112,6 +112,17 @@ static int cmp(const char *mp3path, const char *refpath)
         printf("FAIL: nothing decoded\n");
         return 1;
     }
+    {
+        /* the length from the Xing / Info tag (lame writes one) must agree with what was decoded, to a frame or two */
+        long long est = mp3_estimate_ms(mp3, (int)(mp3_size < 16384 ? mp3_size : 16384), mp3_size);
+        long long real = (long long)(got / channels) * 1000 / hz;
+        printf("  length: estimated %lld ms, decoded %lld ms\n", est, real);
+        if (est <= 0 || llabs(est - real) > real / 30 + 60)
+        {
+            printf("FAIL: the length estimate is off\n");
+            return 1;
+        }
+    }
     long n = got < ref_samples ? got : ref_samples;
     if (labs(got - ref_samples) > 3L * 1152 * channels)
     {

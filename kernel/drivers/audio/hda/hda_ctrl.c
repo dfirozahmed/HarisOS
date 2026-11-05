@@ -9,6 +9,7 @@
  *
  * Stream: an output stream descriptor reads a Buffer Descriptor List (16-byte entries: 64-bit address, length, IOC)
  * round and round, and sends the samples tagged with its stream number (1..15). LPIB tells how far it has read. */
+#include "audio.h"
 #include "hda.h"
 #include "hda_internal.h"
 #include "io.h"
@@ -583,6 +584,8 @@ static int play_buffer(HdaCtrl *h, u64 buf, u32 sound, u32 total)
     int ok = 1;
     while (played < sound + RATE / 20u * 4u)
     {
+        if (audio_stop_requested()) /* a player asked for a stop: end the stream now (the verbs below turn the outputs off) */
+            break;
         if (process_current())
             task_sleep_ms(5);
         if (!HDA_WAIT((now = rd32(h, sd + SD_LPIB)) != last, 500))

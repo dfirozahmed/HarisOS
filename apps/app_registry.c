@@ -9,6 +9,7 @@ extern const AppInfo APP_NOTEPAD;
 extern const AppInfo APP_IMAGEVIEWER;
 extern const AppInfo APP_TERMINAL;
 extern const AppInfo APP_WIFI;
+extern const AppInfo APP_PLAYER;
 extern const AppInfo APP_PERSONALIZE;
 
 static const AppInfo *const APPS[] = {
@@ -18,6 +19,7 @@ static const AppInfo *const APPS[] = {
     &APP_TASKMGR,
     &APP_NOTEPAD,
     &APP_IMAGEVIEWER,
+    &APP_PLAYER,
     &APP_TERMINAL,
     &APP_WIFI,
     &APP_PERSONALIZE,

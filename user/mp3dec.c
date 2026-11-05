@@ -1032,6 +1032,9 @@ int mp3_decode_frame(Mp3Dec *dec, const unsigned char *mp3, int mp3_bytes, short
         return 0; /* Layer I / II: skipped as a whole frame */
     }
 
+    if (!pcm)
+        return (int)hdr_frame_samples(hdr); /* only looking: where is the frame, how long is it */
+
     bs_init(&bs_frame, hdr + HDR_SIZE, frame_size - HDR_SIZE);
     if (HDR_IS_CRC(hdr))
         get_bits(&bs_frame, 16);
@@ -1052,4 +1055,37 @@ int mp3_decode_frame(Mp3Dec *dec, const unsigned char *mp3, int mp3_bytes, short
         }
     L3_save_reservoir(dec, scratch);
     return success * (int)hdr_frame_samples(dec->header);
+}
+
+/* ---- length of a stream ---- */
+static int mp3_tag_eq(const unsigned char *p, const char *tag) { return p[0] == (unsigned char)tag[0] && p[1] == (unsigned char)tag[1] && p[2] == (unsigned char)tag[2] && p[3] == (unsigned char)tag[3]; }
+
+static unsigned be32(const unsigned char *p) { return (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3]; }
+
+/* How long the stream is, in milliseconds: from the frame count in the Xing / Info / VBRI tag of the first frame when there is one
+ * (the encoders write it), else from the bitrate of the first frame and the bytes of audio (right for constant bitrate files).
+ * `data` = the first bytes of the audio (after an ID3 tag), `audio_bytes` = how many bytes of audio there are in all. 0 = unknown. */
+long long mp3_estimate_ms(const unsigned char *data, int bytes, long long audio_bytes)
+{
+    static Mp3Dec dec; /* only used to find the frame; no decoding, so its big buffers stay unused */
+    Mp3Info info;
+    mp3_init(&dec);
+    if (mp3_decode_frame(&dec, data, bytes, 0, &info) <= 0 || info.layer != 3 || info.hz <= 0)
+        return 0;
+    const unsigned char *h = data + info.frame_offset;
+    int samples = (int)hdr_frame_samples(h);
+    int side = HDR_TEST_MPEG1(h) ? (HDR_IS_MONO(h) ? 17 : 32) : (HDR_IS_MONO(h) ? 9 : 17);
+    int tag = info.frame_offset + HDR_SIZE + (HDR_IS_CRC(h) ? 2 : 0) + side;
+    if (tag + 12 <= bytes && (mp3_tag_eq(data + tag, "Xing") || mp3_tag_eq(data + tag, "Info")))
+    {
+        unsigned flags = be32(data + tag + 4);
+        if (flags & 1)
+            return (long long)be32(data + tag + 8) * samples * 1000 / info.hz;
+    }
+    int vbri = info.frame_offset + HDR_SIZE + 32; /* the VBRI tag always sits 32 bytes after the header */
+    if (vbri + 18 <= bytes && mp3_tag_eq(data + vbri, "VBRI"))
+        return (long long)be32(data + vbri + 14) * samples * 1000 / info.hz;
+    if (info.bitrate_kbps > 0)
+        return audio_bytes * 8 / info.bitrate_kbps;
+    return 0;
 }

@@ -36,7 +36,8 @@
  *                  PROCESS_MAX_CHILDREN (1024) children can be outstanding (started and not yet waited for).
  *   SYS_WAIT (10)  rdi = pid, rsi = pointer to an int for the exit code, or 0. Blocks until that child has ended, stores
  *                  its exit code (-1 = ended by a CPU exception) and returns the pid. A child is waited for once. -1 for
- *                  a pid that is not an outstanding child, or a bad pointer (the child stays waitable).
+ *                  a pid that is not an outstanding child, or a bad pointer (the child stays waitable). rdx = 1: does not block: 0 is returned
+ *                  while the child still runs (a window program asks this to find out that a song has finished); the rest is as above.
  *   SYS_READDIR (11) rdi = folder path, rsi = index, rdx = pointer to a SysDirEntry. Fills in the index-th entry of the
  *                  folder (folders first, then files, each sorted by name; "/" lists the drives). Returns 1 if it did, 0 when
  *                  index is past the last entry, -1 for a path that is not a folder, a bad pointer or an index >= 512.
@@ -168,6 +169,11 @@
  *                  hardware, -111 busy or the stream stopped, -112 too long or no memory.
  *   SYS_AUDIO_VOLUME (64) rdi = -1 to ask, or 0 .. 100 (percent; values outside are clamped) to set the master volume, also while a
  *                  sound plays. Returns the volume now in force (0 .. 100), or -1 when there is no sound hardware with an output.
+ *   SYS_SLEEP (65) rdi = milliseconds (1 .. 5000; more is cut to 5000): the calling thread sleeps that long (other threads run). 0.
+ *   SYS_AUDIO_STOP (66) rdi = 1: ask the sound that plays now to stop. SYS_AUDIO_PLAY (in any process) then returns -113 at once (before it starts
+ *                  or, if it is playing, within a few milliseconds) and the request is used up. rdi = 0: take back a request nobody used (a player that
+ *                  asked for a stop when nothing was playing any more). 0. A program that stops another program's sound first waits for
+ *                  that program to end, then calls this with 0, so a late request cannot stop the next sound.
  *   SYS_TIME (62)  no arguments: the wall clock as Unix time, seconds since 1970-01-01 00:00:00, from the real-time clock (read as UTC).
  *                  -1 if there is no clock.
  *   A system call that sleeps (read, wait, a semaphore or queue or pipe) returns -1 when a signal with a handler arrives.
@@ -261,6 +267,8 @@
 #define SYS_TIME 62
 #define SYS_AUDIO_PLAY 63
 #define SYS_AUDIO_VOLUME 64
+#define SYS_SLEEP 65
+#define SYS_AUDIO_STOP 66
 #define SYS_AUDIO_MAX (8u << 20) /* the largest WAV image SYS_AUDIO_PLAY takes */
 
 /* SYS_SOCKET types */

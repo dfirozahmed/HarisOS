@@ -11,6 +11,7 @@
  * isochronous ASAP": no frame number to compute). play_pcm() paces itself by timer_ms(): it keeps about 24 ms queued, which is
  * enough to ride out a late loop pass and small enough for the 40 packet buffer; if the loop is ever more than a moment late the
  * clock is moved back, so the gap is silence and no queued packet is overwritten. */
+#include "audio.h"
 #include "usb_xhci_internal.h"
 
 #if defined(__x86_64__)
@@ -330,6 +331,8 @@ int usb_audio_play_pcm(const short *pcm, unsigned long frames)
     int gone = 0;
     for (;;) /* queue everything just in time, then let the last packets play out */
     {
+        if (audio_stop_requested())
+            break; /* a player asked for a stop: the queued packets (at most ~24 ms) play out */
         pump(); /* transfer events and errors of the endpoint are not needed, but the event ring must not fill up */
         if (!a->active || DEV[a->dev].gone)
         {

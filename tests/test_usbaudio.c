@@ -20,6 +20,7 @@ void pump(void) {}
 u32 ep_interval(int speed, u32 b) { (void)speed; return b; }
 int ctrl_ok(int c) { return c == 1; }
 unsigned long long timer_ms(void) { return 0; }
+int audio_stop_requested(void) { return 0; }
 int timer_ready(void) { return 0; }
 unsigned long long pmm_alloc_contiguous_tag(unsigned long long c, PmmTag t) { (void)c; (void)t; return 0; }
 void pmm_free_contiguous(unsigned long long p, unsigned long long c) { (void)p; (void)c; }

@@ -165,7 +165,7 @@ long long sys_spawn(const SyscallFrame *f)
  * then still there to wait for). */
 long long sys_wait(const SyscallFrame *f)
 {
-    ull want = f->rdi, status_ptr = f->rsi;
+    ull want = f->rdi, status_ptr = f->rsi, nohang = f->rdx & 1;
     const AddressSpace *as = task_address_space();
     Process *p = process_current();
     if (!as || !p || want == 0 || want > 0x7FFFFFFF)
@@ -181,6 +181,8 @@ long long sys_wait(const SyscallFrame *f)
     int code;
     while (!process_reap((int)want, &code))
     {
+        if (nohang) /* rdx = 1: do not sleep, say that it still runs */
+            return 0;
         task_block(); /* the child's exit wakes this thread; interrupts are off, so that cannot slip in between */
         if (sig_interrupted(p))
             return -1; /* the child stays waitable */

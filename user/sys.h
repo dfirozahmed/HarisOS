@@ -71,6 +71,8 @@
 #define SYS_TIME 62
 #define SYS_AUDIO_PLAY 63
 #define SYS_AUDIO_VOLUME 64
+#define SYS_SLEEP 65
+#define SYS_AUDIO_STOP 66
 #define SYS_SOCK_STREAM 1
 #define SYS_GUI_DESTROY 0
 #define SYS_GUI_SET_TITLE 1
@@ -106,6 +108,8 @@ static inline long long sys_brk(long long addr) { return syscall3(SYS_BRK, addr,
 static inline long long sys_spawn(const char *path, const char *const *argv) { return syscall3(SYS_SPAWN, (long long)(usize)path, (long long)(usize)argv, 0); }
 /* Waits for child `pid`; its exit code goes to *status (if not 0). Returns pid or -1. */
 static inline long long sys_wait(long long pid, int *status) { return syscall3(SYS_WAIT, pid, (long long)(usize)status, 0); }
+/* Like sys_wait but never sleeps: 0 = the child still runs, else as sys_wait (pid, code stored, child used up) */
+static inline long long sys_wait_nohang(long long pid, int *status) { return syscall3(SYS_WAIT, pid, (long long)(usize)status, 1); }
 /* what sys_readdir and sys_stat fill in (SysDirEntry in include/syscall.h) */
 typedef struct
 {
@@ -225,6 +229,10 @@ static inline long long sys_clock(void) { return syscall3(SYS_CLOCK, 0, 0, 0); }
 static inline long long sys_audio_play(const void *wav, usize len) { return syscall3(SYS_AUDIO_PLAY, (long long)(usize)wav, (long long)len, 0); }
 /* master volume: sys_audio_volume(-1) asks, 0..100 sets; returns the volume now (percent) or -1 (no sound hardware) */
 static inline long long sys_audio_volume(long long percent) { return syscall3(SYS_AUDIO_VOLUME, percent, 0, 0); }
+/* sleep for `ms` milliseconds (1 .. 5000) */
+static inline void sys_sleep(unsigned ms) { syscall3(SYS_SLEEP, ms, 0, 0); }
+/* stop the sound that plays: sys_audio_stop(1) asks (the player's sys_audio_play returns -113), sys_audio_stop(0) takes an unused request back */
+static inline void sys_audio_stop(int request) { syscall3(SYS_AUDIO_STOP, request, 0, 0); }
 /* Unix time in seconds (the real-time clock read as UTC), or -1 */
 static inline long long sys_time(void) { return syscall3(SYS_TIME, 0, 0, 0); }
 static inline long long sys_wifiscan(unsigned index, char *buf, usize cap) { return syscall3(SYS_WIFISCAN, index, (long long)(usize)buf, (long long)cap); }

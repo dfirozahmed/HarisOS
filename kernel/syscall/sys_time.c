@@ -1,11 +1,21 @@
 /* System calls: clock and wall time. */
 #include "syscall_internal.h"
+#include "task.h"
 
 /* SYS_CLOCK: no arguments. The milliseconds since the kernel started (timer_ms), 0 if the timer is not running. */
 long long sys_clock(const SyscallFrame *f)
 {
     (void)f;
     return (long long)timer_ms();
+}
+
+/* SYS_SLEEP: rdi = milliseconds (1 .. 5000). The thread sleeps; the others run. A GUI program that redraws a clock or a progress bar
+ * between events has no other way to wait for a while. */
+long long sys_sleep(const SyscallFrame *f)
+{
+    unsigned long long ms = f->rdi;
+    task_sleep_ms((unsigned)(ms < 1 ? 1 : ms > 5000 ? 5000 : ms));
+    return 0;
 }
 
 /* SYS_TIME: no arguments. The wall clock as Unix time (seconds since 1970-01-01), taken from the real-time clock, which is read as UTC.

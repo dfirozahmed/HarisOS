@@ -343,6 +343,7 @@ set(KERNEL_SOURCES
     apps/notepad/notepad_app.c      # Notepad app: plain-text editor
     apps/imageviewer/imageviewer_app.c # Image Viewer app: BMP / PNG / JPEG pictures
     apps/imageviewer/imgview.c      # Image Viewer: zoom and drawing maths
+    apps/player/player_app.c        # Player: starts PLAYER.ELF (music player window)
     apps/wifi/wifi_app.c            # Wi-Fi app: pick a wireless network and join it
     apps/console/console_app.c      # Console window: where a program started from the File Explorer prints and reads
     apps/terminal/terminal_app.c    # Terminal app: a console window running the shell; also starts INIT.ELF at boot
@@ -419,7 +420,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan gstest play vol)
+set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan gstest play vol player)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone
@@ -443,13 +444,19 @@ set(USER_ELFS "")
 set(USER_ESP_FILES "")
 # Programs that open their own window (SYS_GUI_*) get no Console window until they print or read; all others are command line
 # programs and get theirs at once (the subsystem is written into the ELF header by mkelf, see include/elf.h).
-set(GUI_PROGRAMS guidemo)
+set(GUI_PROGRAMS guidemo player)
 foreach(PROG ${USER_PROGRAMS})
     string(TOUPPER ${PROG} PROG_UPPER)
     if(PROG IN_LIST GUI_PROGRAMS)
         set(PROG_SUBSYS --gui)
     else()
         set(PROG_SUBSYS --console)
+    endif()
+    # player draws with the desktop's fonts (kernel/graphics/font_data.c, which needs include/font.h)
+    if(PROG STREQUAL "player")
+        set(PROG_EXTRA_CFLAGS -I${CMAKE_SOURCE_DIR}/include)
+    else()
+        set(PROG_EXTRA_CFLAGS "")
     endif()
     set(PROG_OBJ ${CMAKE_BINARY_DIR}/user/${PROG}.obj)
     set(PROG_PE  ${CMAKE_BINARY_DIR}/user/${PROG}.exe)
@@ -458,8 +465,8 @@ foreach(PROG ${USER_PROGRAMS})
     add_custom_command(
         OUTPUT  ${PROG_OBJ}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
-        COMMAND ${CLANG_CC} ${USER_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
-        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/mp3dec.c ${CMAKE_SOURCE_DIR}/user/mp3dec.h ${CMAKE_SOURCE_DIR}/user/mp3tab.h ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fsutil.h ${CMAKE_SOURCE_DIR}/user/fputest.h
+        COMMAND ${CLANG_CC} ${USER_CFLAGS} ${PROG_EXTRA_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/mp3dec.c ${CMAKE_SOURCE_DIR}/user/mp3dec.h ${CMAKE_SOURCE_DIR}/user/mp3tab.h ${CMAKE_SOURCE_DIR}/kernel/graphics/font_data.c ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fsutil.h ${CMAKE_SOURCE_DIR}/user/fputest.h
         COMMENT "Compiling user/${PROG}.c"
         VERBATIM
     )

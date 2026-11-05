@@ -12,6 +12,13 @@
 #define AUDIO_ERR_NONE -10
 #define AUDIO_ERR_BUSY -11
 #define AUDIO_ERR_MEMORY -12
+#define AUDIO_ERR_STOPPED -13 /* audio_stop(1) was called: the sound was cut short (or not started); the request is used up */
+
+/*   audio_stop(1);                asks the sound that plays now (or the next that starts) to stop; the player returns AUDIO_ERR_STOPPED
+ *   audio_stop(0);                takes an unused request back
+ *   audio_stop_requested();       1 while a request waits: the playback loops of the drivers look at it every few milliseconds */
+void audio_stop(int request);
+int audio_stop_requested(void);
 
 int audio_play_wav(const unsigned char *file, unsigned long len);
 

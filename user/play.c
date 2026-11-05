@@ -1,4 +1,4 @@
-/* HarisOS user program: play FILE.WAV or FILE.MP3.
+/* HarisOS user program: play FILE.WAV|FILE.MP3 [-s SECONDS]  (-s: start that far into an MP3).
  *
  * A WAV file is read whole and handed to the kernel (SYS_AUDIO_PLAY), which returns when it has finished playing.
  * An MP3 file is decoded here in user mode (mp3dec.c: Layer III, float math, which the kernel does not use): the file is read through a
@@ -15,7 +15,7 @@
 static const char *why(long long r)
 {
     return r == -101 ? "not a WAV file" : r == -102 ? "not PCM sound" : r == -103 ? "format not supported (PCM 8/16 bit, mono/stereo, 8-96 kHz)"
-         : r == -104 ? "no samples" : r == -110 ? "no sound hardware" : r == -111 ? "the sound device is busy" : r == -112 ? "too long" : "bad request";
+         : r == -104 ? "no samples" : r == -110 ? "no sound hardware" : r == -111 ? "the sound device is busy" : r == -112 ? "too long" : r == -113 ? "stopped" : "bad request";
 }
 
 static void put16(unsigned char *p, unsigned v)
@@ -53,6 +53,15 @@ static void die(const char *msg)
     sys_exit(1);
 }
 
+/* The result of one sys_audio_play: -113 = a player program (the Player window) asked for a stop: end quietly with exit code 3. */
+static void check_play(long long r)
+{
+    if (r == -113)
+        sys_exit(3);
+    if (r != 0)
+        die(why(r));
+}
+
 static void play_wav(long long fd, const char *name)
 {
     long long size = sys_seek((int)fd, 0, 2);
@@ -71,9 +80,7 @@ static void play_wav(long long fd, const char *name)
     sys_close((int)fd);
     if (have != size)
         die("read error");
-    long long r = sys_audio_play(buf, (usize)size);
-    if (r != 0)
-        die(why(r));
+    check_play(sys_audio_play(buf, (usize)size));
     sys_exit(0);
 }
 
@@ -91,7 +98,7 @@ static void skip_id3(long long fd)
         sys_seek((int)fd, 0, 0);
 }
 
-static void play_mp3(long long fd, const char *name)
+static void play_mp3(long long fd, const char *name, long long start_ms)
 {
     Mp3Dec *dec = malloc(sizeof *dec);
     unsigned char *win = malloc(WINDOW);
@@ -105,6 +112,7 @@ static void play_mp3(long long fd, const char *name)
     int have = 0, eof = 0, channels = 0, hz = 0, announced = 0, skipped_layers = 0;
     unsigned pcm_bytes = 0;
     long long total_frames = 0;
+    long long skipped_ms = 0; /* with -s: stream time passed over so far (frames that are only looked at, not decoded) */
 
     for (;;)
     {
@@ -122,7 +130,14 @@ static void play_mp3(long long fd, const char *name)
             break;
 
         Mp3Info info;
-        int n = mp3_decode_frame(dec, win, have, frame_pcm, &info);
+        int skipping = start_ms > 0 && skipped_ms + 150 < start_ms; /* the last ~150 ms are decoded: the bit reservoir needs them */
+        int n = mp3_decode_frame(dec, win, have, skipping ? 0 : frame_pcm, &info);
+        if (skipping)
+        {
+            if (n > 0)
+                skipped_ms += (long long)n * 1000 / info.hz;
+            n = 0;
+        }
         if (n > 0)
         {
             if (info.channels != channels || info.hz != hz) /* the format changed (or the first frame): play what we have first */
@@ -130,9 +145,7 @@ static void play_mp3(long long fd, const char *name)
                 if (pcm_bytes)
                 {
                     wav_header(piece, (unsigned)hz, (unsigned)channels, pcm_bytes);
-                    long long r = sys_audio_play(piece, 44 + pcm_bytes);
-                    if (r != 0)
-                        die(why(r));
+                    check_play(sys_audio_play(piece, 44 + pcm_bytes));
                     pcm_bytes = 0;
                 }
                 channels = info.channels;
@@ -150,9 +163,7 @@ static void play_mp3(long long fd, const char *name)
             if (pcm_bytes >= PIECE_PCM_BYTES)
             {
                 wav_header(piece, (unsigned)hz, (unsigned)channels, pcm_bytes);
-                long long r = sys_audio_play(piece, 44 + pcm_bytes);
-                if (r != 0)
-                    die(why(r));
+                check_play(sys_audio_play(piece, 44 + pcm_bytes));
                 pcm_bytes = 0;
             }
         }
@@ -176,9 +187,7 @@ static void play_mp3(long long fd, const char *name)
     if (pcm_bytes)
     {
         wav_header(piece, (unsigned)hz, (unsigned)channels, pcm_bytes);
-        long long r = sys_audio_play(piece, 44 + pcm_bytes);
-        if (r != 0)
-            die(why(r));
+        check_play(sys_audio_play(piece, 44 + pcm_bytes));
     }
     if (total_frames == 0)
         die(skipped_layers ? "MPEG Layer I / II is not supported (only Layer III, the usual .mp3)" : "not a WAV or MP3 file");
@@ -189,8 +198,16 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
 {
     if (argc < 2)
     {
-        fdprintf(2, "usage: play FILE.WAV|FILE.MP3\n");
+        fdprintf(2, "usage: play FILE.WAV|FILE.MP3 [-s SECONDS]\n");
         sys_exit(2);
+    }
+    long long start_ms = 0;
+    if (argc >= 4 && argv[2][0] == '-' && argv[2][1] == 's')
+    {
+        long long seconds = 0;
+        for (const char *q = argv[3]; *q >= '0' && *q <= '9'; q++)
+            seconds = seconds * 10 + (*q - '0');
+        start_ms = seconds * 1000;
     }
     long long fd = sys_open(argv[1]);
     if (fd < 0)
@@ -204,6 +221,6 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
     if (m == 4 && magic[0] == 'R' && magic[1] == 'I' && magic[2] == 'F' && magic[3] == 'F')
         play_wav(fd, argv[1]);
     else
-        play_mp3(fd, argv[1]);
+        play_mp3(fd, argv[1], start_ms);
     sys_exit(0);
 }
