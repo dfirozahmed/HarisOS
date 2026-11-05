@@ -2,6 +2,7 @@
 #include "audio.h"
 #include "hda.h"
 #include "pmm.h"
+#include "usb.h"
 #include "wav.h"
 
 int audio_volume(void) { return hda_ready() ? hda_volume() : -1; }
@@ -21,7 +22,8 @@ int audio_play_wav(const unsigned char *file, unsigned long len)
     int e = wav_parse(file, len, &wi);
     if (e)
         return e;
-    if (!hda_ready())
+    int use_hda = hda_ready();
+    if (!use_hda && !usb_audio_ready())
         return AUDIO_ERR_NONE;
     unsigned long frames = wav_frames_48k(&wi);
     if (frames == 0 || frames > HDA_MAX_FRAMES)
@@ -32,7 +34,7 @@ int audio_play_wav(const unsigned char *file, unsigned long len)
     if (!buf)
         return AUDIO_ERR_MEMORY;
     wav_to_48k_stereo16(file, &wi, (short *)buf, frames);
-    int r = hda_play_pcm((const short *)buf, frames);
+    int r = use_hda ? hda_play_pcm((const short *)buf, frames) : usb_audio_play_pcm((const short *)buf, frames); /* HD Audio first, else a USB sound device */
     pmm_free_contiguous(buf, pages);
     return r == 0 ? 0 : AUDIO_ERR_BUSY; /* the only way to fail here is a stream that is in use or does not move */
 }

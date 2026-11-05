@@ -167,6 +167,27 @@ typedef struct
 
 #define KQ_N 16
 
+/* USB audio (UAC 1.0): the streaming interface we play on. One device at a time. */
+#define AUD_PKT_FRAMES 48                 /* 48 kHz: 48 frames in every 1 ms packet */
+#define AUD_PKT_BYTES (AUD_PKT_FRAMES * 4) /* 16-bit stereo */
+#define AUD_SLOTS_PER_PAGE 20              /* packets per buffer page (a page never crosses a 64 KiB boundary) */
+#define AUD_SLOTS (AUD_SLOTS_PER_PAGE * 2)
+
+typedef struct
+{
+    int iface, alt, addr; /* AudioStreaming interface, the alternate setting that plays 48 kHz stereo 16-bit, endpoint address */
+    unsigned mps, interval;
+} AudDesc;
+
+typedef struct
+{
+    int active, busy;
+    Xhci *x;
+    int slot, dev, dci;
+    Ring ring;
+    u64 buf_phys[2];
+} Aud;
+
 /* The bulk endpoints of the first bulk-only mass-storage interface (alternate setting 0). */
 typedef struct
 {
@@ -221,6 +242,12 @@ int hub_setup(Xhci *x, int di, u32 cfg_value);
 void pump(void);
 int msc_find(Xhci *x, u32 total, MscDesc *md);
 int msc_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const MscDesc *md);
+
+/* ---- usb_xhci_audio.c ---- */
+extern Aud AUD;
+int aud_find(Xhci *x, u32 total, AudDesc *ad);
+int aud_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const AudDesc *ad);
+void aud_release(void);
 
 /* ---- usb_xhci_dev.c ---- */
 int bring_up(Xhci *x, const Loc *L);

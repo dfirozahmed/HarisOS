@@ -91,6 +91,11 @@ int bring_up(Xhci *x, const Loc *L)
     if (msc_find(x, total, &md))
         return msc_setup(x, di, L, cfg_value, &md);
 
+    /* A sound device (USB audio class, streaming interface with an isochronous OUT endpoint)? */
+    AudDesc ad;
+    if (!AUD.active && aud_find(x, total, &ad))
+        return aud_setup(x, di, L, cfg_value, &ad);
+
     /* Look for boot-protocol keyboard / mouse interfaces (at most one of each kind). */
     struct
     {

@@ -60,6 +60,8 @@ void dev_remove(int di)
         pmm_free_page(m->rin.phys);
         pmm_free_page(m->rout.phys);
     }
+    if (AUD.active && AUD.dev == di)
+        aud_release();
     d->used = 0;
 }
 

@@ -34,4 +34,10 @@ void usb_hid_counts(int *mice, int *keyboards);
  * (3-byte reports: no wheel); *has_wheel = 1 when the descriptor has a wheel. Returns -1 if no such mouse. */
 int usb_mouse_info(int index, int *report_protocol, int *has_wheel);
 
+/* USB audio (class 1, UAC 1.0 streaming interface with an isochronous OUT endpoint, 48 kHz 16-bit stereo): speakers, headsets, DACs.
+ * usb_audio_ready() = 1 while such a device is attached. usb_audio_play_pcm() plays `frames` frames of 48 kHz 16-bit stereo
+ * (left, right, ...) and blocks until they have been sent; 0 = played, <0 = no device / busy / unplugged. */
+int usb_audio_ready(void);
+int usb_audio_play_pcm(const short *stereo48, unsigned long frames);
+
 #endif
