@@ -109,7 +109,10 @@ static int refresh_battery(void)
         cpuload_section_begin();
         int ac = battery_ac();
         cpuload_section_end(23); /* the report's "battery: mains look" lines: one controller read */
-        if (ac != last_ac || now >= next_full_ms)
+        /* The whole reading (~22 ms) is what makes the pointer stutter, so while the user is working it waits for a quiet moment
+         * (at most 25 s past its time); only a change of the cable reads at once. */
+        int working = now - DESKTOP_LAST_INPUT_MS < 400;
+        if (ac != last_ac || (now >= next_full_ms && (!working || now >= next_full_ms + 25000)))
             full = 1;
         last_ac = ac;
         if (full)
