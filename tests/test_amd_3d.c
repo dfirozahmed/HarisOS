@@ -9,6 +9,8 @@
 
 /* the GPU side is not there: stand-ins so that amd_3d.c links */
 uint64_t amd_native_vram_mc_addr(uint32_t offset, uint32_t bytes) { (void)offset; (void)bytes; return 0; }
+unsigned long long timer_us(void) { return 0; }
+int amd_gpu_busy_percent(void) { return -1; }
 int amd_gpu_ring_running(void) { return 0; }
 void amd_gpu_vram_write32(uint32_t off, uint32_t v) { (void)off; (void)v; }
 uint32_t amd_gpu_vram_read32(uint32_t off) { (void)off; return 0; }
@@ -625,8 +627,22 @@ int main(void)
         cn = amd_comp_build_ps_under(code);
         check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_UNDER_OFF + 0x200u <= 0x1000u,
               "under shader: no VCC + literal / SGPR, fits in its slot inside the 4 KiB");
+        cn = amd_comp_build_ps_fade(code);
+        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && code[cn - 1] == A3D_S_ENDPGM &&
+              AMD_COMP_PS_FADE_OFF + 0x200u <= AMD_COMP_SHADER_BYTES,
+              "fade shader: no VCC + literal / SGPR, ends, fits in its slot inside the 8 KiB");
+        {
+            amd_comp_begin(&f, fib, 1024, 0x4100000000ULL, 1920, 1920, 1080, 1, 0x4100000000ULL + 0x0B004000ULL);
+            amd_comp_layer_fade(&f, &s, 20, 10, 120, 110, 400, 300, 128, 1);
+            nf = amd_comp_end(&f, 0x4100000000ULL + 0x0B300040ULL);
+            cb = find_set(fib, nf, 0x69, R3D_CB_BLEND0_CONTROL, &cnt);
+            ud = find_set(fib, nf, 0x76, R3D_SPI_SHADER_USER_DATA_PS_0, &ucnt);
+            check(nf > 0 && f.draws == 1 && cb && cb[0] == 0x40000401u && ud && ucnt == 11 && ((ud[3] >> 9) & 7u) == 7u &&
+                  ud[10] >= 0x3F000000u && ud[10] < 0x3F010000u,   /* 0.5 .. 0.504: 128 / 255 */
+                  "fade draw: layer blend mode 2, 11 user SGPRs, alpha from the 4th byte, s10 = opacity 128/255 as a float");
+        }
         cn = amd_comp_build_ps_dim(code);
-        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_DIM_OFF + 0x200u <= 0x1000u,
+        check(const_bus_bad(code, cn) == 0&& cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_DIM_OFF + 0x200u <= 0x1000u,
               "dim shader: no VCC + literal / SGPR, fits in its slot inside the 4 KiB");
         {
             AmdSurface s3 = { 0x4100000000ULL + 0x01000000ULL, 0x01000000u, 1920, 1080, 1920 };

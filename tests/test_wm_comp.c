@@ -110,13 +110,27 @@ int main(void){
   /* a second window: new surface; the first one loses the focus, so it is drawn again too */
   Window*w2=wm_create("Two",500,300,300,200,draw,0);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==2 && UPLOADS==6);
-  assert(wm_comp_items(items,8)==4 && items[1].surface==1 && items[3].surface==2 && items[2].layer==2);   /* back to front, each after its shadow */
+  /* it opens with a fade: at once nothing of it shows (and the damage tick marks its place), halfway it is a faded layer, then plain */
+  assert(wm_comp_items(items,8)==2 && items[1].surface==1);
+  assert(wm_comp_anim_tick(NOW));
+  NOW += 85;
+  { int n = wm_comp_items(items,8); assert(n==4 && items[3].surface==2 && items[3].layer==3 && items[3].alpha>0 && items[3].alpha<255);
+    assert(items[3].y > 300 && items[2].layer==2 && items[2].hole[2] <= items[2].hole[0]); }   /* a bit lower than its place, no shadow hole */
+  assert(wm_comp_anim_tick(NOW));
+  NOW += 300;
+  assert(wm_comp_anim_tick(NOW));      /* one more mark when it ends ... */
+  assert(!wm_comp_anim_tick(NOW));     /* ... then quiet */
+  assert(wm_comp_items(items,8)==4 && items[1].surface==1 && items[3].surface==2 && items[2].layer==2 && items[3].layer==1 && items[3].y==300);   /* back to front, each after its shadow */
   /* raising the first one: both change their look (focus) */
   wm_raise(w);
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && UPLOADS==8);
   assert(wm_comp_items(items,8)==4 && items[3].surface==1);
   /* closing the second: its surface is freed */
   wm_close(w2);
+  assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==2);   /* its picture stays while it fades out where it was */
+  NOW += 60;
+  { int n = wm_comp_items(items,8); assert(n==4 && items[3].surface==2 && items[3].layer==3 && items[3].alpha>0 && items[3].alpha<255); }
+  NOW += 200;
   assert(wm_comp_update(&OPS,a,b,bytes)==0 && LIVE==1 && FREED_ID==2);
   { unsigned cf, cp; wm_comp_counts(&cf,&cp); assert(cf==4 && cp==0); }  /* two windows drawn whole twice (a new one; the focus) */
   int up = UPLOADS;
@@ -170,6 +184,7 @@ int main(void){
   }
   /* scrolling inside a window: the GPU moves the rows in its surface; only the screen is marked */
   { Window*t=wm_top();
+    NOW += 1000;   /* every window has finished opening / closing */
     assert(wm_comp_update(&OPS,a,b,bytes)==0);
     wm_take_damage_rects(dmg,WM_DAMAGE_MAX);
     int sx=t->r.x+20, sy=t->r.y+60, up=UPLOADS;

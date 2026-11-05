@@ -142,6 +142,7 @@ int desktop_tick(void)
     ticked |= startmenu_tick(flipped, now_ms);
     ticked |= appmenu_tick(now_ms);
     ticked |= deskmenu_tick(now_ms);
+    ticked |= wm_comp_anim_tick(now_ms); /* a window opening / closing / minimizing */
     UiRect glow;
     if (taskbar_tick(now_ms, &glow)) /* a taskbar button's hover tint moved one step */
     {

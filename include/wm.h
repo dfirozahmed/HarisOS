@@ -149,6 +149,7 @@ void wm_comp_set(int on);
 int wm_comp_on(void);
 int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long bytes);
 int wm_comp_items(GfxCompItem *out, int max);
+int wm_comp_anim_tick(unsigned long long now_ms); /* windows opening / closing / minimizing: marks what they cover; 1 = a frame is due */
 void wm_comp_drop(const GfxCompOps *ops);
 int wm_comp_scroll(int x, int y, int w, int h, int dy); /* for gfx_scroll_hook(): move rows inside a window's surface; 0 = done */
 void wm_comp_counts(unsigned *full, unsigned *part); /* windows drawn again whole / in part since the last call (then 0) */

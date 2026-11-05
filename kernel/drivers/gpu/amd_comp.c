@@ -124,6 +124,33 @@ uint32_t amd_comp_build_ps_layer(uint32_t *code)
     return n;
 }
 
+/* A packed layer faded by s10 (0 .. 1): the premultiplied colour times s10, and what shows through becomes 1 - s10 * (1 - a), so at 0
+ * nothing of the layer is left and at 1 it is the layer shader's result. One SGPR per instruction (the constant bus). */
+uint32_t amd_comp_build_ps_fade(uint32_t *code)
+{
+    uint32_t n = 0, c;
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(2));               /* v_cvt_u32_f32 v4, v2 (x)   */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 5, A3D_SRC_VGPR(3));               /* v_cvt_u32_f32 v5, v3 (y)   */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 4, 4, SGPR(8));                        /* v_add_u32 v4, s8, v4       */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 5, 5, SGPR(9));                        /* v_add_u32 v5, s9, v5       */
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[6:9], v[4:5], s[0:7] dmask:0xf */
+    code[n++] = a3d_mimg_1(4, 6, 0, 0);
+    code[n++] = A3D_S_WAITCNT_VM0;                                               /* s_waitcnt vmcnt(0)         */
+    for (c = 0; c < 3; c++)
+        code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 6 + c, 6 + c, SGPR(10));           /* v6+c = s10 * v6+c          */
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 9, 9, A3D_SRC_ONE_F);                  /* v9 = 1.0 - a (the layer's own cover) */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 9, 9, SGPR(10));                       /* v9 = s10 * (1 - a)         */
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 9, 9, A3D_SRC_ONE_F);                  /* v9 = 1.0 - v9              */
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 10);                      /* v_cvt_pkrtz_f16_f32 v10, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 11);                      /* v_cvt_pkrtz_f16_f32 v11, v8, v9 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(9), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v10, v11 compr done vm */
+    code[n++] = a3d_exp1(10, 11, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
 /* The window being dragged, finished in one pass: the layer (s0..s7, texel = pixel + (s8, s9)) and the picture below it, which the CPU
  * put s10 rows further down in the same surface. out = layer colour + below * layer alpha (what blend mode 2 gives over the screen), so
  * the screen gets the final pixel in one write and never shows the picture without the layer. The second load uses its own address
@@ -280,6 +307,7 @@ void amd_comp_begin(AmdCompFrame *f, uint32_t *ib, uint32_t cap, uint64_t rt_mc,
     f->ps_dim_mc = shader_mc + AMD_COMP_PS_DIM_OFF;
     f->ps_wgrad_mc = shader_mc + AMD_COMP_PS_WGRAD_OFF;
     f->ps_wglow_mc = shader_mc + AMD_COMP_PS_WGLOW_OFF;
+    f->ps_fade_mc = shader_mc + AMD_COMP_PS_FADE_OFF;
     f->draws = 0;
     a3d_emit_head(&b, rt_mc, pitch_px, width, height, bgr);
     f->n = b.n; f->over = b.over;
@@ -379,6 +407,20 @@ void amd_comp_layer(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t 
     u[8] = sx - x0;
     u[9] = sy - y0;
     comp_draw(f, x0, y0, x1, y1, 2, f->ps_layer_mc, 1, 2, u, 10);
+}
+
+void amd_comp_layer_fade(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
+                         uint32_t opacity, int bgr)
+{
+    Amd3dJob t = { 0 };
+    uint32_t u[11];
+    t.tex_mc = s->mc; t.tex_w = s->w; t.tex_h = s->h; t.tex_pitch_px = s->pitch_px; t.bgr = bgr;
+    amd_3d_build_tex_desc(u, &t);
+    u[3] = (u[3] & ~(7u << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W)) | (E_SQ_SEL_W << F3D_SQ_IMG_RSRC_WORD3__DST_SEL_W);
+    u[8] = sx - x0;
+    u[9] = sy - y0;
+    u[10] = opacity >= 255 ? 0x3F800000u : a3d_f32_ratio(opacity, 255);
+    comp_draw(f, x0, y0, x1, y1, 2, f->ps_fade_mc, 1, 2, u, 11);
 }
 
 void amd_comp_layer_under(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t below_dy, uint32_t x0, uint32_t y0,
@@ -557,17 +599,18 @@ static unsigned long long comp_tsc(void)
     return ((unsigned long long)hi << 32) | lo;
 }
 
-/* Writes the nine shaders to VRAM, each padded with zeros (the shader fetch reads ahead). */
+/* Writes the ten shaders to VRAM, each padded with zeros (the shader fetch reads ahead). */
 static void upload_shaders(void)
 {
-    static const uint32_t off[9] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF,
-                                     AMD_COMP_PS_LAYER_OFF, AMD_COMP_PS_UNDER_OFF, AMD_COMP_PS_DIM_OFF, AMD_COMP_PS_WGRAD_OFF,
-                                     AMD_COMP_PS_WGLOW_OFF };
+    static const uint32_t off[10] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF,
+                                      AMD_COMP_PS_LAYER_OFF, AMD_COMP_PS_UNDER_OFF, AMD_COMP_PS_DIM_OFF, AMD_COMP_PS_WGRAD_OFF,
+                                      AMD_COMP_PS_WGLOW_OFF, AMD_COMP_PS_FADE_OFF };
     uint32_t code[AMD_COMP_SHADER_MAX], k, i, n;
-    for (k = 0; k < 9; k++) {
+    for (k = 0; k < 10; k++) {
         n = k == 0 ? amd_comp_build_vs(code) : k == 1 ? amd_comp_build_ps_fill(code) : k == 2 ? amd_comp_build_ps_image(code)
           : k == 3 ? amd_comp_build_ps_shadow(code) : k == 4 ? amd_comp_build_ps_layer(code) : k == 5 ? amd_comp_build_ps_under(code)
-          : k == 6 ? amd_comp_build_ps_dim(code) : k == 7 ? amd_comp_build_ps_wall_grad(code) : amd_comp_build_ps_wall_glow(code);
+          : k == 6 ? amd_comp_build_ps_dim(code) : k == 7 ? amd_comp_build_ps_wall_grad(code) : k == 8 ? amd_comp_build_ps_wall_glow(code)
+          : amd_comp_build_ps_fade(code);
         for (i = 0; i < 0x200u / 4u; i++)
             amd_gpu_vram_write32(VRAM_COMP_SHADER_OFF + off[k] + 4u * i, i < n ? code[i] : 0u);
     }
@@ -1241,7 +1284,13 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
             if (it->surface < 1 || it->surface > SC_MAX || !sc_surf[it->surface - 1].off) return -1;
             if (!cut(&x0, &y0, &x1, &y1, it, w, h)) continue;
             s = &sc_surf[it->surface - 1];
-            if (it->layer)
+            if (it->layer == 3 && it->alpha < 255) /* a packed layer faded (a window opening / closing) */
+            {
+                if (it->alpha > 0)
+                    amd_comp_layer_fade(&f, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
+                                        (uint32_t)y1, (uint32_t)it->alpha, sc.bgr);
+            }
+            else if (it->layer)
                 amd_comp_layer(&f, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1,
                                sc.bgr);
             else

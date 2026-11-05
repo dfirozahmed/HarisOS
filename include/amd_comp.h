@@ -28,7 +28,7 @@ typedef struct
     uint32_t pitch_px, width, height;
     int bgr;
     uint64_t vs_mc, ps_fill_mc, ps_image_mc, ps_shadow_mc, ps_layer_mc, ps_under_mc, ps_dim_mc;  /* the shaders (amd_comp_build_*), 256-byte aligned */
-    uint64_t ps_wgrad_mc, ps_wglow_mc;
+    uint64_t ps_wgrad_mc, ps_wglow_mc, ps_fade_mc;
     uint32_t draws;
 } AmdCompFrame;
 
@@ -39,6 +39,7 @@ uint32_t amd_comp_build_ps_fill(uint32_t *code);    /* s0 = (r, g), s1 = (b, a) 
 uint32_t amd_comp_build_ps_image(uint32_t *code);   /* s0..s7 = image resource, s8 / s9 = surface x / y minus screen x / y, s10 = opacity */
 uint32_t amd_comp_build_ps_shadow(uint32_t *code);  /* s0..s3 = x0, y0, x1, y1, s4 = 1 / r, s5 = alpha (floats) */
 uint32_t amd_comp_build_ps_layer(uint32_t *code);   /* s0..s7 = image resource (alpha from the 4th byte), s8 / s9 as for the image */
+uint32_t amd_comp_build_ps_fade(uint32_t *code);    /* as layer, faded: colour times s10 (0 .. 1, a float), what shows through 1 - s10 * (1 - a) (a window opening / closing) */
 uint32_t amd_comp_build_ps_under(uint32_t *code);   /* as layer, plus the picture below it s10 rows further down: out = layer + below * alpha */
 uint32_t amd_comp_build_ps_dim(uint32_t *code);     /* as image, colour times s10 (the screen's brightness) */
 /* colour = s0..s2 + y * s3..s5 + dither * s6 (floats, 1.0 = 255; the dither is the 4 x 4 Bayer value 0 .. 15 of the pixel) */
@@ -70,6 +71,7 @@ uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
 #define AMD_COMP_PS_DIM_OFF 0xC00u
 #define AMD_COMP_PS_WGRAD_OFF 0xE00u
 #define AMD_COMP_PS_WGLOW_OFF 0x1000u
+#define AMD_COMP_PS_FADE_OFF 0x1200u
 #define AMD_COMP_SHADER_BYTES 0x2000u
 
 /* M4a test: three "windows" (surfaces the CPU fills) with soft shadows over a background, the third half transparent, composited in
@@ -111,6 +113,9 @@ uint32_t amd_comp_upload_value(int what);
  * below * that / 255 (blend mode 2, ONE / SRC_ALPHA). The surface's pixel (sx, sy) lands on (x0, y0). */
 void amd_comp_layer(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
                     int bgr);
+/* amd_comp_layer faded: opacity 1 .. 255 (255 = as amd_comp_layer); the whole layer, shadow included, becomes that much less there. */
+void amd_comp_layer_fade(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
+                         uint32_t opacity, int bgr);
 /* The same finished in one pass, no blending: the picture below is in the same surface below_dy rows down (amd_comp_build_ps_under). */
 /* An image (as amd_comp_image, opaque) with its colour times scale / 256: the screen's brightness. */
 void amd_comp_dim(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,

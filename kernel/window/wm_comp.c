@@ -5,6 +5,7 @@
 #include "wm_internal.h"
 #include "ui.h"
 #include "timer.h"
+#include "ui_anim.h"
 
 #define WMC_MAX 64
 #define WMC_PARTS 4 /* changed parts kept apart per window (a list's new rows and its scrollbar); more are merged */
@@ -27,10 +28,22 @@ typedef struct
     unsigned long long wpx[WM_WHY_COUNT + 1]; /* and the pixels they asked for */
     unsigned lk[WM_LOOK_COUNT];            /* the parts of the look it was drawn with */
     unsigned ln[WM_LOOK_COUNT];            /* whole drawings, by the part of the look that changed */
+    UiAnim op;                    /* how much of the window shows, 0 .. 255 (opening, closing, minimizing glide it) */
+    int op_to;                    /* where op is going: 255 shown, 0 hidden */
+    int fresh;                    /* made this frame: a new window opens with a fade */
+    int ghost;                    /* the window is closed: only its fade-out is left (its surface and place are kept) */
+    int maxi;                     /* it was maximized (no shadow) */
+    int anim_was;                 /* the last tick found its animation running (one more damage when it ends) */
 } Wmc;
+
+#define WMC_OPEN_MS 170  /* a window opening */
+#define WMC_CLOSE_MS 130 /* closing */
+#define WMC_MIN_MS 150   /* minimizing / restoring */
+#define WMC_SLIDE 14     /* pixels it rises / sinks while fading */
 
 static Wmc WMC[WMC_MAX];
 static int ON;
+static int WARM; /* the first update after the compositor started has run: windows made later open with a fade */
 static unsigned DRAWN_FULL, DRAWN_PART; /* surfaces drawn again since wm_comp_counts() */
 
 void wm_comp_counts(unsigned *full, unsigned *part)
@@ -163,12 +176,16 @@ static Wmc *entry(const Window *w, int make)
     *free_e = (Wmc){0};
     free_e->id = w->id;
     free_e->full = 1;
+    free_e->fresh = 1;
+    ui_anim_set(&free_e->op, 255);
+    free_e->op_to = 255;
     return free_e;
 }
 
 void wm_comp_set(int on)
 {
     ON = on;
+    WARM = 0;
     for (int i = 0; i < WMC_MAX; i++)
         WMC[i].full = 1; /* what changed while it was off is not known */
 }
@@ -315,12 +332,22 @@ static int opaque_rects(const Window *w, int out[3][4])
 
 static const GfxCompOps *OPS; /* the driver of the last update (for wm_comp_scroll) */
 
+/* Glide a window's opacity to `target` (from wherever it is now, so turning around half way never jumps). */
+static void fade_to(Wmc *c, int target, unsigned dur_ms, unsigned long long now)
+{
+    if (c->op_to == target)
+        return;
+    c->op_to = target;
+    ui_anim_start(&c->op, ui_anim_value(&c->op, now), target, dur_ms, now);
+}
+
 int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long bytes)
 {
     if (!ops || !a || !b)
         return -1;
     OPS = ops;
     int top = wm_top_index_internal();
+    unsigned long long now = timer_ms();
     for (int k = 0; k < WMC_MAX; k++)
         WMC[k].seen = 0;
     for (int i = 0; i < WM_ZN; i++)
@@ -330,8 +357,30 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
         if (!c)
             return -1;
         c->seen = 1;
+        c->maxi = w->maximized;
         if (w->minimized)
+        {
+            if (c->surf)
+                fade_to(c, 0, WMC_MIN_MS, now); /* sinks away; wm_comp_items still shows it until it is gone */
+            else
+            {
+                ui_anim_set(&c->op, 0);
+                c->op_to = 0;
+            }
+            c->fresh = 0;
             continue;
+        }
+        if (c->fresh)
+        {
+            c->fresh = 0;
+            if (WARM) /* a window opened now: it fades in (the ones there when the compositor started just appear) */
+            {
+                ui_anim_start(&c->op, 0, 255, WMC_OPEN_MS, now);
+                c->op_to = 255;
+            }
+        }
+        else
+            fade_to(c, 255, WMC_MIN_MS, now); /* restored from the taskbar */
         if (c->surf && (w->r.x != c->px || w->r.y != c->py))
             moved(w, w->r.x - c->px, w->r.y - c->py);
         c->px = w->r.x;
@@ -420,34 +469,95 @@ int wm_comp_update(const GfxCompOps *ops, void *a, void *b, unsigned long long b
     for (int k = 0; k < WMC_MAX; k++)
         if (WMC[k].id && !WMC[k].seen)
         {
-            if (WMC[k].surf)
-                ops->surface_free(WMC[k].surf); /* the window was closed */
-            WMC[k] = (Wmc){0};
+            Wmc *c = &WMC[k];
+            if (c->surf && !c->ghost && WARM && ui_anim_value(&c->op, now) > 0)
+            {
+                c->ghost = 1; /* closed: its picture stays a moment and fades out where it was */
+                fade_to(c, 0, WMC_CLOSE_MS, now);
+                continue;
+            }
+            if (c->ghost && ui_anim_active(&c->op, now))
+                continue;
+            if (c->surf)
+                ops->surface_free(c->surf); /* the window was closed */
+            *c = (Wmc){0};
         }
+    WARM = 1;
     return 0;
+}
+
+/* One window's items (its shadow, then the picture) at opacity op (1 .. 255): lower by a few pixels while it is not fully there. */
+static int items_of(GfxCompItem *out, int n, int max, const Wmc *c, int x, int y, int w, int h, int maxi, int is_top, int op)
+{
+    int dy = (255 - op) * WMC_SLIDE / 255;
+    if (!maxi && n + 1 < max) /* its shadow first (what ui_window draws on the CPU, here drawn by the GPU) */
+    {
+        int blur, sdy, strength;
+        ui_window_shadow(is_top, &blur, &sdy, &strength);
+        int r = ui_theme()->radius_l + 2; /* the hole: the window's middle, opaque for sure (away from its round corners) */
+        if (op < 255)
+        {
+            strength = strength * op / 255;
+            r = w; /* a fading window covers nothing: no hole (x1 <= x0) */
+        }
+        if (strength > 0)
+            out[n++] = (GfxCompItem){blur, x - blur / 2, y + dy + sdy - blur / 2, w + blur, h + blur, 2, strength,
+                                     {x + r, y + dy + r, x + w - r, y + dy + h - r}};
+    }
+    if (n < max)
+        out[n++] = (GfxCompItem){c->surf, x - c->m, y + dy - c->m, c->lw, c->lh, op < 255 ? 3 : 1, op < 255 ? op : 0, {0, 0, 0, 0}};
+    return n;
 }
 
 int wm_comp_items(GfxCompItem *out, int max)
 {
     int n = 0;
     int top = wm_top_index_internal();
+    unsigned long long now = timer_ms();
     for (int i = 0; i < WM_ZN && n < max; i++)
     {
         Window *w = WM_Z[i];
         Wmc *c = entry(w, 0);
-        if (w->minimized || !c || !c->surf)
+        if (!c || !c->surf)
             continue;
-        if (!w->maximized && n + 1 < max) /* its shadow first (what ui_window draws on the CPU, here drawn by the GPU) */
-        {
-            int blur, dy, strength;
-            ui_window_shadow(i == top, &blur, &dy, &strength);
-            int r = ui_theme()->radius_l + 2; /* the hole: the window's middle, opaque for sure (away from its round corners) */
-            out[n++] = (GfxCompItem){blur, w->r.x - blur / 2, w->r.y + dy - blur / 2, w->r.w + blur, w->r.h + blur, 2, strength,
-                                     {w->r.x + r, w->r.y + r, w->r.x + w->r.w - r, w->r.y + w->r.h - r}};
-        }
-        out[n++] = (GfxCompItem){c->surf, w->r.x - c->m, w->r.y - c->m, c->lw, c->lh, 1, 0, {0, 0, 0, 0}};
+        int op = ui_anim_value(&c->op, now);
+        if (op <= 0)
+            continue; /* minimized and gone, or not shown yet */
+        n = items_of(out, n, max, c, w->r.x, w->r.y, w->r.w, w->r.h, w->maximized, i == top, op > 255 ? 255 : op);
+    }
+    for (int k = 0; k < WMC_MAX && n < max; k++) /* closed windows fading out, above the rest */
+    {
+        const Wmc *c = &WMC[k];
+        if (!c->id || !c->ghost || !c->surf)
+            continue;
+        int op = ui_anim_value(&c->op, now);
+        if (op > 0)
+            n = items_of(out, n, max, c, c->px, c->py, c->lw - 2 * c->m, c->lh - 2 * c->m, c->maxi, 0, op > 255 ? 255 : op);
     }
     return n;
+}
+
+/* Called every tick of the desktop: while a window glides in or out, the part of the screen it covers (and the lift) is marked
+ * so the next frame draws it; one more mark when the glide ends. 1 = something is moving (a frame is due). */
+int wm_comp_anim_tick(unsigned long long now_ms)
+{
+    int any = 0;
+    if (!ON)
+        return 0;
+    for (int k = 0; k < WMC_MAX; k++)
+    {
+        Wmc *c = &WMC[k];
+        if (!c->id || !c->surf)
+            continue;
+        int act = ui_anim_active(&c->op, now_ms);
+        if (act || c->anim_was)
+        {
+            wm_damage_internal(c->px - 44, c->py - 36, c->px + c->lw + 44, c->py + c->lh + 44 + WMC_SLIDE);
+            any = 1;
+        }
+        c->anim_was = act;
+    }
+    return any;
 }
 
 void wm_comp_drop(const GfxCompOps *ops)
