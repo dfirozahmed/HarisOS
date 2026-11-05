@@ -153,6 +153,13 @@ static inline uint32_t a3d_mimg_1(uint32_t vaddr, uint32_t vdata, uint32_t srsrc
 /* for the wallpaper (ordered dither from the pixel position): VOP2 V_XOR_B32 0x15, VOP1 V_CVT_F32_U32 6 (aco_opcodes.py, gfx8 column) */
 #define A3D_OP2_XOR_B32 0x15u
 #define A3D_OP1_CVT_F32_U32 6u
+/* for the backdrop blur (aco_opcodes.py): VOP2 V_MIN_I32 0x0C, V_MAX_I32 0x0D (gfx8 column, which GFX9 uses), V_SUBREV_U32 0x36 (gfx9
+ * column: D = S1 - S0, no carry), VOP1 V_SQRT_F32 0x27 (gfx8 column); inline constant 0.5 = source operand 240 (GCN/GFX9 ISA) */
+#define A3D_OP2_MIN_I32 0x0Cu
+#define A3D_OP2_MAX_I32 0x0Du
+#define A3D_OP2_SUBREV_U32 0x36u
+#define A3D_OP1_SQRT_F32 0x27u
+#define A3D_SRC_HALF_F 240u
 #define A3D_GLOBAL_STORE_DWORD 0x1Cu
 #define A3D_GLOBAL_STORE_DWORDX4 0x1Fu
 

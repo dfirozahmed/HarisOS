@@ -28,7 +28,7 @@ typedef struct
     uint32_t pitch_px, width, height;
     int bgr;
     uint64_t vs_mc, ps_fill_mc, ps_image_mc, ps_shadow_mc, ps_layer_mc, ps_under_mc, ps_dim_mc;  /* the shaders (amd_comp_build_*), 256-byte aligned */
-    uint64_t ps_wgrad_mc, ps_wglow_mc, ps_fade_mc;
+    uint64_t ps_wgrad_mc, ps_wglow_mc, ps_fade_mc, ps_tapx_mc, ps_tapy_mc, ps_rrect_mc;
     uint32_t draws;
 } AmdCompFrame;
 
@@ -40,6 +40,13 @@ uint32_t amd_comp_build_ps_image(uint32_t *code);   /* s0..s7 = image resource, 
 uint32_t amd_comp_build_ps_shadow(uint32_t *code);  /* s0..s3 = x0, y0, x1, y1, s4 = 1 / r, s5 = alpha (floats) */
 uint32_t amd_comp_build_ps_layer(uint32_t *code);   /* s0..s7 = image resource (alpha from the 4th byte), s8 / s9 as for the image */
 uint32_t amd_comp_build_ps_fade(uint32_t *code);    /* as layer, faded: colour times s10 (0 .. 1, a float), what shows through 1 - s10 * (1 - a) (a window opening / closing) */
+/* One axis of a 3-tap box blur (frosted glass): s0..s7 = image, s8 / s9 = texel offset, s10 = tap spacing k (integer), s11 / s12 = lowest /
+ * highest texel on the axis (signed integers; taps outside repeat the edge), s13 = 1 / 3 (float): out = (t(-k) + t + t(+k)) / 3, alpha 1 */
+uint32_t amd_comp_build_ps_tapx(uint32_t *code);
+uint32_t amd_comp_build_ps_tapy(uint32_t *code);
+/* The blurred picture put on the screen inside a rounded rectangle: s0..s7 = image, s8 / s9 = texel offset, s10 / s11 / s12 / s13 = the
+ * rectangle shrunk by its corner radius (x0, y0, x1, y1), s14 = the radius (floats): alpha = clamp(1/2 - (distance to the shrunk box - r)) */
+uint32_t amd_comp_build_ps_rrect(uint32_t *code);
 uint32_t amd_comp_build_ps_under(uint32_t *code);   /* as layer, plus the picture below it s10 rows further down: out = layer + below * alpha */
 uint32_t amd_comp_build_ps_dim(uint32_t *code);     /* as image, colour times s10 (the screen's brightness) */
 /* colour = s0..s2 + y * s3..s5 + dither * s6 (floats, 1.0 = 255; the dither is the 4 x 4 Bayer value 0 .. 15 of the pixel) */
@@ -72,6 +79,9 @@ uint32_t amd_comp_end(AmdCompFrame *f, uint64_t sync_mc);
 #define AMD_COMP_PS_WGRAD_OFF 0xE00u
 #define AMD_COMP_PS_WGLOW_OFF 0x1000u
 #define AMD_COMP_PS_FADE_OFF 0x1200u
+#define AMD_COMP_PS_TAPX_OFF 0x1400u
+#define AMD_COMP_PS_TAPY_OFF 0x1600u
+#define AMD_COMP_PS_RRECT_OFF 0x1800u
 #define AMD_COMP_SHADER_BYTES 0x2000u
 
 /* M4a test: three "windows" (surfaces the CPU fills) with soft shadows over a background, the third half transparent, composited in
@@ -113,6 +123,18 @@ uint32_t amd_comp_upload_value(int what);
  * below * that / 255 (blend mode 2, ONE / SRC_ALPHA). The surface's pixel (sx, sy) lands on (x0, y0). */
 void amd_comp_layer(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
                     int bgr);
+/* Frosted glass: the backdrop under a rounded rectangle is blurred by three box blurs per axis (taps 1, 3 and 9 apart: together a 27-pixel
+ * box, a Gaussian of about 8 pixels). A pass writes the whole target f was begun with ((0, 0) .. (w, h)): axis 0 = x, 1 = y; the texel
+ * read for the pixel (x, y) is (x + ox, y + oy); taps are k apart and clamped to lo .. hi on the axis (in the source's texels). */
+void amd_comp_blur_pass(AmdCompFrame *f, const AmdSurface *s, int axis, uint32_t ox, uint32_t oy, uint32_t k, int lo, int hi, uint32_t w,
+                        uint32_t h, int bgr);
+/* The finished blur (s, its texel (sx, sy) at the screen pixel (x0, y0)) blended in over the rounded rectangle bx .. by with corner radius r. */
+void amd_comp_rrect(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, int bx, int by, int bw, int bh, int r, uint32_t x0,
+                    uint32_t y0, uint32_t x1, uint32_t y1, int bgr);
+#define AMD_COMP_BLUR_REACH 13 /* the three blurs together look 1 + 3 + 9 pixels to each side */
+/* The blur on the host's bytes (a w x h picture of 0x00RRGGBB): the passes of the GPU's chain, each rounded to bytes like its target, over
+ * the box ex, ey, ew, eh (the taps clamped to the picture). For tests and for the check of the GPU's work. */
+void amd_comp_blur_ref(uint32_t *px, int w, int h, int ex, int ey, int ew, int eh);
 /* amd_comp_layer faded: opacity 1 .. 255 (255 = as amd_comp_layer); the whole layer, shadow included, becomes that much less there. */
 void amd_comp_layer_fade(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
                          uint32_t opacity, int bgr);
@@ -159,6 +181,9 @@ uint32_t amd_comp_value(int what);
 #include "gfx.h"
 int amd_comp_scene_init(uint64_t fb_phys, uint32_t pitch_bytes, uint32_t width, uint32_t height, uint64_t vram_cpu, int bgr);
 int amd_comp_scene_test(void);
+/* Before the start menu's backdrop is blurred by the GPU: a wallpaper pattern with a rounded backdrop box, put together offscreen through the
+ * blur chain, checked against the host's blur (amd_comp_blur_ref). 1 = right. */
+int amd_comp_blur_test(void);
 int amd_comp_surface_new(int w, int h);
 void amd_comp_surface_free(int id);
 int amd_comp_surface_upload(int id, const void *px, int pitch, int x, int y, int w, int h, int opaque);

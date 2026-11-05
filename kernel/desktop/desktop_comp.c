@@ -343,7 +343,7 @@ int desktop_comp_frame(const UiRect *areas, int n)
         if (update_top(&TOPS[i], ops, a, b, bytes, areas, n, full) != 0)
             goto fail;
 
-    GfxCompItem items[1 + 1 + 60 + TOPS_N + 1];
+    GfxCompItem items[1 + 1 + 60 + TOPS_N + 1 + 1];
     int k = 0;
     items[k++] = (GfxCompItem){WALL_SURF, 0, 0, W, H, 0, 0, {0, 0, 0, 0}};
     if (ICONS_TOP.shown)
@@ -351,7 +351,14 @@ int desktop_comp_frame(const UiRect *areas, int n)
     k += wm_comp_items(items + k, 60);
     for (int i = 0; i < TOPS_N; i++)
         if (TOPS[i].shown)
+        {
+            UiRect panel;
+            int radius;
+            if (ops->backdrop && TOPS[i].draw == startmenu_draw && startmenu_panel(&panel, &radius))
+                /* the menu is frosted glass: the driver blurs what is under its panel first */
+                items[k++] = (GfxCompItem){radius, panel.x, panel.y, panel.w, panel.h, 4, 0, {0, 0, 0, 0}};
             items[k++] = (GfxCompItem){TOPS[i].surf, TOPS[i].r.x, TOPS[i].r.y, TOPS[i].r.w, TOPS[i].r.h, 1, 0, {0, 0, 0, 0}};
+        }
     /* the pointer, on top of everything (its picture goes up again only when its shape changed) */
     static unsigned int ptr_px[PTR_MAX * PTR_MAX];
     int px, py, pw, ph;

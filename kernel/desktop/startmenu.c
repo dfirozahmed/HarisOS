@@ -150,7 +150,11 @@ static void frost_free(void)
 static int frost(UiRect m)
 {
     if (!gfx_backdrop_possible())
-        return 0;
+    {
+        /* a compositor draws the screen: if its driver blurs the backdrop itself (desktop_comp sends it the panel), the panel is glassy */
+        const GfxCompOps *co = gfx_comp();
+        return co && co->backdrop;
+    }
     GfxClip cl = gfx_get_clip();
     if (cl.x0 >= m.x + m.w || cl.x1 <= m.x || cl.y0 >= m.y + m.h || cl.y1 <= m.y)
         return FROST_OK; /* this draw does not reach the panel: nothing to do (and nothing is drawn of it either) */
@@ -237,6 +241,15 @@ UiRect startmenu_bounds(void)
 {
     UiRect m = menu_rect();
     return ui_rect(m.x - 36, m.y - 30, m.w + 72, m.h + 80);
+}
+
+int startmenu_panel(UiRect *panel, int *radius)
+{
+    if (!OPEN)
+        return 0;
+    *panel = menu_rect();
+    *radius = 18; /* glass() */
+    return 1;
 }
 
 static UiRect search_rect(void)

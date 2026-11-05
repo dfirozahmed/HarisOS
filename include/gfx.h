@@ -167,7 +167,8 @@ typedef struct
     int surface;  /* id */
     int x, y;     /* where its pixel (0, 0) is on the screen */
     int w, h;
-    int layer;    /* 1 = packed layer (blended), 0 = opaque picture, 2 = a soft shadow (see below), 3 = a packed layer faded by alpha */
+    int layer;    /* 1 = packed layer (blended), 0 = opaque picture, 2 = a soft shadow (see below), 3 = a packed layer faded by alpha,
+                   * 4 = a backdrop: what is under it is blurred inside the rounded rectangle x, y, w, h (corner radius in `surface`) */
     int alpha;    /* a shadow: how dark it is at its darkest (0 .. 255); layer 3: its opacity (0 = nothing, 255 = as layer 1) */
     int hole[4];  /* a shadow: x0, y0, x1, y1 it need not be drawn in (an opaque window covers it); x1 <= x0: none */
 } GfxCompItem;
@@ -213,6 +214,8 @@ typedef struct
     /* may be 0: paints the wallpaper (GfxWallpaper below, w x h from the surface's (0, 0)) into a surface; 0 = done. Then the
      * CPU never draws or uploads it while the desktop is composed. */
     int (*wallpaper)(int id, const struct GfxWallpaper *w);
+    /* non-zero: the driver blurs a backdrop item (layer 4 above) itself, so a glass panel over it can be drawn see-through */
+    int backdrop;
 } GfxCompOps;
 void gfx_comp_driver(const GfxCompOps *ops); /* 0: none */
 const GfxCompOps *gfx_comp(void);            /* the driver, 0 when there is none (or it failed) */

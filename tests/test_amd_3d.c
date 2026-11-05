@@ -641,6 +641,41 @@ int main(void)
                   ud[10] >= 0x3F000000u && ud[10] < 0x3F010000u,   /* 0.5 .. 0.504: 128 / 255 */
                   "fade draw: layer blend mode 2, 11 user SGPRs, alpha from the 4th byte, s10 = opacity 128/255 as a float");
         }
+        cn = amd_comp_build_ps_tapx(code);
+        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && code[cn - 1] == A3D_S_ENDPGM,
+              "blur x shader: no VCC + literal / SGPR, ends, fits in its slot");
+        cn = amd_comp_build_ps_tapy(code);
+        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && code[cn - 1] == A3D_S_ENDPGM,
+              "blur y shader: no VCC + literal / SGPR, ends, fits in its slot");
+        cn = amd_comp_build_ps_rrect(code);
+        check(const_bus_bad(code, cn) == 0 && cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && code[cn - 1] == A3D_S_ENDPGM &&
+              AMD_COMP_PS_RRECT_OFF + 0x200u <= AMD_COMP_SHADER_BYTES,
+              "rounded-box shader: no VCC + literal / SGPR, ends, all three blur shaders fit in the 8 KiB");
+        {
+            amd_comp_begin(&f, fib, 1024, 0x4100000000ULL, 1920, 1920, 1080, 1, 0x4100000000ULL + 0x0B004000ULL);
+            amd_comp_blur_pass(&f, &s, 1, 7, 9, 3, 0, 99, 120, 100, 1);
+            amd_comp_rrect(&f, &s, 5, 6, 40, 24, 80, 56, 12, 40, 24, 120, 80, 1);
+            nf = amd_comp_end(&f, 0x4100000000ULL + 0x0B300040ULL);
+            ud = find_set(fib, nf, 0x76, R3D_SPI_SHADER_USER_DATA_PS_0, &ucnt);
+            check(nf > 0 && f.draws == 2 && ud && ucnt == 14 && ud[8] == 7u && ud[9] == 9u && ud[10] == 3u && ud[11] == 0u && ud[12] == 99u,
+                  "blur pass draw: 14 user SGPRs, texel offset, tap spacing 3, clamp 0 .. 99");
+        }
+        {
+            /* the host's blur: a uniform picture stays as it is; one lit pixel becomes a soft blob that reaches at most 13 pixels */
+            static uint32_t pic[100 * 100];
+            int ok = 1, i;
+            for (i = 0; i < 100 * 100; i++) pic[i] = 0x00336699u;
+            amd_comp_blur_ref(pic, 100, 100, 10, 10, 80, 80);
+            for (i = 0; i < 100 * 100; i++) ok &= pic[i] == 0x00336699u;
+            check(ok, "blur reference: a uniform picture stays exactly as it is (the average rounds back)");
+            for (i = 0; i < 100 * 100; i++) pic[i] = 0;
+            pic[50 * 100 + 50] = 0x000000FFu;
+            amd_comp_blur_ref(pic, 100, 100, 10, 10, 80, 80);
+            check(pic[50 * 100 + 50] == 0u || (pic[50 * 100 + 50] & 0xFFu) < 255u,   /* too spread out to stay full */
+                  "blur reference: a lit pixel loses its strength");
+            check(pic[50 * 100 + 50 + 14] == 0u && pic[50 * 100 + 50 - 14] == 0u && pic[(50 - 14) * 100 + 50] == 0u,
+                  "blur reference: nothing reaches further than the 13 pixels the margin allows");
+        }
         cn = amd_comp_build_ps_dim(code);
         check(const_bus_bad(code, cn) == 0&& cn <= AMD_COMP_SHADER_MAX && cn * 4u <= 0x200u && AMD_COMP_PS_DIM_OFF + 0x200u <= 0x1000u,
               "dim shader: no VCC + literal / SGPR, fits in its slot inside the 4 KiB");

@@ -988,6 +988,13 @@ int amd_gpu_bringup_screen(void)
                     amd_scene_ops.wallpaper = amd_comp_surface_wallpaper;
                 serial_print(wall_ok ? "WALL: the GPU paints the wallpaper\n"
                                      : "WALL: not used: the CPU draws the wallpaper and it is uploaded\n");
+                serial_print("BLUR: about to blur a backdrop box with the GPU (offscreen), against the host's blur\n");
+                amd_gpu_log_save();
+                int blur_ok = amd_comp_blur_test();
+                log_comp_result(blur_ok);
+                amd_scene_ops.backdrop = blur_ok;
+                serial_print(blur_ok ? "BLUR: the start menu's backdrop is blurred by the GPU\n"
+                                     : "BLUR: not used: the start menu's panel is nearly solid\n");
                 gfx_comp_driver(&amd_scene_ops);
                 serial_print("SCENE: the GPU composes the desktop\n");
             } else

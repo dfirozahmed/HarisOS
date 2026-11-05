@@ -151,6 +151,93 @@ uint32_t amd_comp_build_ps_fade(uint32_t *code)
     return n;
 }
 
+/* One axis of the frosted-glass blur: three taps of one image, k apart on the axis (clamped to s11 .. s12, signed), averaged with s13 = 1/3.
+ * The three addresses use their own VGPR pairs (v4 v5, v14 v15, v18 v19) and their own results (v6.., v10.., v20..); one SGPR per
+ * instruction (the constant bus). */
+static uint32_t build_ps_tap3(uint32_t *code, int axis)
+{
+    uint32_t n = 0, c;
+    uint32_t sw = axis ? 5 : 4, ot = axis ? 4 : 5;              /* the swept coordinate's VGPR, the other one */
+    uint32_t db = axis ? 15 : 14, ob = axis ? 14 : 15;          /* tap before: swept, other address VGPR */
+    uint32_t da = axis ? 19 : 18, oa = axis ? 18 : 19;          /* tap after */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(2));               /* v_cvt_u32_f32 v4, v2 (x)   */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 5, A3D_SRC_VGPR(3));               /* v_cvt_u32_f32 v5, v3 (y)   */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 4, 4, SGPR(8));                        /* v_add_u32 v4, s8, v4       */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 5, 5, SGPR(9));                        /* v_add_u32 v5, s9, v5       */
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_U32, db, sw, SGPR(10));                  /* before = swept - k         */
+    code[n++] = a3d_vop2(A3D_OP2_MAX_I32, db, db, SGPR(11));                     /* before = max(lo, before)   */
+    code[n++] = a3d_vop2(A3D_OP2_MIN_I32, db, db, SGPR(12));                     /* before = min(hi, before)   */
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, ob, A3D_SRC_VGPR(ot));
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, da, sw, SGPR(10));                     /* after = swept + k          */
+    code[n++] = a3d_vop2(A3D_OP2_MAX_I32, da, da, SGPR(11));
+    code[n++] = a3d_vop2(A3D_OP2_MIN_I32, da, da, SGPR(12));
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, oa, A3D_SRC_VGPR(ot));
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[6:9], v[4:5], s[0:7]   (centre) */
+    code[n++] = a3d_mimg_1(4, 6, 0, 0);
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[10:13], v[14:15], s[0:7] (before) */
+    code[n++] = a3d_mimg_1(14, 10, 0, 0);
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[20:23], v[18:19], s[0:7] (after)  */
+    code[n++] = a3d_mimg_1(18, 20, 0, 0);
+    code[n++] = A3D_S_WAITCNT_VM0;                                               /* s_waitcnt vmcnt(0)         */
+    for (c = 0; c < 3; c++) {
+        code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 6 + c, 10 + c, A3D_SRC_VGPR(6 + c));   /* v6+c += before         */
+        code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 6 + c, 20 + c, A3D_SRC_VGPR(6 + c));   /* v6+c += after          */
+        code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 6 + c, 6 + c, SGPR(13));               /* v6+c *= 1 / 3          */
+    }
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 9, A3D_SRC_ONE_F);                     /* alpha = 1.0                */
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 10);                      /* v_cvt_pkrtz_f16_f32 v10, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 11);                      /* v_cvt_pkrtz_f16_f32 v11, v8, v9 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(9), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v10, v11 compr done vm */
+    code[n++] = a3d_exp1(10, 11, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
+uint32_t amd_comp_build_ps_tapx(uint32_t *code) { return build_ps_tap3(code, 0); }
+uint32_t amd_comp_build_ps_tapy(uint32_t *code) { return build_ps_tap3(code, 1); }
+
+/* An image (the blurred backdrop) over a rounded rectangle: the colour as it is, the alpha from the distance to the rectangle:
+ * d = |max(inner0 - p, p - inner1, 0)| (both axes, as a length) - r; alpha = clamp(1/2 - d, 0, 1): 1 inside, 0 outside, a pixel of
+ * smoothing on the edge. For blend mode 1 (SRC_ALPHA / ONE_MINUS_SRC_ALPHA). */
+uint32_t amd_comp_build_ps_rrect(uint32_t *code)
+{
+    uint32_t n = 0;
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 4, A3D_SRC_VGPR(2));               /* v_cvt_u32_f32 v4, v2 (x)   */
+    code[n++] = a3d_vop1(A3D_OP1_CVT_U32_F32, 5, A3D_SRC_VGPR(3));               /* v_cvt_u32_f32 v5, v3 (y)   */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 4, 4, SGPR(8));                        /* v_add_u32 v4, s8, v4       */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_U32, 5, 5, SGPR(9));                        /* v_add_u32 v5, s9, v5       */
+    code[n++] = a3d_mimg_0(A3D_MIMG_IMAGE_LOAD, 0xF);                            /* image_load v[6:9], v[4:5], s[0:7] dmask:0xf */
+    code[n++] = a3d_mimg_1(4, 6, 0, 0);
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 10, 2, SGPR(10));                      /* v10 = x0 - px              */
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_F32, 11, 2, SGPR(12));                   /* v11 = px - x1              */
+    code[n++] = a3d_vop2(A3D_OP2_MAX_F32, 10, 11, A3D_SRC_VGPR(10));             /* v10 = max(v10, v11)        */
+    code[n++] = a3d_vop2(A3D_OP2_MAX_F32, 10, 10, A3D_SRC_ZERO);                 /* v10 = max(0, v10)          */
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 12, 3, SGPR(11));                      /* v12 = y0 - py              */
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_F32, 13, 3, SGPR(13));                   /* v13 = py - y1              */
+    code[n++] = a3d_vop2(A3D_OP2_MAX_F32, 12, 13, A3D_SRC_VGPR(12));
+    code[n++] = a3d_vop2(A3D_OP2_MAX_F32, 12, 12, A3D_SRC_ZERO);
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 10, 10, A3D_SRC_VGPR(10));             /* v10 = dx^2                 */
+    code[n++] = a3d_vop2(A3D_OP2_MUL_F32, 12, 12, A3D_SRC_VGPR(12));             /* v12 = dy^2                 */
+    code[n++] = a3d_vop2(A3D_OP2_ADD_F32, 10, 12, A3D_SRC_VGPR(10));             /* v10 = dx^2 + dy^2          */
+    code[n++] = a3d_vop1(A3D_OP1_SQRT_F32, 10, A3D_SRC_VGPR(10));                /* v10 = distance to the box  */
+    code[n++] = a3d_vop2(A3D_OP2_SUBREV_F32, 10, 10, SGPR(14));                  /* v10 -= r                   */
+    code[n++] = a3d_vop2(A3D_OP2_SUB_F32, 10, 10, A3D_SRC_HALF_F);               /* v10 = 0.5 - v10            */
+    code[n++] = a3d_vop2(A3D_OP2_MIN_F32, 10, 10, A3D_SRC_ONE_F);                /* v10 = min(1, v10)          */
+    code[n++] = a3d_vop2(A3D_OP2_MAX_F32, 10, 10, A3D_SRC_ZERO);                 /* v10 = max(0, v10)          */
+    code[n++] = A3D_S_WAITCNT_VM0;                                               /* s_waitcnt vmcnt(0)         */
+    code[n++] = a3d_vop1(A3D_OP1_MOV_B32, 9, A3D_SRC_VGPR(10));                  /* alpha = coverage           */
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 14);                      /* v_cvt_pkrtz_f16_f32 v14, v6, v7 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(6), A3D_SRC_VGPR(7), 0);
+    code[n++] = a3d_vop3a_0(A3D_OP3_CVT_PKRTZ_F16_F32, 15);                      /* v_cvt_pkrtz_f16_f32 v15, v8, v9 */
+    code[n++] = a3d_vop3a_1(A3D_SRC_VGPR(8), A3D_SRC_VGPR(9), 0);
+    code[n++] = a3d_exp0(0xF, A3D_EXP_TARGET_MRT0, 1, 1, 1);                     /* exp mrt0 v14, v15 compr done vm */
+    code[n++] = a3d_exp1(14, 15, 0, 0);
+    code[n++] = A3D_S_ENDPGM;
+    return n;
+}
+
 /* The window being dragged, finished in one pass: the layer (s0..s7, texel = pixel + (s8, s9)) and the picture below it, which the CPU
  * put s10 rows further down in the same surface. out = layer colour + below * layer alpha (what blend mode 2 gives over the screen), so
  * the screen gets the final pixel in one write and never shows the picture without the layer. The second load uses its own address
@@ -308,6 +395,9 @@ void amd_comp_begin(AmdCompFrame *f, uint32_t *ib, uint32_t cap, uint64_t rt_mc,
     f->ps_wgrad_mc = shader_mc + AMD_COMP_PS_WGRAD_OFF;
     f->ps_wglow_mc = shader_mc + AMD_COMP_PS_WGLOW_OFF;
     f->ps_fade_mc = shader_mc + AMD_COMP_PS_FADE_OFF;
+    f->ps_tapx_mc = shader_mc + AMD_COMP_PS_TAPX_OFF;
+    f->ps_tapy_mc = shader_mc + AMD_COMP_PS_TAPY_OFF;
+    f->ps_rrect_mc = shader_mc + AMD_COMP_PS_RRECT_OFF;
     f->draws = 0;
     a3d_emit_head(&b, rt_mc, pitch_px, width, height, bgr);
     f->n = b.n; f->over = b.over;
@@ -421,6 +511,76 @@ void amd_comp_layer_fade(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint
     u[9] = sy - y0;
     u[10] = opacity >= 255 ? 0x3F800000u : a3d_f32_ratio(opacity, 255);
     comp_draw(f, x0, y0, x1, y1, 2, f->ps_fade_mc, 1, 2, u, 11);
+}
+
+void amd_comp_blur_pass(AmdCompFrame *f, const AmdSurface *s, int axis, uint32_t ox, uint32_t oy, uint32_t k, int lo, int hi, uint32_t w,
+                        uint32_t h, int bgr)
+{
+    Amd3dJob t = { 0 };
+    uint32_t u[14];
+    t.tex_mc = s->mc; t.tex_w = s->w; t.tex_h = s->h; t.tex_pitch_px = s->pitch_px; t.bgr = bgr;
+    amd_3d_build_tex_desc(u, &t);
+    u[8] = ox;                      /* texel = pixel + (ox, oy), wrap-around integers */
+    u[9] = oy;
+    u[10] = k;
+    u[11] = (uint32_t)lo;
+    u[12] = (uint32_t)hi;
+    u[13] = a3d_f32_ratio(1, 3);
+    comp_draw(f, 0, 0, w, h, 0, axis ? f->ps_tapy_mc : f->ps_tapx_mc, 1, 5, u, 14);   /* v0 .. v23: 24 VGPRs */
+}
+
+void amd_comp_rrect(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, int bx, int by, int bw, int bh, int r, uint32_t x0,
+                    uint32_t y0, uint32_t x1, uint32_t y1, int bgr)
+{
+    Amd3dJob t = { 0 };
+    uint32_t u[15];
+    t.tex_mc = s->mc; t.tex_w = s->w; t.tex_h = s->h; t.tex_pitch_px = s->pitch_px; t.bgr = bgr;
+    amd_3d_build_tex_desc(u, &t);
+    u[8] = sx - x0;
+    u[9] = sy - y0;
+    u[10] = a3d_f32_bits((uint32_t)(bx + r));
+    u[11] = a3d_f32_bits((uint32_t)(by + r));
+    u[12] = a3d_f32_bits((uint32_t)(bx + bw - r));
+    u[13] = a3d_f32_bits((uint32_t)(by + bh - r));
+    u[14] = a3d_f32_bits((uint32_t)r);
+    comp_draw(f, x0, y0, x1, y1, 1, f->ps_rrect_mc, 1, 3, u, 15);   /* v0 .. v15: 16 VGPRs */
+}
+
+/* One box-blur pass of the host reference: dst[y * ew + x] for the box ew x eh, from src (pitch spitch) whose texel for it is (sx0 + x,
+ * sy0 + y); the taps k apart on the axis, clamped to lo .. hi (texels of src). Each byte is (a + b + c) / 3 rounded, like the target. */
+static void blur_ref_pass(const uint32_t *src, int spitch, int sx0, int sy0, uint32_t *dst, int ew, int eh, int axis, int k, int lo, int hi)
+{
+    for (int y = 0; y < eh; y++)
+        for (int x = 0; x < ew; x++) {
+            int tx = sx0 + x, ty = sy0 + y, sw = axis ? ty : tx;
+            int t0 = sw - k, t1 = sw + k;
+            uint32_t pa = src[ty * spitch + tx], pb, pc, out = 0;
+            t0 = t0 < lo ? lo : t0 > hi ? hi : t0;
+            t1 = t1 < lo ? lo : t1 > hi ? hi : t1;
+            pb = axis ? src[t0 * spitch + tx] : src[ty * spitch + t0];
+            pc = axis ? src[t1 * spitch + tx] : src[ty * spitch + t1];
+            for (int c = 0; c < 24; c += 8)
+                out |= ((((pa >> c) & 0xFFu) + ((pb >> c) & 0xFFu) + ((pc >> c) & 0xFFu) + 1u) / 3u) << c;
+            dst[y * ew + x] = out;
+        }
+}
+
+#define BLUR_REF_MAX (160 * 128)
+void amd_comp_blur_ref(uint32_t *px, int w, int h, int ex, int ey, int ew, int eh)
+{
+    static uint32_t ta[BLUR_REF_MAX], tb[BLUR_REF_MAX];
+    if (ew <= 0 || eh <= 0 || ew * eh > BLUR_REF_MAX || ex < 0 || ey < 0 || ex + ew > w || ey + eh > h)
+        return;
+    /* the GPU's chain: x taps 1, 3, 9 (the first from the picture, the others from the box), then y taps 1, 3, 9 */
+    blur_ref_pass(px, w, ex, ey, ta, ew, eh, 0, 1, 0, w - 1);
+    blur_ref_pass(ta, ew, 0, 0, tb, ew, eh, 0, 3, 0, ew - 1);
+    blur_ref_pass(tb, ew, 0, 0, ta, ew, eh, 0, 9, 0, ew - 1);
+    blur_ref_pass(ta, ew, 0, 0, tb, ew, eh, 1, 1, 0, eh - 1);
+    blur_ref_pass(tb, ew, 0, 0, ta, ew, eh, 1, 3, 0, eh - 1);
+    blur_ref_pass(ta, ew, 0, 0, tb, ew, eh, 1, 9, 0, eh - 1);
+    for (int y = 0; y < eh; y++)
+        for (int x = 0; x < ew; x++)
+            px[(ey + y) * w + ex + x] = tb[y * ew + x];
 }
 
 void amd_comp_layer_under(AmdCompFrame *f, const AmdSurface *s, uint32_t sx, uint32_t sy, uint32_t below_dy, uint32_t x0, uint32_t y0,
@@ -580,6 +740,8 @@ uint32_t amd_vpool_free_bytes(const AmdVPool *p)
 #define VRAM_COMP_SHADER_OFF 0x0B004000u   /* 8 KiB (AMD_COMP_SHADER_BYTES): the shaders at AMD_COMP_*_OFF */
 #define VRAM_COMP_SYNC_OFF 0x0B300040u     /* 4 bytes for the end-of-frame sync */
 #define VRAM_COMP_SYNC2_OFF 0x0B300044u    /* the same for a second frame in one submission (the scene compositor) */
+#define VRAM_COMP_SYNCB_OFF 0x0B300050u    /* 8 more, one for each frame of the backdrop blur (six passes and the frame after them) */
+#define VRAM_COMP_SYNCB_N 8u
 /* Below 256 MiB: the CPU reaches VRAM only through BAR0, and on this laptop BAR0 covers the first 256 MiB of the 512 MiB (reads at
  * 256 MiB and up gave 0xFFFFFFFF, 2026-10-29). 208 MiB = after the PSP TMR (192 MiB, 4 MiB). */
 #define VRAM_COMP_RT_OFF 0x0D000000u       /* the 512 x 256 offscreen target (512 KiB) */
@@ -602,15 +764,17 @@ static unsigned long long comp_tsc(void)
 /* Writes the ten shaders to VRAM, each padded with zeros (the shader fetch reads ahead). */
 static void upload_shaders(void)
 {
-    static const uint32_t off[10] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF,
+    static const uint32_t off[13] = { AMD_COMP_VS_OFF, AMD_COMP_PS_FILL_OFF, AMD_COMP_PS_IMAGE_OFF, AMD_COMP_PS_SHADOW_OFF,
                                       AMD_COMP_PS_LAYER_OFF, AMD_COMP_PS_UNDER_OFF, AMD_COMP_PS_DIM_OFF, AMD_COMP_PS_WGRAD_OFF,
-                                      AMD_COMP_PS_WGLOW_OFF, AMD_COMP_PS_FADE_OFF };
+                                      AMD_COMP_PS_WGLOW_OFF, AMD_COMP_PS_FADE_OFF, AMD_COMP_PS_TAPX_OFF, AMD_COMP_PS_TAPY_OFF,
+                                      AMD_COMP_PS_RRECT_OFF };
     uint32_t code[AMD_COMP_SHADER_MAX], k, i, n;
-    for (k = 0; k < 10; k++) {
+    for (k = 0; k < 13; k++) {
         n = k == 0 ? amd_comp_build_vs(code) : k == 1 ? amd_comp_build_ps_fill(code) : k == 2 ? amd_comp_build_ps_image(code)
           : k == 3 ? amd_comp_build_ps_shadow(code) : k == 4 ? amd_comp_build_ps_layer(code) : k == 5 ? amd_comp_build_ps_under(code)
           : k == 6 ? amd_comp_build_ps_dim(code) : k == 7 ? amd_comp_build_ps_wall_grad(code) : k == 8 ? amd_comp_build_ps_wall_glow(code)
-          : amd_comp_build_ps_fade(code);
+          : k == 9 ? amd_comp_build_ps_fade(code) : k == 10 ? amd_comp_build_ps_tapx(code) : k == 11 ? amd_comp_build_ps_tapy(code)
+          : amd_comp_build_ps_rrect(code);
         for (i = 0; i < 0x200u / 4u; i++)
             amd_gpu_vram_write32(VRAM_COMP_SHADER_OFF + off[k] + 4u * i, i < n ? code[i] : 0u);
     }
@@ -658,6 +822,8 @@ static uint32_t frame_submit(const uint32_t *ib, uint32_t n)
      * from an earlier submission, or the wait ends at once (and a second frame would read what the first one has not finished) */
     amd_gpu_vram_write32(VRAM_COMP_SYNC_OFF, 0);
     amd_gpu_vram_write32(VRAM_COMP_SYNC2_OFF, 0);
+    for (k = 0; k < VRAM_COMP_SYNCB_N; k++)
+        amd_gpu_vram_write32(VRAM_COMP_SYNCB_OFF + 4u * k, 0);
     amd_gpu_wc_flush();                 /* the IB, and whatever the CPU wrote that the frame reads */
     sub_t0 = comp_tsc();
     return amd_gpu_submit_ib(amd_gpu_frame_ib_mc(), nd + n);
@@ -1242,23 +1408,17 @@ static int cut(int *x0, int *y0, int *x1, int *y1, const GfxCompItem *it, uint32
     return *x0 < *x1 && *y0 < *y1;
 }
 
-/* The compose into a target (the screen, or the test buffer): rt_mc, its pitch and size. */
-static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t h, const GfxCompItem *items, int n,
-                      const int *rects, int nr)
+/* Items from .. to (not including) of the list, back to front, inside each of the rectangles, into the frame. A backdrop item (layer 4)
+ * draws nothing here (compose_to does its blur between two such calls). -1 when an item names a surface that is not there. */
+static int draw_items(AmdCompFrame *fp, const GfxCompItem *items, int from, int to, const int *rects, int nr, uint32_t w, uint32_t h)
 {
-    static uint32_t ib[SC_IB_MAX];
-    AmdCompFrame f;
-    uint32_t na, nb, seq;
-    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
-    unsigned long long t0 = comp_tsc();
-    if (!sc.up || !amd_gpu_ring_running() || w > sc.bb.w || h > sc.bb.h) return -1;
-
-    amd_comp_begin(&f, ib, SC_IB_MAX, sc.bb.mc, sc.bb.pitch_px, w, h, sc.bgr, shader_mc);   /* 1: the scene into the back buffer */
     for (int r = 0; r < nr; r++)
-        for (int i = 0; i < n; i++) {
+        for (int i = from; i < to; i++) {
             const GfxCompItem *it = &items[i];
             int x0 = rects[4 * r], y0 = rects[4 * r + 1], x1 = rects[4 * r + 2], y1 = rects[4 * r + 3];
             const AmdSurface *s;
+            if (it->layer == 4)
+                continue;
             if (it->layer == 2) /* a soft shadow: no surface; `surface` is its blur */
             {
                 if (!cut(&x0, &y0, &x1, &y1, it, w, h))
@@ -1277,7 +1437,7 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
                 }
                 for (int p = 0; p < np; p++)
                     if (part[p][2] > part[p][0] && part[p][3] > part[p][1])
-                        amd_comp_shadow_part(&f, it->x, it->y, it->x + it->w, it->y + it->h, (uint32_t)it->surface, (uint32_t)it->alpha,
+                        amd_comp_shadow_part(fp, it->x, it->y, it->x + it->w, it->y + it->h, (uint32_t)it->surface, (uint32_t)it->alpha,
                                              (uint32_t)part[p][0], (uint32_t)part[p][1], (uint32_t)part[p][2], (uint32_t)part[p][3]);
                 continue;
             }
@@ -1287,19 +1447,103 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
             if (it->layer == 3 && it->alpha < 255) /* a packed layer faded (a window opening / closing) */
             {
                 if (it->alpha > 0)
-                    amd_comp_layer_fade(&f, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
+                    amd_comp_layer_fade(fp, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
                                         (uint32_t)y1, (uint32_t)it->alpha, sc.bgr);
             }
             else if (it->layer)
-                amd_comp_layer(&f, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1,
+                amd_comp_layer(fp, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1, (uint32_t)y1,
                                sc.bgr);
             else
-                amd_comp_image(&f, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
+                amd_comp_image(fp, s, (uint32_t)(x0 - it->x), (uint32_t)(y0 - it->y), (uint32_t)x0, (uint32_t)y0, (uint32_t)x1,
                                (uint32_t)y1, 255, sc.bgr);
         }
-    scval[AMD_COMP_SC_DRAWS] = f.draws;
+    return 0;
+}
+
+/* The two pictures the blur passes go back and forth between (a backdrop item's box and the margin the blur reaches into). */
+#define BLUR_T_W 512u
+static AmdSurface blur_t[2];
+
+static int blur_scratch(uint32_t ew, uint32_t eh)
+{
+    if (!blur_t[0].off && !amd_surface_alloc(&blur_t[0], BLUR_T_W, sc.bb.h)) return 0;
+    if (!blur_t[1].off && !amd_surface_alloc(&blur_t[1], BLUR_T_W, sc.bb.h)) return 0;
+    return ew <= BLUR_T_W && eh <= sc.bb.h;
+}
+
+/* The compose into a target (the screen, or the test buffer): rt_mc, its pitch and size. The scene goes into the back buffer, frame by
+ * frame, each frame ending with a sync word the next one waits for. With a backdrop item (layer 4: the rounded rectangle x, y, w, h, corner
+ * radius in `surface`) the frames before it are the items under it; then six blur passes of the backdrop (x taps 1, 3, 9, then y taps
+ * 1, 3, 9, between two scratch pictures); then the blurred box put on the back buffer through the rounded rectangle; then the items above
+ * it. The blur reads a margin around the box, so that margin is put together again too (it is added to the rectangles). */
+static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t h, const GfxCompItem *items, int n,
+                      const int *rects, int nr)
+{
+    static uint32_t ib[SC_IB_MAX];
+    int rr[4 * 64 + 4];
+    AmdCompFrame f;
+    uint32_t na, nb, seq, draws = 0;
+    uint64_t shader_mc = amd_native_vram_mc_addr(VRAM_COMP_SHADER_OFF, AMD_COMP_SHADER_BYTES), sync_mc = amd_native_vram_mc_addr(VRAM_COMP_SYNC_OFF, 4u);
+    unsigned long long t0 = comp_tsc();
+    int bi = -1, nrr = nr, ex0 = 0, ey0 = 0, ex1 = 0, ey1 = 0, sj = 0;
+    if (!sc.up || !amd_gpu_ring_running() || w > sc.bb.w || h > sc.bb.h || nr > 64) return -1;
+
+    for (int i = 0; i < n; i++)
+        if (items[i].layer == 4) { bi = i; break; }
+    for (int k = 0; k < 4 * nr; k++) rr[k] = rects[k];
+    if (bi >= 0) {
+        const GfxCompItem *b = &items[bi];
+        int hit = 0;
+        ex0 = b->x - AMD_COMP_BLUR_REACH; ey0 = b->y - AMD_COMP_BLUR_REACH;
+        ex1 = b->x + b->w + AMD_COMP_BLUR_REACH; ey1 = b->y + b->h + AMD_COMP_BLUR_REACH;
+        if (ex0 < 0) ex0 = 0;
+        if (ey0 < 0) ey0 = 0;
+        if (ex1 > (int)w) ex1 = (int)w;
+        if (ey1 > (int)h) ey1 = (int)h;
+        for (int r = 0; r < nr; r++)
+            if (rects[4 * r] < b->x + b->w && rects[4 * r + 2] > b->x && rects[4 * r + 1] < b->y + b->h && rects[4 * r + 3] > b->y) hit = 1;
+        if (!hit || b->x < 0 || b->y < 0 || b->x + b->w > (int)w || b->y + b->h > (int)h || b->w < 2 * b->surface || b->h < 2 * b->surface ||
+            !blur_scratch((uint32_t)(ex1 - ex0), (uint32_t)(ey1 - ey0)))
+            bi = -1;   /* nothing of the box changes, or it cannot be done: the items above it go over the plain backdrop */
+        else {
+            rr[4 * nr] = ex0; rr[4 * nr + 1] = ey0; rr[4 * nr + 2] = ex1; rr[4 * nr + 3] = ey1;
+            nrr = nr + 1;
+        }
+    }
+
+    amd_comp_begin(&f, ib, SC_IB_MAX, sc.bb.mc, sc.bb.pitch_px, w, h, sc.bgr, shader_mc);   /* 1: the scene into the back buffer */
+    if (draw_items(&f, items, 0, bi >= 0 ? bi : n, rr, nrr, w, h) != 0) return -1;
+    draws += f.draws;
     na = amd_comp_end(&f, sync_mc);
     if (!na) return -1;
+    if (bi >= 0) {
+        const GfxCompItem *b = &items[bi];
+        static const uint32_t tap[6] = { 1, 3, 9, 1, 3, 9 };
+        uint32_t ew = (uint32_t)(ex1 - ex0), eh = (uint32_t)(ey1 - ey0);
+        for (int p = 0; p < 6; p++) {                      /* x: bb -> T0 -> T1 -> T0, y: T0 -> T1 -> T0 -> T1 */
+            const AmdSurface *src = p == 0 ? &sc.bb : &blur_t[(p & 1) ? 0 : 1], *dst = &blur_t[(p & 1) ? 1 : 0];
+            int axis = p >= 3, lo = 0, hi = axis ? (int)eh - 1 : (p == 0 ? (int)w - 1 : (int)ew - 1);
+            uint32_t np;
+            amd_comp_begin(&f, ib + na, SC_IB_MAX - na, dst->mc, dst->pitch_px, ew, eh, sc.bgr, shader_mc);
+            amd_comp_blur_pass(&f, src, axis, p == 0 ? (uint32_t)ex0 : 0u, p == 0 ? (uint32_t)ey0 : 0u, tap[p], lo, hi, ew, eh, sc.bgr);
+            draws += f.draws;
+            np = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNCB_OFF + 4u * (uint32_t)sj++, 4u));
+            if (!np) return -1;
+            na += np;
+        }
+        {                                                   /* the blurred box onto the back buffer, then the items above the backdrop */
+            uint32_t np;
+            amd_comp_begin(&f, ib + na, SC_IB_MAX - na, sc.bb.mc, sc.bb.pitch_px, w, h, sc.bgr, shader_mc);
+            amd_comp_rrect(&f, &blur_t[1], (uint32_t)(b->x - ex0), (uint32_t)(b->y - ey0), b->x, b->y, b->w, b->h, b->surface,
+                           (uint32_t)b->x, (uint32_t)b->y, (uint32_t)(b->x + b->w), (uint32_t)(b->y + b->h), sc.bgr);
+            if (draw_items(&f, items, bi + 1, n, rr, nrr, w, h) != 0) return -1;
+            draws += f.draws;
+            np = amd_comp_end(&f, amd_native_vram_mc_addr(VRAM_COMP_SYNCB_OFF + 4u * (uint32_t)sj++, 4u));
+            if (!np) return -1;
+            na += np;
+        }
+    }
+    scval[AMD_COMP_SC_DRAWS] = draws;
     amd_comp_begin(&f, ib + na, SC_IB_MAX - na, rt_mc, rt_pitch_px, w, h, sc.bgr, shader_mc);   /* 2: the changed parts onto the target */
     for (int r = 0; r < nr; r++) {
         GfxCompItem all = { 0, 0, 0, (int)w, (int)h, 0, 0, { 0, 0, 0, 0 } };
@@ -1471,6 +1715,70 @@ int amd_comp_scene_test(void)
     if (bad) { status = "scene FAILED: pixels are wrong"; return 0; }
     if (dbad) { status = "scene FAILED: the copy at half brightness is wrong"; return 0; }
     status = "scene PASS: wallpaper + shadow + layer through the back buffer in 2 rectangles, and at half brightness, every pixel right";
+    return 1;
+}
+
+/* Check before the compositor blurs the start menu's backdrop: the scene test's wallpaper pattern (it has hard steps where the bytes wrap, so
+ * the blur is plain to see) with a backdrop box (40, 24) 80 x 56, corner radius 12, put together through the whole chain into the offscreen
+ * buffer. Outside the box the pixels must be the wallpaper's, deep inside the rounded box the host's blur (amd_comp_blur_ref) within 4;
+ * the pixels on the edge are not looked at. 1 = right. */
+int amd_comp_blur_test(void)
+{
+    static uint32_t wall[176u * 124u], ref[176u * 124u];
+    GfxCompItem items[2];
+    const int rects[4] = { 0, 0, 176, 124 };
+    const int BX = 40, BY = 24, BW = 80, BH = 56, BR = 12;
+    uint32_t x, y, k, bad = 0;
+    int ws;
+    uint64_t rt_mc = amd_native_vram_mc_addr(VRAM_COMP_RT_OFF, COMP_RT_W * COMP_RT_H * 4u);
+    for (k = 0; k < AMD_COMP_VALUES; k++) val[k] = 0;
+    if (!sc.up || !rt_mc) { status = "blur test skipped: the compositor is not set up"; return 0; }
+    for (y = 0; y < 124u; y++)
+        for (x = 0; x < 176u; x++) wall[y * 176u + x] = ref[y * 176u + x] = sc_wall(x, y);
+    amd_comp_blur_ref(ref, 176, 124, BX - AMD_COMP_BLUR_REACH, BY - AMD_COMP_BLUR_REACH, BW + 2 * AMD_COMP_BLUR_REACH,
+                      BH + 2 * AMD_COMP_BLUR_REACH);
+    ws = amd_comp_surface_new(176, 124);
+    if (!ws) { status = "blur test skipped: no surface"; return 0; }
+    if (amd_comp_surface_upload(ws, wall, 176, 0, 0, 176, 124, 1)) { amd_comp_surface_free(ws); status = "blur test FAILED: upload"; return 0; }
+    items[0] = (GfxCompItem){ ws, 0, 0, 176, 124, 0, 0, { 0, 0, 0, 0 } };
+    items[1] = (GfxCompItem){ BR, BX, BY, BW, BH, 4, 0, { 0, 0, 0, 0 } };
+    amd_gpu_fault_clear();
+    if (compose_to(rt_mc, COMP_RT_W, 176, 124, items, 2, rects, 1) != 0) {
+        keep_fault_registers();
+        val[AMD_COMP_V_GRBM] = amd_gpu_reg_read32(0x2004u);
+        amd_comp_surface_free(ws);
+        status = "blur test FAILED: the compose did not finish";
+        return 0;
+    }
+    for (y = 0; y < 124u; y++)
+        for (x = 0; x < 176u; x++) {
+            int dx = 2 * BX + 2 * BR - (int)(2 * x + 1), dy = 2 * BY + 2 * BR - (int)(2 * y + 1), t;
+            uint32_t v = amd_gpu_vram_read32(VRAM_COMP_RT_OFF + (y * COMP_RT_W + x) * 4u) & 0x00FFFFFFu, want;
+            long long d2;
+            t = (int)(2 * x + 1) - (2 * BX + 2 * BW - 2 * BR);
+            if (t > dx) dx = t;
+            if (dx < 0) dx = 0;
+            t = (int)(2 * y + 1) - (2 * BY + 2 * BH - 2 * BR);
+            if (t > dy) dy = t;
+            if (dy < 0) dy = 0;
+            d2 = (long long)dx * dx + (long long)dy * dy;      /* half pixels squared, from the box shrunk by the radius */
+            if (d2 <= (long long)(2 * (BR - 2)) * (2 * (BR - 2))) want = ref[y * 176u + x];
+            else if (d2 >= (long long)(2 * (BR + 2)) * (2 * (BR + 2))) want = wall[y * 176u + x];
+            else continue;   /* on the edge: not looked at */
+            val[AMD_COMP_V_IN_TOTAL]++;
+            if (near_n(v, want & 0x00FFFFFFu, want == wall[y * 176u + x] ? 0 : 4)) { val[AMD_COMP_V_IN_GOOD]++; continue; }
+            if (!bad++) {
+                val[AMD_COMP_V_FIRST_IN] = v | 0x01000000u; val[AMD_COMP_V_FIRST_IN + 1] = want & 0x00FFFFFFu;
+                val[AMD_COMP_V_FIRST_IN + 2] = x | (y << 16);
+            }
+        }
+    val[AMD_COMP_V_DRAWS] = scval[AMD_COMP_SC_DRAWS]; val[AMD_COMP_V_DWORDS] = scval[AMD_COMP_SC_DWORDS];
+    val[AMD_COMP_V_CYCLES] = scval[AMD_COMP_SC_CYCLES];
+    amd_comp_surface_free(ws);
+    scval[AMD_COMP_SC_FRAMES] = scval[AMD_COMP_SC_UPLOADS] = 0;
+    { AmdSceneSums z; amd_comp_scene_sums(&z); }
+    if (bad) { status = "blur FAILED: pixels differ from the host's blur / the wallpaper"; return 0; }
+    status = "blur PASS: the backdrop under a rounded box is blurred by the GPU, every pixel off the edge right";
     return 1;
 }
 

@@ -37,5 +37,7 @@ void startmenu_wheel(int steps);
 void startmenu_draw(void);
 /* Everything the open menu draws, its shadow included (for the compositor: the menu's surface). */
 UiRect startmenu_bounds(void);
+/* The open menu's glass panel (without its shadow) and its corner radius, for a compositor that blurs what is behind it: 1 = open. */
+int startmenu_panel(UiRect *panel, int *radius);
 
 #endif
