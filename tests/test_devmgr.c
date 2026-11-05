@@ -104,10 +104,17 @@ int main(void)
     int before = devmgr_build(&in);
     int found = 0;
     for (int i = 0; i < before; i++)
-        if (strcmp(devmgr_get(i)->name, "USB audio device") == 0 && devmgr_get(i)->has_driver && strstr(devmgr_get(i)->note, "48 kHz"))
+        if (strcmp(devmgr_get(i)->name, "USB audio device") == 0 && devmgr_get(i)->has_driver && strstr(devmgr_get(i)->note, "volume control: no"))
             found = 1;
     CHECK(found);
-    in.usb_audio = 0;
+    in.usb_audio_vol = 1; /* the device has a volume control: the note says so */
+    devmgr_build(&in);
+    found = 0;
+    for (int i = 0; i < before; i++)
+        if (strcmp(devmgr_get(i)->name, "USB audio device") == 0 && strstr(devmgr_get(i)->note, "volume control: yes"))
+            found = 1;
+    CHECK(found);
+    in.usb_audio = in.usb_audio_vol = 0;
     CHECK(devmgr_build(&in) == before - 1);
 
     /* xHCI present but the driver did not start -> no driver */
