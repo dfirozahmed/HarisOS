@@ -57,8 +57,8 @@ if(HARIS_AMD_GPU_PSP_LEVEL GREATER 0)
     list(APPEND EFI_CFLAGS -DHARIS_AMD_GPU_PSP_LEVEL=${HARIS_AMD_GPU_PSP_LEVEL})
 endif()
 
-# A short 440 Hz tone at boot from the HD Audio driver (proof that sound works; turn off with -DHARIS_AUDIO_BOOT_TONE=OFF).
-option(HARIS_AUDIO_BOOT_TONE "Play a short test tone at boot through HD Audio" ON)
+# A short 440 Hz tone at boot from the HD Audio driver (proof that sound works; off by default, turn on with -DHARIS_AUDIO_BOOT_TONE=ON).
+option(HARIS_AUDIO_BOOT_TONE "Play a short test tone at boot through HD Audio" OFF)
 if(HARIS_AUDIO_BOOT_TONE)
     list(APPEND EFI_CFLAGS -DHARIS_AUDIO_BOOT_TONE=1)
 endif()
