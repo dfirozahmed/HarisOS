@@ -147,7 +147,9 @@ int picture_is_name(const char *name)
 }
 static int CON_RESULT = 7, RUN_RESULT = 3, CON_WRITES, CON_FINISHED;
 static char CON_TITLE[96], RUN_NAME[96], CON_TEXT[160];
-int console_window_open(const char *title) { strcpy(CON_TITLE, title); return CON_RESULT; }
+static int NODE_SUBSYS, SUBSYS_SEEN = -1;
+int exec_node_subsystem(int node) { (void)node; return NODE_SUBSYS; }
+int console_window_open_for(const char *title, int subsystem) { strcpy(CON_TITLE, title); SUBSYS_SEEN = subsystem; return CON_RESULT; }
 int console_write(int con, const char *s, unsigned n) { (void)con; CON_WRITES++; if (n < 150) { strncat(CON_TEXT, s, n); } return (int)n; }
 void console_finish(int con, int code) { (void)con; (void)code; CON_FINISHED++; }
 int exec_run_node(int node, const char *name, int console, int *err) { (void)node; (void)console; *err = 0; strcpy(RUN_NAME, name); return RUN_RESULT; }
@@ -313,6 +315,11 @@ int main(void)
     node_set(16, 5, "hello.elf", 0);
     deskfiles_open(16);
     CHECK(strcmp(CON_TITLE, "hello.elf") == 0 && strcmp(RUN_NAME, "hello.elf") == 0 && TOASTS == 0 && CON_WRITES == 0);
+    CHECK(SUBSYS_SEEN == 0); /* the file's subsystem decides how the console opens: it is passed on as it is */
+    NODE_SUBSYS = 2;
+    deskfiles_open(16);
+    CHECK(SUBSYS_SEEN == 2);
+    NODE_SUBSYS = 0;
     CON_RESULT = -1; /* no console or window to run it in */
     deskfiles_open(16);
     CHECK(TOASTS == 1 && LAST_KIND == TOAST_ERROR && strstr(LAST_TEXT, "no free console") != 0);

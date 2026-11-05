@@ -436,8 +436,16 @@ foreach(LIBSRC libc posix libm numconv)
 endforeach()
 set(USER_ELFS "")
 set(USER_ESP_FILES "")
+# Programs that open their own window (SYS_GUI_*) get no Console window until they print or read; all others are command line
+# programs and get theirs at once (the subsystem is written into the ELF header by mkelf, see include/elf.h).
+set(GUI_PROGRAMS guidemo)
 foreach(PROG ${USER_PROGRAMS})
     string(TOUPPER ${PROG} PROG_UPPER)
+    if(PROG IN_LIST GUI_PROGRAMS)
+        set(PROG_SUBSYS --gui)
+    else()
+        set(PROG_SUBSYS --console)
+    endif()
     set(PROG_OBJ ${CMAKE_BINARY_DIR}/user/${PROG}.obj)
     set(PROG_PE  ${CMAKE_BINARY_DIR}/user/${PROG}.exe)
     set(PROG_ELF ${CMAKE_BINARY_DIR}/user/${PROG}.elf)
@@ -460,7 +468,7 @@ foreach(PROG ${USER_PROGRAMS})
     )
     add_custom_command(
         OUTPUT  ${PROG_ELF}
-        COMMAND ${MKELF_EXE} ${PROG_PE} ${PROG_ELF}
+        COMMAND ${MKELF_EXE} ${PROG_PE} ${PROG_ELF} ${PROG_SUBSYS}
         DEPENDS ${MKELF_EXE} ${PROG_PE}
         COMMENT "Making ${PROG}.elf"
         VERBATIM

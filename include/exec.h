@@ -25,6 +25,8 @@
 #define EXEC_ERR_LOAD -5     /* the loader refused the file or ran out of memory (see *err) */
 
 int exec_find(const char *name);
+/* ELF_SUBSYS_* (elf.h) of VFS node `node`, from its header only (the first 64 bytes are read); ELF_SUBSYS_UNKNOWN if it cannot be read. */
+int exec_node_subsystem(int node);
 int exec_run(const char *name, int *err); /* the program's output goes to the serial port, its input is empty */
 
 /* The same for a file that is already known (a double click in the File Explorer): VFS node `node`, shown as `name`.

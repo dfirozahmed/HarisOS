@@ -106,7 +106,7 @@ void ex_go_up(void)
 static const char *run_program(int node, const VfsNode *n)
 {
     static char note[100];
-    int con = console_window_open(n->name);
+    int con = console_window_open_for(n->name, exec_node_subsystem(node));
     if (con < 0)
         return "Cannot run: no free console or window (close one first).";
     int err = 0;

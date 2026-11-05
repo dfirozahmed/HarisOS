@@ -15,6 +15,8 @@ typedef struct
     char queue[CONSOLE_INPUT_MAX]; /* finished lines, a ring */
     int q_head, q_count;
     int waiter; /* thread to wake, -1 = none */
+    int hidden;   /* 1 = made by console_open_hidden and has no window yet (see console_take_pending) */
+    int show_req; /* a hidden console whose program printed or read: it wants its window now */
     char cell[CONSOLE_ROWS][CONSOLE_COLS]; /* the character grid */
 } Console;
 
@@ -133,6 +135,7 @@ int console_open(const char *title)
         c->line_len = 0;
         c->q_head = c->q_count = 0;
         c->waiter = -1;
+        c->hidden = c->show_req = 0;
         int n = 0;
         for (; title && title[n] && n < CONSOLE_TITLE_MAX - 1; n++)
             c->title[n] = title[n];
@@ -140,6 +143,35 @@ int console_open(const char *title)
         clear_row(c, 0);
         return (int)(T[i].gen << 8) | i;
     }
+}
+
+int console_open_hidden(const char *title)
+{
+    int h = console_open(title);
+    Console *c = get(h);
+    if (c)
+        c->hidden = 1;
+    return h;
+}
+
+int console_take_pending(void)
+{
+    for (int i = 0; i < T_CAP; i++)
+    {
+        Console *c = T[i].c;
+        if (!c || !c->hidden)
+            continue;
+        int h = (int)(T[i].gen << 8) | i;
+        if (c->show_req)
+        {
+            c->hidden = c->show_req = 0; /* the caller gives it a window now */
+            c->dirty = 2;
+            return h;
+        }
+        if (c->finished) /* ended without ever printing or reading (a GUI program, a silent tool): no window was needed */
+            console_close(h);
+    }
+    return -1;
 }
 
 void console_close(int h)
@@ -165,6 +197,8 @@ int console_write(int h, const char *text, unsigned n)
         return -1;
     for (unsigned i = 0; i < n; i++)
         put_char(c, text[i]);
+    if (c->hidden && n > 0)
+        c->show_req = 1;
     return (int)n;
 }
 
@@ -195,6 +229,8 @@ void console_finish(int h, int code)
     put_text(c, "]");
     put_char(c, '\n');
     c->finished = 1;
+    if (c->hidden && code != 0) /* a failure is worth showing; a clean exit of a program that never printed is not */
+        c->show_req = 1;
     wake(c);
 }
 
@@ -276,6 +312,8 @@ int console_read(int h, void *buf, int len)
         return 0;
     if (len <= 0)
         return 0;
+    if (c->hidden)
+        c->show_req = 1; /* the program wants input: the user needs a window to type in */
     if (c->q_count == 0)
         return c->finished ? 0 : -1;
     /* like a terminal in line mode: a read never goes past the end of a line, so a program that asks for 4096 bytes gets

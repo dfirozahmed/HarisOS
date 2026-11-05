@@ -1,7 +1,7 @@
 /*
  * mkelf - turns a linked Windows (PE32+) executable into an ELF64 executable for HarisOS user programs.
  *
- *   mkelf <in.exe> <out.elf>
+ *   mkelf <in.exe> <out.elf> [--console | --gui]
  *
  * Why this exists: the kernel loads ELF files (kernel/proc/elf.c), but the toolchain on a Windows machine (MSYS2 clang +
  * lld) has no ELF linker: its lld and binutils only know PE. clang can still compile freestanding code, and lld-link can
@@ -54,8 +54,15 @@ typedef struct
 
 int main(int argc, char **argv)
 {
-    if (argc != 3)
-        die("usage: mkelf <in.exe> <out.elf>", 0);
+    /* optional: the kind of program, written into e_flags (include/elf.h, ELF_SUBSYS_*): the File Explorer opens a Console window
+     * at once for --console and only when the program first prints or reads otherwise. */
+    uint32_t subsys = 0;
+    if (argc == 4 && strcmp(argv[3], "--console") == 0)
+        subsys = 1;
+    else if (argc == 4 && strcmp(argv[3], "--gui") == 0)
+        subsys = 2;
+    else if (argc != 3)
+        die("usage: mkelf <in.exe> <out.elf> [--console | --gui]", 0);
 
     FILE *f = fopen(argv[1], "rb");
     if (!f)
@@ -140,6 +147,7 @@ int main(int argc, char **argv)
     wr32(out + 20, 1);
     wr64(out + 24, image_base + entry_rva);
     wr64(out + 32, 64);   /* program headers right after this header */
+    wr32(out + 48, subsys); /* e_flags: bits 0-1 = the subsystem */
     wr16(out + 52, 64);   /* header size */
     wr16(out + 54, 56);   /* program header size */
     wr16(out + 56, (uint16_t)nseg);

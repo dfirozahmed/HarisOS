@@ -57,6 +57,15 @@ const char *elf_error_text(int err)
 static u64 first_page(const ElfSegment *s) { return s->vaddr >> 12; }
 static u64 last_page(const ElfSegment *s) { return (s->vaddr + s->memsz - 1) >> 12; }
 
+int elf_subsystem(const void *file, u64 size)
+{
+    const unsigned char *f = (const unsigned char *)file;
+    if (!f || size < EHDR_SIZE || f[0] != 0x7F || f[1] != 'E' || f[2] != 'L' || f[3] != 'F' || f[4] != 2 || f[5] != 1)
+        return ELF_SUBSYS_UNKNOWN;
+    unsigned s = rd32(f + 48) & ELF_EF_SUBSYS_MASK; /* e_flags */
+    return s == ELF_SUBSYS_CONSOLE || s == ELF_SUBSYS_GUI ? (int)s : ELF_SUBSYS_UNKNOWN;
+}
+
 int elf_parse(const void *file, u64 size, ElfInfo *out)
 {
     const unsigned char *f = (const unsigned char *)file;

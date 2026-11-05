@@ -7,6 +7,7 @@
  * inside a system call. Closing the window closes the console: the program's reads then return end of input, which
  * ends well-behaved programs. */
 #include "console.h"
+#include "elf.h"
 #include "font.h"
 #include "gfx.h"
 #include "keyboard.h"
@@ -133,11 +134,9 @@ static int on_tick(Window *w)
 
 static void on_close(Window *w) { console_close(handle_of(w)); }
 
-int console_window_open(const char *title)
+/* The window of an existing console. 0 on success; on failure the console is closed. */
+static int window_for(int con, const char *title)
 {
-    int con = console_open(title);
-    if (con < 0)
-        return -1;
     int W = (int)gfx_width(), H = (int)gfx_height();
     int w = WIN_W < W - 20 ? WIN_W : W - 20, h = WIN_H < H - TASKBAR_HEIGHT - 20 ? WIN_H : H - TASKBAR_HEIGHT - 20;
     int step = (OPENED++ % 5) * 28;
@@ -166,5 +165,28 @@ int console_window_open(const char *title)
     win->on_close = on_close;
     win->icon = TASKBAR_ICON_TERMINAL;
     LAST_BLINK[con & 255] = (int)((timer_ms() / 500) & 1);
-    return con;
+    return 0;
+}
+
+int console_window_open(const char *title)
+{
+    int con = console_open(title);
+    if (con < 0)
+        return -1;
+    return window_for(con, title) ? -1 : con;
+}
+
+int console_window_open_for(const char *title, int subsystem)
+{
+    if (subsystem == ELF_SUBSYS_CONSOLE)
+        return console_window_open(title);
+    return console_open_hidden(title);
+}
+
+int console_windows_poll(void)
+{
+    int opened = 0, con;
+    while ((con = console_take_pending()) >= 0)
+        opened |= window_for(con, console_title(con)) == 0;
+    return opened;
 }

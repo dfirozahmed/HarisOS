@@ -63,6 +63,19 @@ typedef struct
 #define ELF_ERR_TOO_BIG -10    /* too many segments or too much memory */
 #define ELF_ERR_EMPTY -11      /* nothing to load */
 
+/* Which kind of program the file says it is, like the Subsystem field of a Windows .exe: bits 0-1 of e_flags (ELF header, offset 48).
+ * tools/mkelf writes it (--console / --gui); a file without it (a program built elsewhere) is ELF_SUBSYS_UNKNOWN. It only decides
+ * whether the Console window opens at once (a command line program) or when the program first prints or reads (see console.h);
+ * it grants nothing and elf_parse ignores it. */
+#define ELF_SUBSYS_UNKNOWN 0
+#define ELF_SUBSYS_CONSOLE 1
+#define ELF_SUBSYS_GUI 2
+#define ELF_EF_SUBSYS_MASK 3u
+
+/* The subsystem from the first ELF_HEADER_SIZE bytes of a file (a bad header gives ELF_SUBSYS_UNKNOWN). */
+#define ELF_HEADER_SIZE 64
+int elf_subsystem(const void *file, unsigned long long size);
+
 int elf_parse(const void *file, unsigned long long size, ElfInfo *out);
 const char *elf_error_text(int err);
 

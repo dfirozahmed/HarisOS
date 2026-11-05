@@ -246,6 +246,34 @@ int main(void)
         CHECK(console_interrupt(ic) == 0);                        /* a stale handle */
     }
 
+    /* hidden consoles: no window until the program prints, reads, or fails */
+    {
+        int p;
+        int a1 = console_open_hidden("silent"), a2 = console_open_hidden("prints"), a3 = console_open_hidden("reads");
+        int a4 = console_open_hidden("fails"), a5 = console_open_hidden("empty write");
+        CHECK(a1 >= 0 && a2 >= 0 && a3 >= 0 && a4 >= 0 && a5 >= 0);
+        CHECK(console_take_pending() == -1);                       /* nobody asked yet */
+        console_write(a2, "hi\n", 3);
+        console_read(a3, in, 8);
+        console_finish(a4, 3);
+        console_write(a5, "", 0);                                  /* an empty write is not output */
+        console_finish(a5, 0);
+        console_finish(a1, 0);                                     /* ended cleanly without a word */
+        int got[3], n = 0;
+        while ((p = console_take_pending()) >= 0 && n < 3)
+            got[n++] = p;
+        CHECK(n == 3 && console_take_pending() == -1);             /* each asked once, handed out once */
+        CHECK((got[0] == a2 || got[1] == a2 || got[2] == a2) && (got[0] == a3 || got[1] == a3 || got[2] == a3) &&
+              (got[0] == a4 || got[1] == a4 || got[2] == a4));
+        CHECK(!console_valid(a1) && !console_valid(a5));           /* the silent ones were closed, no window ever */
+        CHECK(row(a2, 1, r) && strcmp(r, "hi") == 0);              /* what was printed before the window is kept */
+        CHECK(console_changed(a2) == 2);                           /* the new window draws everything */
+        console_write(a2, "more\n", 5);
+        CHECK(console_take_pending() == -1);                       /* a console that has its window is not handed out again */
+        console_close(a2);
+        console_close(a3);
+        console_close(a4);
+    }
 
     /* all slots in use */
     int h[CONSOLE_MAX + 1], opened = 0;

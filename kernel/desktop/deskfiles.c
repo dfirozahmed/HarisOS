@@ -146,7 +146,7 @@ int deskfiles_tick(void)
 /* ---- opening ---- */
 static void run_program(int node, const VfsNode *n)
 {
-    int con = console_window_open(n->name);
+    int con = console_window_open_for(n->name, exec_node_subsystem(node));
     if (con < 0)
     {
         toast_show(TOAST_ERROR, "Cannot run: no free console or window (close one first).");

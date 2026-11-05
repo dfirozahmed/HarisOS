@@ -1,5 +1,6 @@
 /* Taskbar clock polling and caret blink updates. */
 #include "audio.h"
+#include "console.h"
 #include "battery.h"
 #include "net.h"
 #include "desktop.h"
@@ -167,6 +168,7 @@ int desktop_tick(void)
     cpuload_section_end(16);
     cpuload_section_begin();
     ticked |= gui_app_poll(); /* windows of user programs that appeared or went away */
+    ticked |= console_windows_poll(); /* the Console window of a program that has printed or asked for input */
     cpuload_section_end(17);
     cpuload_section_begin();
     ticked |= wm_tick();        /* windows that wait for time (tooltips) */

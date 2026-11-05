@@ -36,6 +36,23 @@ int exec_find(const char *name)
     return -1;
 }
 
+int exec_node_subsystem(int node)
+{
+    const VfsNode *n = vfs_node(node);
+    if (!n || n->is_dir || n->size < ELF_HEADER_SIZE)
+        return ELF_SUBSYS_UNKNOWN;
+    unsigned char hdr[ELF_HEADER_SIZE];
+    unsigned done = 0;
+    while (done < ELF_HEADER_SIZE)
+    {
+        int got = vfs_read(node, done, hdr + done, ELF_HEADER_SIZE - done);
+        if (got <= 0)
+            return ELF_SUBSYS_UNKNOWN;
+        done += (unsigned)got;
+    }
+    return elf_subsystem(hdr, ELF_HEADER_SIZE);
+}
+
 /* All of file `node` into a new kernel buffer, or NULL. */
 unsigned char *read_whole(int node, unsigned *size_out, int *err)
 {

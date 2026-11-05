@@ -198,6 +198,19 @@ int main(void)
         printf("checked %s: %d segments, entry 0x%llx\n", path, r.nseg, r.entry);
     }
 
+    /* the subsystem marker (e_flags bits 0-1): console / GUI / none; other bits and bad headers mean unknown; the loader ignores it */
+    good();
+    CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_UNKNOWN);
+    w32(IMG + 48, 1);           CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_CONSOLE && parse(&info) == 0);
+    w32(IMG + 48, 2);           CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_GUI && parse(&info) == 0);
+    w32(IMG + 48, 3);           CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_UNKNOWN);   /* not a defined value */
+    w32(IMG + 48, 0xFFFFFFFCu); CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_UNKNOWN);   /* other bits are not ours */
+    w32(IMG + 48, 0x100 | 2);   CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_GUI);
+    w32(IMG + 48, 2);
+    CHECK(elf_subsystem(IMG, 63) == ELF_SUBSYS_UNKNOWN && elf_subsystem(0, 64) == ELF_SUBSYS_UNKNOWN);
+    IMG[0] = 'X';               CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_UNKNOWN);   /* not an ELF file */
+    IMG[0] = 0x7F; IMG[4] = 1;  CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_UNKNOWN);   /* 32-bit */
+
     if (fails == 0)
         printf("elf tests passed\n");
     return fails ? 1 : 0;

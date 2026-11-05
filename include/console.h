@@ -32,6 +32,13 @@ int console_open(const char *title); /* a new empty console: its handle, or -1 i
 void console_close(int con);         /* its window is gone; a blocked reader is woken and sees end of input */
 int console_valid(int con);
 
+/* A console that has no window until its program needs one. The window is wanted when the program writes, reads, or ends with a
+ * non-zero code. console_take_pending (called from the desktop tick, never from a system call) hands out the handle of one such
+ * console, now no longer hidden, so the caller can give it a window; -1 = none. A hidden console whose program ended without
+ * ever asking for a window is closed there. This is how a GUI program that prints nothing opens no empty Console window. */
+int console_open_hidden(const char *title);
+int console_take_pending(void);
+
 /* Output: returns the number of bytes taken (n), or -1 for an invalid handle. */
 int console_write(int con, const char *text, unsigned n);
 void console_finish(int con, int exit_code);
@@ -61,5 +68,11 @@ const char *console_title(int con);
 
 /* ---- the window (apps/console) ------------------------------- */
 int console_window_open(const char *title); /* console + window; the handle, or -1 (no free console or window) */
+/* The console for a program started from a file, by the subsystem its ELF header names (elf.h, ELF_SUBSYS_*; exec_node_subsystem):
+ *   console  -> the window opens at once (a command line program: Ctrl+C and its first line of output need it)
+ *   GUI / unknown -> the window opens later, when the program first prints or reads (console_windows_poll, every desktop tick), so a
+ *                    GUI program that never prints gets no empty Console window, and an old file with no marker still works. */
+int console_window_open_for(const char *title, int subsystem);
+int console_windows_poll(void); /* opens the windows that are wanted; 1 if any opened */
 
 #endif
