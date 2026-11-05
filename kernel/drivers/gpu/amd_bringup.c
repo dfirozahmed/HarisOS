@@ -4,6 +4,7 @@
 #include "amd_dcn.h"
 #include "amd_3d.h"
 #include "amd_comp.h"
+#include "cpuload.h"
 #include "amd_psp.h"
 #include "amd_firmware.h"
 #include "gpu_log.h"
@@ -144,6 +145,32 @@ static void amd_scene_report(const GfxCompStats *s)
     log_hex("  per compose, fence spin", (uint32_t)(g.fence_us / c));
     log_hex("  per compose, build us ", (uint32_t)(g.build_us / c));
     log_hex("  per compose, submit us", (uint32_t)(g.submit_us / c));
+    {   /* the main loop's passes since the last report: total busy us of each part and how many times it ran (kernel.c, cpuload.h) */
+        static const char *const name[CPULOAD_SECTIONS] = { "mouse_poll", "cursor move", "desktop_pointer", "desktop_wheel", "desktop_key",
+                                                            "net_poll", "screensleep", "-", "yielded passes", "PASS busy",
+                                                            "PASS halted", "-", "tick clock+volume", "tick wifi", "tick battery",
+                                                            "tick caret", "tick volmenu", "tick gui_app_poll", "tick wm+toast",
+                                                            "tick deskfiles", "tick start/app/deskmenu", "tick anim+taskbar",
+                                                            "tick frame (finish)", "-" };
+        unsigned long long us[CPULOAD_SECTIONS], n[CPULOAD_SECTIONS];
+        cpuload_sections_take(us, n);
+        for (int i = 0; i < CPULOAD_SECTIONS - 1; i++) {
+            if (!n[i]) continue;
+            char label[40];
+            int k = 0;
+            const char *p = "  loop us: ";
+            while (*p) label[k++] = *p++;
+            for (p = name[i]; *p && k < 30; ) label[k++] = *p++;
+            while (k < 30) label[k++] = ' ';
+            label[k] = 0;
+            log_hex(label, (uint32_t)us[i]);
+            for (k = 0, p = "  loop n:  "; *p; ) label[k++] = *p++;
+            for (p = name[i]; *p && k < 30; ) label[k++] = *p++;
+            while (k < 30) label[k++] = ' ';
+            label[k] = 0;
+            log_hex(label, (uint32_t)n[i]);
+        }
+    }
     /* where the requests to draw window content came from, then the windows that took the most drawing */
     for (int i = 0; i < s->nwhy; i++) {
         char label[32];

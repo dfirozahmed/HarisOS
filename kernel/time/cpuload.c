@@ -1,5 +1,6 @@
 /* HarisOS CPU load: see include/cpuload.h. */
 #include "cpuload.h"
+#include "timer.h"
 
 static unsigned long long WIN_START, BUSY_US;
 static int STARTED, PERCENT;
@@ -16,6 +17,41 @@ unsigned long long cpuload_take_idle(void)
     unsigned long long us = IDLE_US;
     IDLE_US = 0;
     return us;
+}
+
+static unsigned long long SEC_US[CPULOAD_SECTIONS], SEC_N[CPULOAD_SECTIONS], SEC_T0, SEC_IDLE0;
+
+void cpuload_section_begin(void)
+{
+    SEC_T0 = timer_us();
+    SEC_IDLE0 = IDLE_US;
+}
+
+void cpuload_section_end(int id)
+{
+    unsigned long long len = timer_us() - SEC_T0, halted = IDLE_US - SEC_IDLE0;
+    if (id < 0 || id >= CPULOAD_SECTIONS)
+        return;
+    SEC_US[id] += len > halted ? len - halted : 0;
+    SEC_N[id]++;
+}
+
+void cpuload_section_add(int id, unsigned long long us)
+{
+    if (id < 0 || id >= CPULOAD_SECTIONS)
+        return;
+    SEC_US[id] += us;
+    SEC_N[id]++;
+}
+
+void cpuload_sections_take(unsigned long long us[CPULOAD_SECTIONS], unsigned long long count[CPULOAD_SECTIONS])
+{
+    for (int i = 0; i < CPULOAD_SECTIONS; i++)
+    {
+        us[i] = SEC_US[i];
+        count[i] = SEC_N[i];
+        SEC_US[i] = SEC_N[i] = 0;
+    }
 }
 
 void cpuload_add_busy(unsigned long long us)

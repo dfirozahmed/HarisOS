@@ -5,6 +5,9 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
+static unsigned long long NOW_US;
+unsigned long long timer_us(void) { return NOW_US; }
+
 int main(void)
 {
     CHECK(cpuload_percent() == 0);
@@ -32,6 +35,16 @@ int main(void)
 
     cpuload_note_idle(300); cpuload_note_idle(200);   /* halted inside a pass: taken once, then gone */
     CHECK(cpuload_take_idle() == 500 && cpuload_take_idle() == 0);
+
+    {   /* sections: the length less the time halted inside it */
+        unsigned long long us[CPULOAD_SECTIONS], n[CPULOAD_SECTIONS];
+        NOW_US = 1000; cpuload_section_begin(); cpuload_note_idle(300); NOW_US = 1900; cpuload_section_end(2);
+        NOW_US = 2000; cpuload_section_begin(); NOW_US = 2100; cpuload_section_end(2);
+        cpuload_sections_take(us, n);
+        CHECK(us[2] == 600 + 100 && n[2] == 2 && us[0] == 0);
+        cpuload_sections_take(us, n);
+        CHECK(us[2] == 0 && n[2] == 0);
+    }
 
     if (fails == 0)
         printf("cpuload tests passed\n");

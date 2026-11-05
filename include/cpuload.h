@@ -35,6 +35,14 @@ int cpuload_boot_percent(void);
 void cpuload_note_idle(unsigned long long us);
 unsigned long long cpuload_take_idle(void);
 
+/* Where a main-loop pass spends its time (a measurement for the compositor's report): cpuload_section_begin() before a part of the pass,
+ * cpuload_section_end(id) after it adds the part's length, less any time halted inside it, to the sum of section id. One part at a time. */
+#define CPULOAD_SECTIONS 24
+void cpuload_section_begin(void);
+void cpuload_section_end(int id);
+void cpuload_section_add(int id, unsigned long long us); /* a whole pass (9: its busy time, 10: its halted time) */
+void cpuload_sections_take(unsigned long long us[CPULOAD_SECTIONS], unsigned long long count[CPULOAD_SECTIONS]); /* then they start again */
+
 void cpuload_add_busy(unsigned long long us);
 void cpuload_poll(unsigned long long now_us);
 int cpuload_percent(void);

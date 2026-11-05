@@ -13,6 +13,7 @@
 #include "startmenu.h"
 #include "ui.h"
 #include "timer.h"
+#include "cpuload.h"
 #include "wm.h"
 #include "rtc.h"
 #include "desktop_internal.h"
@@ -128,20 +129,40 @@ static int refresh_battery(void)
 int desktop_tick(void)
 {
     unsigned long long now_ms = timer_ms();
+    /* each part timed on its own (cpuload.h sections 12 ..): where the pass's time goes when nothing happens */
+    cpuload_section_begin();
     int clock_changed = refresh_taskbar_clock();
     clock_changed |= taskbar_set_volume(audio_volume());
+    cpuload_section_end(12);
+    cpuload_section_begin();
     clock_changed |= refresh_wifi();
+    cpuload_section_end(13);
+    cpuload_section_begin();
     clock_changed |= refresh_battery();
+    cpuload_section_end(14);
+    cpuload_section_begin();
     int flipped = ui_caret_update();
+    cpuload_section_end(15);
+    cpuload_section_begin();
     int ticked = volmenu_tick(); /* the volume may have been changed by a program (SYS_AUDIO_VOLUME); the panel slides open */
+    cpuload_section_end(16);
+    cpuload_section_begin();
     ticked |= gui_app_poll(); /* windows of user programs that appeared or went away */
+    cpuload_section_end(17);
+    cpuload_section_begin();
     ticked |= wm_tick();        /* windows that wait for time (tooltips) */
     ticked |= toast_tick();     /* a toast whose time is up */
+    cpuload_section_end(18);
+    cpuload_section_begin();
     ticked |= deskfiles_tick(); /* the Desktop folder has other files than a second ago */
+    cpuload_section_end(19);
     Window *top = wm_top();
+    cpuload_section_begin();
     ticked |= startmenu_tick(flipped, now_ms);
     ticked |= appmenu_tick(now_ms);
     ticked |= deskmenu_tick(now_ms);
+    cpuload_section_end(20);
+    cpuload_section_begin();
     ticked |= wm_comp_anim_tick(now_ms); /* a window opening / closing / minimizing */
     ticked |= desktop_comp_anim_tick(now_ms); /* the start menu sliding up */
     UiRect glow;
@@ -150,6 +171,7 @@ int desktop_tick(void)
         wm_add_screen_damage(glow);
         ticked = 1;
     }
+    cpuload_section_end(21);
 
     if (clock_changed)
     {
@@ -165,5 +187,8 @@ int desktop_tick(void)
     }
     if (!clock_changed && !flipped && !ticked)
         return 0;
-    return desktop_finish_input(clock_changed);
+    cpuload_section_begin();
+    int shown = desktop_finish_input(clock_changed);
+    cpuload_section_end(22); /* the frame, when there is one (the compose too) */
+    return shown;
 }

@@ -692,12 +692,19 @@ void kernel_main(const BootInfo *info)
     {
         unsigned long long pass_start = timer_us();
         int worked = 0; /* this pass handled something: poll again at once instead of sleeping */
-        if (have_mouse && mouse_poll(&m))
+        cpuload_section_begin();
+        int mouse_got = have_mouse && mouse_poll(&m);
+        cpuload_section_end(0); /* sections: where a pass spends its time (the compositor's report prints them) */
+        if (mouse_got)
         {
             int woke = screensleep_activity(); /* the event that switches the screen on again is only that */
+            cpuload_section_begin();
             gfx_cursor_move(m.x, m.y);
+            cpuload_section_end(1);
+            cpuload_section_begin();
             if (!woke)
                 desktop_pointer(m.x, m.y, m.buttons);
+            cpuload_section_end(2);
             if (m.wheel && !woke)
             {
                 wheel_pending += m.wheel;
@@ -708,7 +715,9 @@ void kernel_main(const BootInfo *info)
         }
         if (wheel_pending && pass_start - wheel_last >= WHEEL_FRAME_US)
         {
+            cpuload_section_begin();
             desktop_wheel(wheel_x, wheel_y, wheel_pending);
+            cpuload_section_end(3);
             if (have_mouse)
                 desktop_pointer(m.x, m.y, m.buttons); /* the list moved under a still pointer: update the hover highlight */
             wheel_pending = 0;
@@ -721,8 +730,10 @@ void kernel_main(const BootInfo *info)
          * produce repeats forever and never see the release. */
         for (int nkeys = 0; nkeys < 4 && gfx_ready() && keyboard_poll(&ke); nkeys++)
         {
+            cpuload_section_begin();
             if (!screensleep_activity()) /* a key that wakes the screen is not used for anything else */
                 desktop_key(&ke);
+            cpuload_section_end(4);
             worked = 1;
         }
         if (pmm_ok && blk_generation() != blk_seen) /* a USB drive came or went (found inside mouse_poll) */
@@ -737,8 +748,10 @@ void kernel_main(const BootInfo *info)
         if (net_present() && (!net_irq_active() || net_irq_take() || pass_start - net_last_poll >= NET_POLL_US))
         {
             net_last_poll = pass_start;
+            cpuload_section_begin();
             if (net_poll() > 0)
                 worked = 1; /* frames arrived: look again at once, more may be behind them */
+            cpuload_section_end(5);
         }
         /* The Wi-Fi card connects in the background after boot (see "starting in the background" in rtl8821ce.c): once the link is up
          * and there is no address yet, ask for one. net_configure() falls back to a fixed address, so this runs once per boot. */
@@ -748,8 +761,10 @@ void kernel_main(const BootInfo *info)
             net_configure();
             worked = 1;
         }
+        cpuload_section_begin();
         screensleep_tick(); /* the screen goes off after the time set in Display Settings */
-        if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers */
+        cpuload_section_end(6);
+        if (gfx_ready() && desktop_tick()) /* blinking text caret, clock, app timers (timed part by part inside: sections 12 ..) */
             worked = 1;
         int others = task_others_ready();
         unsigned long long yielded_us = 0; /* time the other threads had the processor during this pass */
@@ -758,6 +773,8 @@ void kernel_main(const BootInfo *info)
             unsigned long long y0 = timer_us();
             task_yield(); /* preemptible kernel threads run until their slice ends or they yield (see task.h) */
             yielded_us = timer_us() - y0;
+            cpuload_section_begin();
+            cpuload_section_end(8); /* only counts the passes that yielded: the time itself is the other threads' */
         }
         unsigned long long pass_end = timer_us();
         /* everything except the sleep below is CPU time (see cpuload.h); what other threads used while we yielded is not the main loop's: the
@@ -765,6 +782,8 @@ void kernel_main(const BootInfo *info)
         unsigned long long halted_us = cpuload_take_idle(); /* halted inside the pass (a driver waiting for vertical blank) */
         unsigned long long pass_us = pass_end - pass_start;
         cpuload_add_busy(pass_us > yielded_us + halted_us ? pass_us - yielded_us - halted_us : 0);
+        cpuload_section_add(9, pass_us > yielded_us + halted_us ? pass_us - yielded_us - halted_us : 0);
+        cpuload_section_add(10, halted_us);
         cpuload_poll(pass_end);
         for (int c = 0; c < smp_cpu_total(); c++) /* every processor: its busy ticks (see cpuload.h) */
         {
