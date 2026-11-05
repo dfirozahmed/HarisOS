@@ -18,6 +18,7 @@
 #include "wm.h"
 #include "desktop_internal.h"
 #include "timer.h"
+#include "ui_anim.h"
 #include "mem.h"
 
 extern int WALL_VALID;
@@ -97,6 +98,32 @@ static void pointer_changed(int x, int y, int w, int h)
 }
 
 static int DIM_UP = -1; /* the brightness the driver was given (0 .. 256), -1 = none yet */
+#define START_SLIDE_PX 18 /* the start menu starts this far below its place */
+#define START_SLIDE_MS 170
+static UiAnim START_SLIDE;
+static int START_SEEN;      /* the start menu was in the last frame */
+static int START_ANIM_WAS;  /* the last tick found it sliding */
+
+/* Called every tick of the desktop: while the start menu slides up, its box (and the room it slides through) is put together again by the GPU
+ * every frame, without drawing it again. One more frame when it has arrived. 1 = a frame is due. */
+int desktop_comp_anim_tick(unsigned long long now_ms)
+{
+    if (!ON || !START_SEEN)
+    {
+        START_ANIM_WAS = 0;
+        return 0;
+    }
+    int act = ui_anim_active(&START_SLIDE, now_ms);
+    int due = act || START_ANIM_WAS;
+    START_ANIM_WAS = act;
+    if (due)
+    {
+        UiRect b = startmenu_bounds();
+        pointer_changed(b.x, b.y, b.w, b.h + START_SLIDE_PX);
+    }
+    return due;
+}
+
 static int dim_now(void) { return gfx_dim_percent() * 256 / GFX_BRIGHTNESS_MAX; }
 
 int desktop_comp_pointer_pending(void) { return ON && (NPRECT > 0 || dim_now() != DIM_UP); }
@@ -111,6 +138,7 @@ static void leave(void)
     gfx_scroll_hook(0);
     gfx_cursor_external(0); /* the CPU draws the pointer again (gfx_present below) */
     DIM_UP = -1;
+    START_SEEN = 0;
     const GfxCompOps *ops = gfx_comp();
     wm_comp_drop(ops);
     if (ops && WALL_SURF)
@@ -353,12 +381,23 @@ int desktop_comp_frame(const UiRect *areas, int n)
         if (TOPS[i].shown)
         {
             UiRect panel;
-            int radius;
+            int radius, dy = 0;
+            if (TOPS[i].draw == startmenu_draw)
+            {
+                /* the start menu rises as it opens: the GPU puts its picture (and the blur under its panel) a few pixels lower and moves it up,
+                 * no redrawing; clicks use the menu's real place, which it reaches in 170 ms */
+                if (!START_SEEN)
+                    ui_anim_start(&START_SLIDE, START_SLIDE_PX, 0, START_SLIDE_MS, timer_ms());
+                dy = ui_anim_value(&START_SLIDE, timer_ms());
+                START_SEEN = 1;
+            }
             if (ops->backdrop && TOPS[i].draw == startmenu_draw && startmenu_panel(&panel, &radius))
                 /* the menu is frosted glass: the driver blurs what is under its panel first */
-                items[k++] = (GfxCompItem){radius, panel.x, panel.y, panel.w, panel.h, 4, 0, {0, 0, 0, 0}};
-            items[k++] = (GfxCompItem){TOPS[i].surf, TOPS[i].r.x, TOPS[i].r.y, TOPS[i].r.w, TOPS[i].r.h, 1, 0, {0, 0, 0, 0}};
+                items[k++] = (GfxCompItem){radius, panel.x, panel.y + dy, panel.w, panel.h, 4, 0, {0, 0, 0, 0}};
+            items[k++] = (GfxCompItem){TOPS[i].surf, TOPS[i].r.x, TOPS[i].r.y + dy, TOPS[i].r.w, TOPS[i].r.h, 1, 0, {0, 0, 0, 0}};
         }
+        else if (TOPS[i].draw == startmenu_draw)
+            START_SEEN = 0;
     /* the pointer, on top of everything (its picture goes up again only when its shape changed) */
     static unsigned int ptr_px[PTR_MAX * PTR_MAX];
     int px, py, pw, ph;
