@@ -78,6 +78,7 @@ void gfx_shadow(int x, int y, int w, int h, int radius, int blur, int dx, int dy
             if (u > 256)
                 u = 256;
             int f = u * u / 256 * (768 - 2 * u) / 256; /* smoothstep: u^2 (3 - 2u) */
+            f = f * f / 256 * (768 - 2 * f) / 256;     /* twice: a long, gentle tail like a gaussian, no visible edge */
             int a16 = f * strength * 256 / 255; /* 0..65536 */
             blend_ptr16(row + xx, xx, yy, 0, 0, 0, a16 > 65535 ? 65535 : a16);
         }

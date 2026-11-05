@@ -188,9 +188,11 @@ void ui_window_shadows(int on) { SHADOWS = on; }
 
 void ui_window_shadow(int active, int *blur, int *dy, int *strength)
 {
-    *blur = active ? 28 : 18;
-    *dy = active ? 12 : 6;
-    *strength = active ? THEME->shadow : THEME->shadow * 2 / 3;
+    /* A wide, soft shadow, lifted a little (dy) like a light from above; the focused window floats higher than the others.
+     * The reach below the window is blur / 2 + dy: it must stay inside WM_SHADOW_MARGIN (48). */
+    *blur = active ? 40 : 26;
+    *dy = active ? 14 : 8;
+    *strength = active ? THEME->shadow : THEME->shadow * 11 / 20;
 }
 
 /* flat = 1: square corners and no shadow (a maximized window that touches the screen edges) */
