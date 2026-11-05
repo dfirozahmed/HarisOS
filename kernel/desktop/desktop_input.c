@@ -12,13 +12,17 @@
 #include "ui.h"
 #include "wm.h"
 #include "desktop_internal.h"
+#include "timer.h"
 
 #define VOLUME_STEP 5 /* percent points per wheel step or key press */
 
 static unsigned LAST_BTN;
 
+unsigned long long DESKTOP_LAST_INPUT_MS; /* when the pointer or a key last did something (desktop_clock.c puts slow, unimportant polling off meanwhile) */
+
 int desktop_pointer(int x, int y, unsigned buttons)
 {
+    DESKTOP_LAST_INPUT_MS = timer_ms();
     int H = (int)gfx_height();
     int on_bar = y >= H - TASKBAR_HEIGHT;
 
@@ -150,6 +154,7 @@ static int SUPER_DOWN; /* the Windows key repeats while held: toggle once per pr
 
 int desktop_key(const KeyEvent *k)
 {
+    DESKTOP_LAST_INPUT_MS = timer_ms();
     ui_caret_restart(); /* typing: the caret is shown and its blink starts over */
     {
         /* the mouse carries no modifiers: the desktop icons learn Shift / Ctrl from the keys (a modifier's own event may not show itself) */

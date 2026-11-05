@@ -83,9 +83,11 @@ static int refresh_wifi(void)
     return taskbar_set_wifi(!st.present ? -1 : st.state);
 }
 
-/* The battery for the tray icon. The mains cable is looked at 5 times a second (one byte from the embedded controller), so that plugging it in or
- * out shows at once, and every change of it reads everything again straight away; otherwise the whole reading (a handful of bytes) is once a second.
+/* The battery for the tray icon. The mains cable is looked at 2 times a second (one byte from the embedded controller), so that plugging it in or
+ * out shows within half a second, and every change of it reads everything again straight away; otherwise the whole reading (a handful of bytes) is once in 5 seconds.
  * A machine whose controller layout is not known has no level: the icon stays plain. */
+extern unsigned long long DESKTOP_LAST_INPUT_MS; /* desktop_input.c */
+
 static int refresh_battery(void)
 {
     static unsigned long long next_ac_ms, next_full_ms;
@@ -99,13 +101,19 @@ static int refresh_battery(void)
         unsigned long long now = timer_ms();
         if (now < next_ac_ms)
             return 0;
-        next_ac_ms = now + 200;
+        /* A reading stops the desktop for milliseconds (the controller answers a byte in ~3 ms; the whole reading took ~22 ms), which shows as a
+         * skipped frame while the pointer moves. So while the user is working with the pointer or the keyboard it waits, at most 3 s past its time. */
+        if (now - DESKTOP_LAST_INPUT_MS < 400 && now < next_ac_ms + 3000)
+            return 0;
+        next_ac_ms = now + 500;
+        cpuload_section_begin();
         int ac = battery_ac();
+        cpuload_section_end(23); /* the report's "battery: mains look" lines: one controller read */
         if (ac != last_ac || now >= next_full_ms)
             full = 1;
         last_ac = ac;
         if (full)
-            next_full_ms = now + 1000;
+            next_full_ms = now + 5000; /* the level changes slowly: the whole reading every 5 s (a change of the cable reads it at once) */
     }
     else if (++fallback < 4096u)
         return 0;
@@ -117,8 +125,16 @@ static int refresh_battery(void)
     if (!full)
         return 0;
     BatteryInfo b;
-    if (battery_read(&b) != 0)
+    cpuload_section_begin();
+    int rc = battery_read(&b);
+    cpuload_section_end(11); /* the report's "battery: whole reading" lines */
+    if (rc != 0)
+    {
+        /* the controller did not answer (each failed wait costs milliseconds): try again only every 10 s, not 2 times a second */
+        if (timer_ready())
+            next_ac_ms = timer_ms() + 10000;
         return taskbar_set_battery(-1, 0, 0);
+    }
     if (!b.present) /* no battery in the bay: the cable may still be plugged in */
         return taskbar_set_battery(-1, 0, b.ac);
     return taskbar_set_battery(b.percent, b.charging, b.ac);

@@ -69,7 +69,7 @@ void battery_decode(const BatteryRaw *r, BatteryInfo *o)
 
 static int ec_wait(u8 mask, u8 want)
 {
-    for (unsigned i = 0; i < 20000; i++) /* each pass is about a microsecond: up to some milliseconds */
+    for (unsigned i = 0; i < 4000; i++) /* each pass is about a microsecond or two: up to some milliseconds */
     {
         if ((io_in8(EC_CMD) & mask) == want)
             return 1;

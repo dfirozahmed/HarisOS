@@ -148,13 +148,13 @@ static void amd_scene_report(const GfxCompStats *s)
     {   /* the main loop's passes since the last report: total busy us of each part and how many times it ran (kernel.c, cpuload.h) */
         static const char *const name[CPULOAD_SECTIONS] = { "mouse_poll", "cursor move", "desktop_pointer", "desktop_wheel", "desktop_key",
                                                             "net_poll", "screensleep", "-", "yielded passes", "PASS busy",
-                                                            "PASS halted", "-", "tick clock+volume", "tick wifi", "tick battery",
+                                                            "PASS halted", "battery: whole read", "tick clock+volume", "tick wifi", "tick battery",
                                                             "tick caret", "tick volmenu", "tick gui_app_poll", "tick wm+toast",
                                                             "tick deskfiles", "tick start/app/deskmenu", "tick anim+taskbar",
-                                                            "tick frame (finish)", "-" };
+                                                            "tick frame (finish)", "battery: mains look" };
         unsigned long long us[CPULOAD_SECTIONS], n[CPULOAD_SECTIONS];
         cpuload_sections_take(us, n);
-        for (int i = 0; i < CPULOAD_SECTIONS - 1; i++) {
+        for (int i = 0; i < CPULOAD_SECTIONS; i++) {
             if (!n[i]) continue;
             char label[40];
             int k = 0;
