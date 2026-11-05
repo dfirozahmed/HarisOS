@@ -81,6 +81,7 @@ static inline u64 stor_dma_alloc(unsigned pages, int below_4g)
 /* Drivers: each registers the disks it finds with blk_register() and returns how many. */
 int ahci_init(void);
 int nvme_init(void);
+int sdhci_init(void);      /* SD cards in a standard SD host controller (sdhci.c) */
 int virtio_blk_init(void); /* the virtual disk of QEMU / KVM (virtio_blk.c) */
 
 #endif

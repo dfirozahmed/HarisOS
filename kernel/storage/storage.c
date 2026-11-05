@@ -10,7 +10,7 @@ int storage_init(void)
 {
     STARTED = 1;
     int first = blk_count(); /* USB drives found by the xHCI driver came earlier, with their partitions (usb_msc.c) */
-    int disks = ahci_init() + nvme_init() + virtio_blk_init();
+    int disks = ahci_init() + nvme_init() + virtio_blk_init() + sdhci_init();
     int n = blk_count(); /* the partitions that part_scan() adds come after the disks */
     for (int i = first; i < n; i++)
         part_scan(i);

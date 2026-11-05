@@ -164,6 +164,8 @@ const char *blk_kind_name(int kind)
         return "USB drive";
     case BLK_VIRTIO:
         return "Virtual disk";
+    case BLK_SD:
+        return "SD card";
     default:
         return "Disk";
     }

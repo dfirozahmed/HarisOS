@@ -161,6 +161,8 @@ int devmgr_build(const DevmgrInputs *in)
             driver = 1;
         if (in && in->storage_running && d->vendor_id == 0x1AF4 && (d->device_id == 0x1001 || d->device_id == 0x1042))
             driver = 1; /* virtio-blk */
+        if (in && in->storage_running && d->class_code == 0x08 && d->subclass == 0x05)
+            driver = 1; /* SD host controller (sdhci.c) */
         DevEntry *e = add(pci_category(d), pci_class_name(d->class_code, d->subclass), detail, driver);
         if (e && in && d->class_code == 0x02) {
             /* a network card: the driver says how it is doing; without one, the note says what is supported */

@@ -209,6 +209,7 @@ set(KERNEL_SOURCES
     kernel/drivers/audio/hda/hda_codec.c     # sound: HD Audio codec graph (output paths pin <- DAC; host-tested)
     kernel/drivers/bus/virtio.c              # virtio over PCI: capabilities, feature negotiation, virtqueues (polled)
     kernel/drivers/net/virtio_net.c          # network: virtio-net (QEMU / KVM), polled
+    kernel/drivers/storage/sdhci.c           # SD card in a standard SD host controller (SDHCI, PIO, polled)
     kernel/drivers/storage/virtio_blk.c      # virtio-blk virtual disk (QEMU / KVM), polled
     kernel/drivers/net/rtl8168.c             # network: Realtek RTL8111/8168 NIC driver (polled; written from the Linux driver, untested on hardware)
     kernel/net/proto.c               # network: checksum, ARP and ICMP echo frames (host-tested)

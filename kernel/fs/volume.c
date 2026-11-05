@@ -202,6 +202,8 @@ static void common_info(const Drive *v, VfsVolInfo *out)
     const char *bus = (disk && disk->kind == BLK_NVME)  ? "NVMe"
                       : (disk && disk->kind == BLK_SATA) ? "SATA"
                       : (disk && disk->kind == BLK_USB)  ? "USB"
+                      : (disk && disk->kind == BLK_VIRTIO) ? "VirtIO"
+                      : (disk && disk->kind == BLK_SD)   ? "SD"
                                                          : "RAM";
     if (disk && disk->kind == BLK_USB)
         medium = "Removable"; /* a stick is neither an SSD nor a hard disk as far as we can tell */
