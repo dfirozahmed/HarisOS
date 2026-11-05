@@ -19,12 +19,14 @@ typedef struct
     unsigned nconn;
     u16 conn[16]; /* raw entries (short form: top bit 0x80 = range) */
     int longform;
+    u32 sense, sad; /* pins: the pin sense word and the AMD audio descriptor answer */
 } FNode;
 
 static FNode N[256];
 static unsigned CAD = 2;     /* the address the codec answers at */
 static int SILENT_AFTER = -1; /* stop answering after this many verbs (-1 = never) */
 static int VERBS;
+static u32 VENDOR = 0x10EC0999u, REVISION; /* of the root node */
 static u32 LOG[512];         /* Set verbs: nid << 20 | verb */
 static int NLOG;
 
@@ -40,7 +42,8 @@ static u32 codec(void *ctx, unsigned cad, unsigned nid, u32 v)
     {
         switch (v & 0xFFu)
         {
-        case HDA_PAR_VENDOR: return 0x10EC0999u;
+        case HDA_PAR_VENDOR: return VENDOR;
+        case HDA_PAR_REVISION: return REVISION;
         case HDA_PAR_NODES: return n->nodes;
         case HDA_PAR_FG_TYPE: return n->fg_type;
         case HDA_PAR_WCAPS: return n->caps;
@@ -61,6 +64,10 @@ static u32 codec(void *ctx, unsigned cad, unsigned nid, u32 v)
             r |= (u32)n->conn[i + j] << (bits * j);
         return r;
     }
+    if (top == 0xF && ((v >> 8) & 0xFFFu) == HDA_VERB_GET_PIN_SENSE)
+        return n->sense;
+    if (top == 0xF && ((v >> 8) & 0xFFFu) == 0xF76) /* AMD: audio descriptor */
+        return n->sad;
     if (NLOG < 512)
         LOG[NLOG++] = (u32)nid << 20 | (v & 0xFFFFFu);
     return 0;
@@ -96,6 +103,8 @@ static void conn(unsigned nid, unsigned n, const u16 *c)
 static void laptop(void)
 {
     memset(N, 0, sizeof N);
+    VENDOR = 0x10EC0999u;
+    REVISION = 0;
     CAD = 2;
     SILENT_AFTER = -1;
     N[0].nodes = (1u << 16) | 1u;
@@ -322,6 +331,103 @@ int main(void)
     CHECK(hda_stream_format(22050, 16, 2) == 0x4111);
     CHECK(hda_stream_format(12345, 16, 2) == 0);
     CHECK(hda_stream_format(48000, 12, 2) == 0 && hda_stream_format(48000, 16, 0) == 0 && hda_stream_format(48000, 16, 17) == 0);
+
+
+    /* ---- AMD HDMI / DisplayPort codec (made up in the shape of a Renoir GPU's: three ports, three converters) ---- */
+    memset(N, 0, sizeof N);
+    CAD = 1;
+    SILENT_AFTER = -1;
+    VENDOR = 0x1002AA01u;
+    REVISION = 0x0301u;
+    N[0].nodes = (1u << 16) | 1u;
+    N[1].fg_type = 0x01;
+    N[1].nodes = (2u << 16) | 6u; /* widgets 2 .. 7 */
+    for (unsigned i = 2; i <= 4; i++)
+        N[i].caps = W(HDA_W_OUTPUT) | HDA_WCAP_DIGITAL | HDA_WCAP_POWER; /* converters */
+    for (unsigned i = 5; i <= 7; i++)
+    {
+        N[i].caps = W(HDA_W_PIN) | HDA_WCAP_DIGITAL | HDA_WCAP_CONN_LIST | HDA_WCAP_POWER;
+        N[i].pincaps = HDA_PINCAP_OUT | HDA_PINCAP_HDMI | (i == 7 ? HDA_PINCAP_DP : 0);
+        N[i].config = 0x01000000u; /* jack, nothing special */
+        conn(i, 3, (const u16[]){2, 3, 4});
+    }
+    CHECK(hda_codec_scan(&C, 1, codec, 0) == 0 && C.revision == 0x0301 && C.vendor == 0x1002AA01u);
+    CHECK(hda_codec_find_outputs(&C) == 0); /* no analog output */
+    CHECK(hda_codec_find_hdmi(&C) == 3);
+    CHECK(C.hdmi[0].pin == 5 && C.hdmi[0].cvt == 2 && C.hdmi[0].sel == 0); /* each port gets a converter of its own */
+    CHECK(C.hdmi[1].pin == 6 && C.hdmi[1].cvt == 3 && C.hdmi[1].sel == 1);
+    CHECK(C.hdmi[2].pin == 7 && C.hdmi[2].cvt == 4 && C.hdmi[2].sel == 2);
+    CHECK(hda_ati_full_remap(&C));
+    C.revision = 0x0200;
+    CHECK(!hda_ati_full_remap(&C));
+    C.revision = 0x0301;
+
+    /* a pin whose configuration says "nothing connected" is not a port; another vendor's codec is not handled */
+    N[7].config = 0x40000000u;
+    CHECK(hda_codec_scan(&C, 1, codec, 0) == 0 && hda_codec_find_hdmi(&C) == 2);
+    N[7].config = 0x01000000u;
+    VENDOR = 0x10DE0067u; /* NVIDIA */
+    CHECK(hda_codec_scan(&C, 1, codec, 0) == 0 && hda_codec_find_hdmi(&C) == 0);
+    VENDOR = 0x1002AA01u;
+    CHECK(hda_codec_scan(&C, 1, codec, 0) == 0 && hda_codec_find_hdmi(&C) == 3);
+
+    /* no monitor anywhere: nothing is set up */
+    NLOG = 0;
+    CHECK(!hda_codec_hdmi_connected(&C, codec, 0));
+    CHECK(hda_codec_setup_hdmi(&C, 1, 0x11, codec, 0) == 0);
+    CHECK(sent_to(5) == 0 && sent_to(6) == 0 && sent_to(7) == 0 && sent_to(2) == 0 && sent_to(3) == 0);
+
+    /* a monitor on port 2 (pin 6) with a stereo LPCM descriptor, rates 0x07 (32 / 44.1 / 48 kHz) */
+    N[6].sense = 0x80000000u | 0x40000000u;
+    N[6].sad = 0x0701u;
+    u32 sense, lpcm;
+    hda_codec_hdmi_info(&C, 1, &sense, &lpcm, codec, 0);
+    CHECK((sense >> 31) == 1 && lpcm == 0x0701u);
+    hda_codec_hdmi_info(&C, 0, &sense, &lpcm, codec, 0);
+    CHECK((sense >> 31) == 0 && lpcm == 0); /* no monitor: no descriptor is asked for */
+    CHECK(hda_codec_hdmi_connected(&C, codec, 0));
+    N[6].sad = 0; /* a monitor that does not describe its audio: sensed, but no descriptor */
+    hda_codec_hdmi_info(&C, 1, &sense, &lpcm, codec, 0);
+    CHECK((sense >> 31) == 1 && lpcm == 0);
+    N[6].sad = 0x0701u;
+
+    NLOG = 0;
+    CHECK(hda_codec_setup_hdmi(&C, 1, 0x0011, codec, 0) == 1);
+    CHECK(sent(6, 0x70740));                  /* pin control: output enabled */
+    CHECK(sent(6, 0x70101));                  /* pin takes input 1 = converter 3 */
+    CHECK(sent(3, 0x70D01));                  /* converter: digital output on */
+    CHECK(sent(3, 0x72D01));                  /* ... two channels */
+    CHECK(sent(3, 0x20011));                  /* ... stream format 48 kHz 16 bit stereo */
+    CHECK(sent(3, 0x70610));                  /* ... stream tag 1, channel 0 */
+    CHECK(sent(6, 0x77200));                  /* AMD: no downmix */
+    CHECK(sent(6, 0x78901));                  /* AMD rev 3: every slot on its own */
+    CHECK(sent(6, 0x77701) && sent(6, 0x78511)); /* slot 0 <- stream channel 0, slot 1 <- stream channel 1 */
+    CHECK(sent(6, 0x77800) && sent(6, 0x78600) && sent(6, 0x77900) && sent(6, 0x78700) && sent(6, 0x77A00) && sent(6, 0x78800)); /* slots 2..7 off */
+    CHECK(sent(6, 0x77100));                  /* channel allocation 0: front left + right */
+    CHECK(sent_to(5) == 0 && sent_to(7) == 0 && sent_to(2) == 0 && sent_to(4) == 0); /* ports without a monitor are left alone */
+
+    /* an older codec (before revision 3) maps pairs: no mode verb, only even slots written */
+    C.revision = 0x0200;
+    NLOG = 0;
+    CHECK(hda_codec_setup_hdmi(&C, 1, 0x0011, codec, 0) == 1);
+    CHECK(!sent(6, 0x78901) && !sent(6, 0x78511));
+    CHECK(sent(6, 0x77701) && sent(6, 0x77800) && sent(6, 0x77900) && sent(6, 0x77A00));
+    CHECK(!sent(6, 0x78600) && !sent(6, 0x78700) && !sent(6, 0x78800)); /* the odd slots of an unused pair are not written */
+    C.revision = 0x0301;
+
+    /* stop: stream 0 on every converter */
+    NLOG = 0;
+    hda_codec_stop_hdmi(&C, codec, 0);
+    CHECK(sent(2, 0x70600) && sent(3, 0x70600) && sent(4, 0x70600));
+
+    /* a pin that needs a trigger before it senses gets one */
+    N[5].pincaps |= HDA_PINCAP_TRIG_REQ;
+    CHECK(hda_codec_scan(&C, 1, codec, 0) == 0 && hda_codec_find_hdmi(&C) == 3);
+    NLOG = 0;
+    hda_codec_hdmi_info(&C, 0, &sense, &lpcm, codec, 0);
+    CHECK(sent(5, 0x70900));
+    VENDOR = 0x10EC0999u;
+    REVISION = 0;
 
     if (!fails)
         printf("hda tests passed\n");

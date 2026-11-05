@@ -79,6 +79,7 @@ typedef struct
     unsigned iss, oss;
     unsigned codecs; /* STATESTS bits */
     int has_codec;   /* codec below holds the one with outputs */
+    int hdmi;        /* ... and it is an HDMI / DisplayPort codec (no analog output), not an analog one */
     HdaCodec codec;
     int working;
     int busy;        /* a sound is playing: there is one stream */
@@ -88,7 +89,8 @@ typedef struct
 
 static HdaCtrl CTRL[HDA_MAX_CTRL];
 static int NCTRL;
-static int PRIMARY = -1; /* the controller that plays */
+static int PRIMARY = -1;   /* the controller with the analog output (speakers, headphones) */
+static int HDMI_CTRL = -1; /* the controller of a GPU's HDMI / DisplayPort audio: used while a monitor is plugged in */
 static int VOLUME = 100;  /* master volume, percent */
 
 static inline u8 rd8(HdaCtrl *h, u32 o) { return *(volatile u8 *)(h->regs + o); }
@@ -150,6 +152,20 @@ static void st_hex(HdaCtrl *h, unsigned v, int digits)
         t[i] = "0123456789ABCDEF"[(v >> (4 * (digits - 1 - i))) & 0xFu];
     t[digits] = 0;
     st_str(h, t);
+}
+
+static void st_dec(HdaCtrl *h, unsigned v)
+{
+    char t[11];
+    int n = 0;
+    do
+        t[n++] = (char)('0' + v % 10);
+    while ((v /= 10) != 0);
+    char r[11];
+    for (int i = 0; i < n; i++)
+        r[i] = t[n - 1 - i];
+    r[n] = 0;
+    st_str(h, r);
 }
 
 static void log_hex(const char *label, unsigned v)
@@ -390,8 +406,8 @@ static void bring_up(HdaCtrl *h, const PciDevice *pd)
             HDA_WAIT(0, 300);
             e = hda_codec_scan(&scratch, cad, verb, h);
         }
-        if (e == 0)
-            hda_codec_find_outputs(&scratch);
+        if (e == 0 && hda_codec_find_outputs(&scratch) == 0)
+            hda_codec_find_hdmi(&scratch); /* no analog output: a GPU's HDMI / DisplayPort audio? */
         log_codec(&scratch);
         if (h->status[0])
             st_str(h, "; ");
@@ -405,8 +421,43 @@ static void bring_up(HdaCtrl *h, const PciDevice *pd)
             st_str(h, " is not an audio codec");
         else if (e == HDA_ERR_TOO_BIG)
             st_str(h, " has too many widgets");
+        else if (scratch.nouts == 0 && scratch.nhdmi > 0)
+        {
+            int plugged = 0;
+            u32 lpcm_seen = 0;
+            for (int i = 0; i < scratch.nhdmi; i++)
+            {
+                u32 sense, lpcm;
+                hda_codec_hdmi_info(&scratch, i, &sense, &lpcm, verb, h);
+                if (sense >> 31)
+                {
+                    plugged++;
+                    if (!lpcm_seen)
+                        lpcm_seen = lpcm;
+                }
+            }
+            st_str(h, ": HDMI/DP audio, ");
+            st_dec(h, (unsigned)scratch.nhdmi);
+            st_str(h, " ports, ");
+            st_dec(h, (unsigned)plugged);
+            st_str(h, " with a monitor");
+            if (lpcm_seen) /* what the first monitor accepts: channels and the rate mask of its LPCM descriptor */
+            {
+                st_str(h, " (LPCM ");
+                st_dec(h, (lpcm_seen & 7u) + 1u);
+                st_str(h, "ch, rates 0x");
+                st_hex(h, (lpcm_seen >> 8) & 0xFFu, 2);
+                st_str(h, ")");
+            }
+            if (!h->has_codec)
+            {
+                h->codec = scratch;
+                h->has_codec = 1;
+                h->hdmi = 1;
+            }
+        }
         else if (scratch.nouts == 0)
-            st_str(h, ": HDMI/DP audio only (no analog output), not supported yet");
+            st_str(h, ": no analog or HDMI/DP output the driver knows");
         else
         {
             st_str(h, ":");
@@ -431,7 +482,7 @@ static void bring_up(HdaCtrl *h, const PciDevice *pd)
 void hda_init(void)
 {
     NCTRL = 0;
-    PRIMARY = -1;
+    PRIMARY = HDMI_CTRL = -1;
     for (int i = 0; i < pci_count() && NCTRL < HDA_MAX_CTRL; i++)
     {
         const PciDevice *pd = pci_get(i);
@@ -440,14 +491,16 @@ void hda_init(void)
         HdaCtrl *h = &CTRL[NCTRL++];
         zero(h, sizeof *h);
         bring_up(h, pd);
-        if (h->working && PRIMARY < 0)
+        if (h->working && !h->hdmi && PRIMARY < 0)
             PRIMARY = NCTRL - 1;
+        if (h->working && h->hdmi && HDMI_CTRL < 0)
+            HDMI_CTRL = NCTRL - 1;
     }
     if (NCTRL == 0)
         serial_puts("HDA: no HD Audio controller\n");
 }
 
-int hda_ready(void) { return PRIMARY >= 0; }
+int hda_ready(void) { return PRIMARY >= 0 || HDMI_CTRL >= 0; }
 
 int hda_volume(void) { return VOLUME; }
 
@@ -515,8 +568,13 @@ static int play_buffer(HdaCtrl *h, u64 buf, u32 sound, u32 total)
     wr32(h, R_DPLBASE, (u32)(h->page + PG_DPOS) | 1u);
     wr32(h, R_DPUBASE, (u32)((h->page + PG_DPOS) >> 32));
 
-    hda_codec_setup_outputs(&h->codec, STREAM_TAG, fmt, verb, h);
-    hda_codec_set_volume(&h->codec, (unsigned)VOLUME, verb, h); /* setup unmutes at 0 dB: now the chosen level */
+    if (h->hdmi) /* the monitor has the volume knob; the stream goes to every port that has a monitor */
+        hda_codec_setup_hdmi(&h->codec, STREAM_TAG, fmt, verb, h);
+    else
+    {
+        hda_codec_setup_outputs(&h->codec, STREAM_TAG, fmt, verb, h);
+        hda_codec_set_volume(&h->codec, (unsigned)VOLUME, verb, h); /* setup unmutes at 0 dB: now the chosen level */
+    }
     wr8(h, sd + SD_CTL, CTL_RUN);
 
     /* follow LPIB until the stream is inside the silence; give up if it stops moving for half a second.
@@ -538,7 +596,10 @@ static int play_buffer(HdaCtrl *h, u64 buf, u32 sound, u32 total)
     u8 sts = rd8(h, sd + SD_STS);
     wr8(h, sd + SD_CTL, 0);
     HDA_WAIT(!(rd8(h, sd + SD_CTL) & CTL_RUN), 10);
-    hda_codec_stop_outputs(&h->codec, verb, h);
+    if (h->hdmi)
+        hda_codec_stop_hdmi(&h->codec, verb, h);
+    else
+        hda_codec_stop_outputs(&h->codec, verb, h);
 
     serial_puts(ok ? "HDA: played, " : "HDA: the stream stopped moving, ");
     serial_putd(played);
@@ -566,34 +627,60 @@ static u64 dma_alloc(u32 sound, u32 *total, unsigned *pages)
     return buf;
 }
 
+/* Which controller plays: the GPU's HDMI / DisplayPort audio while a monitor is plugged in (so the sound follows the screen), else the
+ * analog output. */
+static int pick_ctrl(void)
+{
+    if (HDMI_CTRL >= 0 && !CTRL[HDMI_CTRL].busy && hda_codec_hdmi_connected(&CTRL[HDMI_CTRL].codec, verb, &CTRL[HDMI_CTRL]))
+        return HDMI_CTRL;
+    return PRIMARY;
+}
+
+static int play_on(int c, u64 buf, u32 sound, u32 total, const char *ok_text)
+{
+    CTRL[c].busy = 1;
+    int r = play_buffer(&CTRL[c], buf, sound, total);
+    st_result(&CTRL[c], r == 0 ? ok_text : "; stream did not move");
+    CTRL[c].busy = 0;
+    return r;
+}
+
+/* Plays on the picked controller; if the monitor path fails, once more on the analog output. */
+static int play_best(u64 buf, u32 sound, u32 total, const char *ok_text)
+{
+    int c = pick_ctrl();
+    if (c < 0 || CTRL[c].busy)
+        return -1;
+    int r = play_on(c, buf, sound, total, ok_text);
+    if (r != 0 && c != PRIMARY && PRIMARY >= 0 && !CTRL[PRIMARY].busy)
+        r = play_on(PRIMARY, buf, sound, total, ok_text);
+    return r;
+}
+
 int hda_play_pcm(const short *stereo, unsigned long frames)
 {
-    if (PRIMARY < 0 || !frames || frames > HDA_MAX_FRAMES || CTRL[PRIMARY].busy)
+    if (!hda_ready() || !frames || frames > HDA_MAX_FRAMES)
         return -1;
     u32 sound = (u32)frames * 4u, total;
     unsigned pages;
     u64 buf = dma_alloc(sound, &total, &pages);
     if (!buf)
         return -1;
-    CTRL[PRIMARY].busy = 1;
     memcpy((void *)buf, stereo, sound);
-    int r = play_buffer(&CTRL[PRIMARY], buf, sound, total);
+    int r = play_best(buf, sound, total, "; played");
     pmm_free_contiguous(buf, pages);
-    st_result(&CTRL[PRIMARY], r == 0 ? "; played" : "; stream did not move");
-    CTRL[PRIMARY].busy = 0;
     return r;
 }
 
 int hda_play_tone(unsigned hz, unsigned ms)
 {
-    if (PRIMARY < 0 || hz == 0 || hz >= RATE / 2 || ms == 0 || ms > 10000 || CTRL[PRIMARY].busy)
+    if (!hda_ready() || hz == 0 || hz >= RATE / 2 || ms == 0 || ms > 10000)
         return -1;
     u32 sound = RATE / 1000u * ms * 4u, total;
     unsigned pages;
     u64 buf = dma_alloc(sound, &total, &pages);
     if (!buf)
         return -1;
-    CTRL[PRIMARY].busy = 1;
     short *s = (short *)buf;
     unsigned phase = 0, step = (unsigned)(((u64)hz << 32) / RATE);
     for (u32 i = 0; i < sound / 4u; i++)
@@ -602,9 +689,7 @@ int hda_play_tone(unsigned hz, unsigned ms)
         phase += step;
         s[2 * i] = s[2 * i + 1] = (short)v;
     }
-    int r = play_buffer(&CTRL[PRIMARY], buf, sound, total);
+    int r = play_best(buf, sound, total, "; test tone played");
     pmm_free_contiguous(buf, pages);
-    st_result(&CTRL[PRIMARY], r == 0 ? "; test tone played" : "; stream did not move");
-    CTRL[PRIMARY].busy = 0;
     return r;
 }

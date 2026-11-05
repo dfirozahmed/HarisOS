@@ -56,6 +56,9 @@ int hda_codec_scan(HdaCodec *c, unsigned cad, HdaVerbFn fn, void *ctx)
     c->cad = cad;
 
     c->vendor = fn(ctx, cad, 0, verb12(HDA_VERB_GET_PARAM, HDA_PAR_VENDOR));
+    c->revision = fn(ctx, cad, 0, verb12(HDA_VERB_GET_PARAM, HDA_PAR_REVISION));
+    if (c->revision == HDA_NO_RESPONSE)
+        c->revision = 0;
     u32 nodes = fn(ctx, cad, 0, verb12(HDA_VERB_GET_PARAM, HDA_PAR_NODES));
     if (c->vendor == HDA_NO_RESPONSE || nodes == HDA_NO_RESPONSE)
         return HDA_ERR_SILENT;
@@ -270,6 +273,157 @@ void hda_codec_stop_outputs(const HdaCodec *c, HdaVerbFn fn, void *ctx)
 {
     for (int o = 0; o < c->nouts; o++)
         fn(ctx, c->cad, c->out[o].nid[c->out[o].len - 1], verb12(HDA_VERB_SET_STREAM, 0));
+}
+
+/* ---- HDMI / DisplayPort audio of AMD / ATI GPUs ----
+ *
+ * The GPU's audio function has one pin per display output (HDMI, DisplayPort) and a few converters; each pin has the converters it can
+ * take in its connection list. Presence of a monitor comes from the pin sense word. Besides the standard HDA verbs the AMD codec has
+ * its own pin verbs (0x77x / 0x78x) for the channel allocation and for mapping stream channels to the 8 slots of the HDMI audio packet;
+ * and no ELD, it answers the same facts through the verbs 0xF70 (speaker allocation) and 0xF76 (audio descriptor). Verb numbers and
+ * the order of the steps are those of Linux sound/hda/codecs/hdmi/atihdmi.c and hdmi.c. */
+#define ATI_VERB_SET_CHANNEL_ALLOCATION 0x771
+#define ATI_VERB_SET_DOWNMIX_INFO 0x772
+#define ATI_VERB_SET_AUDIO_DESCRIPTOR 0x776
+#define ATI_VERB_SET_MULTICHANNEL_01 0x777 /* + slot / 2 (+ 0x0e for odd slots) */
+#define ATI_VERB_SET_MULTICHANNEL_MODE 0x789
+#define ATI_VERB_GET_AUDIO_DESCRIPTOR 0xF76
+#define ATI_MODE_SINGLE 1 /* every slot mapped on its own (revision 3 and later) */
+
+static int is_ati(const HdaCodec *c) { return (c->vendor >> 16) == 0x1002u; }
+
+int hda_ati_full_remap(const HdaCodec *c) { return c->vendor == 0x1002AA01u && (c->revision & 0xFF00u) >= 0x0300u; }
+
+int hda_codec_find_hdmi(HdaCodec *c)
+{
+    c->nhdmi = 0;
+    if (!is_ati(c))
+        return 0; /* the generic HDMI path (DIP infoframes) is not written: only AMD's verbs are known here */
+    u8 taken[HDA_MAX_NODES];
+    for (unsigned i = 0; i < HDA_MAX_NODES; i++)
+        taken[i] = 0;
+    for (unsigned i = 0; i < c->count && c->nhdmi < HDA_MAX_HDMI; i++)
+    {
+        const HdaNode *n = &c->node[i];
+        if (HDA_WCAP_TYPE(n->caps) != HDA_W_PIN || !(n->pincaps & HDA_PINCAP_OUT) || !(n->pincaps & (HDA_PINCAP_HDMI | HDA_PINCAP_DP)))
+            continue;
+        if (HDA_CFG_CONN(n->config) == 1u || !(n->caps & HDA_WCAP_CONN_LIST)) /* nothing connected to this port */
+            continue;
+        int pick = -1;
+        for (unsigned k = 0; k < n->nconn && pick < 0; k++) /* a converter no other port has taken, else the first one */
+        {
+            const HdaNode *cv = hda_codec_node(c, n->conn[k]);
+            if (cv && HDA_WCAP_TYPE(cv->caps) == HDA_W_OUTPUT && !taken[n->conn[k] - c->first])
+                pick = (int)k;
+        }
+        for (unsigned k = 0; k < n->nconn && pick < 0; k++)
+        {
+            const HdaNode *cv = hda_codec_node(c, n->conn[k]);
+            if (cv && HDA_WCAP_TYPE(cv->caps) == HDA_W_OUTPUT)
+                pick = (int)k;
+        }
+        if (pick < 0)
+            continue;
+        HdaHdmiPin *h = &c->hdmi[c->nhdmi++];
+        h->pin = (u8)(c->first + i);
+        h->cvt = n->conn[pick];
+        h->sel = (u8)pick;
+        taken[h->cvt - c->first] = 1;
+    }
+    return c->nhdmi;
+}
+
+void hda_codec_hdmi_info(const HdaCodec *c, int i, u32 *sense, u32 *lpcm, HdaVerbFn fn, void *ctx)
+{
+    const HdaHdmiPin *h = &c->hdmi[i];
+    const HdaNode *n = hda_codec_node(c, h->pin);
+    if (n && (n->pincaps & HDA_PINCAP_TRIG_REQ))
+        fn(ctx, c->cad, h->pin, verb12(HDA_VERB_SET_PIN_SENSE, 0)); /* some pins only sense when asked */
+    u32 v = fn(ctx, c->cad, h->pin, verb12(HDA_VERB_GET_PIN_SENSE, 0));
+    *sense = v == HDA_NO_RESPONSE ? 0 : v;
+    *lpcm = 0;
+    if (*sense >> 31) /* a monitor: ask for its LPCM audio descriptor (coding type 1 in bits 6:3 of the selector) */
+    {
+        fn(ctx, c->cad, h->pin, verb12(ATI_VERB_SET_AUDIO_DESCRIPTOR, 1u << 3));
+        u32 d = fn(ctx, c->cad, h->pin, verb12(ATI_VERB_GET_AUDIO_DESCRIPTOR, 0));
+        if (d != HDA_NO_RESPONSE && (d & 0xFF00u))
+            *lpcm = d & 0xFFFFu;
+    }
+}
+
+int hda_codec_hdmi_connected(const HdaCodec *c, HdaVerbFn fn, void *ctx)
+{
+    for (int i = 0; i < c->nhdmi; i++)
+    {
+        u32 sense, lpcm;
+        hda_codec_hdmi_info(c, i, &sense, &lpcm, fn, ctx);
+        if (sense >> 31)
+            return 1;
+    }
+    return 0;
+}
+
+/* Stereo on the first two slots, the other six off. Revision 3+: slot s gets its own verb. Older codecs map pairs of slots (and swap
+ * the centre / LFE pair themselves), so only the even slot of a pair is written, with an even stream channel. */
+void hda_ati_map_stereo(unsigned cad, unsigned pin, int full_remap, HdaVerbFn fn, void *ctx)
+{
+    for (unsigned slot = 0; slot < 8; slot++)
+    {
+        unsigned ch = slot < 2 ? slot : 0xFu, hs = slot;
+        if (!full_remap)
+        {
+            hs = slot == 2 ? 3u : slot == 3 ? 2u : slot; /* the built-in centre / LFE swap */
+            if ((hs & 1u) && ch == 0xFu)
+                continue; /* an unused odd slot: the even one of the pair decides */
+            hs -= hs & 1u;
+            if (ch != 0xFu)
+                ch -= ch & 1u;
+        }
+        unsigned verb = ATI_VERB_SET_MULTICHANNEL_01 + hs / 2 + (hs & 1u) * 0x0Eu;
+        fn(ctx, cad, pin, verb12(verb, ch != 0xFu ? (ch << 4) | 1u : 0u)); /* [7:4] stream channel, [0] enable */
+    }
+}
+
+int hda_codec_setup_hdmi(const HdaCodec *c, unsigned tag, u16 fmt, HdaVerbFn fn, void *ctx)
+{
+    int done = 0;
+    fn(ctx, c->cad, c->afg, verb12(HDA_VERB_SET_POWER, 0));
+    for (int i = 0; i < c->nhdmi; i++)
+    {
+        u32 sense, lpcm;
+        hda_codec_hdmi_info(c, i, &sense, &lpcm, fn, ctx);
+        if (!(sense >> 31))
+            continue; /* no monitor on this port */
+        const HdaHdmiPin *h = &c->hdmi[i];
+        const HdaNode *pn = hda_codec_node(c, h->pin);
+        const HdaNode *cn = hda_codec_node(c, h->cvt);
+        if (pn->caps & HDA_WCAP_POWER)
+            fn(ctx, c->cad, h->pin, verb12(HDA_VERB_SET_POWER, 0));
+        if (cn->caps & HDA_WCAP_POWER)
+            fn(ctx, c->cad, h->cvt, verb12(HDA_VERB_SET_POWER, 0));
+        if (pn->caps & HDA_WCAP_OUT_AMP)
+            fn(ctx, c->cad, h->pin, verb4(HDA_VERB4_SET_AMP, amp_unmute(1, 0, pn->out_amp)));
+        fn(ctx, c->cad, h->pin, verb12(HDA_VERB_SET_PIN_CTL, HDA_PINCTL_OUT_EN));
+        fn(ctx, c->cad, h->pin, verb12(ATI_VERB_SET_DOWNMIX_INFO, 0)); /* no downmix flagged in the infoframe */
+        if (hda_ati_full_remap(c))
+            fn(ctx, c->cad, h->pin, verb12(ATI_VERB_SET_MULTICHANNEL_MODE, ATI_MODE_SINGLE));
+        if (pn->nconn > 1)
+            fn(ctx, c->cad, h->pin, verb12(HDA_VERB_SET_CONN_SEL, h->sel));
+        fn(ctx, c->cad, h->cvt, verb12(HDA_VERB_SET_DIGI1, 1));      /* digital output enabled */
+        fn(ctx, c->cad, h->cvt, verb12(HDA_VERB_SET_CHAN_COUNT, 1)); /* 2 channels - 1 */
+        fn(ctx, c->cad, h->cvt, verb4(HDA_VERB4_SET_FORMAT, fmt));
+        fn(ctx, c->cad, h->cvt, verb12(HDA_VERB_SET_STREAM, (tag & 0xFu) << 4));
+        hda_ati_map_stereo(c->cad, h->pin, hda_ati_full_remap(c), fn, ctx);
+        fn(ctx, c->cad, h->pin, verb12(ATI_VERB_SET_CHANNEL_ALLOCATION, 0)); /* CEA channel allocation 0: front left + right */
+        done++;
+    }
+    return done;
+}
+
+void hda_codec_stop_hdmi(const HdaCodec *c, HdaVerbFn fn, void *ctx)
+{
+    for (int i = 0; i < c->nhdmi; i++)
+        fn(ctx, c->cad, c->hdmi[i].cvt, verb12(HDA_VERB_SET_STREAM, 0));
 }
 
 /* ---- pure helpers ---- */

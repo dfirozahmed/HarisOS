@@ -11,6 +11,10 @@ typedef unsigned long long u64;
 
 /* ---- codec verbs (spec 7.3.3). A command is: codec address 31:28, node id 27:20, verb 19:0. ---- */
 #define HDA_VERB_GET_PARAM 0xF00
+#define HDA_VERB_GET_PIN_SENSE 0xF09 /* 31 = a sink is plugged in, 30 = its ELD is valid */
+#define HDA_VERB_SET_PIN_SENSE 0x709 /* a trigger some pins need before the sense is read */
+#define HDA_VERB_SET_DIGI1 0x70D     /* digital converter control 1: bit 0 = digital output enabled */
+#define HDA_VERB_SET_CHAN_COUNT 0x72D /* converter: number of channels - 1 */
 #define HDA_VERB_GET_CONN_SEL 0xF01
 #define HDA_VERB_SET_CONN_SEL 0x701
 #define HDA_VERB_GET_CONN_LIST 0xF02
@@ -24,6 +28,7 @@ typedef unsigned long long u64;
 
 /* Get Parameter ids (spec 7.3.4) */
 #define HDA_PAR_VENDOR 0x00
+#define HDA_PAR_REVISION 0x02
 #define HDA_PAR_NODES 0x04     /* first sub-node 23:16, count 7:0 */
 #define HDA_PAR_FG_TYPE 0x05   /* 7:0, 0x01 = audio function group */
 #define HDA_PAR_WCAPS 0x09     /* audio widget capabilities */
@@ -48,7 +53,10 @@ typedef unsigned long long u64;
 
 /* pin capabilities (parameter 0x0C) */
 #define HDA_PINCAP_HP_DRIVE (1u << 3)
+#define HDA_PINCAP_TRIG_REQ (1u << 1)
 #define HDA_PINCAP_OUT (1u << 4)
+#define HDA_PINCAP_HDMI (1u << 7)
+#define HDA_PINCAP_DP (1u << 24)
 #define HDA_PINCAP_EAPD (1u << 16)
 
 /* configuration default (verb F1C): what the board maker says the pin is wired to */
@@ -91,16 +99,27 @@ typedef struct
 #define HDA_NO_RESPONSE 0xFFFFFFFFu
 typedef u32 (*HdaVerbFn)(void *ctx, unsigned cad, unsigned nid, u32 verb);
 
+/* One HDMI / DisplayPort output of an AMD / ATI HDMI codec: the pin (where the monitor is) and the converter that feeds it. */
+#define HDA_MAX_HDMI 6
+typedef struct
+{
+    u8 pin, cvt; /* node ids */
+    u8 sel;      /* index of cvt in the pin's connection list */
+} HdaHdmiPin;
+
 typedef struct
 {
     unsigned cad;
     u32 vendor; /* vendor 31:16, device 15:0 (e.g. 0x10EC0236 = Realtek ALC236) */
+    u32 revision; /* parameter 0x02 of the root node (0 if the codec did not answer) */
     unsigned afg;   /* node id of the audio function group, 0 = none */
     unsigned first; /* node id of node[0] */
     unsigned count;
     HdaNode node[HDA_MAX_NODES];
     int nouts;
     HdaPath out[HDA_MAX_OUTS];
+    int nhdmi;
+    HdaHdmiPin hdmi[HDA_MAX_HDMI];
 } HdaCodec;
 
 /* Reads the codec's audio function group and every widget in it. 0 = done, <0 = HDA_ERR_*. */
@@ -114,6 +133,23 @@ void hda_codec_setup_outputs(const HdaCodec *c, unsigned tag, u16 fmt, HdaVerbFn
 int hda_codec_set_volume(const HdaCodec *c, unsigned percent, HdaVerbFn fn, void *ctx);
 /* The gain step for `percent` of an output amp with the given capabilities (parameter 0x12); *mute = 1 if it should be muted. Pure. */
 int hda_amp_gain(u32 ampcaps, unsigned percent, int *mute);
+/* ---- HDMI / DisplayPort audio of AMD / ATI GPUs (codec vendor 0x1002xxxx). Verbs from Linux sound/hda/codecs/hdmi/atihdmi.c. ---- */
+/* Finds the digital output pins and gives each its own converter where it can. Returns nhdmi (0 for other vendors' codecs). */
+int hda_codec_find_hdmi(HdaCodec *c);
+/* What is behind port i right now: *sense = the pin sense word (bit 31 = a monitor is plugged in); *lpcm = the monitor's LPCM audio
+ * descriptor as the codec reports it (0 = none): channels - 1 in bits 2:0, supported rates in bits 15:8 (spec CEA-861 SAD). */
+void hda_codec_hdmi_info(const HdaCodec *c, int i, u32 *sense, u32 *lpcm, HdaVerbFn fn, void *ctx);
+/* 1 if any port has a monitor plugged in. */
+int hda_codec_hdmi_connected(const HdaCodec *c, HdaVerbFn fn, void *ctx);
+/* For every port with a monitor: powers up, routes pin <- converter, enables the output, points the converter at stream `tag` with
+ * format `fmt` (stereo) and sets the channel mapping. Returns how many ports were set up. */
+int hda_codec_setup_hdmi(const HdaCodec *c, unsigned tag, u16 fmt, HdaVerbFn fn, void *ctx);
+void hda_codec_stop_hdmi(const HdaCodec *c, HdaVerbFn fn, void *ctx);
+/* The verbs that map stereo onto the first two of the pin's 8 channel slots, for a codec of this revision: calls fn for each. Pure
+ * apart from fn. `full_remap` = revision 3 or later (every slot separately), else slots are mapped in pairs. */
+void hda_ati_map_stereo(unsigned cad, unsigned pin, int full_remap, HdaVerbFn fn, void *ctx);
+int hda_ati_full_remap(const HdaCodec *c);
+
 /* Stops the DACs (stream tag 0). */
 void hda_codec_stop_outputs(const HdaCodec *c, HdaVerbFn fn, void *ctx);
 
