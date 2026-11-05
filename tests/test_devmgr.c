@@ -168,7 +168,7 @@ int main(void)
     CHECK(devmgr_build(&nin) == 2);
     CHECK(devmgr_get(0)->category == DEV_CAT_NETWORK && devmgr_get(1)->category == DEV_CAT_NETWORK);
     /* no driver found a card: the notes say what is supported */
-    CHECK(!devmgr_get(0)->has_driver && strcmp(devmgr_get(0)->note, "No driver (supported: Intel e1000, Realtek RTL8168)") == 0);
+    CHECK(!devmgr_get(0)->has_driver && strcmp(devmgr_get(0)->note, "No driver (supported: Intel e1000, Realtek RTL8168, virtio-net)") == 0);
     CHECK(!devmgr_get(1)->has_driver && strstr(devmgr_get(1)->note, "wireless") != NULL);
     /* the driver started the Ethernet card: its line is the note, the wireless card is untouched */
     nin.net_found = 1;

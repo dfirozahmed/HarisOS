@@ -55,6 +55,7 @@ try {
         @('WAV file tests', 'tests/run_wav_tests.sh'),
         @('Battery tests', 'tests/run_battery_tests.sh'),
         @('Realtek RTL8168 driver tests', 'tests/run_rtl8168_tests.sh'),
+        @('virtio transport and virtio-net tests', 'tests/run_virtio_tests.sh'),
         @('Realtek RTL8821CE identification tests', 'tests/run_rtl8821ce_tests.sh'),
         @('WPA2 crypto and handshake tests', 'tests/run_wpa_tests.sh'),
         @('TCP tests', 'tests/run_tcp_tests.sh'),

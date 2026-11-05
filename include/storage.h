@@ -10,4 +10,7 @@ int storage_init(void);
 /* 1 when a storage controller driver ran (even if it found no disk), for the Device Manager. */
 int storage_controllers_started(void);
 
+/* One line per disk to the serial port (name, model, size). Separate from storage_init() because the serial port is set up later. */
+void storage_log(void);
+
 #endif

@@ -322,6 +322,7 @@ void kernel_main(const BootInfo *info)
     if (pmm_ok)
     {
         serial_init();
+        storage_log(); /* the disks found earlier (the serial port was not ready then) */
 
         smp_bsp_init(); /* this processor's per-CPU record (GS base): before the scheduler and the system call code need it */
 
