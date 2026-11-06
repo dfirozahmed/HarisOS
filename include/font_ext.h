@@ -9,7 +9,8 @@ extern const unsigned short *const ext_cp;
 extern const unsigned int ext_n;
 
 /* One Font per pixel size; its glyphs are indexed by the position in ext_cp (not by character code), the baseline matches the
- * Latin font of that size. */
+ * Latin font of that size. Regular has all five sizes, medium 14 and 16, bold 20 (the sizes of font_med_* and font_bold_*). */
 extern const Font font_ext_12, font_ext_14, font_ext_16, font_ext_20, font_ext_32;
+extern const Font font_ext_med_14, font_ext_med_16, font_ext_bold_20;
 
 #endif

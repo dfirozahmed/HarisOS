@@ -34,7 +34,14 @@ int ar_run_len(const unsigned *cp, int n);
  * advance and shares the pen position of its letter. Writes at most max_out glyphs and returns how many. */
 int ar_shape_run(const unsigned *cp, int n, int size, BnGlyphPos *out, int max_out);
 
-/* The Arabic face for a Latin font of this nominal size: the nearest of the five sizes. */
+/* The same for a weight: AR_REGULAR, AR_MEDIUM or AR_BOLD (font_ar.h). The glyphs are the same in every weight; their widths and the
+ * anchors of the marks are not. */
+int ar_shape_run_w(const unsigned *cp, int n, int size, int weight, BnGlyphPos *out, int max_out);
+
+/* The Arabic face for a Latin font of this nominal size: the nearest of the five sizes (regular). */
 const Font *ar_face_for_size(int size);
+
+/* The Arabic face of the weight and size of a Latin font (font_ui_* regular, font_med_* medium, font_bold_20 bold). */
+const Font *ar_face_for(const Font *latin);
 
 #endif

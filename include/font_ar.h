@@ -9,18 +9,29 @@
 #define AR_SCALE_PERMILLE 1000 /* the glyphs are drawn at this fraction of the Latin font's pixel size */
 #define AR_GSUB_STAGES 5    /* 0: ccmp, 1: fina, 2: medi, 3: init (each only on glyphs in that form), 4: rlig / calt / liga */
 
-/* Glyphs indexed by glyph id (not by character code); one Font per pixel size, baseline matching the Latin font of that size. */
-extern const Font font_ar_12, font_ar_14, font_ar_16, font_ar_20, font_ar_32;
+/* Weights: 0 regular, 1 medium, 2 bold (the Latin fonts font_ui_*, font_med_*, font_bold_*). */
+#define AR_WEIGHTS 3
+#define AR_REGULAR 0
+#define AR_MEDIUM 1
+#define AR_BOLD 2
 
-/* The font's own OpenType tables. */
-extern const unsigned char *const ar_gsub, *const ar_gpos, *const ar_gdef;
-extern const unsigned int ar_gsub_len, ar_gpos_len, ar_gdef_len;
+/* Glyphs indexed by glyph id (not by character code); one Font per pixel size, baseline matching the Latin font of that size.
+ * Regular has all five sizes, medium 14 and 16, bold 20. */
+extern const Font font_ar_12, font_ar_14, font_ar_16, font_ar_20, font_ar_32;
+extern const Font font_ar_med_14, font_ar_med_16, font_ar_bold_20;
+
+/* The font's own OpenType tables: GSUB and GDEF are the same for every weight, GPOS and the advances differ. */
+extern const unsigned char *const ar_gsub, *const ar_gdef;
+extern const unsigned int ar_gsub_len, ar_gdef_len;
+extern const unsigned char *const ar_gpos_w[AR_WEIGHTS];
+extern const unsigned int ar_gpos_len_w[AR_WEIGHTS];
+extern const unsigned short *const ar_gpos_lookups_w[AR_WEIGHTS];
+extern const unsigned short ar_gpos_nlookups_w[AR_WEIGHTS];
+extern const unsigned short *const ar_adv_w[AR_WEIGHTS]; /* advances in font design units (AR_UPEM per em) */
 
 extern const unsigned short *const ar_gsub_lookups, *const ar_gsub_stage;
-extern const unsigned short *const ar_gpos_lookups;
-extern const unsigned short ar_gpos_nlookups;
 
-extern const unsigned short *const ar_cmap_cp, *const ar_cmap_gid, *const ar_adv;
+extern const unsigned short *const ar_cmap_cp, *const ar_cmap_gid; /* the same for every weight */
 extern const unsigned int ar_cmap_n;
 
 #endif

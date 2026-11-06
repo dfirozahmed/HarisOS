@@ -32,7 +32,7 @@ static int ext_index(unsigned cp)
     return -1;
 }
 
-/* The extra face of the size nearest to the Latin font's (the same five sizes as the Bengali and Arabic faces). */
+/* The extra face of the size nearest to the Latin font's (the same five sizes as the Bengali and Arabic faces), regular weight. */
 static const Font *ext_face_for_size(int size)
 {
     if (size <= 13)
@@ -44,6 +44,25 @@ static const Font *ext_face_for_size(int size)
     if (size <= 26)
         return &font_ext_20;
     return &font_ext_32;
+}
+
+/* The extra face that goes with a Latin font: its weight (medium for font_med_*, bold for font_bold_20) and size. */
+static const Font *ext_face_for(const Font *f)
+{
+    switch (bn_weight_of(f))
+    {
+    case 1: /* medium (BN_MEDIUM) */
+        if (f->size <= 15)
+            return &font_ext_med_14;
+        if (f->size <= 18)
+            return &font_ext_med_16;
+        break;
+    case 2: /* bold (BN_BOLD) */
+        if (f->size >= 19 && f->size <= 26)
+            return &font_ext_bold_20;
+        break;
+    }
+    return ext_face_for_size(f->size);
 }
 
 /* One glyph to draw. newline = 1: a line break (no glyph). */
@@ -100,9 +119,9 @@ static const Font *q_font(const Font *f, int face)
 {
     switch (face)
     {
-    case Q_EXT: return ext_face_for_size(f->size);
+    case Q_EXT: return ext_face_for(f); /* each of these three has the weight of the Latin font */
     case Q_BN: return bn_face_for(f); /* of the weight of the Latin font: regular, medium or bold */
-    case Q_AR: return ar_face_for_size(f->size);
+    case Q_AR: return ar_face_for(f);
     }
     return f;
 }
@@ -116,7 +135,7 @@ static void plain_item(const Font *f, unsigned cp, QItem *q)
     {
         q->face = Q_EXT;
         q->idx = (unsigned short)e;
-        q->adv = sat16(ext_face_for_size(f->size)->glyphs[e].advance);
+        q->adv = sat16(ext_face_for(f)->glyphs[e].advance);
     }
     else
     {
@@ -143,7 +162,7 @@ static void shaped_items(QItem *q, int face, const BnGlyphPos *g, int n)
 NOINLINE static int shape_ar_items(const Font *f, const unsigned *cps, int len, QItem *out, int room)
 {
     BnGlyphPos tmp[OT_CAP];
-    int cnt = ar_shape_run(cps, len, f->size, tmp, OT_CAP);
+    int cnt = ar_shape_run_w(cps, len, f->size, bn_weight_of(f), tmp, OT_CAP);
     if (cnt <= room)
         shaped_items(out, Q_AR, tmp, cnt);
     return cnt;
@@ -494,7 +513,17 @@ NOINLINE static int fit_rtl(const Font *f, const char *s, int max_w)
         utf8_decode(&q);
         ends[n++] = (int)(q - s);
     }
-    int lo = 0, hi = n; /* the most characters that fit: width grows with the prefix, so a binary search */
+    /* The whole line first: a prefix cut inside an Arabic word shapes its last letter as a word end, which can be wider than the same
+     * letter inside the whole line, so prefix widths are not exactly monotonic and the search below could miss that all fits. */
+    if (n > 0)
+    {
+        for (int i = 0; i < ends[n - 1]; i++)
+            tmp[i] = s[i];
+        tmp[ends[n - 1]] = 0;
+        if (gfx_text_w(f, tmp) <= max_w)
+            return ends[n - 1];
+    }
+    int lo = 0, hi = n; /* the most characters that fit: width grows with the prefix (nearly), so a binary search */
     while (lo < hi)
     {
         int mid = (lo + hi + 1) / 2;

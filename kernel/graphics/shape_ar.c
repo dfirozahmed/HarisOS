@@ -12,10 +12,12 @@
 #define M_MEDI 0x0002u
 #define M_INIT 0x0004u
 
-static OtFont ar_otfont(void)
+static OtFont ar_otfont(int weight)
 {
-    OtFont f = {ar_gsub, ar_gpos, ar_gdef, ar_gsub_lookups, ar_gsub_stage, 0, ar_gpos_lookups, ar_gpos_nlookups,
-                ar_adv, AR_UPEM, ar_cmap_cp, ar_cmap_gid, ar_cmap_n};
+    if (weight < 0 || weight >= AR_WEIGHTS)
+        weight = AR_REGULAR;
+    OtFont f = {ar_gsub, ar_gpos_w[weight], ar_gdef, ar_gsub_lookups, ar_gsub_stage, 0, ar_gpos_lookups_w[weight],
+                ar_gpos_nlookups_w[weight], ar_adv_w[weight], AR_UPEM, ar_cmap_cp, ar_cmap_gid, ar_cmap_n};
     return f;
 }
 
@@ -25,7 +27,7 @@ int ar_is_arabic(unsigned cp)
 {
     if ((cp >= 0x0600 && cp <= 0x06FF) || (cp >= 0x0750 && cp <= 0x077F))
     {
-        OtFont f = ar_otfont();
+        OtFont f = ar_otfont(AR_REGULAR); /* the cmap is the same in every weight */
         return ot_cmap(&f, cp) != 0;
     }
     return 0;
@@ -37,6 +39,25 @@ int ar_run_len(const unsigned *cp, int n)
     while (i < n && i < AR_RUN_MAX && (ar_is_arabic(cp[i]) || is_joiner(cp[i])))
         i++;
     return i;
+}
+
+const Font *ar_face_for(const Font *latin)
+{
+    /* the weight of the Latin font (the same rule as for Bengali), if the Arabic faces have its size */
+    switch (bn_weight_of(latin))
+    {
+    case AR_MEDIUM:
+        if (latin->size <= 15)
+            return &font_ar_med_14;
+        if (latin->size <= 18)
+            return &font_ar_med_16;
+        break;
+    case AR_BOLD:
+        if (latin->size >= 19 && latin->size <= 26)
+            return &font_ar_bold_20;
+        break;
+    }
+    return ar_face_for_size(latin->size);
 }
 
 const Font *ar_face_for_size(int size)
@@ -82,7 +103,12 @@ static int scale16(int units, int size)
 
 int ar_shape_run(const unsigned *cp, int n, int size, BnGlyphPos *out, int max_out)
 {
-    OtFont font = ar_otfont();
+    return ar_shape_run_w(cp, n, size, AR_REGULAR, out, max_out);
+}
+
+int ar_shape_run_w(const unsigned *cp, int n, int size, int weight, BnGlyphPos *out, int max_out)
+{
+    OtFont font = ar_otfont(weight);
     OtBuf b;
     int jt[AR_RUN_MAX];
     if (n > AR_RUN_MAX)
@@ -132,7 +158,7 @@ int ar_shape_run(const unsigned *cp, int n, int size, BnGlyphPos *out, int max_o
         out[i].gid = g->gid;
         out[i].x_off = scale16(g->xoff, size);
         out[i].y_off = scale16(g->yoff, size);
-        out[i].adv = scale16((int)ar_adv[g->gid] + g->xadv, size);
+        out[i].adv = scale16((int)font.adv[g->gid] + g->xadv, size);
     }
     return cnt;
 }

@@ -226,6 +226,66 @@ int main(void)
         assert(gfx_text_w(&font_bold_20, mixed) >= sum - 2 && gfx_text_w(&font_bold_20, mixed) <= sum + 2);
     }
 
+    /* ---- Arabic, Cyrillic, Greek and Latin-1 in the weight of the Latin font ---- */
+    {
+        assert(ar_face_for(&font_med_14) == &font_ar_med_14 && ar_face_for(&font_med_16) == &font_ar_med_16);
+        assert(ar_face_for(&font_bold_20) == &font_ar_bold_20);
+        assert(ar_face_for(&font_ui_14) == &font_ar_14 && ar_face_for(&font_ui_32) == &font_ar_32 && ar_face_for(&font_ui_12) == &font_ar_12);
+
+        /* Arabic: the same glyphs in every weight, wider and with the marks anchored on that weight's own letters */
+        unsigned word[] = {0x0628, 0x0650, 0x0633, 0x0652, 0x0645};
+        BnGlyphPos r[96], m[96], b[96];
+        int nr = ar_shape_run_w(word, 5, 20, AR_REGULAR, r, 96), nm = ar_shape_run_w(word, 5, 20, AR_MEDIUM, m, 96),
+            nb = ar_shape_run_w(word, 5, 20, AR_BOLD, b, 96);
+        assert(nr == nm && nm == nb && nr > 5);
+        int differ = 0;
+        for (int i = 0; i < nr; i++)
+        {
+            assert(r[i].gid == m[i].gid && m[i].gid == b[i].gid);
+            differ |= r[i].adv != b[i].adv;
+        }
+        assert(differ);
+        BnGlyphPos plain[96];
+        assert(ar_shape_run(word, 5, 20, plain, 96) == nr);
+        for (int i = 0; i < nr; i++)
+            assert(plain[i].gid == r[i].gid && plain[i].adv == r[i].adv && plain[i].x_off == r[i].x_off && plain[i].y_off == r[i].y_off);
+
+        /* every script: text in the medium / bold Latin font is drawn with the medium / bold face, wider and with more ink */
+        const char *samples[] = {"\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7",                                  /* مرحبا */
+                                 "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82",                          /* Привет */
+                                 "\xce\x95\xce\xbb\xce\xbb\xce\xac\xce\xb4\xce\xb1",                          /* Ελλάδα */
+                                 "caf\xc3\xa9 \xc3\x80\xc3\x89\xc3\x8e"};                                     /* café ÀÉÎ */
+        test_clip = (GfxClip){-100000, -100000, 100000, 100000};
+        for (unsigned i = 0; i < sizeof samples / sizeof samples[0]; i++)
+        {
+            /* (medium is less than a pixel wider than regular for a short word, so its width may round to the same: ink tells) */
+            assert(gfx_text_w(&font_med_14, samples[i]) >= gfx_text_w(&font_ui_14, samples[i]));
+            assert(gfx_text_w(&font_bold_20, samples[i]) > gfx_text_w(&font_ui_20, samples[i]));
+            int c0 = blend_calls;
+            gfx_text(&font_ui_14, 10, 5, samples[i], gfx_rgb(255, 255, 255));
+            int regular14_px = blend_calls - c0;
+            c0 = blend_calls;
+            gfx_text(&font_med_14, 10, 5, samples[i], gfx_rgb(255, 255, 255));
+            assert(regular14_px > 0 && blend_calls - c0 > regular14_px); /* medium covers more pixels */
+            c0 = blend_calls;
+            gfx_text(&font_ui_20, 10, 5, samples[i], gfx_rgb(255, 255, 255));
+            int regular_px = blend_calls - c0;
+            c0 = blend_calls;
+            gfx_text(&font_bold_20, 10, 5, samples[i], gfx_rgb(255, 255, 255));
+            assert(regular_px > 0 && blend_calls - c0 > regular_px); /* bold covers more */
+        }
+        /* the three weights of the extra faces hold the same characters, so a line measures the same in every weight except for widths */
+        assert(font_ext_med_14.glyphs != font_ext_14.glyphs && font_ext_bold_20.bitmap != font_ext_20.bitmap);
+        /* a right-to-left line in a medium / bold font: widths still add up, and fit still works */
+        char line[64];
+        strcpy(line, samples[0]);
+        strcat(line, " ");
+        strcat(line, samples[0]);
+        int w1 = gfx_text_w(&font_bold_20, samples[0]), sp = gfx_text_w(&font_bold_20, " ");
+        assert(gfx_text_w(&font_bold_20, line) >= 2 * w1 + sp - 2 && gfx_text_w(&font_bold_20, line) <= 2 * w1 + sp + 2);
+        assert(gfx_text_fit(&font_bold_20, line, gfx_text_w(&font_bold_20, line)) == (int)strlen(line));
+    }
+
     /* ---- Latin-1, Latin Extended-A, Greek, Cyrillic: drawn from the extra faces, not '?' ---- */
     {
         int q = gfx_text_w(&font_ui_14, "?");
