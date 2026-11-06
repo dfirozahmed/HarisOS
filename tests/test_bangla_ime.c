@@ -56,6 +56,18 @@ static int key(int ch, unsigned mods)
         apply(&out[i]);
     return n;
 }
+/* a key with exact modifiers, as the keyboard driver delivers it: key = the key's own character, ch = what it types (0 with Ctrl / Alt) */
+static void keym(int k, unsigned mods)
+{
+    KeyEvent in = {k, k, 1, mods}, out[IME_MAX_EVENTS];
+    if ((mods & KMOD_SHIFT) && k == '1')
+        in.ch = '!';
+    if (mods & (KMOD_CTRL | KMOD_ALT))
+        in.ch = 0;
+    int n = ime_filter(&in, out, IME_MAX_EVENTS);
+    for (int i = 0; i < n; i++)
+        apply(&out[i]);
+}
 static void typed(const char *s)
 {
     for (; *s; s++)
@@ -201,9 +213,90 @@ int main(void)
         key('k', 0);
     CHECK(TLEN > 0 && TLEN < 256);
 
+    /* ---- the national layout: Ctrl+Shift+Space switches to it ---- */
+    CHECK(ime_mode() == IME_PHONETIC);
+    fresh();
+    keym(' ', KMOD_CTRL | KMOD_SHIFT);
+    CHECK(ime_mode() == IME_NATIONAL && ime_active() && TLEN == 0);
+    keym('f', 0);
+    keym('h', 0);
+    keym('q', KMOD_SHIFT);
+    keym('v', KMOD_SHIFT);
+    keym('h', 0);
+    CHECK(strcmp(text(), "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe") == 0); /* ব া ং ল া = বাংলা */
+    fresh();
+    keym('j', 0);
+    keym('d', 0);
+    CHECK(strcmp(text(), "\xe0\xa6\x95\xe0\xa6\xbf") == 0);                                     /* ক ি: typed in spoken order */
+    fresh();
+    keym('h', KMOD_ALT | KMOD_ALTGR);                    /* AltGr: the independent vowels */
+    keym('m', 0);
+    keym('d', 0);
+    CHECK(strcmp(text(), "\xe0\xa6\x86\xe0\xa6\xae\xe0\xa6\xbf") == 0);                         /* আমি */
+    keym('d', KMOD_ALT | KMOD_ALTGR);
+    keym('d', KMOD_ALT | KMOD_ALTGR | KMOD_SHIFT);
+    keym('h', KMOD_SHIFT);
+    CHECK(strcmp(text(), "\xe0\xa6\x86\xe0\xa6\xae\xe0\xa6\xbf\xe0\xa6\x87\xe0\xa6\x88\xe0\xa6\x85") == 0); /* ... ই ঈ অ */
+    fresh();
+    keym('j', 0);
+    keym('g', 0);
+    keym('j', 0);
+    keym('g', KMOD_SHIFT);
+    CHECK(strcmp(text(), "\xe0\xa6\x95\xe0\xa7\x8d\xe0\xa6\x95\xe0\xa5\xa4") == 0);             /* ক ্ ক । : hasanta and danda */
+    fresh();
+    keym('1', 0);
+    keym('0', 0);
+    keym('4', KMOD_ALT | KMOD_ALTGR);
+    CHECK(strcmp(text(), "\xe0\xa7\xa7\xe0\xa7\xa6\xe0\xa7\xb3") == 0);                         /* ১ ০ ৳ */
+    fresh();
+    keym('-', KMOD_ALT | KMOD_ALTGR);
+    keym('=', KMOD_ALT | KMOD_ALTGR);
+    CHECK(TLEN == 2 && TEXT[0] == 0x200C && TEXT[1] == 0x200D);                                /* ZWNJ ZWJ */
+    /* what the layout leaves alone is typed as usual, and shortcuts are not typing */
+    fresh();
+    keym(',', 0);
+    keym('1', KMOD_SHIFT);
+    keym(' ', 0);
+    keym('=', 0);
+    CHECK(strcmp(text(), ",! =") == 0);
+    {
+        KeyEvent out[IME_MAX_EVENTS];
+        KeyEvent ctrl_j = {'j', 0, 1, KMOD_CTRL}, left_alt = {'h', 0, 1, KMOD_ALT}, bs = {KEY_BACKSPACE, 0, 1, 0};
+        CHECK(ime_filter(&ctrl_j, out, IME_MAX_EVENTS) == 1 && out[0].key == 'j' && out[0].ch == 0);
+        CHECK(ime_filter(&left_alt, out, IME_MAX_EVENTS) == 1 && out[0].key == 'h' && out[0].ch == 0);
+        CHECK(ime_filter(&bs, out, IME_MAX_EVENTS) == 1 && out[0].key == KEY_BACKSPACE);
+        KeyEvent up = {'j', 'j', 0, 0};
+        CHECK(ime_filter(&up, out, IME_MAX_EVENTS) == 1 && out[0].pressed == 0 && out[0].ch == 'j'); /* a release is not typing */
+    }
+    /* every table entry types an assigned Bangla character, and none is typed in two places by accident of a level */
+    {
+        int n = 0;
+        for (int k = 32; k < 127; k++)
+            for (unsigned m = 0; m < 4; m++)
+            {
+                KeyEvent in = {k, k, 1, ((m & 1) ? KMOD_SHIFT : 0) | ((m & 2) ? KMOD_ALT | KMOD_ALTGR : 0)}, out[IME_MAX_EVENTS];
+                if (m & 2)
+                    in.ch = 0;
+                if (ime_filter(&in, out, IME_MAX_EVENTS) == 1 && out[0].key == 0 && out[0].ch)
+                {
+                    unsigned c = (unsigned)out[0].ch;
+                    CHECK((c >= 0x0980 && c <= 0x09FF) || c == 0x0964 || c == 0x0965 || c == 0x200C || c == 0x200D);
+                    CHECK(c != 0x09B3 && c != 0x09BB && c != 0x0902); /* the code points xkeyboard-config marks as unassigned */
+                    n++;
+                }
+            }
+        CHECK(n == 95); /* the 98 characters of xkeyboard-config's layout, less the 3 it marks as unassigned (counted by a script from the file) */
+    }
+    /* back to the phonetic layout; its state is clean */
+    keym(' ', KMOD_CTRL | KMOD_SHIFT);
+    CHECK(ime_mode() == IME_PHONETIC);
+    fresh();
+    typed("ami");
+    CHECK(strcmp(text(), "\xe0\xa6\x86\xe0\xa6\xae\xe0\xa6\xbf") == 0);
+
     /* off again */
     key(' ', KMOD_CTRL);
-    CHECK(!ime_active());
+    CHECK(!ime_active() && ime_mode() == IME_OFF);
     fresh();
     typed("k");
     CHECK(strcmp(text(), "k") == 0);

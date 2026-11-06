@@ -162,12 +162,13 @@ int taskbar_set_battery(int percent, int charging, int ac)
     return changed;
 }
 
-static int IME_ON; /* Bangla typing is on (see bangla_ime.h) */
+static int IME_MODE; /* 0 = Latin letters, 1 = Bangla phonetic, 2 = Bangla national layout (see bangla_ime.h) */
 
-int taskbar_set_ime(int on)
+int taskbar_set_ime(int mode)
 {
-    int changed = (on != 0) != IME_ON;
-    IME_ON = on != 0;
+    int m = mode == 1 || mode == 2 ? mode : 0;
+    int changed = m != IME_MODE;
+    IME_MODE = m;
     return changed;
 }
 
@@ -365,14 +366,18 @@ void taskbar_draw(void)
         bat_w = ui_text_width(bat_txt, UI_TEXT_SMALL) + 6;
     }
     int plug_w = BAT_AC ? 20 + 6 : 0; /* the plug beside the battery: 20 px and a gap */
-    int lang_w = 34 + 8; /* the typing language ("EN" / "বাং"): 34 px and a gap */
+    int lang_w = 52 + 8; /* the typing language ("EN", "অভ্র", "জাতীয়"): 52 px and a gap */
     int tray_w = lang_w + 14 + 20 + 14 + 22 + 14 + plug_w + 26 + 14 + bat_w;
     int tx = rx - cw - 14 - tray_w;
     if (tx > x)
     {
         pill(tx, cy - 17, tray_w, 34, t->radius_m, -1, 0, t);
-        ui_text_in_color(ui_rect(tx + 10, cy - 10, 34, 20), IME_ON ? "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82" : "EN", UI_TEXT_SMALL, UI_ALIGN_CENTER,
-                         IME_ON ? t->accent : t->text_dim); /* Ctrl+Space switches */
+        /* Ctrl+Space turns Bangla on / off, Ctrl+Shift+Space switches the Bangla layout: অভ্র = phonetic, জাতীয় = national */
+        ui_text_in_color(ui_rect(tx + 10, cy - 10, 52, 20),
+                         IME_MODE == 1   ? "\xe0\xa6\x85\xe0\xa6\xad\xe0\xa7\x8d\xe0\xa6\xb0"
+                         : IME_MODE == 2 ? "\xe0\xa6\x9c\xe0\xa6\xbe\xe0\xa6\xa4\xe0\xa7\x80\xe0\xa6\xaf"
+                                         : "EN",
+                         UI_TEXT_SMALL, UI_ALIGN_CENTER, IME_MODE ? t->accent : t->text_dim);
         int ix = tx + lang_w + 14 + 10;
         ui_icon(UI_ICON_WIFI, ix, cy, 20, WIFI == 1 ? t->text : WIFI == 2 ? t->warning : t->text_dim);
         WIFI_X = ix - 10 - 7;

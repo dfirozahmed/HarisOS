@@ -24,6 +24,7 @@
 #define KMOD_CTRL 2
 #define KMOD_ALT 4
 #define KMOD_CAPS 8 /* Caps Lock is on */
+#define KMOD_ALTGR 16 /* the right Alt key (AltGr) is held (KMOD_ALT is set too): the third level of a layout */
 
 enum
 {

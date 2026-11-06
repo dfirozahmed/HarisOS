@@ -182,7 +182,8 @@ static void usb_process(const unsigned char *r)
         return;
 
     unsigned m = r[0], old = USB_PREV[0];
-    USB_MODS = ((m & 0x11) ? KMOD_CTRL : 0) | ((m & 0x22) ? KMOD_SHIFT : 0) | ((m & 0x44) ? KMOD_ALT : 0);
+    USB_MODS = ((m & 0x11) ? KMOD_CTRL : 0) | ((m & 0x22) ? KMOD_SHIFT : 0) | ((m & 0x44) ? KMOD_ALT : 0) |
+               ((m & 0x40) ? KMOD_ALTGR : 0); /* bit 6 of the modifier byte: the right Alt */
     for (int i = 0; i < 8; i++)
         if (((m ^ old) >> i) & 1)
             pend_push(MODKEY[i], 0, (int)((m >> i) & 1));
@@ -302,6 +303,7 @@ int keyboard_poll(KeyEvent *out)
         case KEY_ALT:
             if (ext) ALT_R = pressed; else ALT_L = pressed;
             set_mod(KMOD_ALT, ALT_L || ALT_R);
+            set_mod(KMOD_ALTGR, ALT_R); /* the right Alt alone: AltGr */
             break;
         case KEY_CAPS:
             if (pressed && !CAPS_HELD) /* toggles once per press, not on every repeat */

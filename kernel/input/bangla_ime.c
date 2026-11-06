@@ -135,11 +135,48 @@ int bn_translit(const char *s, int n, unsigned *out, int max)
     return o < max ? o : max;
 }
 
+/* ---- the national layout (BDS 1738): every key is a Bangla character ---- */
+/* The table of the Bangladesh Computer Council's National Bangla keyboard, as in xkeyboard-config (symbols/bd, "basic").
+ * Four levels per key: plain, Shift, AltGr, Shift+AltGr; 0 = the key has nothing there (it types what it normally does).
+ * Left out, as xkeyboard-config itself marks them: U+09B3 and U+09BB (not allocated in Unicode) and U+0902 (a Devanagari sign). */
+static const struct
+{
+    char key; /* the key, named by the character it types on a US keyboard without Shift */
+    unsigned short cp[4];
+} NATIONAL[] = {
+    {'1', {0x09E7, 0, 0x09F4, 0}},      {'2', {0x09E8, 0, 0x09F5, 0}},      {'3', {0x09E9, 0, 0x09F6, 0}},
+    {'4', {0x09EA, 0, 0x09F3, 0x09F2}}, {'5', {0x09EB, 0, 0x09F7, 0}},      {'6', {0x09EC, 0, 0x09F8, 0}},
+    {'7', {0x09ED, 0, 0, 0}},           {'8', {0x09EE, 0, 0, 0}},           {'9', {0x09EF, 0, 0, 0}},
+    {'0', {0x09E6, 0, 0x09F9, 0}},      {'-', {0, 0, 0x200C, 0}},           {'=', {0, 0, 0x200D, 0}},
+    {'q', {0x0999, 0x0982, 0x09E2, 0x09E3}}, {'w', {0x09AF, 0x09DF, 0, 0}}, {'e', {0x09A1, 0x09A2, 0x09C4, 0}},
+    {'r', {0x09AA, 0x09AB, 0, 0}},      {'t', {0x099F, 0x09A0, 0, 0}},      {'y', {0x099A, 0x099B, 0, 0}},
+    {'u', {0x099C, 0x099D, 0, 0}},      {'i', {0x09B9, 0x099E, 0x09BD, 0}}, {'o', {0x0997, 0x0998, 0, 0}},
+    {'p', {0x09DC, 0x09DD, 0, 0}},
+    {'a', {0x09C3, 0x09D7, 0x098B, 0x09E0}}, {'s', {0x09C1, 0x09C2, 0x0989, 0x098A}},
+    {'d', {0x09BF, 0x09C0, 0x0987, 0x0988}}, {'f', {0x09AC, 0x09AD, 0x09F0, 0x09F1}},
+    {'g', {0x09CD, 0x0964, 0x0965, 0}}, {'h', {0x09BE, 0x0985, 0x0986, 0}}, {'j', {0x0995, 0x0996, 0, 0}},
+    {'k', {0x09A4, 0x09A5, 0x09CE, 0}}, {'l', {0x09A6, 0x09A7, 0x098C, 0x09E1}},
+    {'z', {0x0981, 0x0983, 0x09FA, 0}}, {'x', {0x09CB, 0x09CC, 0x0993, 0x0994}},
+    {'c', {0x09C7, 0x09C8, 0x098F, 0x0990}}, {'v', {0x09B0, 0x09B2, 0, 0}}, {'b', {0x09A8, 0x09A3, 0, 0}},
+    {'n', {0x09B8, 0x09B7, 0, 0}},      {'m', {0x09AE, 0x09B6, 0, 0}},      {'.', {0, 0, 0x09BC, 0}},
+};
+
+/* The character a key types in the national layout at this level, 0 if the layout leaves it alone. */
+static unsigned national_char(int key, unsigned mods)
+{
+    int level = ((mods & KMOD_SHIFT) ? 1 : 0) + ((mods & KMOD_ALTGR) ? 2 : 0);
+    for (unsigned i = 0; i < sizeof NATIONAL / sizeof NATIONAL[0]; i++)
+        if (NATIONAL[i].key == key)
+            return NATIONAL[i].cp[level];
+    return 0;
+}
+
 /* ---- the filter ---- */
 #define WORD_MAX 24
 #define OUT_MAX 64
 
 static int ACTIVE;
+static int LAYOUT = IME_PHONETIC; /* which Bangla layout is used while ACTIVE */
 static char WORD[WORD_MAX];
 static int WLEN;
 static unsigned SENT[OUT_MAX]; /* what was handed on for the word so far */
@@ -147,6 +184,8 @@ static int SLEN;
 static int LAST_DANDA; /* the last key typed "।": another "." makes it a full stop */
 
 int ime_active(void) { return ACTIVE; }
+
+int ime_mode(void) { return ACTIVE ? LAYOUT : IME_OFF; }
 
 void ime_reset(void)
 {
@@ -158,6 +197,12 @@ void ime_reset(void)
 void ime_set_active(int on)
 {
     ACTIVE = on != 0;
+    ime_reset();
+}
+
+void ime_set_layout(int layout)
+{
+    LAYOUT = layout == IME_NATIONAL ? IME_NATIONAL : IME_PHONETIC;
     ime_reset();
 }
 
@@ -205,14 +250,33 @@ int ime_filter(const KeyEvent *in, KeyEvent *out, int max)
 {
     if (max < 1)
         return 0;
-    if (in->pressed && in->key == ' ' && (in->mods & KMOD_CTRL) && !(in->mods & KMOD_ALT)) /* Ctrl+Space: on / off */
+    if (in->pressed && in->key == ' ' && (in->mods & KMOD_CTRL) && !(in->mods & KMOD_ALT))
     {
-        ime_set_active(!ACTIVE);
+        if (in->mods & KMOD_SHIFT) /* Ctrl+Shift+Space: the other Bangla layout, and Bangla on */
+        {
+            ime_set_layout(LAYOUT == IME_PHONETIC ? IME_NATIONAL : IME_PHONETIC);
+            ACTIVE = 1;
+        }
+        else /* Ctrl+Space: Bangla on / off */
+            ime_set_active(!ACTIVE);
         return 0;
     }
     if (!ACTIVE || !in->pressed || max < IME_MAX_EVENTS)
     {
         out[0] = *in;
+        return 1;
+    }
+    if (LAYOUT == IME_NATIONAL)
+    {
+        /* every key has its own character; Ctrl and the left Alt are shortcuts, the right Alt (AltGr) is the third level */
+        int shortcut = (in->mods & KMOD_CTRL) || ((in->mods & KMOD_ALT) && !(in->mods & KMOD_ALTGR));
+        unsigned cp = !shortcut && in->key >= 32 && in->key < 127 ? national_char(in->key, in->mods) : 0;
+        if (cp)
+        {
+            ev_char(&out[0], cp);
+            return 1;
+        }
+        out[0] = *in; /* a key the layout leaves alone: punctuation, Space, Enter, the arrows */
         return 1;
     }
     int was_danda = LAST_DANDA;
