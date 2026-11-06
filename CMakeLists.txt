@@ -292,6 +292,8 @@ set(KERNEL_SOURCES
     kernel/drivers/input/usb_xhci/usb_xhci_audio.c  # xHCI: USB audio (UAC 1.0 streaming, isochronous OUT)
     kernel/drivers/input/usb_xhci/usb_xhci_bt.c     # xHCI: Bluetooth controller (HCI over USB: control, interrupt, bulk)
     kernel/bluetooth/bt_hci.c                       # Bluetooth: HCI core (commands, events, start-up, status line)
+    kernel/bluetooth/bt_rtl.c                       # Bluetooth: Realtek firmware file parser and download (host-tested)
+    kernel/bluetooth/bt_fw.c                        # Bluetooth: reads BTFW.BIN / BTCFG.BIN from a drive and loads them
     kernel/drivers/input/usb_xhci/usb_xhci_dev.c    # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_ctrl.c   # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_stub.c   # xHCI
@@ -614,6 +616,20 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)
     list(APPEND HARIS_EXTRA_FILES ${CMAKE_SOURCE_DIR}/firmware/RTW8821C.BIN)
     message(STATUS "Wi-Fi firmware found: firmware/RTW8821C.BIN goes onto haris.img")
 endif()
+
+# Bluetooth firmware of the Realtek chip (linux-firmware rtl_bt/rtl8821c_fw.bin and rtl8821c_config.bin in firmware/; Realtek's licence, git
+# ignores the folder). On the FAT root they get 8.3 names: BTFW.BIN and BTCFG.BIN; bt_fw.c reads them once the drives are mounted.
+foreach(PAIR rtl8821c_fw.bin:BTFW.BIN rtl8821c_config.bin:BTCFG.BIN)
+    string(REPLACE ":" ";" PARTS "${PAIR}")
+    list(GET PARTS 0 BT_SRC)
+    list(GET PARTS 1 BT_DST)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/firmware/${BT_SRC})
+        file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/fw)
+        configure_file(${CMAKE_SOURCE_DIR}/firmware/${BT_SRC} ${CMAKE_BINARY_DIR}/fw/${BT_DST} COPYONLY)
+        list(APPEND HARIS_EXTRA_FILES ${CMAKE_BINARY_DIR}/fw/${BT_DST})
+        message(STATUS "Bluetooth firmware found: firmware/${BT_SRC} goes onto haris.img as ${BT_DST}")
+    endif()
+endforeach()
 
 # AMD Radeon (Renoir) firmware: linux-firmware amdgpu/renoir_*.bin in firmware/amd/renoir/ (AMD's licence, git ignores the folder). A FAT
 # root folder here only has 8.3 names, so each file goes onto haris.img as R_<NAME>.BIN (renoir_pfp.bin -> R_PFP.BIN); amd_firmware.c reads them.

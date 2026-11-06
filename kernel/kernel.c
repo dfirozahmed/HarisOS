@@ -2,6 +2,7 @@
 #include "bangla_ime.h"
 #include "battery.h"
 #include "blk.h"
+#include "bluetooth.h"
 #include "bootinfo.h"
 #include "bootsplash.h"
 #include "console.h"
@@ -301,6 +302,7 @@ void kernel_main(const BootInfo *info)
         ntfs_set_clock(nt_clock);
         volume_mount_all();       /* FAT32, exFAT and NTFS drives found on the disks */
         volume_unlock_clean();    /* ordinary clean drives can be written at once; system and unclean ones stay locked */
+        bt_firmware_boot();       /* Bluetooth chip (USB, found by mouse_init): its firmware files are on a drive now */
         amd_gpu_bringup_firmware(); /* AMD Radeon: reads the Renoir firmware files into memory, writes nothing to the GPU */
         amd_gpu_log_save();       /* the AMD GPU checks of earlier in the boot, to GPULOG.TXT on the boot drive */
         amd_gpu_bringup_psp();    /* opt-in (HARIS_AMD_GPU_PSP_LEVEL): talks to the PSP, saving the log first; before the GART step */

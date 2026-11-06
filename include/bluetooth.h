@@ -37,6 +37,17 @@ typedef enum
     BT_FAILED      /* the chip does not answer as expected (see why) */
 } BtState;
 
+/* Firmware (Realtek chips load a patch from a file after power-up; see bt_rtl.h) */
+typedef enum
+{
+    BT_FW_NONE = 0,   /* not looked at yet */
+    BT_FW_NOT_NEEDED, /* the chip is not one that needs a patch, or one is already running */
+    BT_FW_MISSING,    /* the files are not on any drive */
+    BT_FW_BAD,        /* a file is wrong for this chip (fw_why) */
+    BT_FW_LOADED,     /* patch sent, the chip restarted and answers */
+    BT_FW_FAILED      /* sending the patch failed (fw_code = HCI status or BT_E_*, fw_done pieces went through) */
+} BtFwState;
+
 typedef struct
 {
     BtState state;
@@ -55,6 +66,11 @@ typedef struct
     unsigned events;          /* events received since attach */
     unsigned dropped;         /* ... of which dropped (queue full) */
     unsigned hw_errors;       /* Hardware Error events */
+    BtFwState fw_state;
+    const char *fw_why;       /* BT_FW_BAD: what is wrong (static text) */
+    int fw_code;
+    unsigned fw_version;      /* version number in the firmware file header */
+    unsigned fw_done, fw_total; /* pieces sent / to send */
 } BtInfo;
 
 /* bt_cmd() results below zero */
@@ -67,6 +83,12 @@ typedef struct
 void bt_attach(const BtTransport *t, unsigned short vid, unsigned short pid); /* runs the start-up commands (blocks for a while) */
 void bt_detach(void);                                                       /* chip unplugged */
 void bt_rx_event(const unsigned char *evt, unsigned len);                   /* one complete HCI event packet */
+void bt_fw_report(BtFwState state, const char *why, int code, unsigned fw_version, unsigned done, unsigned total); /* firmware outcome, for the status line */
+void bt_restart(void); /* Reset + read the versions and the address again (after a firmware patch changed the chip) */
+
+/* Kernel only (kernel/bluetooth/bt_fw.c): once the drives are mounted, loads the firmware files BTFW.BIN and BTCFG.BIN (copies of
+ * linux-firmware rtl_bt/rtl8821c_fw.bin and rtl8821c_config.bin, see CMakeLists.txt) into a Realtek chip that needs them. */
+void bt_firmware_boot(void);
 
 /* ---- users ---- */
 const BtInfo *bt_info(void);

@@ -136,18 +136,9 @@ static void fail(const char *why, int code)
     B.info.why_code = code;
 }
 
-void bt_attach(const BtTransport *t, unsigned short vid, unsigned short pid)
+static void start(void)
 {
-    B.t = *t;
-    B.head = B.tail = 0;
-    unsigned char *z = (unsigned char *)&B.info; /* no "= {0}": it could turn into a memset call (no libc) */
-    for (unsigned i = 0; i < sizeof B.info; i++)
-        z[i] = 0;
-    B.info.vid = vid;
-    B.info.pid = pid;
-    B.info.state = BT_INIT;
-    B.attached = 1;
-
+    unsigned short vid = B.info.vid;
     unsigned char r[16];
     unsigned n;
     int st;
@@ -195,6 +186,41 @@ void bt_attach(const BtTransport *t, unsigned short vid, unsigned short pid)
     }
 
     B.info.state = BT_HCI_UP;
+}
+
+void bt_attach(const BtTransport *t, unsigned short vid, unsigned short pid)
+{
+    B.t = *t;
+    B.head = B.tail = 0;
+    unsigned char *z = (unsigned char *)&B.info; /* no "= {0}": it could turn into a memset call (no libc) */
+    for (unsigned i = 0; i < sizeof B.info; i++)
+        z[i] = 0;
+    B.info.vid = vid;
+    B.info.pid = pid;
+    B.info.state = BT_INIT;
+    B.attached = 1;
+    start();
+}
+
+void bt_restart(void)
+{
+    if (!B.attached)
+        return;
+    B.info.state = BT_INIT;
+    B.info.have_rom = B.info.have_addr = 0;
+    B.info.why = 0;
+    B.info.why_code = 0;
+    start();
+}
+
+void bt_fw_report(BtFwState state, const char *why, int code, unsigned fw_version, unsigned done, unsigned total)
+{
+    B.info.fw_state = state;
+    B.info.fw_why = why;
+    B.info.fw_code = code;
+    B.info.fw_version = fw_version;
+    B.info.fw_done = done;
+    B.info.fw_total = total;
 }
 
 void bt_detach(void)
@@ -304,6 +330,36 @@ void bt_status(char *buf, unsigned cap)
                     putc_(&o, ':');
                 putx(&o, i->bdaddr[k], 2);
             }
+        }
+        switch (i->fw_state)
+        {
+        case BT_FW_LOADED:
+            puts_(&o, " fw ok ");
+            putx(&o, i->fw_version, 8);
+            break;
+        case BT_FW_MISSING:
+            puts_(&o, " fw: files missing");
+            break;
+        case BT_FW_BAD:
+            puts_(&o, " fw bad: ");
+            puts_(&o, i->fw_why ? i->fw_why : "?");
+            break;
+        case BT_FW_FAILED:
+            puts_(&o, " fw failed ");
+            putd(&o, i->fw_done);
+            putc_(&o, '/');
+            putd(&o, i->fw_total);
+            puts_(&o, " st ");
+            if (i->fw_code < 0)
+            {
+                putc_(&o, '-');
+                putd(&o, (unsigned)-i->fw_code);
+            }
+            else
+                putx(&o, (unsigned)i->fw_code, 2);
+            break;
+        default:
+            break;
         }
         if (i->state == BT_INIT)
             puts_(&o, " (starting)");
