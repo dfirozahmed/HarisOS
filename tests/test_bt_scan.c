@@ -262,6 +262,9 @@ static void run_names(const unsigned char *a1, const char *n1, int st1, const un
     }
 }
 
+static int HOOK_MODE = -1;
+static void hook_set_mode(int mode) { HOOK_MODE = mode; }
+
 int main(void)
 {
     /* 1. not up / no chip */
@@ -324,7 +327,7 @@ int main(void)
     F.clock += 20000;
     bt_poll();
     CHECK(F.cancels == 1 && bt_scan_state() == BT_SCAN_DONE);
-    CHECK(line_is(0, "done: 0 devices, inquiry ended with -2"));
+    CHECK(line_is(0, "done: 0 devices, inquiry ended with -2; inquiry 20000 ms, 2 events, 0 results, 0 hw errors"));
 
     /* 6. a name request nobody answers: given up after the time limit, with a cancel */
     fresh();
@@ -434,6 +437,48 @@ int main(void)
             CHECK(line_is(1, want));
         }
     }
+
+    /* 12. an inquiry that ends by itself but heard nothing: the line says how long it took and how many events came (the Command Status of
+     * the Inquiry and the Inquiry Complete), so "nobody there" can be told from "the radio is blocked" */
+    fresh();
+    CHECK(bt_scan_start() == 0);
+    F.clock += 10240;
+    ev_complete(0);
+    bt_poll();
+    bt_poll();
+    CHECK(bt_scan_state() == BT_SCAN_DONE);
+    CHECK(line_is(0, "done: 0 devices; inquiry 10240 ms, 2 events, 0 results, 0 hw errors"));
+    /* a hardware error event is counted */
+    fresh();
+    CHECK(bt_scan_start() == 0);
+    {
+        unsigned char hw[3] = {0x10, 1, 0x42};
+        push(hw);
+    }
+    F.clock += 500;
+    ev_complete(0);
+    bt_poll();
+    bt_poll();
+    CHECK(line_is(0, "done: 0 devices; inquiry 500 ms, 3 events, 0 results, 1 hw errors"));
+    /* with devices the diagnostics are left out */
+    fresh();
+    CHECK(bt_scan_start() == 0);
+    ev_inq(A, CLS_OTHER, 0);
+    F.clock += 100;
+    ev_complete(0);
+    run_names(A, "X", 0, 0, "", 0);
+    CHECK(line_is(0, "done: 1 device"));
+
+    /* 13. the antenna hook: nothing happens without one; with one, the mode is passed on */
+    bt_coex(1); /* no hook yet: harmless */
+    bt_set_coex_hook(hook_set_mode);
+    bt_coex(2);
+    CHECK(HOOK_MODE == 2);
+    bt_coex(0);
+    CHECK(HOOK_MODE == 0);
+    bt_set_coex_hook(0);
+    bt_coex(1);
+    CHECK(HOOK_MODE == 0); /* the old hook was not called */
 
     printf("bt_scan: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

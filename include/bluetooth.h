@@ -132,6 +132,11 @@ typedef struct
 #define BT_E_NOT_UP (-100)  /* bt_scan_start: no working chip */
 #define BT_E_SCANNING (-101) /* ... a scan is already running */
 
+/* The chip shares its antenna with the Wi-Fi card. The Wi-Fi driver owns the switch, so the kernel hands us a function that asks it:
+ * mode 0 = Bluetooth gets no radio, 1 = it may always use it (Wi-Fi on 5 GHz), 2 = hardware arbitration. Without a hook nothing happens. */
+void bt_set_coex_hook(void (*hook)(int mode));
+void bt_coex(int mode); /* pass a mode on to the hook */
+
 int bt_scan_start(void);
 void bt_poll(void); /* call often (every pass of the main loop): handles events, steps the scan */
 BtScanState bt_scan_state(void);

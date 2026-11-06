@@ -39,7 +39,20 @@ static struct
     int inquiry_status;        /* status of the Inquiry Complete event, or the failure of the command */
     int pending;               /* index of the device whose name was asked for, or -1 */
     unsigned overflow;         /* devices that did not fit in the list */
+    unsigned long long t_start, t_end; /* the inquiry began / ended (Inquiry Complete or our time-out) */
+    unsigned ev0;              /* BtInfo.events when the Inquiry went out */
+    unsigned raw;              /* device records in result events, duplicates included (diagnostics: 0 = the chip heard nothing) */
 } S;
+
+static void (*COEX_HOOK)(int mode);
+
+void bt_set_coex_hook(void (*hook)(int mode)) { COEX_HOOK = hook; }
+
+void bt_coex(int mode)
+{
+    if (COEX_HOOK)
+        COEX_HOOK(mode);
+}
 
 void bt_scan_reset(void)
 {
@@ -49,6 +62,9 @@ void bt_scan_reset(void)
     S.pending = -1;
     S.inquiry_status = 0;
     S.overflow = 0;
+    S.t_start = S.t_end = 0;
+    S.ev0 = 0;
+    S.raw = 0;
 }
 
 BtScanState bt_scan_state(void) { return S.state; }
@@ -127,7 +143,7 @@ void bt_scan_event(const unsigned char *e, unsigned len)
         {
             S.inquiry_status = p[0];
             S.state = BT_SCAN_NAMES;
-            S.t0 = bt_now();
+            S.t0 = S.t_end = bt_now();
         }
     }
     else if ((e[0] == EV_INQUIRY_RESULT || e[0] == EV_INQUIRY_RESULT_RSSI || e[0] == EV_EXTENDED_INQUIRY_RESULT) && S.state != BT_SCAN_INQUIRY)
@@ -139,6 +155,7 @@ void bt_scan_event(const unsigned char *e, unsigned len)
         for (unsigned i = 0; i < n && 1 + (i + 1) * 14 <= plen; i++)
         {
             const unsigned char *r = p + 1 + i * 14;
+            S.raw++;
             BtScanDev *d = find_or_add(r);
             if (!d)
                 continue;
@@ -155,6 +172,7 @@ void bt_scan_event(const unsigned char *e, unsigned len)
         for (unsigned i = 0; i < n && 1 + (i + 1) * 14 <= plen; i++)
         {
             const unsigned char *r = p + 1 + i * 14;
+            S.raw++;
             BtScanDev *d = find_or_add(r);
             if (!d)
                 continue;
@@ -170,6 +188,7 @@ void bt_scan_event(const unsigned char *e, unsigned len)
     {
         /* one device: address (6), page scan repetition mode, period mode, class (3), clock offset (2), RSSI (1), then the 240 byte response */
         const unsigned char *r = p + 1;
+        S.raw++;
         BtScanDev *d = find_or_add(r);
         if (!d)
             return;
@@ -237,7 +256,9 @@ int bt_scan_start(void)
     unsigned char r[4];
     unsigned n;
     S.state = BT_SCAN_INQUIRY; /* before the command: the chip may answer at once */
-    S.t0 = bt_now();
+    S.t0 = S.t_start = bt_now();
+    S.raw = 0;
+    S.ev0 = bt_info()->events;
     int st = bt_cmd(OP_INQUIRY, par, sizeof par, r, sizeof r, &n, 1000); /* Command Status: started (0) or refused */
     if (st != 0)
     {
@@ -261,7 +282,7 @@ void bt_scan_step(void)
         bt_cmd(OP_INQUIRY_CANCEL, 0, 0, r, sizeof r, &n, 1000);
         S.inquiry_status = BT_E_TIMEOUT;
         S.state = BT_SCAN_NAMES;
-        S.t0 = now;
+        S.t0 = S.t_end = now;
     }
     if (S.state != BT_SCAN_NAMES)
         return;
@@ -421,6 +442,19 @@ int bt_scan_line(unsigned index, char *buf, unsigned cap)
             }
             if (S.overflow)
                 puts_(&o, ", list full");
+            if (S.count == 0 && S.t_end >= S.t_start && S.t_end)
+            {
+                /* nothing found: say what the chip did, so that "nobody there" and "the radio is blocked" can be told apart */
+                puts_(&o, "; inquiry ");
+                putd(&o, (int)(S.t_end - S.t_start));
+                puts_(&o, " ms, ");
+                putd(&o, (int)(bt_info()->events - S.ev0));
+                puts_(&o, " events, ");
+                putd(&o, (int)S.raw);
+                puts_(&o, " results, ");
+                putd(&o, (int)bt_info()->hw_errors);
+                puts_(&o, " hw errors");
+            }
         }
     }
     else

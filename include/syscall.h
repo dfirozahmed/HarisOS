@@ -170,7 +170,7 @@
  *   SYS_AUDIO_VOLUME (64) rdi = -1 to ask, or 0 .. 100 (percent; values outside are clamped) to set the master volume, also while a
  *                  sound plays. Returns the volume now in force (0 .. 100), or -1 when there is no sound hardware with an output.
  *   SYS_SLEEP (65) rdi = milliseconds (1 .. 5000; more is cut to 5000): the calling thread sleeps that long (other threads run). 0.
- *   SYS_BTSCAN (67) rdi = SYS_BTSCAN_START (0xFFFF): start a Bluetooth device scan (about 10 s plus names; it runs in the background); returns 0, or
+ *   SYS_BTSCAN (67) rdi = SYS_BTSCAN_START (0xFFFF), rsi = 0 .. 3 (antenna share with Wi-Fi: 0 default, 1 Bluetooth gets no radio, 2 it may always use it, 3 hardware arbitration): start a Bluetooth device scan (about 10 s plus names; it runs in the background); returns 0, or
  *                  negative (-100 no working Bluetooth chip, -101 a scan is already running, other: the HCI status / error of the chip).
  *                  Otherwise rdi = line number, rsi = pointer to a buffer, rdx = its size (2 .. 256): one line of the scan result as text
  *                  (bt_scan_line in bluetooth.h): line 0 is a summary starting with "idle", "scanning", "names" or "done", lines 1 .. n one device

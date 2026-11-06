@@ -814,6 +814,8 @@ int net_wifi_scan_line(unsigned index, char *buf, unsigned cap)
 }
 /* the Bluetooth scan the kernel would hold: a summary and one device; a scan can be started once */
 static int BT_START_RESULT = 0, BT_STARTS = 0, BT_PRESENT = 1;
+static int BT_COEX_LAST = -99;
+void bt_coex(int mode) { BT_COEX_LAST = mode; }
 int bt_scan_start(void)
 {
     BT_STARTS++;
@@ -2557,6 +2559,13 @@ int main(void)
         /* starting a scan needs no buffer: the result of bt_scan_start() goes back as it is */
         int before = BT_STARTS;
         CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 0, 0) == 0 && BT_STARTS == before + 1);
+        CHECK(BT_COEX_LAST == 1); /* rsi 0 = the default: Bluetooth may use its radio */
+        CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 1, 0) == 0 && BT_COEX_LAST == 0);   /* off */
+        CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 2, 0) == 0 && BT_COEX_LAST == 1);   /* always */
+        CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 3, 0) == 0 && BT_COEX_LAST == 2);   /* hardware arbitration */
+        before = BT_STARTS;
+        BT_COEX_LAST = -99;
+        CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 4, 0) == -1 && BT_STARTS == before && BT_COEX_LAST == -99); /* no such mode: nothing happens */
         BT_START_RESULT = -101;
         CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 0, 0) == -101);
         BT_START_RESULT = 0;

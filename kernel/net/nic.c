@@ -168,6 +168,9 @@ int net_wifi_join_poll(int *result)
     return s;
 }
 
+/* The Bluetooth chip shares the radio with this Wi-Fi card: what it may do while Wi-Fi owns the antenna path (see rtl8821ce_chan.c). */
+void net_wifi_bt_coex(int mode) { rtl8821ce_bt_coex(mode); }
+
 int net_wifi_disconnect(void)
 {
     if (!wifi_active())

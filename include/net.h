@@ -107,6 +107,8 @@ int net_wifi_connect(const char *ssid, const char *passphrase);
  * is dropped. The card stays the adapter, so another network can be joined. NET_WIFI_OK (also when there was no connection), NET_WIFI_E_NO_ADAPTER, or
  * NET_WIFI_E_BUSY while a scan or a join is going on. */
 int net_wifi_disconnect(void);
+/* The Bluetooth chip of the same card: 0 = Wi-Fi only (Bluetooth gets no radio), 1 = Bluetooth may always transmit (Wi-Fi on 5 GHz), 2 = hardware arbitration. */
+void net_wifi_bt_coex(int mode);
 int net_wifi_join_start(const char *ssid, const char *passphrase);
 int net_wifi_join_poll(int *result);
 int net_irq_init(void);

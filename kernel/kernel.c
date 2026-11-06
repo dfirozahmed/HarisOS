@@ -330,6 +330,9 @@ void kernel_main(const BootInfo *info)
         smp_bsp_init(); /* this processor's per-CPU record (GS base): before the scheduler and the system call code need it */
 
         splash_progress(74, "Starting the network");
+        bt_set_coex_hook(net_wifi_bt_coex); /* the Bluetooth chip and the Wi-Fi card share the antenna: the Wi-Fi driver owns the switch */
+        if (bt_hci_up())
+            bt_coex(1); /* before the Wi-Fi card is set up: it then leaves Bluetooth its radio (the default is to deny it) */
         net_init(); /* Intel e1000 on PCI, if any; the self test needs the serial port and the timer */
         wifi_boot = net_wifi_boot_begin(); /* claims the Wi-Fi card for the thread started before the main loop; nothing uses it until then */
 #if HARIS_BOOT_SELFTEST

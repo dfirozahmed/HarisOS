@@ -286,12 +286,20 @@ static void coex_ant_switch(unsigned ctrl_type, unsigned pos_type)
     }
 }
 
+/* What Bluetooth gets while Wi-Fi owns the path. 0 = nothing (GNT_BT forced low: Linux' "Wi-Fi only" phase, Bluetooth can neither send nor hear),
+ * 1 = GNT_BT forced high (Bluetooth may always use its radio; right while Wi-Fi is on 5 GHz: on this board, RFE type 4, only 2.4 GHz Wi-Fi
+ * shares the Bluetooth port, 5 GHz has its own path, so the two do not meet), 2 = GNT_BT under hardware PTA arbitration (Linux' 5 GHz phase
+ * COEX_SET_ANT_5G; needs the PTA wiring set up by rtw8821c_coex_cfg_init, which this driver does not do yet). Set by the Bluetooth side. */
+static int BT_COEX;
+
+static unsigned bt_grant(void) { return BT_COEX == 0 ? 1 : (BT_COEX == 2 ? 0 : 3); /* COEX_GNT_SET_SW_LOW / HW_PTA / SW_HIGH */ }
+
 /* rtw_coex_set_ant_path(COEX_SET_ANT_WONLY) */
 static void coex_wifi_only(unsigned rfe)
 {
     CX.cur_switch_status = 0;
     coex_rfe_type(rfe);
-    coex_gnt_bt(1); /* COEX_GNT_SET_SW_LOW: Bluetooth gets no grant */
+    coex_gnt_bt(bt_grant()); /* COEX_GNT_SET_SW_LOW by default: Bluetooth gets no grant */
     coex_gnt_wl(3); /* COEX_GNT_SET_SW_HIGH: Wi-Fi always has it */
     coex_owner_wifi();
     if (CX.ant_switch_exist)
@@ -485,6 +493,15 @@ void set_channel_20(unsigned channel, const u32 ch_param[3], unsigned bb_swing_2
 }
 
 Anon_CHN CHN;
+
+/* The Bluetooth side asks for another share of the antenna path. Takes effect at once if the radio is already set up, else with the first
+ * tuning (channel_probe). */
+void rtl8821ce_bt_coex(int mode)
+{
+    BT_COEX = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+    if (CHN.state != CH_NOT_TRIED)
+        coex_gnt_bt(bt_grant());
+}
 
 /* tune to a channel (20 MHz) with the antenna given to Wi-Fi, and check by reading RF register 0x18 back */
 void channel_probe(unsigned channel)

@@ -1,16 +1,41 @@
-/* HarisOS user program: btscan
+/* HarisOS user program: btscan [off|sw|pta]
  * Looks for Bluetooth devices around (phones, headphones, keyboards ... that are in "discoverable" / pairing mode) and prints them: address,
- * signal strength, kind and name. The scan runs in the kernel (SYS_BTSCAN) and takes about 10 seconds plus the time to ask for names. */
+ * signal strength, kind and name. The scan runs in the kernel (SYS_BTSCAN) and takes about 10 seconds plus the time to ask for names.
+ * The optional word says how the Bluetooth chip shares the antenna with the Wi-Fi card (for trying out): off = Bluetooth gets no radio,
+ * sw = it may always use it (the default), pta = hardware arbitration. */
 #include "libc.h"
 
 #define WAIT_MS 60000
 
+static int is_word(const char *a, const char *w)
+{
+    while (*a && *a == *w)
+    {
+        a++;
+        w++;
+    }
+    return *a == 0 && *w == 0;
+}
+
 __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    long long mode = 0;
+    if (argc >= 2)
+    {
+        if (is_word(argv[1], "off"))
+            mode = 1;
+        else if (is_word(argv[1], "sw"))
+            mode = 2;
+        else if (is_word(argv[1], "pta"))
+            mode = 3;
+        else
+        {
+            fdprintf(2, "usage: btscan [off|sw|pta]\n");
+            sys_exit(1);
+        }
+    }
     char line[256];
-    long long r = sys_btscan(SYS_BTSCAN_START, line, sizeof line);
+    long long r = syscall3(SYS_BTSCAN, SYS_BTSCAN_START, mode, 0);
     if (r == -100)
     {
         fdprintf(2, "btscan: no working Bluetooth chip\n");

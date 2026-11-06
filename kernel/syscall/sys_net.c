@@ -80,7 +80,12 @@ long long sys_btscan(const SyscallFrame *f)
     if (!as || !process_current())
         return -1;
     if (f->rdi == SYS_BTSCAN_START)
+    {
+        if (f->rsi > 3)
+            return -1;
+        bt_coex(f->rsi == 0 ? 1 : (int)f->rsi - 1); /* 0 = the default (Bluetooth may use its radio), 1 off, 2 always, 3 hardware arbitration */
         return bt_scan_start();
+    }
     if (f->rdi > 0xFFFE || f->rdx < 2 || f->rdx > 256 || !aspace_user_ok(as, f->rsi, f->rdx, 1))
         return -1;
     char line[256];

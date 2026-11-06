@@ -3645,6 +3645,38 @@ int main(void)
     NIC_RTL8821CE.status(st, sizeof st);
     CHECK(strstr(st, "cut ?"));
 
+    /* what Bluetooth gets while Wi-Fi owns the antenna path (coex register 0x38: GNT_BT in bits 15:14 and 11:10, GNT_WL in 13:12 and 9:8;
+     * 0 = hardware PTA, 1 = forced low, 3 = forced high). By default Bluetooth is denied (the old behaviour, which the Linux comparison
+     * above checks); once the Bluetooth side asks, the next "Wi-Fi only" setting leaves it its radio, and a change takes effect at once
+     * when the radio has been set up. Board: RFE type 4, the one in the real laptop. */
+    {
+#define GNT_BT_NOW (((LTEM[0x38] >> 14) & 3) == ((LTEM[0x38] >> 10) & 3) ? (LTEM[0x38] >> 14) & 3 : 99u)
+#define GNT_WL_NOW (((LTEM[0x38] >> 12) & 3) == ((LTEM[0x38] >> 8) & 3) ? (LTEM[0x38] >> 12) & 3 : 99u)
+        memset(LTEM, 0, sizeof LTEM);
+        memset(REGS, 0, sizeof REGS);
+        REGS[0x1703] |= 0x20;
+        CHN.state = CH_NOT_TRIED;
+        coex_wifi_only(4);
+        CHECK(GNT_BT_NOW == 1 && GNT_WL_NOW == 3); /* default: Bluetooth denied */
+        rtl8821ce_bt_coex(1);                      /* the radio is not set up yet: nothing is written now ... */
+        CHECK(GNT_BT_NOW == 1);
+        coex_wifi_only(4);                         /* ... but the next setting uses it */
+        CHECK(GNT_BT_NOW == 3 && GNT_WL_NOW == 3);
+        CHN.state = CH_OK;                         /* radio set up: a change is applied at once */
+        rtl8821ce_bt_coex(2);
+        CHECK(GNT_BT_NOW == 0 && GNT_WL_NOW == 3);
+        rtl8821ce_bt_coex(0);
+        CHECK(GNT_BT_NOW == 1 && GNT_WL_NOW == 3);
+        rtl8821ce_bt_coex(1);
+        CHECK(GNT_BT_NOW == 3);
+        rtl8821ce_bt_coex(-4); /* out of range values are clamped */
+        CHECK(GNT_BT_NOW == 1);
+        rtl8821ce_bt_coex(77);
+        CHECK(GNT_BT_NOW == 0);
+        rtl8821ce_bt_coex(0); /* back to the default for the tests that follow */
+        CHN.state = CH_NOT_TRIED;
+    }
+
     if (fails == 0)
         printf("rtl8821ce tests passed\n");
     return fails ? 1 : 0;
