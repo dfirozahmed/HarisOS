@@ -262,7 +262,7 @@ static void update_buttons(Window *w)
     w->btn[BTN_SCAN].enabled = idle && up && !link_active();
     w->btn[BTN_DISCONNECT].enabled = (idle || OP == OP_SEND) && up && (ls == BT_LINK_UP || ls == BT_LINK_CONNECTING);
     w->btn[BTN_SEND].enabled = idle && up && ls == BT_LINK_UP && FILE_CH && w->edits[0].len > 0;
-    w->btn[BTN_BROWSE].enabled = idle;
+    w->btn[BTN_BROWSE].enabled = 1; /* choosing a file does not disturb a scan or a connection, so it is always possible */
     const BtScanDev *d = (SEL >= 0 && SEL < bt_scan_count()) ? bt_scan_dev(SEL) : 0;
     w->btn[BTN_CONNECT].enabled = idle && up && !link_active() && bt_scan_state() != BT_SCAN_INQUIRY && bt_scan_state() != BT_SCAN_NAMES && d && usable(d);
 }
@@ -1050,8 +1050,7 @@ static void on_browse(UiButton *b, void *user)
 {
     (void)b;
     Window *w = (Window *)user;
-    if (OP == OP_NONE)
-        filepicker_open(w, "Choose a file to send", w->edits[0].text, file_picked, 0);
+    filepicker_open(w, "Choose a file to send", w->edits[0].text, file_picked, 0);
 }
 
 static void on_send(UiButton *b, void *user)
