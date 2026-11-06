@@ -101,6 +101,23 @@ static inline int utf8_decode_ok(const char **ps, unsigned *cp)
     return (const unsigned char *)*ps - start == 3 && start[0] == 0xEF && start[1] == 0xBF && start[2] == 0xBD;
 }
 
+/* The character at s[0..n) (text that has no terminating 0, such as the clipboard): its length in bytes (1..4) and *cp, or 0 if
+ * the bytes there are not well-formed UTF-8 or n is 0. Never reads past n. */
+static inline int utf8_decode_bounded(const char *s, int n, unsigned *cp)
+{
+    char t[5];
+    int m = n < 4 ? n : 4;
+    for (int i = 0; i < m; i++)
+        t[i] = s[i];
+    t[m] = 0; /* a character cut short by n runs into this 0 and is reported as bad */
+    if (m == 0)
+        return 0;
+    const char *p = t;
+    if (!utf8_decode_ok(&p, cp))
+        return 0;
+    return (int)(p - t);
+}
+
 /* 1 if the whole string is well-formed UTF-8 (no stray, overlong or surrogate sequences, nothing above U+10FFFF).
  * A real U+FFFD (EF BF BD) is fine; the "bad byte" marker utf8_decode gives for broken input is not. */
 static inline int utf8_valid(const char *s)

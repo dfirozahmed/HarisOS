@@ -110,6 +110,55 @@ int main(void)
         console_close(con);
     }
 
+    /* ---- paste ---- */
+    {
+        int con = console_open("PASTE");
+        char buf[64], row[CONSOLE_COLS + 1];
+        const char *two = "ab\ncd";
+        CHECK(con_paste(con, two, 5) == 5);                             /* every character was taken */
+        CHECK(console_read(con, buf, 64) == 3 && memcmp(buf, "ab\n", 3) == 0); /* a line break is Enter: "ab" can be read */
+        CHECK(console_row(con, 0, row) && strcmp(row, "cd") == 0);      /* "cd" waits in the line being edited */
+        console_key(con, '\n');
+        CHECK(console_read(con, buf, 64) == 3 && memcmp(buf, "cd\n", 3) == 0);
+
+        /* \r\n is one Enter, a lone \r is dropped, a Tab is 4 spaces, controls and broken bytes are skipped */
+        CHECK(con_paste(con, "x\r\ny\rz\tw\x01\xff!", 11) > 0);
+        CHECK(console_read(con, buf, 64) == 2 && memcmp(buf, "x\n", 2) == 0);
+        console_key(con, '\n');
+        CHECK(console_read(con, buf, 64) == 9 && memcmp(buf, "yz    w!\n", 9) == 0); /* y z, Tab = 4 spaces, w, !: the \x01 and \xff are gone */
+
+        /* Bangla: whole characters, echoed and read back as the same UTF-8 bytes */
+        const char *bn = "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe"; /* বাংলা */
+        CHECK(con_paste(con, bn, 15) == 5); /* five characters (code points), 15 bytes */
+        CHECK(console_row(con, 0, row) && strcmp(row, bn) == 0);
+        console_key(con, '\n');
+        CHECK(console_read(con, buf, 64) == 16 && memcmp(buf, bn, 15) == 0 && buf[15] == '\n');
+
+        /* a character cut short at the end of the text is skipped, never half-typed */
+        CHECK(con_paste(con, "a\xe0\xa6", 3) == 1);
+        console_key(con, '\n');
+        CHECK(console_read(con, buf, 64) == 2 && memcmp(buf, "a\n", 2) == 0);
+
+        /* nothing to paste, a finished console, an invalid handle */
+        CHECK(con_paste(con, "", 0) == 0 && con_paste(-1, "abc", 3) == 0);
+        console_finish(con, 0);
+        CHECK(con_paste(con, "abc", 3) == 0);
+
+        /* a line that is full takes no more (the rest of that line is dropped, the next line works) */
+        int full = console_open("FULL");
+        char big[CONSOLE_LINE_MAX + 40];
+        memset(big, 'q', sizeof big);
+        big[sizeof big - 1] = '\n';
+        int took = con_paste(full, big, (int)sizeof big);
+        CHECK(took < (int)sizeof big && took >= CONSOLE_LINE_MAX - 1);
+        char in[CONSOLE_LINE_MAX + 4];
+        int got = console_read(full, in, sizeof in);
+        CHECK(got > 0 && in[got - 1] == '\n' && got <= CONSOLE_LINE_MAX + 1);
+        CHECK(con_paste(full, "ok\n", 3) == 3 && console_read(full, in, sizeof in) == 3 && memcmp(in, "ok\n", 3) == 0);
+        console_close(full);
+        console_close(con);
+    }
+
     if (fails == 0)
         printf("console selection tests passed\n");
     return fails ? 1 : 0;

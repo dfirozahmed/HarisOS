@@ -93,6 +93,15 @@ static int copy_selection(Window *w)
     return n > 0 && ui_clipboard_set(buf, n);
 }
 
+/* Type the clipboard text into the console (see con_paste). */
+static void paste_clipboard(Window *w)
+{
+    int n;
+    const char *clip = ui_clipboard_text(&n);
+    if (clip && n > 0)
+        con_paste(handle_of(w), clip, n);
+}
+
 /* Mark the bottom text row (the one with the cursor) to be drawn again. */
 static void mark_cursor_row(Window *w)
 {
@@ -166,6 +175,18 @@ static void on_key(Window *w, const KeyEvent *k)
     {
         console_interrupt(handle_of(w));
         return;
+    }
+    /* Ctrl+V, Ctrl+Shift+V and Shift+Insert paste: the clipboard is typed into the line (a line break in it is Enter). */
+    int pasting = ((k->mods & KMOD_CTRL) && (k->key == 'v' || k->key == 'V')) ||
+                  (!(k->mods & KMOD_CTRL) && (k->mods & KMOD_SHIFT) && k->key == KEY_INSERT);
+    if (pasting)
+    {
+        if (sel_of(w)->sel.on)
+        {
+            sel_of(w)->sel.on = 0;
+            wm_add_damage(wm_content(w));
+        }
+        paste_clipboard(w);
     }
     int ch = 0;
     if (k->key == KEY_ENTER || k->ch == '\n')
@@ -285,17 +306,20 @@ static int on_drag(Window *w, int x, int y, unsigned buttons)
     return 1;
 }
 
-/* A right click copies what is selected (and drops the selection), as the Windows terminal does. */
+/* A right click copies what is selected (and drops the selection); with nothing selected it pastes. As the Windows terminal does. */
 static int on_rpress(Window *w, int x, int y)
 {
     (void)x;
     (void)y;
     SelState *s = sel_of(w);
-    if (!s->sel.on)
-        return 0;
-    copy_selection(w);
-    s->sel.on = 0;
-    return 1;
+    if (s->sel.on)
+    {
+        copy_selection(w);
+        s->sel.on = 0;
+        return 1;
+    }
+    paste_clipboard(w);
+    return 1; /* the line (and maybe rows) changed: draw the window again */
 }
 
 /* The window of an existing console. 0 on success; on failure the console is closed. */

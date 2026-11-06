@@ -116,20 +116,7 @@ static int np_next(int p)
 }
 
 /* the character at s[0..n): its length (1..4) and *cp, or 0 if the bytes are not well-formed UTF-8. Never reads past n. */
-static int np_char(const char *s, int n, unsigned *cp)
-{
-    char t[5];
-    int m = n < 4 ? n : 4;
-    for (int i = 0; i < m; i++)
-        t[i] = s[i];
-    t[m] = 0; /* a character cut short by n runs into this 0 and is reported as bad */
-    if (m == 0)
-        return 0;
-    const char *p = t;
-    if (!utf8_decode_ok(&p, cp))
-        return 0;
-    return (int)(p - t);
-}
+static int np_char(const char *s, int n, unsigned *cp) { return utf8_decode_bounded(s, n, cp); }
 
 /* A character that may be in the text: '\n', or printable (not a control: C0, DEL, C1). */
 static int np_printable(unsigned cp)

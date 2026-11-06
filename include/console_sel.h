@@ -36,4 +36,11 @@ void con_sel_word(const char *text, int col, int *from, int *to);
  * terminating 0, never cutting a character; returns the length. */
 int con_sel_text(int con, const ConSel *s, char *out, int cap);
 
+/* Paste: type text[0..len) into console `con` as if it was typed (it is echoed and collected in the line being edited). A line
+ * break (\n, or \r\n as one) is Enter, so a pasted line runs; a Tab becomes 4 spaces; other control characters and bytes
+ * that are not well-formed UTF-8 are skipped. At most CON_PASTE_MAX bytes are taken. Returns how many characters the
+ * console accepted (a full line takes no more). */
+#define CON_PASTE_MAX (256 * 1024)
+int con_paste(int con, const char *text, int len);
+
 #endif

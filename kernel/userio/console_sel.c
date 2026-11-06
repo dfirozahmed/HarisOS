@@ -78,6 +78,34 @@ void con_sel_word(const char *text, int col, int *from, int *to)
     *to = e;
 }
 
+int con_paste(int con, const char *text, int len)
+{
+    int accepted = 0;
+    if (len > CON_PASTE_MAX)
+        len = CON_PASTE_MAX;
+    for (int i = 0; i < len;)
+    {
+        unsigned cp;
+        int n = utf8_decode_bounded(text + i, len - i, &cp);
+        if (n == 0) /* a broken byte */
+        {
+            i++;
+            continue;
+        }
+        i += n;
+        if (cp == '\r') /* \r\n is one line break: the \n does it; a lone \r is dropped */
+            continue;
+        if (cp == '\t')
+        {
+            for (int k = 0; k < 4; k++)
+                accepted += console_key(con, ' ');
+        }
+        else if (cp == '\n' || (cp >= 32 && cp != 127 && !(cp >= 0x80 && cp <= 0x9F)))
+            accepted += console_key(con, (int)cp);
+    }
+    return accepted;
+}
+
 int con_sel_text(int con, const ConSel *s, char *out, int cap)
 {
     ConPoint lo, hi;
