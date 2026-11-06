@@ -84,6 +84,7 @@ static int copy_in(AddressSpace *as, u64 va, const unsigned char *src, u64 n)
 void process_free(void *p)
 {
     process_release_files((Process *)p); /* (normally done at exit: this catches any other way a process can go away) */
+    kfree(((Process *)p)->lazy); /* (NULL for a program that was loaded whole) */
     kfree(p);
 }
 
@@ -161,12 +162,14 @@ void set_heap(Process *p, u64 heap_base)
 
 void purge_exits(int owner); /* (the records of exit codes, further down) */
 
-static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *sp, u64 heap_base)
+static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *sp, u64 heap_base, LazyImage *lazy)
 {
+    /* (`lazy`: NULL, or the image of a demand paged program; launch owns it from here on and frees it when it fails) */
     unsigned stack_pages = stack_pages_for(sp);
     for (unsigned i = 1; i <= stack_pages; i++)
         if (aspace_map_new(as, PAGING_USER_END - (u64)i * 4096, ASPACE_WRITE) != 0)
         {
+            kfree(lazy);
             aspace_destroy(as);
             return -1;
         }
@@ -176,6 +179,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     {
         kfree(st);
         kfree(p);
+        kfree(lazy);
         aspace_destroy(as);
         return -1;
     }
@@ -191,6 +195,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     {
         kfree(st);
         kfree(p);
+        kfree(lazy);
         aspace_destroy(as);
         return -1;
     }
@@ -209,12 +214,14 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
     p->shm_next = 0;
     p->child = 0; /* (the list of children is made by the first spawn or fork) */
     p->child_cap = 0;
+    p->lazy = lazy;
     set_heap(p, heap_base);
     p->stack_low = PAGING_USER_END - (u64)stack_pages * 4096;
     if (process_files_init(p) != 0)
     {
         kfree(st);
         kfree(p);
+        kfree(lazy);
         aspace_destroy(as);
         return -1;
     }
@@ -245,6 +252,7 @@ static int launch(const char *name, AddressSpace *as, u64 entry, ProcessSpawn *s
         kfree(st);
         kfree(p->file);
         kfree(p);
+        kfree(lazy);
         aspace_destroy(as);
         return -1;
     }
@@ -299,7 +307,7 @@ int process_start(const char *name, const void *image, u64 size)
         return -1;
     }
     ProcessSpawn sp = {.console = -1, .parent = -1};
-    return launch(name, as, PAGING_USER_BASE, &sp, PAGING_USER_BASE + pages * 4096);
+    return launch(name, as, PAGING_USER_BASE, &sp, PAGING_USER_BASE + pages * 4096, 0);
 }
 
 /* Each segment gets its own pages (elf_parse made sure no page is shared) with the permissions it asks for. A fresh page is zero,
@@ -349,5 +357,47 @@ int process_spawn_elf(const char *name, const void *file, u64 size, ProcessSpawn
         aspace_destroy(as);
         return -1;
     }
-    return launch(name, as, info.entry, sp, heap_base);
+    return launch(name, as, info.entry, sp, heap_base, 0);
+}
+
+int process_spawn_elf_lazy(const char *name, int node, unsigned file_size, const void *hdr, u64 hdr_len, ProcessSpawn *sp, int *err)
+{
+    ElfInfo info;
+    int e = elf_parse_prefix(hdr, hdr_len, file_size, &info); /* every field is checked here, before anything is made */
+    if (err)
+        *err = e;
+    if (e != ELF_OK)
+        return -1;
+    const VfsNode *vn = vfs_node(node);
+    if (!vn)
+        return -1;
+    LazyImage *im = kmalloc(sizeof(LazyImage));
+    if (!im)
+        return -1;
+    im->node = node;
+    im->size = file_size;
+    int i = 0;
+    for (; i < VFS_NAME_MAX - 1 && vn->name[i]; i++)
+        im->name[i] = vn->name[i];
+    im->name[i] = 0;
+    im->nseg = info.nseg;
+    u64 heap_base = 0;
+    for (int k = 0; k < info.nseg; k++)
+    {
+        im->seg[k] = info.seg[k];
+        u64 seg_end = (info.seg[k].vaddr + info.seg[k].memsz + 4095) & ~4095ULL;
+        if (seg_end > heap_base)
+            heap_base = seg_end;
+    }
+    AddressSpace *as = aspace_create();
+    if (!as)
+    {
+        kfree(im);
+        return -1;
+    }
+    aspace_set_lazy_hook(process_lazy_ensure); /* the kernel loads a page too when a system call is about to use it */
+    serial_puts("process: ");
+    serial_puts(name);
+    serial_puts(" is demand paged\n");
+    return launch(name, as, info.entry, sp, heap_base, im); /* no segment page is mapped: the first touch loads it */
 }

@@ -96,11 +96,40 @@ unsigned char *read_whole(int node, unsigned *size_out, int *err)
     return buf;
 }
 
+/* A big program is not read: its first bytes (ELF header and program headers) are enough to start it, the pages come from the file when
+ * the program uses them (process_spawn_elf_lazy). -1 = not done (small file, no room in the first bytes, a bad file ...): the caller reads it
+ * whole as before, which also gives the proper error. Otherwise the thread id (>= 0). */
+static int spawn_lazy(int node, const char *name, ProcessSpawn *sp)
+{
+    const VfsNode *n = vfs_node(node);
+    if (!n || n->is_dir || n->size < EXEC_LAZY_MIN || n->size > EXEC_MAX_FILE)
+        return -1;
+    enum { HDR_BYTES = 4096 };
+    unsigned char *hdr = kmalloc(HDR_BYTES); /* (heap, not stack: a 4 KiB frame needs the stack probe __chkstk, which the kernel does not have) */
+    if (!hdr)
+        return -1;
+    unsigned done = 0;
+    while (done < HDR_BYTES && done < n->size)
+    {
+        int got = vfs_read(node, done, hdr + done, (n->size < HDR_BYTES ? n->size : HDR_BYTES) - done);
+        if (got <= 0)
+            break;
+        done += (unsigned)got;
+    }
+    int le = 0;
+    int id = done >= 64 ? process_spawn_elf_lazy(name, node, n->size, hdr, done, sp, &le) : -1;
+    kfree(hdr);
+    return id;
+}
+
 int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
 {
     int e = 0;
     if (err)
         *err = 0;
+    int lazy_id = spawn_lazy(node, name, sp);
+    if (lazy_id >= 0)
+        return lazy_id;
     unsigned size = 0;
     unsigned char *buf = read_whole(node, &size, &e);
     if (!buf)

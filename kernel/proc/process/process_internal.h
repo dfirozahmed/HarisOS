@@ -16,8 +16,19 @@
 #include "syscall.h"
 #include "task.h"
 #include "timer.h"
+#include "vfs.h"
 
 typedef unsigned long long u64;
+
+/* The file of a demand paged program (process_lazy.c): what the pages are loaded from. */
+typedef struct LazyImage
+{
+    int node;      /* VFS node of the file */
+    unsigned size; /* its size and name when the process started: checked at every load */
+    char name[VFS_NAME_MAX];
+    int nseg;
+    ElfSegment seg[ELF_MAX_SEGMENTS];
+} LazyImage;
 
 /* ---- types, constants and variables used by more than one file ---- */
 typedef struct
@@ -39,6 +50,11 @@ int place_args(AddressSpace *as, const ProcessSpawn *sp, Start *st);
 void set_heap(Process *p, u64 heap_base);
 void purge_exits(int owner);
 int load_segments(AddressSpace *as, const ElfInfo *info, const void *file, u64 *heap_base);
+
+/* ---- process_lazy.c ---- */
+void process_lazy_ensure(const AddressSpace *as, u64 va, u64 len); /* the kernel is about to use [va, va+len): load the pages of it that are not there yet */
+int process_lazy_populate_all(Process *p, AddressSpace *as);       /* load every page, then forget the image (before a fork); 0, or -1 */
+void process_lazy_free(Process *p);
 
 /* ---- process_exit.c ---- */
 void purge_exits(int owner);

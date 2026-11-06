@@ -38,6 +38,10 @@ int aspace_init(void);
 
 AddressSpace *aspace_create(void);                                 /* NULL: no memory, or aspace_init failed */
 AddressSpace *aspace_clone(const AddressSpace *src);                 /* a copy of a user space (fork): its own pages with the same contents; NULL if memory ran out */
+/* Demand paging (process_lazy.c): fn(as, va, len) is called by aspace_user_ok before it checks a range, so the pages of the range that
+ * are not loaded yet can be loaded first. */
+typedef void (*AspaceLazyFn)(const AddressSpace *as, unsigned long long va, unsigned long long len);
+void aspace_set_lazy_hook(AspaceLazyFn fn);
 int aspace_cow_fault(AddressSpace *as, unsigned long long va); /* a write to a copy-on-write page: 1 = made private + writable, 0 = not such a page, -1 = no memory */
 int aspace_map_shared(AddressSpace *as, unsigned long long va, unsigned long long phys, unsigned flags); /* an existing page (shared memory), not owned: 0 or -1 */
 int aspace_unmap_shared(AddressSpace *as, unsigned long long va);    /* take such a page out again (flushes the TLB entry): 0 or -1 */

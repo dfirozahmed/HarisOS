@@ -16,6 +16,7 @@
 
 #include "process.h"
 
+#define EXEC_LAZY_MIN (128 * 1024) /* a program at least this big is demand paged by exec_spawn_node: read page by page when it runs (process.h) */
 #define EXEC_MAX_FILE (8 * 1024 * 1024) /* (Player carries the desktop's fonts and text engine: about 2 MiB) */
 
 #define EXEC_ERR_NOTFOUND -1 /* no such file on any drive */

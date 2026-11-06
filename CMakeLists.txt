@@ -154,6 +154,7 @@ set(KERNEL_SOURCES
     kernel/proc/process/process_launch.c            # processes
     kernel/proc/process/process_exec.c              # processes
     kernel/proc/process/process_stack.c             # processes
+    kernel/proc/process/process_lazy.c              # processes: demand paging of big programs
     kernel/proc/process/process_exit.c              # processes
     kernel/proc/process/process_selftest.c          # processes
     kernel/proc/user_demo.c         # ring 3 demo programs for the self test

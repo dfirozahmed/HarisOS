@@ -48,6 +48,7 @@ int process_exec_elf(const char *name, const void *file, u64 size, const Process
         kfree((void *)file);
     if (args->free_args)
         kfree((void *)args->args); /* the arguments are on the new stack now */
+    process_lazy_free(p); /* the old program's file is not needed any more */
     process_release_shm(p); /* the old address space (and the mappings in it) goes away below */
     gui_release_owner(p->pid); /* its windows drew into those mappings */
     for (int i = 0; i < 32; i++) /* a new program has none of the old one's handlers (ignored signals stay ignored) */
@@ -74,6 +75,8 @@ int process_fork(u64 user_rip, u64 user_rsp)
         return -1;
     int slot = process_child_slot(p);
     if (slot < 0)
+        return -1;
+    if (process_lazy_populate_all(p, as) != 0) /* pages not loaded yet would be missing in the clone: load them all first */
         return -1;
     AddressSpace *cas = aspace_clone(as);
     if (!cas)

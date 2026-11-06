@@ -147,8 +147,14 @@ int aspace_map_new(AddressSpace *as, u64 va, unsigned flags)
 
 int aspace_translate(const AddressSpace *as, u64 va, u64 *phys) { return paging_translate(as->entry, va, phys, 0); }
 
+static AspaceLazyFn LAZY_HOOK;
+
+void aspace_set_lazy_hook(AspaceLazyFn fn) { LAZY_HOOK = fn; }
+
 int aspace_user_ok(const AddressSpace *as, u64 va, u64 len, int write)
 {
+    if (LAZY_HOOK)
+        LAZY_HOOK(as, va, len);
     if (write && len > 0 && va + len > va)
         for (u64 page = va & ~4095ULL; page < va + len; page += 4096) /* the kernel is about to write here: copy-on-write pages become private first */
             if (aspace_cow_fault((AddressSpace *)as, page) < 0)

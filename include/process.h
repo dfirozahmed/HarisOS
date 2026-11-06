@@ -147,6 +147,18 @@ typedef struct
 /* process_start_elf with a ProcessSpawn: returns the thread id or -1 (*err as there). */
 int process_spawn_elf(const char *name, const void *file, unsigned long long size, ProcessSpawn *sp, int *err);
 
+/* process_spawn_elf for a big program that is not read into memory: `hdr` = the first hdr_len bytes of file `node` of the VFS (they must hold
+ * the ELF header and the program header table), file_size = its whole size. Only the segments are written down; each page is read from
+ * the file when the program first uses it (a page fault, or a system call that is about to touch it), so the program starts at once and
+ * pages it never uses are never read. The file must stay on its drive (the process is ended by a page fault when it is gone). Returns
+ * the thread id or -1 (*err as for process_spawn_elf). */
+int process_spawn_elf_lazy(const char *name, int node, unsigned file_size, const void *hdr, unsigned long long hdr_len, ProcessSpawn *sp,
+                           int *err);
+
+/* A page fault of ring 3 code at `addr` (page not present): if it is a page of a demand paged program it is loaded and 1 is returned -
+ * the instruction runs again. 0 = a real fault (or a page that could not be loaded). */
+int process_lazy_fault(unsigned long long addr);
+
 /* Has the child `pid` ended? If so: 1, its exit code in *code (-1 = ended by a CPU exception), and the record is used up
  * (a second call says 0). 0 = still running or unknown. The records of the last few dozen children are kept. */
 int process_reap(int pid, int *code);
@@ -191,6 +203,7 @@ typedef struct Process
     ProcessFile *file; /* file descriptor PROCESS_FD_FIRST + index: a heap block of file_cap entries, made with the process and grown when full */
     int file_cap;
     int stdio[3]; /* fd 0, 1, 2: -1 = the console, else the index in file[] that stands in for it (shell redirection) */
+    struct LazyImage *lazy; /* NULL, or the program file whose pages are loaded on first use (demand paging, process_spawn_elf_lazy) */
 } Process;
 
 Process *process_current(void); /* the running process, NULL in a kernel thread */

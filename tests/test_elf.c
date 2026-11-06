@@ -211,6 +211,31 @@ int main(void)
     IMG[0] = 'X';               CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_UNKNOWN);   /* not an ELF file */
     IMG[0] = 0x7F; IMG[4] = 1;  CHECK(elf_subsystem(IMG, 64) == ELF_SUBSYS_UNKNOWN);   /* 32-bit */
 
+    /* demand paging: only the first bytes of the file are in memory, the whole size is given separately */
+    good();
+    CHECK(elf_parse_prefix(IMG, 64 + 3 * 56, 0x2100, &info) == 0 && info.nseg == 2);    /* header + table are enough */
+    CHECK(elf_parse_prefix(IMG, 64 + 2 * 56, 0x2100, &info) == ELF_ERR_PHDRS);           /* the table sticks out of what is in memory */
+    CHECK(elf_parse_prefix(IMG, 63, 0x2100, &info) == ELF_ERR_FORMAT);
+    CHECK(elf_parse_prefix(IMG, 0x2100, 0x20FF, &info) == ELF_ERR_FORMAT);               /* more bytes in memory than the file has */
+    CHECK(elf_parse_prefix(IMG, 64 + 3 * 56, 0x2000 + 0xF, &info) == ELF_ERR_SEGMENT);   /* a segment reaches past the end of the whole file */
+    CHECK(elf_parse_prefix(IMG, 0x2100, 0x2100, &info) == elf_parse(IMG, 0x2100, &info));
+
+    /* where the bytes of a page come from */
+    {
+        ElfSegment s = {.vaddr = BASE + 0x1800, .offset = 0x800, .filesz = 0x1900, .memsz = 0x4000, .flags = ELF_PF_R | ELF_PF_W};
+        unsigned long long off;
+        unsigned dst, len;
+        CHECK(!elf_page_source(&s, BASE + 0x0000, &off, &dst, &len));                 /* before the segment */
+        CHECK(elf_page_source(&s, BASE + 0x1000, &off, &dst, &len) && off == 0x800 && dst == 0x800 && len == 0x800); /* starts in the middle of the page */
+        CHECK(elf_page_source(&s, BASE + 0x2000, &off, &dst, &len) && off == 0x1000 && dst == 0 && len == 0x1000);   /* a whole page of the file */
+        CHECK(elf_page_source(&s, BASE + 0x3000, &off, &dst, &len) && off == 0x2000 && dst == 0 && len == 0x100);    /* file ends inside the page */
+        CHECK(elf_page_source(&s, BASE + 0x4000, &off, &dst, &len) && len == 0);                                      /* only .bss: all zero */
+        CHECK(elf_page_source(&s, BASE + 0x5000, &off, &dst, &len) && len == 0);
+        CHECK(!elf_page_source(&s, BASE + 0x6000, &off, &dst, &len));                 /* memsz ends at BASE+0x5800: the page after is outside */
+        ElfSegment e = {.vaddr = BASE, .offset = 0, .filesz = 0, .memsz = 0, .flags = ELF_PF_R};
+        CHECK(!elf_page_source(&e, BASE, &off, &dst, &len));                          /* an empty segment has no pages */
+    }
+
     if (fails == 0)
         printf("elf tests passed\n");
     return fails ? 1 : 0;

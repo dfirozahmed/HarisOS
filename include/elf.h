@@ -77,6 +77,16 @@ typedef struct
 int elf_subsystem(const void *file, unsigned long long size);
 
 int elf_parse(const void *file, unsigned long long size, ElfInfo *out);
+
+/* The same checks when only the first `prefix` bytes of the file are in memory (the ELF header and the program header table must lie in
+ * them) and the whole file is `size` bytes long: demand paging reads the rest later, a page at a time. elf_parse is this with
+ * prefix == size. */
+int elf_parse_prefix(const void *file, unsigned long long prefix, unsigned long long size, ElfInfo *out);
+
+/* Where the bytes of the page that starts at `page` (page aligned) come from, for demand paging. 0 = the page is outside the segment's
+ * memory. 1 = it is inside: bytes [*dst, *dst + *len) of the page are *len bytes of the file starting at *file_off, all the other bytes
+ * of the page are zero (*len is 0 for a page that is only .bss). */
+int elf_page_source(const ElfSegment *seg, unsigned long long page, unsigned long long *file_off, unsigned *dst, unsigned *len);
 const char *elf_error_text(int err);
 
 #endif

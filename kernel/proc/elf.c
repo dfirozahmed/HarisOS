@@ -66,10 +66,32 @@ int elf_subsystem(const void *file, u64 size)
     return s == ELF_SUBSYS_CONSOLE || s == ELF_SUBSYS_GUI ? (int)s : ELF_SUBSYS_UNKNOWN;
 }
 
-int elf_parse(const void *file, u64 size, ElfInfo *out)
+int elf_parse(const void *file, u64 size, ElfInfo *out) { return elf_parse_prefix(file, size, size, out); }
+
+int elf_page_source(const ElfSegment *seg, u64 page, u64 *file_off, unsigned *dst, unsigned *len)
+{
+    u64 end = seg->vaddr + seg->memsz;
+    if (seg->memsz == 0 || page + 4096 <= seg->vaddr || page >= end)
+        return 0;
+    u64 file_end = seg->vaddr + seg->filesz; /* the bytes from here to `end` are zero */
+    u64 from = page > seg->vaddr ? page : seg->vaddr;
+    u64 to = page + 4096 < file_end ? page + 4096 : file_end;
+    *file_off = 0;
+    *dst = 0;
+    *len = 0;
+    if (from < to)
+    {
+        *file_off = seg->offset + (from - seg->vaddr);
+        *dst = (unsigned)(from - page);
+        *len = (unsigned)(to - from);
+    }
+    return 1;
+}
+
+int elf_parse_prefix(const void *file, u64 prefix, u64 size, ElfInfo *out)
 {
     const unsigned char *f = (const unsigned char *)file;
-    if (!f || !out || size < EHDR_SIZE)
+    if (!f || !out || prefix < EHDR_SIZE || size < prefix)
         return ELF_ERR_FORMAT;
     if (f[0] != 0x7F || f[1] != 'E' || f[2] != 'L' || f[3] != 'F')
         return ELF_ERR_FORMAT;
@@ -84,7 +106,7 @@ int elf_parse(const void *file, u64 size, ElfInfo *out)
         return ELF_ERR_PHDRS;
     /* the table must lie inside the file; compared as phoff <= size - table so that nothing can wrap around */
     u64 table = (u64)phnum * PHDR_SIZE;
-    if (phoff > size || table > size - phoff)
+    if (phoff > prefix || table > prefix - phoff)
         return ELF_ERR_PHDRS;
 
     out->entry = entry;
