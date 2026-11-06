@@ -115,6 +115,7 @@ enum
     M_COPY,
     M_PASTE,
     M_SEND,
+    M_BTSEND,
     M_SORT_NAME,
     M_SORT_SIZE,
     M_SORT_TYPE,

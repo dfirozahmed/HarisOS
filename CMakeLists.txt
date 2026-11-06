@@ -369,7 +369,8 @@ set(KERNEL_SOURCES
     apps/imageviewer/imgview.c      # Image Viewer: zoom and drawing maths
     apps/player/player_app.c        # Player: starts PLAYER.ELF (music player window)
     apps/wifi/wifi_app.c            # Wi-Fi app: pick a wireless network and join it
-    apps/bluetooth/bluetooth_app.c  # Bluetooth app: scan for devices, pair and connect a headset (A2DP)
+    apps/bluetooth/bluetooth_app.c  # Bluetooth app: scan for devices, pair and connect a headset (A2DP), send and receive files
+    apps/filepicker/filepicker.c    # File picker dialog (choose one file on a drive)
     apps/console/console_app.c      # Console window: where a program started from the File Explorer prints and reads
     apps/terminal/terminal_app.c    # Terminal app: a console window running the shell; also starts INIT.ELF at boot
     apps/gui/gui_app.c)             # Compositor: windows for the surfaces of user programs (SYS_GUI_*)

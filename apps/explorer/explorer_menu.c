@@ -1,6 +1,7 @@
 /* File Explorer: the right-click menu and the sort menu. The panel itself (layout, mouse, keys, drawing) is the HarisUI UiMenu
  * (ui.h); this file fills it with the items for what was clicked and runs the one that is chosen. */
 #include "explorer.h"
+#include "bluetoothapp.h"
 #include "deskfiles.h"
 
 static void add(int item, const char *label, const char *hint, int flags)
@@ -26,6 +27,10 @@ void ex_menu_open(int x, int y, int kind)
         int several = ex_sel_count() > 1; /* Open and Rename work on one entry */
         add(M_OPEN, "Open", several ? 0 : "Enter", several ? UI_MENU_DISABLED : 0);
         add(M_SEND, "Send to desktop", 0, 0);
+        {
+            const VfsNode *sn = EX_SEL >= 0 && EX_SEL < EX_NITEMS ? vfs_node(EX_ITEMS[EX_SEL]) : 0;
+            add(M_BTSEND, "Send via Bluetooth", 0, several || !sn || sn->is_dir ? UI_MENU_DISABLED : 0); /* one file at a time */
+        }
         ui_menu_separator(&EX_MENU);
         add(M_CUT, "Cut", "Ctrl+X", 0);
         add(M_COPY, "Copy", "Ctrl+C", 0);
@@ -82,6 +87,16 @@ void ex_menu_run(int item)
         break;
     case M_SEND:
         ex_send_selected(); /* a copy of each goes into the Desktop folder; a toast says how it went */
+        break;
+    case M_BTSEND:
+        if (EX_SEL >= 0 && EX_SEL < EX_NITEMS)
+        {
+            char path[300];
+            vfs_path(EX_ITEMS[EX_SEL], path, sizeof path);
+            const char *why = bluetooth_app_send_file(path); /* the Bluetooth window opens with the file; NULL = it worked */
+            if (why)
+                EX_NOTE = why;
+        }
         break;
     case M_SORT_NAME:
         ex_set_sort(VFS_SORT_NAME, EX_SORT_DESC);

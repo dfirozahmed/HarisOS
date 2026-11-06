@@ -10,7 +10,9 @@
  * An app uses only public headers (ui.h, wm.h, desktop.h, bluetooth.h) - never desktop_internal.h. */
 #include "app.h"
 #include "bluetooth.h"
+#include "bluetoothapp.h"
 #include "desktop.h"
+#include "filepicker.h"
 #include "mouse.h"
 #include "taskbar.h"
 #include "toast.h"
@@ -26,6 +28,7 @@
 #define BTN_DISCONNECT 1
 #define BTN_CONNECT 2
 #define BTN_SEND 3
+#define BTN_BROWSE 4
 
 /* how long each step may take before the app gives up (the stack has time-outs of its own, these are the safety net) */
 #define T_LINK_MS 30000
@@ -49,6 +52,7 @@ static int SEND_NODE = -1;       /* the file being sent (a vfs node) */
 static char SEND_NAME[64];
 static int RECV_ON;              /* visible to other devices, ready to take files */
 static char RECV_PATH[96];       /* the folder they are saved in */
+static int NO_SCAN;                /* the window was opened to send a file: do not start a scan by itself */
 static int DISC_AFTER;           /* Disconnect was pressed during a transfer: cancel it, then disconnect */
 static int VOL_DRAG;             /* the left button went down on the volume slider and is still held */
 static char MSG[100];
@@ -221,7 +225,7 @@ static Layout layout(UiRect body)
     l.list = r;
     l.volume = ui_rect(l.foot.x + 76, l.foot.y + 12, l.foot.w - 76 - 56, 20);
     l.recv = ui_rect(l.foot.x + 2, l.foot.y + 88, 40, 22); /* the "Receive files" switch */
-    l.file = ui_rect(l.foot.x + 76, l.foot.y + 44, l.foot.w - 76 - 124, 30); /* the path of the file to send; the Send button is to its right */
+    l.file = ui_rect(l.foot.x + 76, l.foot.y + 44, l.foot.w - 76 - 216, 30); /* the path of the file to send; the Browse and Send buttons are to its right */
     return l;
 }
 
@@ -258,6 +262,7 @@ static void update_buttons(Window *w)
     w->btn[BTN_SCAN].enabled = idle && up && !link_active();
     w->btn[BTN_DISCONNECT].enabled = (idle || OP == OP_SEND) && up && (ls == BT_LINK_UP || ls == BT_LINK_CONNECTING);
     w->btn[BTN_SEND].enabled = idle && up && ls == BT_LINK_UP && FILE_CH && w->edits[0].len > 0;
+    w->btn[BTN_BROWSE].enabled = idle;
     const BtScanDev *d = (SEL >= 0 && SEL < bt_scan_count()) ? bt_scan_dev(SEL) : 0;
     w->btn[BTN_CONNECT].enabled = idle && up && !link_active() && bt_scan_state() != BT_SCAN_INQUIRY && bt_scan_state() != BT_SCAN_NAMES && d && usable(d);
 }
@@ -442,14 +447,8 @@ static void bt_draw(Window *w, UiRect body)
     put_dec(vol, sizeof vol, &n, (unsigned)bt_a2dp_volume());
     put_str(vol, sizeof vol, &n, "%");
     ui_text_in_color(ui_rect(l.volume.x + l.volume.w + 6, l.foot.y + 10, 48, 24), vol, UI_TEXT_BODY, UI_ALIGN_RIGHT, audio ? t->text : t->text_dim);
-    if (ls == BT_LINK_UP && FILE_CH)
-    {
-        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 46, 70, 26), "File", UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
-        ui_edit_draw(l.file, &w->edits[0], "Path, e.g. /HARISOS/photo.jpg", OP == OP_NONE);
-    }
-    else
-        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 46, l.foot.w - 4, 26), "To send a file, connect a phone or computer that accepts files.", UI_TEXT_SMALL, UI_ALIGN_LEFT,
-                         t->text_dim);
+    ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 46, 70, 26), "File", UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
+    ui_edit_draw(l.file, &w->edits[0], "Path - or press Browse", OP == OP_NONE);
     ui_toggle(l.recv, RECV_ON);
     ui_text_in_color(ui_rect(l.recv.x + 50, l.recv.y - 1, 130, 24), "Receive files", UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
     ui_text_in_color(ui_rect(l.recv.x + 186, l.recv.y - 1, l.foot.w - 190, 24), RECV_ON ? RECV_PATH : "Phones can then send files to this computer.", UI_TEXT_SMALL, UI_ALIGN_LEFT,
@@ -459,6 +458,9 @@ static void bt_draw(Window *w, UiRect body)
     else if (SEL >= 0 && SEL < total && !usable(bt_scan_dev(SEL)))
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 120, l.foot.w - 140, 60), "This kind of device has no sound or file service this app can use.", UI_TEXT_SMALL,
                          UI_ALIGN_LEFT, t->warning);
+    else if (w->edits[0].len > 0 && !(ls == BT_LINK_UP && FILE_CH))
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 120, l.foot.w - 140, 60), "Connect a phone or computer that accepts files (select it, press Connect), then press Send.",
+                         UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
     if (MENU.open && w != wm_top())
         ui_menu_close(&MENU); /* focus moved elsewhere (another window or a dialog) */
     ui_menu_draw(&MENU);
@@ -1030,6 +1032,28 @@ static void on_connect(UiButton *b, void *user)
     start_connect((Window *)user);
 }
 
+/* the picker's answer: the path goes into the File box */
+static void file_picked(const char *path, void *user)
+{
+    (void)user;
+    Window *w = BT_WIN;
+    if (!w)
+        return;
+    ui_edit_set_text(&w->edits[0], path);
+    MSG[0] = 0;
+    MSG_KIND = 0;
+    update_buttons(w);
+    wm_invalidate();
+}
+
+static void on_browse(UiButton *b, void *user)
+{
+    (void)b;
+    Window *w = (Window *)user;
+    if (OP == OP_NONE)
+        filepicker_open(w, "Choose a file to send", w->edits[0].text, file_picked, 0);
+}
+
 static void on_send(UiButton *b, void *user)
 {
     (void)b;
@@ -1136,7 +1160,7 @@ static int bt_press(Window *w, int x, int y)
         set_receive(w, !RECV_ON);
         return 1;
     }
-    if (bt_link_state() == BT_LINK_UP && FILE_CH && w->edits[0].field.w > 0 && ui_contains(w->edits[0].field, x, y))
+    if (w->edits[0].field.w > 0 && ui_contains(w->edits[0].field, x, y))
     {
         ui_edit_mouse(&w->edits[0], x, y, 1);
         ui_caret_restart();
@@ -1257,7 +1281,7 @@ static void bt_key(Window *w, const KeyEvent *k)
         else
             start_connect(w);
     }
-    else if (bt_link_state() == BT_LINK_UP && FILE_CH && ui_edit_key(&w->edits[0], k)) /* anything else types the path of the file */
+    else if (ui_edit_key(&w->edits[0], k)) /* anything else types the path of the file */
     {
         ui_caret_restart();
         update_buttons(w);
@@ -1312,7 +1336,7 @@ static void bluetooth_app_open(void)
     win->edit_count = 1; /* the path of the file to send */
     win->focus = 0;
     win->caret = 1;
-    win->edits[0].max = 200;
+    win->edits[0].max = 255;
     BT_WIN = win;
     OP = OP_NONE;
     SEL = -1;
@@ -1331,10 +1355,34 @@ static void bluetooth_app_open(void)
     wm_add_button_ex(win, "Scan", UI_BTN_SECONDARY, ui_rect(cw - 8 - 100, 8 + 14, 100, 34), WM_ANCHOR_RIGHT, on_scan, win);
     wm_add_button_ex(win, "Disconnect", UI_BTN_SECONDARY, ui_rect(cw - 8 - 100 - 8 - 124, 8 + 14, 124, 34), WM_ANCHOR_RIGHT, on_disconnect, win);
     wm_add_button_ex(win, "Connect", UI_BTN_PRIMARY, ui_rect(cw - 8 - 116, ch - 8 - 42, 116, 34), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_connect, win);
+    wm_add_button_ex(win, "Browse", UI_BTN_SECONDARY, ui_rect(cw - 8 - 108 - 8 - 92, ch - 8 - FOOT_H + 44, 92, 32), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_browse, win);
     wm_add_button_ex(win, "Send", UI_BTN_PRIMARY, ui_rect(cw - 8 - 108, ch - 8 - FOOT_H + 44, 108, 32), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_send, win);
     update_buttons(win);
-    if (bt_hci_up() && bt_scan_count() == 0 && bt_scan_state() == BT_SCAN_IDLE && !link_active()) /* nothing to show yet: look around */
+    if (!NO_SCAN && bt_hci_up() && bt_scan_count() == 0 && bt_scan_state() == BT_SCAN_IDLE && !link_active()) /* nothing to show yet: look around */
         start_scan(win);
+}
+
+/* "Send via Bluetooth" in the File Explorer: the window opens with the file in its File box and, if a device that takes files is connected, sends it */
+const char *bluetooth_app_send_file(const char *path)
+{
+    if (!path || !*path)
+        return "No file given.";
+    NO_SCAN = 1;
+    bluetooth_app_open();
+    NO_SCAN = 0;
+    Window *w = BT_WIN;
+    if (!w)
+        return "The Bluetooth window could not be opened.";
+    if (OP == OP_SEND)
+        return "A file is being sent - wait until it is done.";
+    ui_edit_set_text(&w->edits[0], path);
+    MSG[0] = 0;
+    MSG_KIND = 0;
+    update_buttons(w);
+    if (w->btn[BTN_SEND].enabled)
+        start_send(w);
+    wm_invalidate();
+    return 0;
 }
 
 const AppInfo APP_BLUETOOTH = {
