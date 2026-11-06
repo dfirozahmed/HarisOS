@@ -60,6 +60,9 @@ void console_wait(int con, int task_id); /* wake task_id (task_wake) when input 
  * out[CONSOLE_COLS + 1], without trailing spaces, and returns 1; 0 if there is no such row yet. */
 int console_row(int con, int back, char *out);
 int console_cursor_col(int con); /* column of the cursor on the bottom row, -1 if the console is finished or invalid */
+/* Rows started so far (the row with the cursor is number console_lines): a row keeps its number when more rows follow, so
+ * the window can remember a selection as row numbers while the text scrolls. 0 for an invalid handle. */
+unsigned console_lines(int con);
 int console_dirty(int con);      /* 1 once after every change of the screen: the window redraws then */
 /* The same, saying how much: 0 = nothing, 1 = only the row with the cursor changed (typing, a backspace, text on the same
  * line), 2 = more (a new row: everything moved up). Reading either one clears both. */

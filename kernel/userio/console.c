@@ -396,6 +396,12 @@ int console_row(int h, int back, char *out)
     return 1;
 }
 
+unsigned console_lines(int h)
+{
+    Console *c = get(h);
+    return c ? c->lines : 0;
+}
+
 int console_cursor_col(int h)
 {
     Console *c = get(h);

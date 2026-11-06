@@ -136,6 +136,7 @@ set(KERNEL_SOURCES
     kernel/syscall/sys_time.c       # system calls: clock and wall time
     kernel/syscall/sys_gui.c        # system calls: GUI windows
     kernel/userio/console.c           # console: character grid, cursor and line editor for a program's window (host-tested)
+    kernel/userio/console_sel.c       # console: selecting text with the mouse (the logic, host-tested)
     kernel/ipc/pipe.c              # pipes: the byte queue between processes (host-tested)
     kernel/ipc/shm.c               # shared memory segments (host-tested)
     kernel/ipc/mq.c                # message queues (host-tested)

@@ -196,6 +196,20 @@ int main(void)
         console_close(e);
     }
 
+    /* the row counter: a row keeps its number while more rows follow (a selection in the window is remembered by it) */
+    {
+        int n = console_open("COUNT");
+        char rn[CONSOLE_COLS + 1];
+        CHECK(console_lines(n) == 0 && console_lines(-1) == 0);
+        put(n, "first\nsecond\nthird");
+        CHECK(console_lines(n) == 2); /* "third" is row 2 */
+        CHECK(row(n, console_lines(n) - 1, rn) && strcmp(rn, "second") == 0);
+        put(n, "\nfourth");
+        CHECK(console_lines(n) == 3 && row(n, console_lines(n) - 1, rn) && strcmp(rn, "second") == 0); /* "second" is still row 1 */
+        console_close(n);
+        CHECK(console_lines(n) == 0);
+    }
+
     /* a line that is too long stops accepting characters (and the screen shows only what was accepted) */
     for (int i = 0; i < CONSOLE_LINE_MAX + 50; i++)
         console_key(c, 'q');
