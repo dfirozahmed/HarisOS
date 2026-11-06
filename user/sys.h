@@ -115,7 +115,7 @@ typedef struct
 {
     unsigned size;
     unsigned is_dir;
-    char name[96];
+    char name[256]; /* UTF-8, up to 255 bytes */
 } DirEntry;
 
 /* 1 = entry `index` of folder `path` is in *e, 0 = no more entries, -1 = error */

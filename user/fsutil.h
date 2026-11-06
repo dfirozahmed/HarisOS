@@ -4,7 +4,7 @@
 
 #include "libc.h"
 
-#define FS_PATH_MAX 256
+#define FS_PATH_MAX 320 /* the longest path the system calls take (PATH_MAX in kernel/syscall/sys_util.c) */
 
 static inline int fs_is_dir(const char *path)
 {

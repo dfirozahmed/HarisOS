@@ -16,7 +16,7 @@
 
 #include "process.h"
 
-#define EXEC_MAX_FILE (2 * 1024 * 1024)
+#define EXEC_MAX_FILE (8 * 1024 * 1024) /* (Player carries the desktop's fonts and text engine: about 2 MiB) */
 
 #define EXEC_ERR_NOTFOUND -1 /* no such file on any drive */
 #define EXEC_ERR_SIZE -2     /* empty, or bigger than EXEC_MAX_FILE */

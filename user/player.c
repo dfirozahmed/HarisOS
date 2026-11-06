@@ -2,8 +2,10 @@
  *
  *   player [FILE.MP3 | FILE.WAV | FOLDER]
  *
- * The window is a compositor surface (SYS_GUI_*, include/gui.h): this program draws every pixel itself, with the same pre-rendered
- * fonts as the desktop (kernel/graphics/font_data.c is compiled in). It shows the MP3 / WAV files of one folder as a play list and
+ * The window is a compositor surface (SYS_GUI_*, include/gui.h): this program draws every pixel itself, with the same text engine as
+ * the desktop: kernel/graphics/font.c and what it needs (the fonts, the Bengali and Arabic shapers, the bidi algorithm) are linked
+ * into this program, and draw into PIX through gfx_blend_pixel below. So file names and song titles in any language the desktop
+ * shows (Latin, Greek, Cyrillic, Bengali, Arabic) look the same here. It shows the MP3 / WAV files of one folder as a play list and
  * plays them.
  *
  * Sound is not made here. Playing is a separate process, PLAY.ELF, started with the file and the second to start at; SYS_AUDIO_PLAY
@@ -20,7 +22,7 @@
 
 #pragma clang diagnostic ignored "-Wunused-function"
 #include "mp3dec.c" /* only mp3_estimate_ms and the frame locator are used here: how long a song is, its sample rate and bitrate */
-#include "../kernel/graphics/font_data.c"
+#include "utf8.h"
 
 /* key codes of include/keyboard.h that the window events carry */
 #define KEY_ESC 256
@@ -66,6 +68,14 @@ static void put_px(int x, int y, unsigned c, int a)
 {
     if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H)
         PIX[y * WIN_W + x] = blend(PIX[y * WIN_W + x], c, a);
+}
+
+/* The two functions the text engine (kernel/graphics/font.c) needs from its host: where a pixel goes, and the area it may draw in. */
+void gfx_blend_pixel(int x, int y, GfxColor color, unsigned char alpha) { put_px(x, y, color & 0xFFFFFFu, alpha); }
+GfxClip gfx_get_clip(void)
+{
+    GfxClip c = {0, 0, WIN_W, WIN_H};
+    return c;
 }
 
 static void fill_rect(int x, int y, int w, int h, unsigned c)
@@ -133,75 +143,41 @@ static void fill_tri(float x0, float y0, float x1, float y1, float x2, float y2,
         }
 }
 
-/* ---- text: the same layout rules as gfx_text (kernel/graphics/font.c), drawn into PIX ---- */
-static const FontGlyph *glyph_of(const Font *f, unsigned char ch)
-{
-    if (ch < f->first || ch > f->last)
-        ch = '?';
-    return &f->glyphs[ch - f->first];
-}
+/* ---- text: the desktop's text engine (UTF-8, all the scripts of the desktop) ---- */
+static int text_width(const Font *f, const char *s) { return gfx_text_w(f, s); }
 
-static int text_width(const Font *f, const char *s)
-{
-    int w = 0;
-    for (; *s; s++)
-        w += glyph_of(f, (unsigned char)*s)->advance;
-    return (w + 8) >> 4;
-}
-
-static int round_pen(int pen)
-{
-    int pixel = pen / 16, rem = pen % 16;
-    return rem >= 8 ? pixel + 1 : (rem <= -8 ? pixel - 1 : pixel);
-}
-
-/* max_w > 0: the text is cut with ".." so that it fits. */
+/* max_w > 0: the text is cut with ".." so that it fits (between characters: gfx_text_fit never cuts a Bengali syllable or a UTF-8 letter). */
 static void draw_text(const Font *f, int x, int y, const char *s, unsigned c, int max_w)
 {
-    char cut[160];
-    if (max_w > 0 && text_width(f, s) > max_w)
+    char cut[360];
+    if (max_w > 0 && gfx_text_w(f, s) > max_w)
     {
-        int n = 0;
-        int w = 2 * glyph_of(f, '.')->advance;
-        while (s[n] && n < (int)sizeof cut - 4 && (((w + glyph_of(f, (unsigned char)s[n])->advance + 8) >> 4) <= max_w))
-        {
-            w += glyph_of(f, (unsigned char)s[n])->advance;
-            cut[n] = s[n];
-            n++;
-        }
+        int n = gfx_text_fit(f, s, max_w - gfx_text_w(f, ".."));
+        if (n > (int)sizeof cut - 4)
+            n = (int)sizeof cut - 4;
+        while (n > 0 && utf8_is_cont((unsigned char)s[n])) /* (the cap above can fall inside a character) */
+            n--;
+        for (int i = 0; i < n; i++)
+            cut[i] = s[i];
         cut[n++] = '.';
         cut[n++] = '.';
         cut[n] = 0;
         s = cut;
     }
-    int pen = x * 16;
-    for (; *s; s++)
-    {
-        const FontGlyph *g = glyph_of(f, (unsigned char)*s);
-        if (g->w)
-        {
-            const unsigned char *src = f->bitmap + g->offset;
-            int gx = round_pen(pen) + g->bx, gy = y + g->by;
-            for (int row = 0; row < g->h; row++)
-                for (int col = 0; col < g->w; col++)
-                    if (src[row * g->w + col])
-                        put_px(gx + col, gy + row, c, src[row * g->w + col]);
-        }
-        pen += g->advance;
-    }
+    gfx_text(f, x, y, s, 0xFF000000u | c);
 }
 
 /* ------------------------------------------------------------ the play list ------------------------------------------------------------ */
 typedef struct
 {
-    char name[96];
-    char path[256];
+    char name[256]; /* UTF-8: a Bengali letter takes 3 bytes, the file systems allow 255 */
+    char path[320]; /* (the system call layer's longest path) */
     int is_mp3;
 } Track;
 
 static Track *TR;
 static int NT;
-static char DIR[256];
+static char DIR[320];
 static int SEL = -1;    /* the song that is playing / paused, or was chosen */
 static int SCROLL;      /* first visible row */
 
@@ -248,7 +224,7 @@ static void load_folder(const char *dir)
     if (NT == 0 && !strcmp(DIR, "/")) /* "/" lists the drives, which hold no files themselves: show the first drive that has songs */
         for (unsigned i = 0; sys_readdir("/", i, &e) == 1 && i < 16; i++)
         {
-            char drive[160];
+            char drive[320];
             join_path(drive, sizeof drive, "/", e.name);
             if (!e.is_dir)
                 continue;
@@ -259,15 +235,29 @@ static void load_folder(const char *dir)
 }
 
 /* ------------------------------------------------------------ song information ------------------------------------------------------------ */
-static char TITLE[96], ARTIST[96], FORMAT[64];
+static char TITLE[192], ARTIST[192], FORMAT[64]; /* UTF-8 */
 static long long DUR_MS;       /* 0 = not known */
 
 static long long be28(const unsigned char *p) { return ((long long)p[0] << 21) | ((long long)p[1] << 14) | ((long long)p[2] << 7) | p[3]; }
 
-/* A text frame's text as plain ASCII ('?' for what the fonts do not have). enc: 0 Latin-1, 1 UTF-16 with BOM, 2 UTF-16BE, 3 UTF-8. */
+/* Add a character to the UTF-8 text in out (a control character is left out; a character that does not fit is not cut in half). */
+static void id3_put(char *out, int *o, int cap, unsigned cp)
+{
+    if (cp < 32 || cp == 127 || (cp >= 0x80 && cp <= 0x9F))
+        return;
+    char t[4];
+    int k = utf8_encode(cp, t);
+    if (*o + k > cap - 1)
+        return;
+    for (int i = 0; i < k; i++)
+        out[(*o)++] = t[i];
+}
+
+/* A text frame's text as UTF-8. enc: 0 Latin-1, 1 UTF-16 (with a byte order mark), 2 UTF-16BE, 3 UTF-8. */
 static void id3_text(const unsigned char *p, int n, char *out, int cap)
 {
     int o = 0;
+    out[0] = 0;
     if (n < 1)
         return;
     int enc = p[0];
@@ -275,29 +265,50 @@ static void id3_text(const unsigned char *p, int n, char *out, int cap)
     n--;
     if (enc == 1 || enc == 2)
     {
-        int le = enc == 1 && n >= 2 && p[0] == 0xFF && p[1] == 0xFE;
-        if (enc == 1 && n >= 2)
+        int be = enc == 2;
+        if (enc == 1 && n >= 2 && p[0] == 0xFF && p[1] == 0xFE) /* the byte order mark says */
+            p += 2, n -= 2;
+        else if (enc == 1 && n >= 2 && p[0] == 0xFE && p[1] == 0xFF)
+            be = 1, p += 2, n -= 2;
+        for (int i = 0; i + 1 < n; i += 2)
         {
-            p += 2;
-            n -= 2;
-        }
-        for (int i = 0; i + 1 < n && o < cap - 1; i += 2)
-        {
-            int lo = le || enc == 1 ? p[i] : p[i + 1], hi = le || enc == 1 ? p[i + 1] : p[i];
-            if (lo == 0 && hi == 0)
+            unsigned u = be ? (unsigned)p[i] << 8 | p[i + 1] : (unsigned)p[i + 1] << 8 | p[i];
+            if (u == 0)
                 break;
-            out[o++] = (hi == 0 && lo >= 32 && lo < 127) ? (char)lo : '?';
+            if (u >= 0xD800 && u <= 0xDBFF && i + 3 < n) /* the first half of a pair: the second follows */
+            {
+                unsigned v = be ? (unsigned)p[i + 2] << 8 | p[i + 3] : (unsigned)p[i + 3] << 8 | p[i + 2];
+                if (v >= 0xDC00 && v <= 0xDFFF)
+                {
+                    id3_put(out, &o, cap, 0x10000u + ((u - 0xD800u) << 10) + (v - 0xDC00u));
+                    i += 2;
+                    continue;
+                }
+            }
+            if (u >= 0xD800 && u <= 0xDFFF) /* a half that has no other half */
+                continue;
+            id3_put(out, &o, cap, u);
+        }
+    }
+    else if (enc == 3)
+    {
+        for (int i = 0; i < n && p[i];)
+        {
+            unsigned cp;
+            int len = utf8_decode_bounded((const char *)p + i, n - i, &cp);
+            if (len == 0) /* broken UTF-8: skip the byte */
+            {
+                i++;
+                continue;
+            }
+            i += len;
+            id3_put(out, &o, cap, cp);
         }
     }
     else
-        for (int i = 0; i < n && o < cap - 1 && p[i]; i++)
-            out[o++] = (p[i] >= 32 && p[i] < 127) ? (char)p[i] : (p[i] >= 0x80 && enc == 3 && (p[i] & 0xC0) == 0x80 ? 0 : '?');
-    /* UTF-8: one '?' per multi-byte character (continuation bytes were dropped above as 0); remove the zeros */
-    int w = 0;
-    for (int i = 0; i < o; i++)
-        if (out[i])
-            out[w++] = out[i];
-    out[w] = 0;
+        for (int i = 0; i < n && p[i]; i++) /* Latin-1: the byte is the code point */
+            id3_put(out, &o, cap, p[i]);
+    out[o] = 0;
 }
 
 /* Reads the ID3v2 tag at the start of the file: title and artist (TIT2 / TPE1, versions 2.3 and 2.4). Returns the size of the tag
@@ -567,7 +578,7 @@ static void render(void)
     /* title and details */
     const char *title = TITLE[0] ? TITLE : (SEL >= 0 ? TR[SEL].name : "Nothing playing");
     draw_text(&font_bold_20, MARGIN, 16, title, C_TEXT, WIN_W - 2 * MARGIN);
-    char sub[200];
+    char sub[400];
     if (SEL >= 0)
         snprintf(sub, sizeof sub, "%s%s%s", ARTIST[0] ? ARTIST : "", ARTIST[0] && FORMAT[0] ? "  -  " : "", FORMAT);
     else
@@ -618,7 +629,7 @@ static void render(void)
         draw_text(&font_ui_12, VOL_X, BTN_Y - 8, "No sound device", C_DIM, 0);
 
     /* play list */
-    char head[160];
+    char head[400];
     snprintf(head, sizeof head, "Play list - %s", DIR);
     draw_text(&font_med_14, MARGIN, 192, head, C_TEXT, WIN_W - 2 * MARGIN);
     fill_rect(MARGIN, 216, WIN_W - 2 * MARGIN, 1, C_BORDER);

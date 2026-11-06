@@ -280,11 +280,11 @@ int vfs_lookup(const char *path)
             path++;
         if (!*path)
             break;
-        char part[96];
+        char part[VFS_NAME_MAX];
         int n = 0;
         while (*path && *path != '/')
         {
-            if (n >= 95)
+            if (n >= VFS_NAME_MAX - 1)
                 return -1; /* a name longer than the VFS keeps */
             part[n++] = *path++;
         }
@@ -1425,7 +1425,7 @@ int main(void)
         CHECK(call(SYS_READDIR, U("/"), 1, U(&e)) == 0);                                  /* past the end */
         CHECK(call(SYS_READDIR, U("/RAM Disk"), 0, U(&e)) == 1 && strcmp(e.name, "DIR") == 0 && e.is_dir == 1);
         CHECK(call(SYS_READDIR, U("/RAM Disk"), 1, U(&e)) == 1 && strcmp(e.name, "readme.txt") == 0 && e.size == 20 && e.is_dir == 0);
-        CHECK(e.name[11] == 0 && e.name[95] == 0);                                        /* the rest of the name is cleared */
+        CHECK(e.name[11] == 0 && e.name[sizeof e.name - 1] == 0);                                      /* the rest of the name is cleared */
         CHECK(call(SYS_READDIR, U("/RAM Disk"), 2, U(&e)) == 0);
         CHECK(call(SYS_READDIR, U("/RAM Disk/DIR"), 0, U(&e)) == 0);                      /* an empty folder */
         CHECK(call(SYS_READDIR, U("/RAM Disk/readme.txt"), 0, U(&e)) == -1);              /* a file */
@@ -1557,10 +1557,20 @@ int main(void)
         CHECK(call(SYS_OPEN, U("a/b"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
         CHECK(call(SYS_OPEN, U("dir/"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
         CHECK(call(SYS_OPEN, U(".."), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
-        char longname[120];
+        char longname[300];
         memset(longname, 'n', sizeof(longname) - 1);
         longname[sizeof(longname) - 1] = 0;
-        CHECK(call(SYS_OPEN, U(longname), SYS_O_WRITE | SYS_O_CREATE, 0) == -1); /* longer than a VFS name */
+        CHECK(call(SYS_OPEN, U(longname), SYS_O_WRITE | SYS_O_CREATE, 0) == -1); /* longer than a VFS name (255 bytes) */
+        {   /* a name of 200 bytes (66 Bengali letters) is fine, and SYS_STAT gives it back whole: the entry holds 255 bytes */
+            char fine[201];
+            memset(fine, 'm', 200);
+            fine[200] = 0;
+            long long ffd = call(SYS_OPEN, U(fine), SYS_O_WRITE | SYS_O_CREATE, 0);
+            CHECK(ffd >= 3);
+            call(SYS_CLOSE, (ull)ffd, 0, 0);
+            CHECK(call(SYS_STAT, U(fine), U(&e), 0) == 0 && strlen(e.name) == 200 && e.name[200] == 0);
+            CHECK(call(SYS_UNLINK, U(fine), 0, 0) == 0);
+        }
         VFS_READONLY = 1;
         CHECK(call(SYS_OPEN, U("new.txt"), SYS_O_WRITE | SYS_O_CREATE, 0) == -1);
         fd = call(SYS_OPEN, U("f.txt"), SYS_O_WRITE, 0);

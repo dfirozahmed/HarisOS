@@ -450,6 +450,21 @@ foreach(LIBSRC libc posix libm numconv)
     )
     list(APPEND LIBC_OBJ ${LIBSRC_OBJ})
 endforeach()
+# Player draws its own window and uses the desktop's text engine: kernel/graphics/font.c, the fonts, the Bengali and Arabic shapers and the
+# bidi algorithm are compiled again, as user code, and linked into player.elf (it supplies gfx_blend_pixel and gfx_get_clip itself).
+set(PLAYER_TEXT_OBJ "")
+foreach(TXSRC font font_data font_bn_data font_ext_data font_ar_data uni_data ot bidi shape_ar shape_bn)
+    set(TXOBJ ${CMAKE_BINARY_DIR}/user/player_${TXSRC}.obj)
+    add_custom_command(
+        OUTPUT  ${TXOBJ}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+        COMMAND ${CLANG_CC} ${USER_CFLAGS} -I${CMAKE_SOURCE_DIR}/include -c ${CMAKE_SOURCE_DIR}/kernel/graphics/${TXSRC}.c -o ${TXOBJ}
+        DEPENDS ${CMAKE_SOURCE_DIR}/kernel/graphics/${TXSRC}.c ${HARIS_HEADERS}
+        COMMENT "Compiling kernel/graphics/${TXSRC}.c for Player"
+        VERBATIM
+    )
+    list(APPEND PLAYER_TEXT_OBJ ${TXOBJ})
+endforeach()
 set(USER_ELFS "")
 set(USER_ESP_FILES "")
 # Programs that open their own window (SYS_GUI_*) get no Console window until they print or read; all others are command line
@@ -462,11 +477,13 @@ foreach(PROG ${USER_PROGRAMS})
     else()
         set(PROG_SUBSYS --console)
     endif()
-    # player draws with the desktop's fonts (kernel/graphics/font_data.c, which needs include/font.h)
+    # player draws with the desktop's text engine (see PLAYER_TEXT_OBJ above; its headers are in include/)
     if(PROG STREQUAL "player")
         set(PROG_EXTRA_CFLAGS -I${CMAKE_SOURCE_DIR}/include)
+        set(PROG_EXTRA_OBJ ${PLAYER_TEXT_OBJ})
     else()
         set(PROG_EXTRA_CFLAGS "")
+        set(PROG_EXTRA_OBJ "")
     endif()
     set(PROG_OBJ ${CMAKE_BINARY_DIR}/user/${PROG}.obj)
     set(PROG_PE  ${CMAKE_BINARY_DIR}/user/${PROG}.exe)
@@ -476,15 +493,15 @@ foreach(PROG ${USER_PROGRAMS})
         OUTPUT  ${PROG_OBJ}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
         COMMAND ${CLANG_CC} ${USER_CFLAGS} ${PROG_EXTRA_CFLAGS} -c ${CMAKE_SOURCE_DIR}/user/${PROG}.c -o ${PROG_OBJ}
-        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/mp3dec.c ${CMAKE_SOURCE_DIR}/user/mp3dec.h ${CMAKE_SOURCE_DIR}/user/mp3tab.h ${CMAKE_SOURCE_DIR}/kernel/graphics/font_data.c ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fsutil.h ${CMAKE_SOURCE_DIR}/user/fputest.h
+        DEPENDS ${CMAKE_SOURCE_DIR}/user/${PROG}.c ${CMAKE_SOURCE_DIR}/user/mp3dec.c ${CMAKE_SOURCE_DIR}/user/mp3dec.h ${CMAKE_SOURCE_DIR}/user/mp3tab.h ${HARIS_HEADERS} ${CMAKE_SOURCE_DIR}/user/sys.h ${CMAKE_SOURCE_DIR}/user/libc.h ${CMAKE_SOURCE_DIR}/user/fsutil.h ${CMAKE_SOURCE_DIR}/user/fputest.h
         COMMENT "Compiling user/${PROG}.c"
         VERBATIM
     )
     add_custom_command(
         OUTPUT  ${PROG_PE}
         COMMAND ${LLD_LINK} -subsystem:native -entry:_start -nodefaultlib -base:0x400000000000 -fixed -dynamicbase:no
-                -driver -align:4096 -filealign:4096 -out:${PROG_PE} ${PROG_OBJ} ${LIBC_OBJ}
-        DEPENDS ${PROG_OBJ} ${LIBC_OBJ}
+                -driver -align:4096 -filealign:4096 -out:${PROG_PE} ${PROG_OBJ} ${PROG_EXTRA_OBJ} ${LIBC_OBJ}
+        DEPENDS ${PROG_OBJ} ${PROG_EXTRA_OBJ} ${LIBC_OBJ}
         COMMENT "Linking ${PROG}.exe"
         VERBATIM
     )

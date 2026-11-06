@@ -56,7 +56,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
         sys_exit(2);
     }
     const char *src = names[0], *dst = names[1];
-    char base[96], target[FS_PATH_MAX];
+    char base[256], target[FS_PATH_MAX]; /* (a name is up to 255 bytes) */
     if (fs_is_dir(dst)) /* into the folder, under the source's name */
     {
         fs_basename(src, base, sizeof(base));

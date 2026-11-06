@@ -312,7 +312,7 @@ typedef struct
 {
     unsigned size;   /* bytes, 0 for a folder */
     unsigned is_dir; /* 1 = folder */
-    char name[96];   /* NUL-terminated; "" for the root */
+    char name[256];  /* NUL-terminated UTF-8, up to 255 bytes (VFS_NAME_MAX); "" for the root */
 } SysDirEntry;
 
 /* What SYS_GUI_CREATE reads and fills in (the same layout in user/sys.h). */
