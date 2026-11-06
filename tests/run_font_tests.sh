@@ -10,6 +10,11 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/kernel/graphics/font_data.c" \
   "$ROOT/kernel/graphics/font_bn_data.c" \
   "$ROOT/kernel/graphics/font_ext_data.c" \
+  "$ROOT/kernel/graphics/font_ar_data.c" \
+  "$ROOT/kernel/graphics/uni_data.c" \
+  "$ROOT/kernel/graphics/ot.c" \
+  "$ROOT/kernel/graphics/bidi.c" \
+  "$ROOT/kernel/graphics/shape_ar.c" \
   "$ROOT/kernel/graphics/shape_bn.c" \
   -o "$OUT"
 "$OUT"

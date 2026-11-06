@@ -1,6 +1,8 @@
 #include "font.h"
 #include "font_bn.h"
 #include "font_ext.h"
+#include "font_ar.h"
+#include "shape_ar.h"
 #include "shape_bn.h"
 #include "utf8.h"
 #include <assert.h>
@@ -209,6 +211,85 @@ int main(void)
         for (unsigned i = 1; i < ext_n; i++)
             assert(ext_cp[i - 1] < ext_cp[i]);
         assert(ext_cp[0] >= 0x80);
+    }
+
+    /* ---- Arabic: joining shapes, marks, right-to-left drawing ---- */
+    {
+        assert(ar_is_arabic(0x0628) && ar_is_arabic(0x064E) && !ar_is_arabic('A') && !ar_is_arabic(' ') && !ar_is_arabic(0x200D));
+        unsigned ba[] = {0x0628}, ba3[] = {0x0628, 0x0628, 0x0628}, ba_alef[] = {0x0628, 0x0627}, alef[] = {0x0627};
+        unsigned ba_fatha[] = {0x0628, 0x064E}, sentence[] = {0x0645, 0x0631, ' ', 0x0627};
+        BnGlyphPos g[96], h[96], k[96];
+        assert(ar_run_len(sentence, 4) == 2); /* a run ends at a space */
+        int n1 = ar_shape_run(ba, 1, 14, g, 96), n3 = ar_shape_run(ba3, 3, 14, h, 96);
+        assert(n1 == 2 && n3 == 6);           /* ba is a skeleton and a dot mark; three of them */
+        /* the four shapes of ba: alone, at the start, in the middle, at the end of a join are four different glyphs */
+        assert(h[0].gid != h[2].gid && h[2].gid != h[4].gid && h[0].gid != h[4].gid);
+        assert(g[0].gid != h[0].gid && g[0].gid != h[2].gid && g[0].gid != h[4].gid);
+        assert(g[1].adv == 0 && h[1].adv == 0 && h[3].adv == 0 && h[5].adv == 0); /* a dot has no width of its own */
+        assert(g[0].adv > 0 && h[0].adv > 0 && h[2].adv > 0 && h[4].adv > 0);
+        /* alef joins only to the letter before it: after ba it is the final form, a different glyph from the plain alef */
+        int na = ar_shape_run(alef, 1, 14, k, 96);
+        int nb = ar_shape_run(ba_alef, 2, 14, h, 96);
+        assert(na == 1 && nb == 3 && h[2].gid != k[0].gid);
+        /* a mark (fatha) takes no width, and is moved to its place over the letter */
+        int nf = ar_shape_run(ba_fatha, 2, 14, h, 96);
+        assert(nf == 3 && h[2].adv == 0 && (h[2].x_off != 0 || h[2].y_off != 0));
+        /* bigger size, bigger glyphs; a size's face is the one for that size */
+        ar_shape_run(ba, 1, 32, k, 96);
+        assert(k[0].adv > g[0].adv && ar_face_for_size(14) == &font_ar_14 && ar_face_for_size(32) == &font_ar_32);
+        assert(ar_shape_run(ba3, 3, 14, h, 2) == 2); /* max_out respected */
+
+        /* drawing and measuring: Arabic is not '?', has pixels, and a line mixes with Latin */
+        const char *marhaba = "\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7";                    /* مرحبا */
+        const char *bil = "\xd8\xa8\xd8\xa7\xd9\x84\xd8\xb9\xd8\xa7\xd9\x84\xd9\x85";        /* بالعالم */
+        int wm = gfx_text_w(&font_ui_14, marhaba), wb = gfx_text_w(&font_ui_14, bil);
+        assert(wm > 0 && wm != gfx_text_w(&font_ui_14, "?????") && wb > 0);
+        int calls = blend_calls;
+        test_clip = (GfxClip){-100000, -100000, 100000, 100000};
+        gfx_text(&font_ui_14, 10, 5, marhaba, gfx_rgb(255, 255, 255));
+        assert(blend_calls > calls);
+        char line[64];
+        strcpy(line, marhaba);
+        strcat(line, " ");
+        strcat(line, bil);
+        int sp = gfx_text_w(&font_ui_14, " ");
+        assert(gfx_text_w(&font_ui_14, line) >= wm + sp + wb - 2 && gfx_text_w(&font_ui_14, line) <= wm + sp + wb + 2);
+        char mixed[64];
+        strcpy(mixed, "abc ");
+        strcat(mixed, marhaba);
+        int wabc = gfx_text_w(&font_ui_14, "abc ");
+        assert(gfx_text_w(&font_ui_14, mixed) >= wabc + wm - 2 && gfx_text_w(&font_ui_14, mixed) <= wabc + wm + 2);
+        assert(gfx_text_w(&font_ui_20, marhaba) > gfx_text_w(&font_ui_12, marhaba));
+        /* a line break inside right-to-left text: the width is the longest line */
+        char two[64];
+        strcpy(two, marhaba);
+        strcat(two, "\n");
+        strcat(two, bil);
+        assert(gfx_text_w(&font_ui_14, two) == (wm > wb ? wm : wb));
+        /* fit: the bytes of the line's start (in the order typed) that fit */
+        assert(gfx_text_fit(&font_ui_14, line, gfx_text_w(&font_ui_14, line)) == (int)strlen(line));
+        assert(gfx_text_fit(&font_ui_14, line, 1) == 0);
+        assert(gfx_text_fit(&font_ui_14, line, wm) == (int)strlen(marhaba)); /* the first word fits, the space after it does not */
+        /* a long right-to-left line is laid out in chunks and still measures the sum of its parts */
+        char longl[1024];
+        longl[0] = 0;
+        for (int i = 0; i < 40; i++)
+        {
+            strcat(longl, marhaba);
+            strcat(longl, " ");
+        }
+        assert(gfx_text_w(&font_ui_14, longl) >= 40 * (wm + sp) - 40 && gfx_text_w(&font_ui_14, longl) <= 40 * (wm + sp) + 40);
+        /* Arabic digits and punctuation come from the Arabic face too, and nothing is '?' */
+        {   /* (their width happens to equal that of '?': what tells them apart is what is drawn) */
+            int c0 = blend_calls;
+            gfx_text(&font_ui_14, 10, 5, "\xd9\xa1\xd9\xa2\xd9\xa3", gfx_rgb(255, 255, 255));
+            int digits_px = blend_calls - c0;
+            c0 = blend_calls;
+            gfx_text(&font_ui_14, 10, 5, "???", gfx_rgb(255, 255, 255));
+            assert(digits_px > 0 && digits_px != blend_calls - c0);
+        }
+        /* a joiner outside a word and Bengali next to Arabic still work */
+        assert(gfx_text_w(&font_ui_14, "\xe0\xa6\x95\xd9\x85\xe0\xa6\x95") > 0);
     }
 
     puts("Font regression tests passed.");
