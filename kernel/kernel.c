@@ -699,6 +699,19 @@ void kernel_main(const BootInfo *info)
     for (;;)
     {
         unsigned long long pass_start = timer_us();
+        {
+            /* diagnostics: the main loop polls the mouse and draws the windows, so a long gap between two passes is what a frozen pointer is */
+            static unsigned long long prev_pass;
+            static int stalls;
+            if (prev_pass && pass_start - prev_pass >= 300000 && stalls < 60)
+            {
+                stalls++;
+                serial_puts("main loop: ");
+                serial_putd((long long)((pass_start - prev_pass) / 1000));
+                serial_puts(" ms between two passes\n");
+            }
+            prev_pass = pass_start;
+        }
         int worked = 0; /* this pass handled something: poll again at once instead of sleeping */
         cpuload_section_begin();
         int mouse_got = have_mouse && mouse_poll(&m);

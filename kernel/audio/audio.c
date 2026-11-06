@@ -3,6 +3,8 @@
 #include "bluetooth.h"
 #include "hda.h"
 #include "pmm.h"
+#include "serial.h"
+#include "timer.h"
 #include "usb.h"
 #include "wav.h"
 
@@ -52,7 +54,13 @@ int audio_play_wav(const unsigned char *file, unsigned long len)
     unsigned long long buf = pmm_alloc_contiguous_tag(pages, PMM_TAG_OTHER);
     if (!buf)
         return AUDIO_ERR_MEMORY;
+    unsigned long long prep0 = timer_ms();
     wav_to_48k_stereo16(file, &wi, (short *)buf, frames);
+    serial_puts("audio: converted ");
+    serial_putd((long long)frames);
+    serial_puts(" frames in ");
+    serial_putd((long long)(timer_ms() - prep0));
+    serial_puts(" ms\n");
     int r = use_bt ? audio_bt_play((const short *)buf, frames) : use_hda ? hda_play_pcm((const short *)buf, frames) : usb_audio_play_pcm((const short *)buf, frames);
     pmm_free_contiguous(buf, pages);
     if (stopped())

@@ -25,16 +25,25 @@ static int image_ok(const LazyImage *im)
 }
 
 /* Pages loaded by one page fault when the file's bytes go on: a drive is slow per request (a USB stick: a transfer of its own for every
- * read, whatever its size), so the pages after the one that was touched are read in the same request. A program walks its data forward,
- * and the next pages are mostly wanted a moment later (the fonts of Player are 1.5 MiB of such pages). */
-#define READ_AHEAD_PAGES 16
+ * read, whatever its size), so the pages after the one that was touched are read in the same go. A program walks its data forward, and
+ * the next pages are mostly wanted a moment later (the fonts of Player are 1.5 MiB of such pages). The bytes pass through the image's
+ * own buffer (LAZY_IO_BYTES): no allocation in a page fault, and nothing to give back if the process is ended while it waits. */
+#define READ_AHEAD_PAGES (LAZY_IO_BYTES / 4096)
+
+/* The thread gives the others a turn (and the main loop that polls the mouse and draws the windows) at least this often while it reads. */
+#define LAZY_SLICE_US 2000
+#define LAZY_PIECE 8192 /* one request to the drive: the longest the lock is held without a chance to give way */
 
 static unsigned flags_of(const ElfSegment *s) { return ((s->flags & ELF_PF_W) ? ASPACE_WRITE : 0) | ((s->flags & ELF_PF_X) ? ASPACE_EXEC : 0); }
 
 /* Make the page at `page` (page aligned) exist if it belongs to a segment of the program, together with up to READ_AHEAD_PAGES - 1 pages
  * that follow it in the file and are not there yet. 1 = the page is there now (it was, or it was loaded), 0 = no segment has it, -1 = it
  * should be there but cannot be loaded (no memory, the file is gone or unreadable); a failure of a read-ahead page alone is not one: that
- * page simply loads later, when it is touched. */
+ * page simply loads later, when it is touched.
+ *
+ * Reading may take long on a slow drive, and the page fault (like a system call) holds the big kernel lock: between the pieces of the read
+ * the thread yields (task_yield gives the lock to the others), as Linux's page fault sleeps while the page is read in. Whatever may have
+ * changed meanwhile is looked at again afterwards: the drive may be gone. */
 static int fill_page(LazyImage *im, AddressSpace *as, u64 page)
 {
     u64 phys;
@@ -64,27 +73,29 @@ static int fill_page(LazyImage *im, AddressSpace *as, u64 page)
             }
 
         unsigned long long t0 = timer_ms();
-        unsigned char *buf = 0; /* (heap, not stack: a frame of 4 KiB or more needs the stack probe __chkstk, which the kernel does not have) */
         if (len)
         {
             if (!image_ok(im))
                 return -1;
-            buf = kmalloc(total);
-            if (!buf)
-                return -1;
+            unsigned long long slice = timer_us();
             for (unsigned done = 0; done < total;)
             {
-                int got = vfs_read(im->node, (unsigned)(file_off + done), buf + done, total - done);
+                unsigned want = total - done > LAZY_PIECE ? LAZY_PIECE : total - done;
+                int got = vfs_read(im->node, (unsigned)(file_off + done), im->io + done, want);
                 if (got <= 0)
-                {
-                    kfree(buf);
                     return -1;
-                }
                 done += (unsigned)got;
+                if (done < total && timer_us() - slice >= LAZY_SLICE_US)
+                {
+                    task_yield();
+                    slice = timer_us();
+                }
             }
+            if (!image_ok(im)) /* the drive may have gone while the others ran */
+                return -1;
         }
 
-        unsigned used = 0; /* bytes of buf placed so far */
+        unsigned used = 0; /* bytes of the buffer placed so far */
         int result = 1;
         for (unsigned k = 0; k < npages; k++)
         {
@@ -99,10 +110,9 @@ static int fill_page(LazyImage *im, AddressSpace *as, u64 page)
             }
             volatile unsigned char *to = (volatile unsigned char *)phys + dst2; /* (a new page is zero: only the file's bytes are copied; no memcpy) */
             for (unsigned b = 0; b < len2; b++)
-                to[b] = buf[used + b];
+                to[b] = im->io[used + b];
             used += len2;
         }
-        kfree(buf); /* (NULL for a page that is only .bss) */
         im->reads += len ? 1 : 0;
         im->pages += used || len == 0 ? npages : 0;
         im->bytes += total;

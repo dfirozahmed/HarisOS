@@ -309,7 +309,9 @@ int idle_init(void)
     idt_set(IDLE_VEC_TLB, idle_isr_tlb);
     IDT[8].ist = 1;  /* #DF runs on the TSS's IST1 stack: it may be the kernel stack that broke */
     IDT[2].ist = 3;  /* an NMI runs on IST3, never on the user's stack (the SYSCALL entry has a window where RSP is the user's) */
-    IDT[14].ist = 2; /* so does #PF (IST2): a thread stack that overflowed into its guard page cannot take the frame */
+    /* #PF has no IST stack of its own (like Linux): a page fault from ring 3 arrives on the thread's own kernel stack, so the handler can do what a
+     * system call does, read a file and give the CPU to other threads (process_lazy.c). A kernel stack that overflowed into its guard page cannot
+     * take the #PF frame: the CPU raises #DF (IST1) instead, and fault.c recognises the guard page by CR2 there. */
     idt_set(VEC_SPURIOUS, idle_isr_spurious);
     idt_load();
 

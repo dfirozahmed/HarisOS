@@ -15,6 +15,7 @@ long long sys_audio_play(const SyscallFrame *f)
     if (!as || !aspace_user_ok(as, ptr, len, 0))
         return -1;
     ull pages = (len + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    unsigned long long copy0 = timer_ms();
     unsigned char *buf = (unsigned char *)pmm_alloc_contiguous_tag(pages, PMM_TAG_OTHER);
     if (!buf)
         return -1;
@@ -24,6 +25,11 @@ long long sys_audio_play(const SyscallFrame *f)
         copy_from_user((char *)buf + done, ptr + done, n);
         done += n;
     }
+    serial_puts("audio: copied ");
+    serial_putd((long long)(len / 1024));
+    serial_puts(" KiB in ");
+    serial_putd((long long)(timer_ms() - copy0));
+    serial_puts(" ms\n");
     int r = audio_play_wav(buf, len);
     pmm_free_contiguous((unsigned long long)buf, pages);
     return r == 0 ? 0 : -100 + r; /* -101 .. -104 file errors, -110 none, -111 busy, -112 memory */

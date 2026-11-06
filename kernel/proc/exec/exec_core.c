@@ -74,7 +74,8 @@ unsigned char *read_whole(int node, unsigned *size_out, int *err)
     unsigned done = 0;
     while (done < size)
     {
-        unsigned want = size - done > 65536 ? 65536 : size - done;
+        unsigned piece = task_current() != 0 ? 16384 : 65536; /* (a system call: smaller pieces, the main loop gets a turn after each) */
+        unsigned want = size - done > piece ? piece : size - done;
         int got = vfs_read(node, done, buf + done, want);
         if (got <= 0)
         {

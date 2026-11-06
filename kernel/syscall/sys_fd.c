@@ -149,8 +149,16 @@ long long file_read(Process *p, ull idx, ull ptr, ull len)
         return -1; /* the file was deleted while open */
     char buf[CHUNK];
     ull total = 0;
+    unsigned long long slice = timer_us();
     while (total < len)
     {
+        /* A big read from a USB drive can take a second, and a system call keeps the kernel (the main loop that polls the mouse and
+         * draws the windows) out the whole time. Every 2 ms the other threads and processors get their turn. */
+        if (timer_us() - slice >= 2000)
+        {
+            task_yield();
+            slice = timer_us();
+        }
         if (p->file[idx].pos >= vn->size)
             break; /* at or past the end: 0 bytes, whatever a drive's read would say about such an offset */
         ull left = vn->size - p->file[idx].pos;

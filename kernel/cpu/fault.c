@@ -133,7 +133,7 @@ typedef struct
 } __attribute__((packed)) Tss;
 
 static unsigned char DF_STACK[4096] __attribute__((aligned(16)));
-static unsigned char PF_STACK[4096] __attribute__((aligned(16))); /* IST2: a page fault from a stack overflow */
+static unsigned char PF_STACK[4096] __attribute__((aligned(16))); /* IST2: not used by any vector now (the #PF runs on the thread's stack); the TSS slot stays */
 /* IST3: a non-maskable interrupt can arrive at any instruction, including the ones in the system call entry between
  * SYSCALL and the switch to the kernel stack (RSP is still the user's) and the last instructions before SYSRET (RSP
  * is the user's again). Without its own stack the handler would run on a stack ring 3 controls. */
@@ -426,8 +426,10 @@ void fault_dispatch(FaultFrame *f)
     static char text[1024];
     int len = fault_format(text, sizeof(text), f, cr2);
 
-    /* A page fault inside a thread's guard page is a stack overflow: say so and whose it is. */
-    const char *owner = f->vector == 14 ? task_guard_hit(cr2) : 0;
+    /* A page fault inside a thread's guard page is a stack overflow: say so and whose it is. The CPU could not push the #PF frame on the
+     * overflowed stack and raised #DF instead (the #PF has no IST stack): CR2 still holds the guard page address then, as for a #PF that
+     * could be reported. */
+    const char *owner = (f->vector == 14 || f->vector == 8) ? task_guard_hit(cr2) : 0;
     if (owner)
     {
         static const char NOTE[] = "\nSTACK OVERFLOW IN THREAD: ";

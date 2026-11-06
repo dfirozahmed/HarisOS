@@ -168,7 +168,23 @@ long long syscall_dispatch(SyscallFrame *f)
     /* The stack pointer may be below the mapped part of the stack (a big frame was made with one subtraction and nothing touched yet): map
      * it down to there now, so that the pointers the call checks (a buffer in that frame) are valid. */
     process_stack_grow(f->user_rsp);
+    ull number = f->rax;
+    ull t0 = timer_us();
     long long r = dispatch_call(f);
+    ull took = timer_us() - t0; /* diagnostics: a call that takes long keeps the main loop (mouse, windows) waiting unless it sleeps or yields */
+    static int reported;
+    if (took >= 30000 && reported < 60 && number != SYS_SLEEP && number != SYS_AUDIO_PLAY && number != SYS_WAIT) /* (these sleep on purpose: the lock is not held meanwhile) */
+    {
+        reported++;
+        serial_puts("syscall ");
+        serial_putd((long long)number);
+        serial_puts(" took ");
+        serial_putd((long long)(took / 1000));
+        serial_puts(" ms in ");
+        const char *who = task_name(task_current());
+        serial_puts(who ? who : "?");
+        serial_puts("\n");
+    }
     if (f->rax != SYS_SIGRETURN && signal_deliverable(process_current()))
         r = signal_syscall_return(f, r);
     return r;

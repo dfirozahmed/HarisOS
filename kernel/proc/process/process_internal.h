@@ -21,6 +21,7 @@
 typedef unsigned long long u64;
 
 /* The file of a demand paged program (process_lazy.c): what the pages are loaded from. */
+#define LAZY_IO_BYTES (8 * 4096) /* the most one page fault reads in one go */
 typedef struct LazyImage
 {
     int node;      /* VFS node of the file */
@@ -30,6 +31,7 @@ typedef struct LazyImage
     ElfSegment seg[ELF_MAX_SEGMENTS];
     unsigned reads, pages, bytes; /* what the loads did so far (printed when the process ends): file reads, pages made, bytes read */
     unsigned long long ms;        /* time spent in them, ms */
+    unsigned char io[LAZY_IO_BYTES]; /* the bytes of a read pass through here on their way into the new pages */
 } LazyImage;
 
 /* ---- types, constants and variables used by more than one file ---- */
