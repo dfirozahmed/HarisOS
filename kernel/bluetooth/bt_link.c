@@ -372,6 +372,8 @@ static void chan_reset(void)
     SD.acc_len = 0;
     SD.send = SD.want_close = 0;
     bt_avdtp_reset();
+    bt_rfcomm_reset();
+    bt_obex_reset();
 }
 
 static void sdp_fail(const char *why, int code)
@@ -394,6 +396,8 @@ static void chan_link_down(void)
     }
     bt_a2dp_reset();
     bt_avdtp_reset(); /* before the channels are forgotten: it says "link ended" */
+    bt_rfcomm_reset();
+    bt_obex_reset();
     for (int i = 0; i < CHAN_N; i++)
         CH[i].state = CH_FREE;
     SD.want_close = 0;
@@ -471,6 +475,8 @@ int bt_chan_send(int slot, const unsigned char *data, unsigned n)
         pdu[4 + i] = data[i];
     return bt_acl_send(L.handle, pdu, 4 + n) < 0 ? -1 : 0;
 }
+
+int bt_chan_tx_idle(void) { return L.txh == L.txt; }
 
 int bt_chan_queue(int slot, const unsigned char *data, unsigned n)
 {
@@ -672,7 +678,28 @@ static void chan_data(unsigned cid, const unsigned char *d, unsigned n)
     }
     else if (c->user == BT_USER_AVDTP_SIG || c->user == BT_USER_AVDTP_MEDIA)
         bt_avdtp_rx(c->user, d, n);
+    else if (c->user == BT_USER_RFCOMM)
+        bt_rfcomm_rx(d, n);
 }
+
+/* what the last service discovery found */
+int bt_sdp_status(void)
+{
+    switch (SD.state)
+    {
+    case SDP_OPENING:
+    case SDP_ASKING:
+        return 1;
+    case SDP_DONE:
+        return 2;
+    case SDP_FAILED:
+        return 3;
+    default:
+        return 0;
+    }
+}
+int bt_sdp_count(void) { return SD.state == SDP_DONE ? SD.nsvc : 0; }
+const BtSdpService *bt_sdp_service(int i) { return SD.state == SDP_DONE && i >= 0 && i < SD.nsvc ? &SD.svc[i] : 0; }
 
 int bt_sdp_browse(void)
 {
@@ -998,6 +1025,7 @@ void bt_link_step(void)
 
     sdp_step(now);
     bt_avdtp_step(now);
+    bt_rfcomm_step(now);
 
     /* send what is queued; copy the entry first, sending may handle events that queue more */
     while (L.txt != L.txh && L.state == BT_LINK_UP)
@@ -1017,6 +1045,7 @@ void bt_link_step(void)
     }
 
     bt_a2dp_step(now); /* audio, after the signalling that is waiting */
+    bt_obex_step(now); /* file data, after the queued control frames (it sends its own, bigger, PDUs at once) */
 
     if (L.probe == 1)
     {

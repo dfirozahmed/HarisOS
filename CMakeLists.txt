@@ -298,6 +298,8 @@ set(KERNEL_SOURCES
     kernel/bluetooth/bt_avdtp.c                     # Bluetooth: AVDTP, the control side of A2DP streaming (host-tested)
     kernel/bluetooth/bt_pair.c                      # Bluetooth: pairing, link key, encryption (host-tested)
     kernel/bluetooth/bt_sdp.c                       # Bluetooth: SDP request and answer parser (host-tested)
+    kernel/bluetooth/bt_rfcomm.c                    # Bluetooth: RFCOMM serial channels over L2CAP (host-tested)
+    kernel/bluetooth/bt_obex.c                      # Bluetooth: OBEX Object Push, sends a file to a phone (host-tested)
     kernel/bluetooth/bt_link.c                      # Bluetooth: ACL link, L2CAP signalling, probe (host-tested)
     kernel/bluetooth/bt_scan.c                      # Bluetooth: device discovery (inquiry, names), host-tested
     kernel/bluetooth/bt_rtl.c                       # Bluetooth: Realtek firmware file parser and download (host-tested)

@@ -281,6 +281,8 @@ const char *bt_sdp_uuid_name(unsigned uuid)
     switch (uuid)
     {
     case 0x1101: return "serial port";
+    case 0x1105: return "file push (OPP)";
+    case 0x1106: return "file transfer (FTP)";
     case 0x1108: return "headset";
     case 0x1112: return "headset gateway";
     case 0x1131: return "headset (HS)";

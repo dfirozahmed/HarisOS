@@ -307,10 +307,64 @@ void bt_a2dp_reset(void);
 int bt_avdtp_media(int *slot, BtSbcConfig *cfg); /* 1 while the stream is open (bt_avdtp_ready()): the media channel's slot and the agreed setting */
 int bt_chan_send(int slot, const unsigned char *data, unsigned n); /* one PDU on the channel now (the media packets: up to 1000 bytes). Not inside handlers. */
 
+/* ---- what the last service discovery found (bt_sdp_browse): for programs that decide by the services ---- */
+int bt_sdp_status(void); /* 0 never asked, 1 running, 2 done, 3 failed */
+int bt_sdp_count(void);  /* services found by the last browse */
+const BtSdpService *bt_sdp_service(int i);
+
+/* ---- RFCOMM: serial-like channels over L2CAP (kernel/bluetooth/bt_rfcomm.c) ----
+ * Many services (file transfer, hands-free, serial port) are a "server channel" on RFCOMM, which is the old serial cable idea carried over
+ * L2CAP channel PSM 3: first the multiplexer is started (SABM on DLCI 0), then the data channel (SABM on DLCI = server channel * 2), then the
+ * two sides exchange modem signals (MSC) and data flows in UIH frames. We are the side that starts, we do not negotiate credits
+ * (frames are 127 bytes at most, the default). ETSI TS 07.10 with the Bluetooth adaptation, RFCOMM 1.2. */
+typedef enum { BT_RF_IDLE = 0, BT_RF_OPENING, BT_RF_OPEN, BT_RF_CLOSING, BT_RF_CLOSED, BT_RF_FAILED } BtRfState;
+
+typedef struct
+{
+    unsigned addr, ctrl; /* the address and control bytes as sent (control with the poll/final bit) */
+    unsigned dlci;       /* addr >> 2 */
+    int cr;              /* the command/response bit of the address */
+    const unsigned char *data;
+    unsigned len;
+} BtRfFrame;
+
+#define BT_RF_MAX_FRAME 127 /* the data bytes of one frame (N1 default) */
+unsigned char bt_rfcomm_fcs(const unsigned char *p, unsigned n);                       /* frame check sequence over n bytes */
+unsigned bt_rfcomm_build(unsigned char *out, unsigned cap, unsigned addr, unsigned ctrl, const unsigned char *data, unsigned n); /* one frame; its size, 0 if it does not fit */
+int bt_rfcomm_parse(const unsigned char *p, unsigned n, BtRfFrame *f);                 /* 0 = a good frame, -1 = too short or bad check sequence */
+int bt_rfcomm_open(unsigned server_channel);    /* 0 = started (the L2CAP channel is being opened); BT_E_LINK_BUSY / BT_E_NOT_UP */
+void bt_rfcomm_close(void);
+BtRfState bt_rfcomm_state(void);
+int bt_rfcomm_send(const unsigned char *data, unsigned n); /* cuts into frames and sends them now (not inside handlers); n or -1 */
+void bt_rfcomm_set_rx(void (*rx)(const unsigned char *data, unsigned n)); /* who gets the data of the open channel (called from the ACL handler) */
+void bt_rfcomm_rx(const unsigned char *d, unsigned n);     /* a PDU of the L2CAP channel */
+void bt_rfcomm_step(unsigned long long now);
+void bt_rfcomm_reset(void);                                /* the link ended */
+const char *bt_rfcomm_why(int *code);                      /* why it failed (static text) */
+
+/* ---- OBEX: Object Push, sending one file to a phone or computer (kernel/bluetooth/bt_obex.c) ----
+ * bt_obex_send() opens RFCOMM to the device's Object Push server channel (found by SDP: service class 0x1105), connects OBEX, sends the file as a
+ * series of PUT requests (the device answers "continue" after each; a phone usually asks its user to accept first, so the first answer can take
+ * a while) and disconnects. The file comes through a reader function so the Bluetooth code needs no file system. Stepped by the main loop. */
+typedef int (*BtObexRead)(void *ctx, unsigned offset, unsigned char *buf, unsigned n); /* bytes read (n unless the file ended), or < 0 */
+typedef enum { BT_OBEX_IDLE = 0, BT_OBEX_RUNNING, BT_OBEX_DONE, BT_OBEX_FAILED } BtObexState;
+
+int bt_obex_send(const char *name, unsigned size, BtObexRead rd, void *ctx, unsigned server_channel); /* 0 = started */
+BtObexState bt_obex_state(void);
+void bt_obex_progress(unsigned *done, unsigned *total); /* bytes the device has accepted / the file's size */
+const char *bt_obex_why(int *code);                      /* BT_OBEX_FAILED: why (static text) and the OBEX response code (0xC0 ..) or a BT_E_* */
+void bt_obex_cancel(void);
+void bt_obex_step(unsigned long long now);
+void bt_obex_reset(void);
+int bt_obex_line(char *buf, unsigned cap);
+unsigned bt_obex_put_packet(unsigned char *out, unsigned cap, const unsigned char *cid, const unsigned short *name16, unsigned name_chars, unsigned total,
+                            int first, int final, const unsigned char *body, unsigned body_len); /* one PUT request; its size, 0 if it does not fit */
+
 /* ---- L2CAP channels for the protocols above (bt_link.c): SDP and AVDTP use these ---- */
 #define BT_USER_SDP 1
 #define BT_USER_AVDTP_SIG 2
 #define BT_USER_AVDTP_MEDIA 3
+#define BT_USER_RFCOMM 4
 enum { BT_CHAN_FREE = 0, BT_CHAN_CONNECTING, BT_CHAN_CONFIG, BT_CHAN_OPEN, BT_CHAN_CLOSING };
 int bt_chan_open(unsigned psm, int user);  /* asks the device for a channel to this service; the slot (0 ..) or -1 */
 void bt_chan_close(int slot);
@@ -318,6 +372,7 @@ int bt_chan_state(int slot);               /* BT_CHAN_* */
 int bt_chan_result(int slot);              /* why the device refused (the L2CAP result: 2 PSM not supported, 3 security block ...), 0 = no refusal */
 unsigned bt_chan_mtu(int slot);
 int bt_chan_queue(int slot, const unsigned char *data, unsigned n); /* a small PDU (up to 60 bytes) in the send queue: 0 or -1. Fine inside handlers. */
+int bt_chan_tx_idle(void); /* 1 when nothing waits in the send queue (so a bt_chan_send now cannot overtake a queued PDU) */
 void bt_avdtp_rx(int user, const unsigned char *data, unsigned n);  /* data that arrived on an AVDTP channel */
 void bt_avdtp_step(unsigned long long now);
 void bt_avdtp_reset(void);                                          /* the link ended */

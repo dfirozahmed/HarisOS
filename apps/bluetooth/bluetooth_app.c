@@ -15,22 +15,25 @@
 #include "taskbar.h"
 #include "timer.h"
 #include "ui.h"
+#include "vfs.h"
 #include "wm.h"
 
 #define ROW_H 46
 #define HEAD_H 76
-#define FOOT_H 100
+#define FOOT_H 150
 #define BTN_SCAN 0
 #define BTN_DISCONNECT 1
 #define BTN_CONNECT 2
+#define BTN_SEND 3
 
 /* how long each step may take before the app gives up (the stack has time-outs of its own, these are the safety net) */
 #define T_LINK_MS 30000
 #define T_PAIR_MS 40000
 #define T_AV_MS 45000
+#define T_SDP_MS 15000
 #define T_DOWN_MS 10000
 
-enum { OP_NONE, OP_SCAN, OP_LINK, OP_PAIR, OP_AV, OP_STOP_AV, OP_STOP_LINK };
+enum { OP_NONE, OP_SCAN, OP_LINK, OP_PAIR, OP_SDP, OP_AV, OP_SEND, OP_STOP_AV, OP_STOP_LINK };
 
 static Window *BT_WIN;
 static int OP;
@@ -40,6 +43,10 @@ static int SCROLL;
 static UiScroll SB;
 static UiMenu MENU; /* the right-click menu of a device: Connect, Disconnect, Copy name, Copy address, Scan */
 enum { BTM_CONNECT, BTM_DISCONNECT, BTM_COPY_NAME, BTM_COPY_ADDR, BTM_SCAN }; /* its item ids */
+static int FILE_CH;              /* the RFCOMM channel of the device's Object Push service (it takes files), 0 = it has none */
+static int SEND_NODE = -1;       /* the file being sent (a vfs node) */
+static char SEND_NAME[64];
+static int DISC_AFTER;           /* Disconnect was pressed during a transfer: cancel it, then disconnect */
 static int VOL_DRAG;             /* the left button went down on the volume slider and is still held */
 static char MSG[100];
 static int MSG_KIND;             /* 0 none, 1 good, 2 bad */
@@ -158,11 +165,11 @@ static const char *class_word(const BtScanDev *d)
     }
 }
 
-/* only audio devices (or ones that did not tell their class) can be used for sound */
+/* what this app can do with a device: sound (audio class), receive files (phones, computers); a device that did not tell its class is tried */
 static int usable(const BtScanDev *d)
 {
     int major = d->cls[1] & 0x1F;
-    return major == 4 || (d->cls[0] == 0 && d->cls[1] == 0 && d->cls[2] == 0);
+    return major == 1 || major == 2 || major == 4 || (d->cls[0] == 0 && d->cls[1] == 0 && d->cls[2] == 0);
 }
 
 static const char *dev_name(const BtScanDev *d) { return d->name_state == 1 && d->name[0] ? d->name : "Unknown device"; }
@@ -179,6 +186,10 @@ static unsigned long long signature(void)
     s = s * 64 + (unsigned)bt_scan_count();
     s = s * 7 + (unsigned)bt_a2dp_audio_ready();
     s = s * 128 + (unsigned)bt_a2dp_volume();
+    unsigned done = 0, total = 0;
+    bt_obex_progress(&done, &total);
+    s = s * 101 + (total ? (unsigned)((unsigned long long)done * 100 / total) : 0);
+    s = s * 7 + (unsigned)bt_obex_state();
     if (OP == OP_SCAN)
         s = s * 1024 + (unsigned)scan_percent(); /* the progress bar */
     else if (OP != OP_NONE)
@@ -189,7 +200,7 @@ static unsigned long long signature(void)
 /* ---- layout ---- */
 typedef struct
 {
-    UiRect head, list, foot, volume;
+    UiRect head, list, foot, volume, file;
 } Layout;
 
 static Layout layout(UiRect body)
@@ -201,6 +212,7 @@ static Layout layout(UiRect body)
     ui_cut_right(&r, UI_SCROLL_W);
     l.list = r;
     l.volume = ui_rect(l.foot.x + 76, l.foot.y + 12, l.foot.w - 76 - 56, 20);
+    l.file = ui_rect(l.foot.x + 76, l.foot.y + 44, l.foot.w - 76 - 124, 30); /* the path of the file to send; the Send button is to its right */
     return l;
 }
 
@@ -235,7 +247,8 @@ static void update_buttons(Window *w)
     int up = bt_hci_up();
     BtLinkState ls = bt_link_state();
     w->btn[BTN_SCAN].enabled = idle && up && !link_active();
-    w->btn[BTN_DISCONNECT].enabled = idle && up && (ls == BT_LINK_UP || ls == BT_LINK_CONNECTING);
+    w->btn[BTN_DISCONNECT].enabled = (idle || OP == OP_SEND) && up && (ls == BT_LINK_UP || ls == BT_LINK_CONNECTING);
+    w->btn[BTN_SEND].enabled = idle && up && ls == BT_LINK_UP && FILE_CH && w->edits[0].len > 0;
     const BtScanDev *d = (SEL >= 0 && SEL < bt_scan_count()) ? bt_scan_dev(SEL) : 0;
     w->btn[BTN_CONNECT].enabled = idle && up && !link_active() && bt_scan_state() != BT_SCAN_INQUIRY && bt_scan_state() != BT_SCAN_NAMES && d && usable(d);
 }
@@ -272,9 +285,15 @@ static void bt_draw(Window *w, UiRect body)
         put_str(line, sizeof line, &n, "Disconnecting...");
         col = t->warning;
     }
-    else if (OP == OP_LINK || OP == OP_PAIR || OP == OP_AV)
+    else if (OP == OP_SEND)
     {
-        put_str(line, sizeof line, &n, OP == OP_LINK ? "Connecting..." : OP == OP_PAIR ? "Pairing..." : "Preparing the music stream...");
+        put_str(line, sizeof line, &n, "Sending ");
+        put_str(line, sizeof line, &n, SEND_NAME);
+        col = t->warning;
+    }
+    else if (OP == OP_LINK || OP == OP_PAIR || OP == OP_SDP || OP == OP_AV)
+    {
+        put_str(line, sizeof line, &n, OP == OP_LINK ? "Connecting..." : OP == OP_PAIR ? "Pairing..." : OP == OP_SDP ? "Asking what the device can do..." : "Preparing the music stream...");
         col = t->warning;
     }
     else if (ls == BT_LINK_UP)
@@ -300,6 +319,17 @@ static void bt_draw(Window *w, UiRect body)
     n = 0;
     if (!bt_hci_up())
         bt_status(line, sizeof line);
+    else if (OP == OP_SEND)
+    {
+        unsigned done, total;
+        bt_obex_progress(&done, &total);
+        put_dec(line, sizeof line, &n, total ? (unsigned)((unsigned long long)done * 100 / total) : 0);
+        put_str(line, sizeof line, &n, "% - ");
+        put_dec(line, sizeof line, &n, done);
+        put_str(line, sizeof line, &n, " of ");
+        put_dec(line, sizeof line, &n, total);
+        put_str(line, sizeof line, &n, " bytes");
+    }
     else if (OP != OP_NONE && OP != OP_SCAN)
     {
         put_dec(line, sizeof line, &n, (unsigned)((timer_ms() - OP_T0) / 1000));
@@ -312,12 +342,18 @@ static void bt_draw(Window *w, UiRect body)
         put_str(line, sizeof line, &n, " found");
     }
     else if (ls == BT_LINK_UP)
-        put_str(line, sizeof line, &n, audio ? "Sound from the Player goes to this device." : "Linked, but the music stream is not open.");
+        put_str(line, sizeof line, &n, audio ? "Sound from the Player goes to this device." : FILE_CH ? "This device accepts files: type a path below." : "Linked, but the music stream is not open.");
     else
         put_str(line, sizeof line, &n, bt_scan_count() ? "Pick a device below." : "Put the headset in pairing mode, then press Scan.");
     ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 32, l.head.w - 48 - 240, 22), line, UI_TEXT_DIM, UI_ALIGN_LEFT, t->text_dim);
     if (OP == OP_SCAN)
         ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 240, 8), scan_percent());
+    else if (OP == OP_SEND)
+    {
+        unsigned done, total;
+        bt_obex_progress(&done, &total);
+        ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 240, 8), total ? (int)((unsigned long long)done * 100 / total) : 0);
+    }
     ui_separator(l.head.x, l.head.y + l.head.h - 6, l.head.w);
 
     /* the list */
@@ -359,7 +395,7 @@ static void bt_draw(Window *w, UiRect body)
             put_str(info, sizeof info, &k, " dBm");
         }
         ui_text_in_color(ui_rect(r.x + 44, r.y + 24, r.w - 44 - badge_w - 8, 18), info, UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
-        const char *badge = cur ? (ls == BT_LINK_UP ? (audio ? "Audio on" : "Connected") : "Connecting...") : ok ? "" : "No audio";
+        const char *badge = cur ? (ls == BT_LINK_UP ? (audio ? "Audio on" : FILE_CH ? "File transfer" : "Connected") : "Connecting...") : ok ? "" : "No audio";
         if (*badge)
             ui_text_in_color(ui_rect(r.x + r.w - badge_w - 6, r.y, badge_w, r.h - 2), badge, UI_TEXT_SMALL, UI_ALIGN_RIGHT,
                              cur ? (ls == BT_LINK_UP ? t->success : t->warning) : t->warning);
@@ -375,10 +411,18 @@ static void bt_draw(Window *w, UiRect body)
     put_dec(vol, sizeof vol, &n, (unsigned)bt_a2dp_volume());
     put_str(vol, sizeof vol, &n, "%");
     ui_text_in_color(ui_rect(l.volume.x + l.volume.w + 6, l.foot.y + 10, 48, 24), vol, UI_TEXT_BODY, UI_ALIGN_RIGHT, audio ? t->text : t->text_dim);
+    if (ls == BT_LINK_UP && FILE_CH)
+    {
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 46, 70, 26), "File", UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
+        ui_edit_draw(l.file, &w->edits[0], "Path, e.g. /HARISOS/photo.jpg", OP == OP_NONE);
+    }
+    else
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 46, l.foot.w - 4, 26), "To send a file, connect a phone or computer that accepts files.", UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                         t->text_dim);
     if (MSG[0])
-        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 44, l.foot.w - 140, 50), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 84, l.foot.w - 140, 56), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
     else if (SEL >= 0 && SEL < total && !usable(bt_scan_dev(SEL)))
-        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 44, l.foot.w - 140, 50), "Only audio devices (headsets, speakers) can be connected here.", UI_TEXT_SMALL,
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 84, l.foot.w - 140, 56), "This kind of device has no sound or file service this app can use.", UI_TEXT_SMALL,
                          UI_ALIGN_LEFT, t->warning);
     if (MENU.open && w != wm_top())
         ui_menu_close(&MENU); /* focus moved elsewhere (another window or a dialog) */
@@ -418,6 +462,69 @@ static void fail(Window *w, const char *what, unsigned idx)
     finish(w, 2, m);
 }
 
+/* what the device offers, from the services SDP found */
+static int has_class(const BtSdpService *s, unsigned id) { return s->class_id[0] == id || s->class_id[1] == id; }
+
+static int sdp_has_audio(void)
+{
+    for (int i = 0; i < bt_sdp_count(); i++)
+        if (has_class(bt_sdp_service(i), 0x110B)) /* A2DP sink */
+            return 1;
+    return 0;
+}
+
+static int sdp_file_channel(void)
+{
+    for (int i = 0; i < bt_sdp_count(); i++)
+    {
+        const BtSdpService *s = bt_sdp_service(i);
+        if (has_class(s, 0x1105) && s->has_rfcomm && s->rfcomm >= 1 && s->rfcomm <= 30) /* Object Push */
+            return (int)s->rfcomm;
+    }
+    return 0;
+}
+
+static int send_read(void *ctx, unsigned off, unsigned char *buf, unsigned n)
+{
+    (void)ctx;
+    return vfs_read(SEND_NODE, off, buf, n);
+}
+
+static void start_send(Window *w)
+{
+    if (OP != OP_NONE || !w->btn[BTN_SEND].enabled)
+        return;
+    int id = vfs_lookup(w->edits[0].text);
+    const VfsNode *f = id >= 0 ? vfs_node(id) : 0;
+    if (!f || f->is_dir)
+    {
+        finish(w, 2, "No such file. Type its full path, for example /HARISOS/photo.jpg.");
+        return;
+    }
+    unsigned char probe;
+    if (f->size && vfs_read(id, 0, &probe, 1) < 1)
+    {
+        finish(w, 2, "This file cannot be read (files on the RAM disk have no content).");
+        return;
+    }
+    SEND_NODE = id;
+    SEND_NAME[0] = 0;
+    int k = 0;
+    put_str(SEND_NAME, sizeof SEND_NAME, &k, f->name);
+    int r = bt_obex_send(f->name, f->size, send_read, 0, (unsigned)FILE_CH);
+    if (r != 0)
+    {
+        finish(w, 2, r == BT_E_LINK_BUSY ? "The last transfer is still closing - try again in a few seconds." : "Could not start the transfer.");
+        return;
+    }
+    MSG[0] = 0;
+    MSG_KIND = 0;
+    DISC_AFTER = 0;
+    begin(OP_SEND);
+    update_buttons(w);
+    wm_invalidate();
+}
+
 static void start_scan(Window *w)
 {
     if (OP != OP_NONE || !bt_hci_up() || link_active())
@@ -455,6 +562,7 @@ static void start_connect(Window *w)
     }
     MSG[0] = 0;
     MSG_KIND = 0;
+    FILE_CH = 0;
     begin(OP_LINK);
     update_buttons(w);
     wm_invalidate();
@@ -462,12 +570,19 @@ static void start_connect(Window *w)
 
 static void start_disconnect(Window *w)
 {
+    if (OP == OP_SEND) /* cancel the transfer first; the tick then disconnects */
+    {
+        bt_obex_cancel();
+        DISC_AFTER = 1;
+        return;
+    }
     if (OP != OP_NONE || !bt_hci_up() || !link_active())
         return;
     bt_a2dp_stop_audio();
     bt_avdtp_stop();
     MSG[0] = 0;
     MSG_KIND = 0;
+    FILE_CH = 0;
     begin(OP_STOP_AV);
     update_buttons(w);
     wm_invalidate();
@@ -514,11 +629,12 @@ static int bt_tick(Window *w)
     case OP_PAIR:
         if (line_of(0x80, line, sizeof line) && starts(line, "pair: done"))
         {
-            int r = bt_avdtp_start_keep(); /* open the music stream, but start it only when sound comes */
-            if (r != 0)
-                fail(w, "Could not start the music stream.", 0xA0);
-            else
+            if (bt_sdp_browse() == 0) /* what can the device do: sound, files? */
+                begin(OP_SDP);
+            else if (bt_avdtp_start_keep() == 0) /* no SDP possible: try the music stream as before */
                 begin(OP_AV);
+            else
+                fail(w, "Could not start the music stream.", 0xA0);
         }
         else if (line_of(0x80, line, sizeof line) && starts(line, "pair: failed"))
             fail(w, "Pairing did not work.", 0x80);
@@ -527,9 +643,76 @@ static int bt_tick(Window *w)
         else if (el > T_PAIR_MS)
             fail(w, "Pairing took too long.", 0x80);
         break;
+    case OP_SDP:
+    {
+        int st = bt_sdp_status();
+        if (st == 2 || st == 3)
+        {
+            FILE_CH = st == 2 ? sdp_file_channel() : 0;
+            if ((st == 2 && sdp_has_audio()) || (st == 3 && !FILE_CH))
+            {
+                if (bt_avdtp_start_keep() == 0) /* a failed SDP is tried as a headset: that is what the old way did */
+                    begin(OP_AV);
+                else
+                    fail(w, "Could not start the music stream.", 0xA0);
+            }
+            else if (FILE_CH)
+                finish(w, 1, "Connected. This device accepts files: type the path of a file and press Send.");
+            else
+                fail(w, "The device offers no sound or file service this app can use.", 0);
+        }
+        else if (bt_link_state() != BT_LINK_UP)
+            fail(w, "The link was lost.", 0);
+        else if (el > T_SDP_MS)
+            fail(w, "The device did not tell its services in time.", 0);
+        break;
+    }
+    case OP_SEND:
+    {
+        BtObexState os = bt_obex_state();
+        if (os == BT_OBEX_DONE)
+        {
+            char m[100];
+            int k = 0;
+            unsigned done, total;
+            bt_obex_progress(&done, &total);
+            m[0] = 0;
+            put_str(m, sizeof m, &k, "Sent ");
+            put_str(m, sizeof m, &k, SEND_NAME);
+            put_str(m, sizeof m, &k, " (");
+            put_dec(m, sizeof m, &k, total);
+            put_str(m, sizeof m, &k, " bytes).");
+            finish(w, 1, m);
+        }
+        else if (os == BT_OBEX_FAILED)
+        {
+            int code;
+            const char *why = bt_obex_why(&code);
+            char m[100];
+            int k = 0;
+            int cancelled = starts(why, "cancelled");
+            m[0] = 0;
+            if (cancelled)
+                put_str(m, sizeof m, &k, "Transfer cancelled.");
+            else
+            {
+                put_str(m, sizeof m, &k, "Not sent: ");
+                put_str(m, sizeof m, &k, why);
+                put_str(m, sizeof m, &k, ".");
+            }
+            finish(w, cancelled ? 1 : 2, m);
+            if (DISC_AFTER)
+            {
+                DISC_AFTER = 0;
+                start_disconnect(w);
+            }
+        }
+        break;
+    }
     case OP_AV:
         if (line_of(0xA0, line, sizeof line) && starts(line, "a2dp: ready"))
-            finish(w, 1, "Connected. Sound from the Player goes to the device; the volume keys change the volume.");
+            finish(w, 1, FILE_CH ? "Connected. Sound goes to the device, and it accepts files: type a path and press Send."
+                                 : "Connected. Sound from the Player goes to the device; the volume keys change the volume.");
         else if (line_of(0xA0, line, sizeof line) && (starts(line, "a2dp: failed") || starts(line, "a2dp: closed")))
             fail(w, "The device did not accept the music stream.", 0xA0);
         else if (bt_link_state() != BT_LINK_UP)
@@ -573,6 +756,12 @@ static void on_connect(UiButton *b, void *user)
 {
     (void)b;
     start_connect((Window *)user);
+}
+
+static void on_send(UiButton *b, void *user)
+{
+    (void)b;
+    start_send((Window *)user);
 }
 
 static void on_disconnect(UiButton *b, void *user)
@@ -670,6 +859,12 @@ static int bt_press(Window *w, int x, int y)
         bt_a2dp_set_volume(vol_at(&l, x));
         return 1;
     }
+    if (bt_link_state() == BT_LINK_UP && FILE_CH && w->edits[0].field.w > 0 && ui_contains(w->edits[0].field, x, y))
+    {
+        ui_edit_mouse(&w->edits[0], x, y, 1);
+        ui_caret_restart();
+        return 1;
+    }
     if (OP != OP_NONE)
         return 0;
     if (ui_contains(l.list, x, y))
@@ -709,7 +904,12 @@ static int bt_drag(Window *w, int x, int y, unsigned buttons)
         SCROLL = SB.pos;
         return changed;
     }
-    (void)y;
+    if (w->edits[0].dragging && ui_edit_mouse(&w->edits[0], x, y, buttons))
+    {
+        ui_caret_restart();
+        wm_add_damage(ui_inset(w->edits[0].field, -3));
+        return 2;
+    }
     return 0;
 }
 
@@ -752,7 +952,10 @@ static void bt_key(Window *w, const KeyEvent *k)
     }
     if (k->key == KEY_ESC)
     {
-        wm_close(w);
+        if (OP == OP_SEND)
+            bt_obex_cancel(); /* Esc stops the transfer first; a second Esc closes the window */
+        else
+            wm_close(w);
         return;
     }
     if (OP != OP_NONE)
@@ -771,7 +974,18 @@ static void bt_key(Window *w, const KeyEvent *k)
         wm_invalidate();
     }
     else if (k->key == KEY_ENTER)
-        start_connect(w);
+    {
+        if (w->btn[BTN_SEND].enabled)
+            start_send(w);
+        else
+            start_connect(w);
+    }
+    else if (bt_link_state() == BT_LINK_UP && FILE_CH && ui_edit_key(&w->edits[0], k)) /* anything else types the path of the file */
+    {
+        ui_caret_restart();
+        update_buttons(w);
+        wm_invalidate();
+    }
 }
 
 static void bt_close(Window *w)
@@ -818,6 +1032,10 @@ static void bluetooth_app_open(void)
     win->on_tick = bt_tick;
     win->on_close = bt_close;
     win->icon = TASKBAR_ICON_BLUETOOTH;
+    win->edit_count = 1; /* the path of the file to send */
+    win->focus = 0;
+    win->caret = 1;
+    win->edits[0].max = 200;
     BT_WIN = win;
     OP = OP_NONE;
     SEL = -1;
@@ -827,12 +1045,16 @@ static void bluetooth_app_open(void)
     MSG[0] = 0;
     MSG_KIND = 0;
     SIG = 0;
+    DISC_AFTER = 0;
+    if (!link_active())
+        FILE_CH = 0; /* (with a link still up from before, the app remembers what the device offered) */
     desktop_set_status(0);
 
     int cw = w - 2, ch = h - ui_theme()->titlebar_h - 2;
     wm_add_button_ex(win, "Scan", UI_BTN_SECONDARY, ui_rect(cw - 8 - 100, 8 + 14, 100, 34), WM_ANCHOR_RIGHT, on_scan, win);
     wm_add_button_ex(win, "Disconnect", UI_BTN_SECONDARY, ui_rect(cw - 8 - 100 - 8 - 124, 8 + 14, 124, 34), WM_ANCHOR_RIGHT, on_disconnect, win);
     wm_add_button_ex(win, "Connect", UI_BTN_PRIMARY, ui_rect(cw - 8 - 116, ch - 8 - 42, 116, 34), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_connect, win);
+    wm_add_button_ex(win, "Send", UI_BTN_PRIMARY, ui_rect(cw - 8 - 108, ch - 8 - FOOT_H + 44, 108, 32), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_send, win);
     update_buttons(win);
     if (bt_hci_up() && bt_scan_count() == 0 && bt_scan_state() == BT_SCAN_IDLE && !link_active()) /* nothing to show yet: look around */
         start_scan(win);
