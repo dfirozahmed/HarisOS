@@ -94,6 +94,9 @@ typedef struct {
     unsigned char net_bus, net_dev, net_fn;
     char net_status[96]; /* one line: chip, link, counters, or why it did not start */
     char amd_status[96]; /* one line from the AMD GPU bring-up (amd_bringup.h), "" = no AMD GPU */
+    int bt_found;        /* a USB Bluetooth chip is attached (bluetooth.h) */
+    int bt_working;      /* ... and it answers HCI commands */
+    char bt_status[96];  /* one line: chip, versions, address, or why it did not start */
     int audio_count;
     DevmgrAudio audio[DEVMGR_MAX_AUDIO];
 } DevmgrInputs;

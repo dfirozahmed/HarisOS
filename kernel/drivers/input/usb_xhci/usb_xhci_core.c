@@ -154,7 +154,10 @@ void dispatch(Xhci *x, const Trb *e)
 {
     u32 type = (e->d3 >> 10) & 63;
     if (type == 32)
+    {
         hid_event(x, e);
+        bt_event(x, e); /* each looks at slot + endpoint and ignores what is not its own */
+    }
     else if (type == 34)
         port_event(x, e);
 }

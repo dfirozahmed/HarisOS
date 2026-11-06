@@ -44,6 +44,7 @@ try {
         @('Power tests', 'tests/run_power_tests.sh'),
         @('I2C-HID discovery tests', 'tests/run_i2chid_tests.sh'),
         @('PCI and Device Manager tests', 'tests/run_devmgr_tests.sh'),
+        @('Bluetooth HCI tests', 'tests/run_bt_tests.sh'),
         @('Display adapter tests', 'tests/run_display_tests.sh'),
         @('AMD GPU (GART) tests', 'tests/run_amdgpu_tests.sh'),
         @('AMD GPU 3D pipeline tests', 'tests/run_amd3d_tests.sh'),

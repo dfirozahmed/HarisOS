@@ -234,6 +234,11 @@ int devmgr_build(const DevmgrInputs *in)
                      in->usb_audio_vol ? "Playback: 48 kHz 16-bit stereo; volume control: yes"
                                        : "Playback: 48 kHz 16-bit stereo; volume control: no");
         }
+        if (in->bt_found) {
+            DevEntry *e = add(DEV_CAT_NETWORK, "Bluetooth controller", "USB (xHCI), HCI", in->bt_working);
+            if (e)
+                copy(e->note, sizeof e->note, in->bt_status);
+        }
         /* I2C-HID devices from the ACPI tables; a started one is the touchpad in use */
         int n = in->i2c_count < DEVMGR_MAX_I2C ? in->i2c_count : DEVMGR_MAX_I2C;
         for (int i = 0; i < n; i++) {

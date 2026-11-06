@@ -117,6 +117,27 @@ int main(void)
     in.usb_audio = in.usb_audio_vol = 0;
     CHECK(devmgr_build(&in) == before - 1);
 
+    /* a Bluetooth chip: one Network row, "driver" only while the chip answers HCI, the status line as note; none when absent */
+    in.bt_found = 1;
+    in.bt_working = 1;
+    strcpy(in.bt_status, "BT 0bda:b00a hci 8");
+    CHECK(devmgr_build(&in) == before);
+    found = 0;
+    for (int i = 0; i < before; i++)
+        if (strcmp(devmgr_get(i)->name, "Bluetooth controller") == 0 && devmgr_get(i)->has_driver &&
+            devmgr_get(i)->category == DEV_CAT_NETWORK && strcmp(devmgr_get(i)->note, "BT 0bda:b00a hci 8") == 0)
+            found = 1;
+    CHECK(found);
+    in.bt_working = 0; /* found but it does not answer */
+    devmgr_build(&in);
+    found = 0;
+    for (int i = 0; i < before; i++)
+        if (strcmp(devmgr_get(i)->name, "Bluetooth controller") == 0 && !devmgr_get(i)->has_driver)
+            found = 1;
+    CHECK(found);
+    in.bt_found = 0;
+    CHECK(devmgr_build(&in) == before - 1);
+
     /* xHCI present but the driver did not start -> no driver */
     in.usb_running = 0;
     devmgr_build(&in);

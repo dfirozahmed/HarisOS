@@ -96,6 +96,11 @@ int bring_up(Xhci *x, const Loc *L)
     if (!AUD.active && aud_find(x, total, &ad))
         return aud_setup(x, di, L, cfg_value, &ad);
 
+    /* A Bluetooth controller (class 0xE0 / 1 / 1)? Usually a chip soldered into the laptop that hangs on a USB port. */
+    BtDesc bd;
+    if (!BT.active && bt_find(x, total, &bd))
+        return bt_setup(x, di, L, cfg_value, &bd);
+
     /* Look for boot-protocol keyboard / mouse interfaces (at most one of each kind). */
     struct
     {

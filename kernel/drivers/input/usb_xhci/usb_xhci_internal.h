@@ -202,6 +202,32 @@ typedef struct
     unsigned in_mps, out_mps, in_burst, out_burst;
 } MscDesc;
 
+/* Bluetooth (USB class 0xE0 subclass 1 protocol 1, "Bluetooth Primary Controller"): interface 0 has an interrupt IN endpoint
+ * (HCI events) and two bulk endpoints (ACL data in / out); HCI commands go over the control endpoint. One chip at a time. */
+#define BT_EV_BUF 260 /* an HCI event is at most 2 + 255 bytes */
+
+typedef struct
+{
+    int iface, intr_addr, in_addr, out_addr;
+    unsigned intr_mps, in_mps, out_mps, intr_interval;
+} BtDesc;
+
+typedef struct
+{
+    int active;
+    Xhci *x;
+    int slot, dev;
+    unsigned short vid, pid;
+    int intr_dci, in_dci, out_dci;
+    unsigned intr_mps;
+    Ring rintr, rin, rout;
+    volatile u8 *ibuf; /* the interrupt IN transfer lands here (one packet, intr_mps bytes) */
+    u64 ibuf_phys;
+    u8 ev[BT_EV_BUF]; /* HCI event being put together from the packets */
+    unsigned ev_have;
+    int errs;
+} Bt;
+
 /* ---- usb_xhci_core.c ---- */
 u32 pci_read(u32 bus, u32 dev, u32 fn, u32 off);
 void pci_write(u32 bus, u32 dev, u32 fn, u32 off, u32 v);
@@ -257,6 +283,13 @@ int aud_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const AudDesc *ad);
 void aud_release(void);
 int aud_percent_to_db(int vmin, int vmax, int percent);
 int aud_db_to_percent(int vmin, int vmax, int v);
+
+/* ---- usb_xhci_bt.c ---- */
+extern Bt BT;
+int bt_find(Xhci *x, u32 total, BtDesc *bd);
+int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd);
+void bt_event(Xhci *x, const Trb *e);
+void bt_release(void);
 
 /* ---- usb_xhci_dev.c ---- */
 int bring_up(Xhci *x, const Loc *L);

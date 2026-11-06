@@ -1,5 +1,6 @@
 /* Device Manager glue: collects what PCI and the input drivers know right now.
  * Kept apart from devmgr.c so that file stays free of drivers and can be tested on the host. */
+#include "bluetooth.h"
 #include "blk.h"
 #include "devmgr.h"
 #include "display.h"
@@ -75,6 +76,9 @@ int devmgr_refresh(void)
         in.net_fn = loc[2];
     }
     amd_gpu_bringup_summary(in.amd_status, sizeof in.amd_status);
+    in.bt_found = bt_info()->state != BT_ABSENT;
+    in.bt_working = bt_hci_up();
+    bt_status(in.bt_status, sizeof in.bt_status);
     in.audio_count = 0;
     for (int i = 0; i < hda_count() && in.audio_count < DEVMGR_MAX_AUDIO; i++)
     {

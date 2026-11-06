@@ -290,6 +290,8 @@ set(KERNEL_SOURCES
     kernel/drivers/input/usb_xhci/usb_xhci_enum.c   # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_msc.c    # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_audio.c  # xHCI: USB audio (UAC 1.0 streaming, isochronous OUT)
+    kernel/drivers/input/usb_xhci/usb_xhci_bt.c     # xHCI: Bluetooth controller (HCI over USB: control, interrupt, bulk)
+    kernel/bluetooth/bt_hci.c                       # Bluetooth: HCI core (commands, events, start-up, status line)
     kernel/drivers/input/usb_xhci/usb_xhci_dev.c    # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_ctrl.c   # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_stub.c   # xHCI

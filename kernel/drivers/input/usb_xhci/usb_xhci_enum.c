@@ -62,6 +62,8 @@ void dev_remove(int di)
     }
     if (AUD.active && AUD.dev == di)
         aud_release();
+    if (BT.active && BT.dev == di)
+        bt_release(); /* the slot is disabled above: the controller no longer touches its rings and buffer */
     d->used = 0;
 }
 
