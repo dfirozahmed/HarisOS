@@ -38,6 +38,8 @@ static unsigned long long OP_T0; /* when the current step began */
 static int SEL = -1;             /* row in the stack's device list */
 static int SCROLL;
 static UiScroll SB;
+static UiMenu MENU; /* the right-click menu of a device: Connect, Disconnect, Copy name, Copy address, Scan */
+enum { BTM_CONNECT, BTM_DISCONNECT, BTM_COPY_NAME, BTM_COPY_ADDR, BTM_SCAN }; /* its item ids */
 static int VOL_DRAG;             /* the left button went down on the volume slider and is still held */
 static char MSG[100];
 static int MSG_KIND;             /* 0 none, 1 good, 2 bad */
@@ -378,7 +380,9 @@ static void bt_draw(Window *w, UiRect body)
     else if (SEL >= 0 && SEL < total && !usable(bt_scan_dev(SEL)))
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 44, l.foot.w - 140, 50), "Only audio devices (headsets, speakers) can be connected here.", UI_TEXT_SMALL,
                          UI_ALIGN_LEFT, t->warning);
-    (void)w;
+    if (MENU.open && w != wm_top())
+        ui_menu_close(&MENU); /* focus moved elsewhere (another window or a dialog) */
+    ui_menu_draw(&MENU);
 }
 
 /* ---- the steps ---- */
@@ -577,6 +581,69 @@ static void on_disconnect(UiButton *b, void *user)
     start_disconnect((Window *)user);
 }
 
+/* the menu's commands are the buttons' and keys' own functions; the buttons' enabled flags say which of them can run now */
+static void menu_run(int id)
+{
+    Window *w = BT_WIN;
+    if (!w)
+        return;
+    const BtScanDev *d = (SEL >= 0 && SEL < bt_scan_count()) ? bt_scan_dev(SEL) : 0;
+    char text[40];
+    int len = 0;
+    text[0] = 0;
+    switch (id)
+    {
+    case BTM_CONNECT:
+        start_connect(w);
+        break;
+    case BTM_DISCONNECT:
+        start_disconnect(w);
+        break;
+    case BTM_SCAN:
+        start_scan(w);
+        break;
+    case BTM_COPY_NAME:
+    case BTM_COPY_ADDR:
+        if (!d)
+            break;
+        if (id == BTM_COPY_NAME)
+            put_str(text, sizeof text, &len, dev_name(d));
+        else
+            put_addr(text, sizeof text, &len, d->addr);
+        ui_clipboard_set(text, len);
+        break;
+    default:
+        break;
+    }
+}
+
+/* right click on a device: select it and open its menu; elsewhere in the list only Scan. Nothing while a step is running. */
+static int bt_rpress(Window *w, int x, int y)
+{
+    ui_menu_close(&MENU);
+    if (OP != OP_NONE)
+        return 1;
+    Layout l = layout(wm_content(w));
+    int row = SCROLL + (y - l.list.y) / ROW_H;
+    int on_dev = ui_contains(l.list, x, y) && (y - l.list.y) / ROW_H < visible_rows(&l) && row >= 0 && row < bt_scan_count();
+    if (!on_dev && !ui_contains(l.list, x, y))
+        return 0; /* the header and the footer have no menu */
+    if (on_dev)
+        select_row(w, row);
+    ui_menu_clear(&MENU);
+    if (on_dev)
+    {
+        ui_menu_add(&MENU, BTM_CONNECT, "Connect", "Enter", w->btn[BTN_CONNECT].enabled ? 0 : UI_MENU_DISABLED);
+        ui_menu_add(&MENU, BTM_DISCONNECT, "Disconnect", 0, w->btn[BTN_DISCONNECT].enabled ? 0 : UI_MENU_DISABLED);
+        ui_menu_add(&MENU, BTM_COPY_NAME, "Copy name", 0, 0);
+        ui_menu_add(&MENU, BTM_COPY_ADDR, "Copy address", 0, 0);
+        ui_menu_separator(&MENU);
+    }
+    ui_menu_add(&MENU, BTM_SCAN, "Scan", "F5", w->btn[BTN_SCAN].enabled ? 0 : UI_MENU_DISABLED);
+    ui_menu_open(&MENU, x, y, wm_content(w));
+    return 1;
+}
+
 static int vol_at(const Layout *l, int x)
 {
     int p = (x - l->volume.x) * 100 / (l->volume.w > 0 ? l->volume.w : 1);
@@ -585,6 +652,11 @@ static int vol_at(const Layout *l, int x)
 
 static int bt_press(Window *w, int x, int y)
 {
+    if (MENU.open) /* a click on an item shows it pressed and it runs when the button is released (bt_drag); a click anywhere else only closes the menu */
+    {
+        ui_menu_press(&MENU, x, y);
+        return 1;
+    }
     Layout l = layout(wm_content(w));
     sb_sync(&l);
     if (ui_scroll_press(&SB, x, y))
@@ -613,6 +685,14 @@ static int bt_press(Window *w, int x, int y)
 
 static int bt_drag(Window *w, int x, int y, unsigned buttons)
 {
+    if (MENU.open && MENU.press >= 0)
+    {
+        int id = -1;
+        int r = ui_menu_release(&MENU, x, y, buttons, &id); /* 2 = released on the item it was pressed on */
+        if (r == 2)
+            menu_run(id);
+        return r != 0;
+    }
     Layout l = layout(wm_content(w));
     if (VOL_DRAG)
     {
@@ -635,6 +715,8 @@ static int bt_drag(Window *w, int x, int y, unsigned buttons)
 
 static int bt_hover(Window *w, int x, int y)
 {
+    if (MENU.open)
+        return ui_menu_hover(&MENU, x, y);
     Layout l = layout(wm_content(w));
     sb_sync(&l);
     return ui_scroll_hover(&SB, x, y);
@@ -642,6 +724,8 @@ static int bt_hover(Window *w, int x, int y)
 
 static int bt_wheel(Window *w, int steps)
 {
+    int had_menu = MENU.open;
+    ui_menu_close(&MENU); /* the rows move under it */
     Layout l = layout(wm_content(w));
     int max = bt_scan_count() - visible_rows(&l);
     if (max < 0)
@@ -652,13 +736,20 @@ static int bt_wheel(Window *w, int steps)
         SCROLL = max;
     if (SCROLL < 0)
         SCROLL = 0;
-    return SCROLL != old;
+    return SCROLL != old || had_menu;
 }
 
 static void bt_key(Window *w, const KeyEvent *k)
 {
     if (!k->pressed)
         return;
+    if (MENU.open) /* the menu has the keyboard: Up / Down / Enter / Esc, every other key is ignored */
+    {
+        int id = -1;
+        if (ui_menu_key(&MENU, k, &id) == 2)
+            menu_run(id);
+        return;
+    }
     if (k->key == KEY_ESC)
     {
         wm_close(w);
@@ -686,6 +777,7 @@ static void bt_key(Window *w, const KeyEvent *k)
 static void bt_close(Window *w)
 {
     (void)w;
+    ui_menu_close(&MENU);
     BT_WIN = 0; /* a running link stays: Bluetooth audio goes on without the window */
     OP = OP_NONE;
     VOL_DRAG = 0;
@@ -721,6 +813,8 @@ static void bluetooth_app_open(void)
     win->on_drag = bt_drag;
     win->on_wheel = bt_wheel;
     win->on_hover = bt_hover;
+    win->on_rpress = bt_rpress;
+    ui_menu_clear(&MENU);
     win->on_tick = bt_tick;
     win->on_close = bt_close;
     win->icon = TASKBAR_ICON_BLUETOOTH;
