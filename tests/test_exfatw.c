@@ -129,6 +129,24 @@ int main(void)
     CHECK(exfat_create(&F, &root, 0, big, 0, &e2) == 0 && e2.secondary == 18);   /* 255 characters: the limit */
     CHECK(check() == 0);
 
+    /* Unicode names: UTF-8 in the system, UTF-16 on the disk (the checker recomputes the name hash from the UTF-16 units) */
+    {
+        const char *bn = "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe.txt"; /* বাংলা.txt: 9 units, one name entry */
+        const char *emoji = "x\xf0\x9f\x98\x80y";                                            /* above U+FFFF: a surrogate pair */
+        ExEntry u1, u2, back;
+        CHECK(exfat_create(&F, &root, 0, bn, 0, &u1) == 0 && u1.secondary == 2);
+        CHECK(exfat_create(&F, &root, 0, bn, 0, &back) == EXFAT_ERR_EXISTS);
+        CHECK(exfat_create(&F, &root, 0, emoji, 0, &u2) == 0 && u2.secondary == 2);
+        CHECK(find(&root, bn, &back) && back.set_index == u1.set_index);
+        CHECK(find(&root, emoji, &back) && back.set_index == u2.set_index);
+        CHECK(exfat_create(&F, &root, 0, "\xff.txt", 0, &back) == EXFAT_ERR_BADNAME);
+        CHECK(exfat_create(&F, &root, 0, "\xed\xa0\x80.txt", 0, &back) == EXFAT_ERR_BADNAME);
+        CHECK(check() == 0);
+        CHECK(exfat_rename(&F, &root, 0, &u1, "plain.txt") == 0 && find(&root, "plain.txt", &back) && !find(&root, bn, &back));
+        CHECK(exfat_rename(&F, &root, 0, &u1, bn) == 0 && find(&root, bn, &back));
+        CHECK(check() == 0);
+    }
+
     /* ---- data ---- */
     CHECK(find(&root, "new.txt", &e));
     CHECK(write_pat(&root, &e, 0, 100, 5) == 100 && e.size == 100 && e.first_cluster >= 2);

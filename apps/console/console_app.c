@@ -91,7 +91,7 @@ static void on_key(Window *w, const KeyEvent *k)
         ch = '\n';
     else if (k->key == KEY_BACKSPACE)
         ch = '\b';
-    else if (k->ch >= 32 && k->ch < 127)
+    else if ((k->ch >= 32 && k->ch < 127) || (k->ch >= 0x80 && k->ch <= 0x10FFFF)) /* ASCII or a Unicode code point */
         ch = k->ch;
     if (ch)
         console_key(handle_of(w), ch);

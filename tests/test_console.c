@@ -139,7 +139,8 @@ int main(void)
     CHECK(console_read(c, in, 64) == -1);                     /* all taken */
     CHECK(console_read(c, in, 0) == 0);
     CHECK(console_key(c, '\b') == 0);                         /* nothing to erase on an empty line */
-    CHECK(console_key(c, 0x01) == 0 && console_key(c, 0x7F) == 0 && console_key(c, 300) == 0);
+    CHECK(console_key(c, 0x01) == 0 && console_key(c, 0x7F) == 0);
+    CHECK(console_key(c, 0xD800) == 0 && console_key(c, 0x110000) == 0 && console_key(c, -1) == 0); /* not Unicode characters */
 
     /* partial reads, several lines queued, empty line */
     type(c, "one\rtwo\r\r");
@@ -148,6 +149,52 @@ int main(void)
     CHECK(console_read(c, in, 64) == 4 && memcmp(in, "two\n", 4) == 0);
     CHECK(console_read(c, in, 64) == 1 && in[0] == '\n');     /* an empty line is just the newline */
     CHECK(console_read(c, in, 64) == -1);
+
+    /* Unicode: the grid and the line editor hold UTF-8, one byte per cell, and treat a multi-byte character as one unit */
+    {
+        int u = console_open("UTF8");
+        char r8[CONSOLE_COLS + 1], in8[64];
+        put(u, "a\xe0\xa6\x95z"); /* a, U+0995, z */
+        CHECK(row(u, 0, r8) && strcmp(r8, "a\xe0\xa6\x95z") == 0);
+        put(u, "\b\b"); /* back over z, then over the whole 3-byte character */
+        CHECK(console_cursor_col(u) == 1);
+        put(u, "q");
+        /* the cursor was on the character's first cell, so q replaced that one byte: the two continuation bytes stay (the
+         * text drawing code shows them as '?'), exactly as a terminal overwrites cell by cell */
+        CHECK(row(u, 0, r8) && strcmp(r8, "aq\xa6\x95z") == 0);
+        put(u, "\n");
+        /* a character is never split by the end of a row */
+        for (int i = 0; i < CONSOLE_COLS - 1; i++)
+            put(u, "k");
+        put(u, "\xe0\xa6\x95");
+        CHECK(row(u, 0, r8) && strcmp(r8, "\xe0\xa6\x95") == 0);
+        CHECK(row(u, 1, r8) && strlen(r8) == CONSOLE_COLS - 1);
+        /* bytes that cannot be UTF-8 and control characters show as '?' */
+        put(u, "\n");
+        console_write(u, "\xc0\xf5\x07", 3);
+        CHECK(row(u, 0, r8) && strcmp(r8, "???") == 0);
+        console_close(u);
+
+        int e = console_open("TYPED");
+        CHECK(console_key(e, 0x995) == 1 && console_key(e, 0x9BF) == 1 && console_key(e, 'x') == 1);
+        CHECK(row(e, 0, r8) && strcmp(r8, "\xe0\xa6\x95\xe0\xa6\xbf" "x") == 0); /* echoed as UTF-8 */
+        CHECK(console_key(e, '\b') == 1 && row(e, 0, r8) && strcmp(r8, "\xe0\xa6\x95\xe0\xa6\xbf") == 0);
+        CHECK(console_key(e, '\b') == 1 && row(e, 0, r8) && strcmp(r8, "\xe0\xa6\x95") == 0); /* one Backspace, one character */
+        CHECK(console_cursor_col(e) == 3);
+        CHECK(console_key(e, '\n') == 1);
+        CHECK(console_read(e, in8, 64) == 4 && memcmp(in8, "\xe0\xa6\x95\n", 4) == 0); /* the program reads UTF-8 bytes */
+        for (int i = 0; i < CONSOLE_LINE_MAX; i++)
+            console_key(e, 0x995);
+        console_key(e, '\n'); /* a full line takes whole characters only */
+        int got = console_read(e, in8, 64), total = 0;
+        while (got > 0)
+        {
+            total += got;
+            got = console_read(e, in8, 64);
+        }
+        CHECK(total > 0 && (total - 1) % 3 == 0);
+        console_close(e);
+    }
 
     /* a line that is too long stops accepting characters (and the screen shows only what was accepted) */
     for (int i = 0; i < CONSOLE_LINE_MAX + 50; i++)

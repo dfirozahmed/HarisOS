@@ -154,7 +154,27 @@ static void test_basic(const char *tag)
     CHECK(find(&root, "new.txt", &d) && d.recno == e.recno);
     CHECK(ntfs_create(&F, &root, "NEW.TXT", 0, &d) == NTFS_ERR_EXISTS);          /* collation: same name */
     CHECK(ntfs_create(&F, &root, "hello.txt", 0, &d) == NTFS_ERR_EXISTS);
-    CHECK(ntfs_create(&F, &root, "caf\xC3\xA9.txt", 0, &d) == NTFS_ERR_BADNAME);
+    /* UTF-8 names: the image already has a file with U+00E9 in its name; $UpCase says U+00C9 is the same letter */
+    CHECK(ntfs_create(&F, &root, "caf\xC3\xA9.txt", 0, &d) == NTFS_ERR_EXISTS);
+    CHECK(ntfs_create(&F, &root, "CAF\xC3\x89.TXT", 0, &d) == NTFS_ERR_EXISTS);
+    CHECK(ntfs_create(&F, &root, "\xff.txt", 0, &d) == NTFS_ERR_BADNAME);          /* not UTF-8 */
+    CHECK(ntfs_create(&F, &root, "\xed\xa0\x80.txt", 0, &d) == NTFS_ERR_BADNAME);  /* a UTF-16 surrogate encoded in UTF-8 */
+    {
+        const char *bn = "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe.txt"; /* বাংলা.txt */
+        const char *emoji = "x\xf0\x9f\x98\x80y";                                            /* a surrogate pair on the disk */
+        NtEntry b1, b2, back2;
+        CHECK(ntfs_create(&F, &root, bn, 0, &b1) >= 0 && !b1.is_dir);
+        CHECK(ntfs_create(&F, &root, emoji, 0, &b2) >= 0);
+        CHECK(ntfs_create(&F, &root, bn, 0, &d) == NTFS_ERR_EXISTS);
+        fsck(1, "after creating Unicode names");                                   /* the index stays sorted and consistent */
+        CHECK(find(&root, bn, &back2) && back2.recno == b1.recno);
+        CHECK(find(&root, emoji, &back2) && back2.recno == b2.recno);
+        CHECK(ntfs_rename(&F, &b2, "\xe0\xa6\x95\xe0\xa6\xbf.txt") == 0 && find(&root, "\xe0\xa6\x95\xe0\xa6\xbf.txt", &back2) && !find(&root, emoji, &back2));
+        fsck(1, "after renaming to a Unicode name");
+        CHECK(ntfs_delete(&F, &b1) == 0 && !find(&root, bn, &back2));
+        CHECK(ntfs_delete(&F, &b2) == 0);
+        fsck(1, "after deleting Unicode names");
+    }
 
     unsigned char buf[40000], back[40000];
     fill(buf, 100, 7);
@@ -294,7 +314,7 @@ static void test_rename(const char *tag)
     CHECK(n == 1 && find(&root, "short.txt", &d));
     fsck(1, "rename of a file that had a DOS name");
     CHECK(ntfs_rename(&F, &e, "short.txt") == 0);                                   /* the same name: nothing to do */
-    CHECK(find(&root, "caf\x01.txt", &e) || find(&root, "caf_.txt", &e));
+    CHECK(find(&root, "caf\xc3\xa9.txt", &e)); /* the image's file named with U+00E9, as UTF-8 */
     {   /* names around the one with the non-ASCII letter: the order comes from the $UpCase table (U+00E9 -> U+00C9) */
         static const char *const near_names[] = {"cafe.txt", "CAFZ.txt", "caf~.txt", "caf.txt", "cag.txt", "cafa.txt", "CAF.TXT2"};
         NtEntry x;

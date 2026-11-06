@@ -20,7 +20,7 @@
 
 typedef struct
 {
-    unsigned short offset;  /* start of this glyph's bitmap in Font.bitmap */
+    unsigned int offset;    /* start of this glyph's bitmap in Font.bitmap (32 bit: the Bengali bitmaps are over 64 KB) */
     unsigned char w, h;     /* bitmap size in pixels (0 = nothing to draw, e.g. space) */
     signed char bx;         /* bitmap left edge relative to the pen position */
     signed char by;         /* bitmap top edge, measured from the top of the line */

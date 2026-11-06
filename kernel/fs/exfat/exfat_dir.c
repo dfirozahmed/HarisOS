@@ -1,5 +1,6 @@
 /* exFAT: folders. */
 #include "exfat_internal.h"
+#include "utf8.h"
 
 /* ---- folders ------------------------------------------------------ */
 /* the index-th 32-byte entry of a folder: 1 = got it, 0 = past the end, -1 = error */
@@ -68,6 +69,7 @@ int exfat_list(ExFat *f, const ExEntry *dir, ExFatListFn cb, void *user)
             continue;
         }
         char name[EXFAT_NAME_MAX];
+        unsigned short units[256]; /* the name as stored: UTF-16, at most 255 units */
         u32 nlen = st[3], got = 0;
         for (u32 k = 2; k <= secondary && got < nlen; k++)
         {
@@ -80,10 +82,14 @@ int exfat_list(ExFat *f, const ExEntry *dir, ExFatListFn cb, void *user)
             for (int c = 0; c < 15 && got < nlen; c++, got++)
             {
                 u32 ch = rd16(ne + 2 + 2 * c);
-                name[got] = (char)(ch >= 0x20 && ch < 0x7F ? ch : '_'); /* other characters: '_' */
+                units[got] = (unsigned short)(ch < 0x20 || ch == 0x7F ? '_' : ch); /* control characters: '_' */
             }
         }
-        name[got] = 0;
+        /* Names are UTF-8 inside the system. One that needs EXFAT_NAME_MAX bytes or more in UTF-8 (255 units can be up to 765
+         * bytes) cannot be handed out whole, and exFAT has no short name to fall back on: it is left out of the listing. */
+        int fits = got > 0 && got == nlen && utf8_size_from_utf16(units, (int)got) < EXFAT_NAME_MAX;
+        if (fits)
+            utf8_from_utf16(units, (int)got, name, EXFAT_NAME_MAX);
         ExEntry x;
         zero(&x, sizeof x);
         x.first_cluster = rd32(st + 20);
@@ -95,8 +101,8 @@ int exfat_list(ExFat *f, const ExEntry *dir, ExFatListFn cb, void *user)
         x.set_index = index;
         x.secondary = (u8)secondary;
         index += secondary + 1;
-        if (got == 0 || got < nlen)
-            continue; /* broken name */
+        if (!fits)
+            continue; /* broken name, or too long for UTF-8 */
         if (attr & EXFAT_ATTR_DIR)
             x.valid = x.size;
         reported++;

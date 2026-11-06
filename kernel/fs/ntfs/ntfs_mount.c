@@ -1,8 +1,11 @@
 /* NTFS: names, mount, folder listing, file data (the read side). */
 #include "ntfs_internal.h"
+#include "utf8.h"
 
 /* ---- names -------------------------------------------------------- */
-/* a $FILE_NAME key (parent ref, times, sizes, flags, name length, namespace, name) -> ASCII name */
+/* a $FILE_NAME key (parent ref, times, sizes, flags, name length, namespace, name) -> UTF-8 name. The name is UTF-16 on the
+ * disk (at most 255 units, so up to 765 bytes in UTF-8): one that needs NTFS_NAME_MAX bytes or more cannot be handed out
+ * whole and gives 0, which leaves the entry out of the listing. */
 static u32 key_name(const u8 *key, u32 key_len, char *out)
 {
     if (key_len < 66)
@@ -10,14 +13,15 @@ static u32 key_name(const u8 *key, u32 key_len, char *out)
     u32 n = key[64];
     if (66 + n * 2 > key_len)
         return 0;
-    u32 o = 0;
-    for (u32 i = 0; i < n && o < NTFS_NAME_MAX - 1; i++)
+    unsigned short units[255];
+    for (u32 i = 0; i < n; i++)
     {
         u32 ch = rd16(key + 66 + 2 * i);
-        out[o++] = (char)(ch >= 0x20 && ch < 0x7F ? ch : '_');
+        units[i] = (unsigned short)(ch < 0x20 || ch == 0x7F ? '_' : ch); /* control characters: '_' */
     }
-    out[o] = 0;
-    return o;
+    if (utf8_size_from_utf16(units, (int)n) >= NTFS_NAME_MAX)
+        return 0;
+    return (u32)utf8_from_utf16(units, (int)n, out, NTFS_NAME_MAX);
 }
 
 /* ---- mount -------------------------------------------------------- */
@@ -88,13 +92,14 @@ int ntfs_mount(Ntfs *nt, int blk)
     /* volume label: $Volume (record 3), attribute $VOLUME_NAME */
     if (load_stream(nt, 3, AT_VOLUME_NAME, 0, &S_MAIN) == 0 && S_MAIN.found && S_MAIN.resident)
     {
-        u32 n = 0;
-        for (u32 i = 0; i + 1 < S_MAIN.res_len && n < sizeof nt->label - 1; i += 2)
+        unsigned short units[32]; /* a label has at most 32 characters */
+        int n = 0;
+        for (u32 i = 0; i + 1 < S_MAIN.res_len && n < 32; i += 2, n++)
         {
             u32 ch = rd16(S_MAIN.res + i);
-            nt->label[n++] = (char)(ch >= 0x20 && ch < 0x7F ? ch : '_');
+            units[n] = (unsigned short)(ch < 0x20 || ch == 0x7F ? '_' : ch);
         }
-        nt->label[n] = 0;
+        utf8_from_utf16(units, n, nt->label, (int)sizeof nt->label); /* UTF-8; cut between characters if it does not fit */
     }
     /* the root folder must be there */
     if (record_read(nt, 5, REC))

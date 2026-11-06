@@ -2,10 +2,63 @@
 #include "ui_internal.h"
 #include "heap.h"
 #include "timer.h"
+#include "utf8.h"
 
 #define DOUBLE_CLICK_MS 450
 
 /* ---- small helpers ------------------------------------------- */
+/* The text is UTF-8 and cursor, anchor, scroll and every other position are byte offsets that always lie between
+ * characters: one Backspace, arrow key or click moves over a whole character (1 to 4 bytes). UI_EDIT_MAX and max count bytes. */
+static int prev_char(const UiEdit *e, int i) /* start of the character before byte i */
+{
+    if (i <= 0)
+        return 0;
+    do
+        i--;
+    while (i > 0 && utf8_is_cont((unsigned char)e->text[i]));
+    return i;
+}
+
+static int next_char(const UiEdit *e, int i) /* start of the character after the one at byte i */
+{
+    if (i >= e->len)
+        return e->len;
+    do
+        i++;
+    while (i < e->len && utf8_is_cont((unsigned char)e->text[i]));
+    return i;
+}
+
+/* move a position back to the start of the character it is in */
+static int snap(const UiEdit *e, int i)
+{
+    while (i > 0 && i < e->len && utf8_is_cont((unsigned char)e->text[i]))
+        i--;
+    return i;
+}
+
+/* Copy the part of s that may go into a field: printable ASCII and well-formed UTF-8 characters (not the C1 controls),
+ * digits only in a numeric field; whole characters only, at most cap bytes. out gets no terminating 0. Returns the length. */
+static int filter_text(const UiEdit *e, const char *s, char *out, int cap)
+{
+    int n = 0;
+    while (*s)
+    {
+        const char *start = s;
+        unsigned cp;
+        if (!utf8_decode_ok(&s, &cp) || cp < 32 || cp == 127 || (cp >= 0x80 && cp <= 0x9F))
+            continue;
+        if ((e->flags & UI_EDIT_NUMERIC) && (cp < '0' || cp > '9'))
+            continue;
+        int k = (int)(s - start);
+        if (n + k > cap)
+            break;
+        for (int i = 0; i < k; i++)
+            out[n++] = start[i];
+    }
+    return n;
+}
+
 static int max_len(const UiEdit *e)
 {
     return (e->max > 0 && e->max < UI_EDIT_MAX) ? e->max : UI_EDIT_MAX;
@@ -30,6 +83,9 @@ static void fix(UiEdit *e)
         e->scroll = 0;
     if (e->scroll > e->len)
         e->scroll = e->len;
+    e->cursor = snap(e, e->cursor);
+    e->anchor = snap(e, e->anchor);
+    e->scroll = snap(e, e->scroll);
 }
 
 int ui_edit_selection(const UiEdit *e, int *from, int *to)
@@ -58,7 +114,8 @@ int ui_edit_has_selection(const UiEdit *e) { return ui_edit_selection(e, 0, 0); 
 
 static int is_word(char c)
 {
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+           (unsigned char)c >= 0x80; /* the bytes of non-ASCII letters */
 }
 
 /* A password field must not reveal where its words are: word jumps go to the ends. */
@@ -205,7 +262,7 @@ static void del_range(UiEdit *e, int a, int b)
     e->cursor = e->anchor = a;
 }
 
-/* type s at the caret (replacing the selection); only printable ASCII, respects max / numeric */
+/* type s at the caret (replacing the selection); printable text only (see filter_text), respects max / numeric */
 static int insert_str(UiEdit *e, const char *s, int kind)
 {
     if (e->flags & UI_EDIT_READONLY)
@@ -213,16 +270,7 @@ static int insert_str(UiEdit *e, const char *s, int kind)
     int a = 0, b = 0, has = ui_edit_selection(e, &a, &b);
     int room = max_len(e) - (e->len - (has ? b - a : 0));
     char tmp[UI_EDIT_MAX + 1];
-    int n = 0;
-    for (; *s && n < room; s++)
-    {
-        unsigned char c = (unsigned char)*s;
-        if (c < 32 || c > 126)
-            continue;
-        if ((e->flags & UI_EDIT_NUMERIC) && (c < '0' || c > '9'))
-            continue;
-        tmp[n++] = (char)c;
-    }
+    int n = filter_text(e, s, tmp, room);
     if (n == 0)
         return 0;
     if (has)
@@ -304,16 +352,7 @@ void ui_edit_clear(UiEdit *e)
 
 void ui_edit_set_text(UiEdit *e, const char *s)
 {
-    int n = 0;
-    for (; *s && n < max_len(e); s++)
-    {
-        unsigned char c = (unsigned char)*s;
-        if (c < 32 || c > 126)
-            continue;
-        if ((e->flags & UI_EDIT_NUMERIC) && (c < '0' || c > '9'))
-            continue;
-        e->text[n++] = (char)c;
-    }
+    int n = filter_text(e, s, e->text, max_len(e));
     e->text[n] = 0;
     e->len = n;
     e->cursor = e->anchor = n;
@@ -384,11 +423,11 @@ int ui_edit_key(UiEdit *e, const KeyEvent *k)
     case KEY_LEFT:
         if (!shift && has)
             return move_to(e, a, 0); /* collapse to the left end of the selection */
-        return move_to(e, ctrl ? word_left(e, e->cursor) : e->cursor - 1, shift);
+        return move_to(e, ctrl ? word_left(e, e->cursor) : prev_char(e, e->cursor), shift);
     case KEY_RIGHT:
         if (!shift && has)
             return move_to(e, b, 0);
-        return move_to(e, ctrl ? word_right(e, e->cursor) : e->cursor + 1, shift);
+        return move_to(e, ctrl ? word_right(e, e->cursor) : next_char(e, e->cursor), shift);
     case KEY_HOME:
         return move_to(e, 0, shift);
     case KEY_END:
@@ -400,7 +439,7 @@ int ui_edit_key(UiEdit *e, const KeyEvent *k)
             return 0;
         if (ctrl)
             return delete_range_undoable(e, word_left(e, e->cursor), e->cursor, 0);
-        return delete_range_undoable(e, e->cursor - 1, e->cursor, 2);
+        return delete_range_undoable(e, prev_char(e, e->cursor), e->cursor, 2);
     case KEY_DELETE:
         if (has)
             return delete_range_undoable(e, a, b, 0);
@@ -408,13 +447,15 @@ int ui_edit_key(UiEdit *e, const KeyEvent *k)
             return 0;
         if (ctrl)
             return delete_range_undoable(e, e->cursor, word_right(e, e->cursor), 0);
-        return delete_range_undoable(e, e->cursor, e->cursor + 1, 2);
+        return delete_range_undoable(e, e->cursor, next_char(e, e->cursor), 2);
     default:
         break;
     }
-    if (k->ch >= 32 && k->ch < 127)
+    if ((k->ch >= 32 && k->ch < 127) ||
+        (k->ch >= 0x80 && k->ch <= 0x10FFFF && !(k->ch >= 0xD800 && k->ch <= 0xDFFF))) /* ASCII or a Unicode character */
     {
-        char one[2] = {(char)k->ch, 0};
+        char one[5];
+        one[utf8_encode((unsigned)k->ch, one)] = 0;
         return insert_str(e, one, 1) > 0;
     }
     return 0;
@@ -455,7 +496,15 @@ static int show_chars(const UiEdit *e, int from, int to, char *out)
 {
     int n = 0;
     for (int i = from; i < to && i < e->len; i++)
-        out[n++] = (e->flags & UI_EDIT_PASSWORD) ? '*' : e->text[i];
+    {
+        if (e->flags & UI_EDIT_PASSWORD)
+        {
+            if (!utf8_is_cont((unsigned char)e->text[i])) /* one '*' for a whole character */
+                out[n++] = '*';
+        }
+        else
+            out[n++] = e->text[i];
+    }
     out[n] = 0;
     return n;
 }
@@ -472,9 +521,9 @@ static int edit_width(const UiEdit *e, int from, int to)
 static int hit_index(const UiEdit *e, int x)
 {
     int rel = x - inner(e).x, prev = 0;
-    for (int i = e->scroll; i < e->len; i++)
+    for (int i = e->scroll; i < e->len; i = next_char(e, i))
     {
-        int w = edit_width(e, e->scroll, i + 1);
+        int w = edit_width(e, e->scroll, next_char(e, i));
         if (rel < (prev + w) / 2)
             return i;
         prev = w;
@@ -487,7 +536,7 @@ static void select_word_at(UiEdit *e, int idx)
 {
     int c = idx;
     if ((c >= e->len || !is_word(e->text[c])) && c > 0 && is_word(e->text[c - 1]))
-        c--;
+        c = prev_char(e, c);
     int a = c, b = c;
     if (c < e->len && is_word(e->text[c]))
     {
@@ -497,7 +546,7 @@ static void select_word_at(UiEdit *e, int idx)
             b++;
     }
     else
-        b = c < e->len ? c + 1 : c;
+        b = c < e->len ? next_char(e, c) : c;
     e->anchor = a;
     e->cursor = b;
 }
@@ -541,11 +590,11 @@ int ui_edit_mouse(UiEdit *e, int x, int y, unsigned buttons)
         UiRect in = inner(e);
         int idx;
         if (x < in.x)
-            idx = e->cursor > e->scroll ? e->scroll : (e->cursor > 0 ? e->cursor - 1 : 0);
+            idx = e->cursor > e->scroll ? e->scroll : prev_char(e, e->cursor);
         else if (x > in.x + in.w)
         {
             int last = hit_index(e, in.x + in.w);
-            idx = e->cursor < last ? last : (e->cursor < e->len ? e->cursor + 1 : e->len);
+            idx = e->cursor < last ? last : next_char(e, e->cursor);
         }
         else
             idx = hit_index(e, x);
@@ -585,9 +634,9 @@ void ui_edit_draw(UiRect r, UiEdit *e, const char *placeholder, int focused)
     if (e->scroll > cur)
         e->scroll = cur;
     while (e->scroll < cur && edit_width(e, e->scroll, cur) > avail)
-        e->scroll++;
-    while (e->scroll > 0 && edit_width(e, e->scroll - 1, e->len) <= avail)
-        e->scroll--;
+        e->scroll = next_char(e, e->scroll);
+    while (e->scroll > 0 && edit_width(e, prev_char(e, e->scroll), e->len) <= avail)
+        e->scroll = prev_char(e, e->scroll);
 
     int a = 0, b = 0, has = ui_edit_selection(e, &a, &b);
     int ty = r.y + (r.h - ui_text_height(UI_TEXT_BODY)) / 2;

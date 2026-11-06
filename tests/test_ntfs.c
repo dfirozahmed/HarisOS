@@ -406,7 +406,7 @@ int main(void)
     CHECK(find(&root, "sparse.bin", &e) && same(&e, 27, 3000) && same(&e, 27, 20000));
     CHECK(find(&root, "partial-init.bin", &e) && same(&e, 28, 999) && same(&e, 28, 8000));
     CHECK(find(&root, "Long File Name.txt", &e) && same(&e, 29, 50));
-    CHECK(find(&root, "caf_.txt", &e) && same(&e, 30, 10));            /* U+00E9 shows as '_' */
+    CHECK(find(&root, "caf\xc3\xa9.txt", &e) && same(&e, 30, 10));     /* U+00E9 comes back as its UTF-8 bytes C3 A9 */
     CHECK(find(&root, "empty.txt", &e) && e.size == 0 && ntfs_read(&F, &e, 0, &e.pad, 1) == 0);
     CHECK(find(&root, "compressed.dat", &e) && ntfs_read(&F, &e, 0, &e.pad, 1) == -2);
     CHECK(find(&root, "attrlist.bin", &e) && same(&e, 33, 1500) && same(&e, 33, 10000));

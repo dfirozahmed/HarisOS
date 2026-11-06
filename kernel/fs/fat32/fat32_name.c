@@ -1,5 +1,6 @@
 /* FAT32: names (short 8.3 and long names). */
 #include "fat32_internal.h"
+#include "utf8.h"
 
 /* ---- names ------------------------------------------------------ */
 u8 f32_sfn_checksum(const u8 *n)
@@ -13,7 +14,8 @@ u8 f32_sfn_checksum(const u8 *n)
 int f32_name_valid(const char *name)
 {
     unsigned n = slen(name);
-    if (n == 0 || n > 255 || name[0] == ' ' || name[n - 1] == ' ' || name[n - 1] == '.')
+    /* n counts bytes of the UTF-8 name: at most 255, so it is also at most 255 UTF-16 units (the limit of a long name) */
+    if (n == 0 || n > 255 || name[0] == ' ' || name[n - 1] == ' ' || name[n - 1] == '.' || !utf8_valid(name))
         return 0;
     for (unsigned i = 0; i < n; i++)
     {
@@ -62,6 +64,8 @@ int f32_make_sfn(const char *name, u8 sfn[11], u8 *ntres, unsigned tail)
     for (unsigned i = bstart; i < dot; i++)
     {
         u8 c = (u8)name[i];
+        if (utf8_is_cont(c)) /* the rest of a multi-byte character: the lead byte already gave its '_' */
+            continue;
         if (c == '.' || c == ' ')
         {
             lossy = 1; /* extra dots and spaces are dropped */
@@ -84,6 +88,8 @@ int f32_make_sfn(const char *name, u8 sfn[11], u8 *ntres, unsigned tail)
     for (unsigned i = dot + 1; dot < n && i < n; i++)
     {
         u8 c = (u8)name[i];
+        if (utf8_is_cont(c))
+            continue;
         if (c == ' ')
         {
             lossy = 1;

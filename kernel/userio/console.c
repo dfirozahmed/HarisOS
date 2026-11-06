@@ -2,6 +2,7 @@
 #include "console.h"
 #include "heap.h"
 #include "task.h"
+#include "utf8.h"
 
 typedef struct
 {
@@ -69,8 +70,12 @@ static void put_char(Console *c, char ch)
         c->col = 0;
     else if (ch == '\b')
     {
-        if (c->col > 0)
+        if (c->col > 0) /* back over one whole character: a multi-byte one fills several cells */
+        {
             c->col--;
+            while (c->col > 0 && utf8_is_cont((unsigned char)*cell(c, c->col)))
+                c->col--;
+        }
     }
     else if (ch == '\t')
     {
@@ -80,9 +85,14 @@ static void put_char(Console *c, char ch)
     }
     else
     {
-        if (c->col >= CONSOLE_COLS) /* a long line wraps */
+        /* The grid holds UTF-8: one byte per cell, so a character of 2 to 4 bytes takes as many cells (the text drawing
+         * code reads them back as characters). A long line wraps, and never in the middle of a character. */
+        unsigned char b = (unsigned char)ch;
+        int need = b >= 0xC2 ? utf8_len_of_lead(b) : 1;
+        if (c->col + need > CONSOLE_COLS)
             new_row(c);
-        *(volatile char *)cell(c, c->col++) = (ch >= 32 && ch < 127) ? ch : '?';
+        /* control characters, DEL and the bytes that never occur in UTF-8 (C0 C1 F5..FF) show as '?' */
+        *(volatile char *)cell(c, c->col++) = (b >= 32 && b != 127 && b != 0xC0 && b != 0xC1 && b < 0xF5) ? ch : '?';
     }
     if (c->dirty < 1)
         c->dirty = 1;
@@ -270,8 +280,11 @@ int console_key(int h, int ch)
     {
         if (c->line_len == 0)
             return 0;
+        int bytes = 1; /* one typed character: its lead byte and the continuation bytes after it */
         c->line_len--;
-        if (c->col > 0) /* erase the echoed character */
+        while (c->line_len > 0 && utf8_is_cont((unsigned char)c->line[c->line_len]))
+            c->line_len--, bytes++;
+        while (bytes-- > 0 && c->col > 0) /* erase the echoed character */
         {
             c->col--;
             *(volatile char *)cell(c, c->col) = ' ';
@@ -294,6 +307,19 @@ int console_key(int h, int ch)
     {
         c->line[c->line_len++] = (char)ch;
         put_char(c, (char)ch);
+        return 1;
+    }
+    if (ch >= 0x80 && ch <= 0x10FFFF && !(ch >= 0xD800 && ch <= 0xDFFF)) /* a Unicode character: kept and echoed as UTF-8 */
+    {
+        char u[4];
+        int n = utf8_encode((unsigned)ch, u);
+        if (c->line_len + n > CONSOLE_LINE_MAX - 1)
+            return 0;
+        for (int i = 0; i < n; i++)
+        {
+            c->line[c->line_len++] = u[i];
+            put_char(c, u[i]);
+        }
         return 1;
     }
     return 0;

@@ -54,6 +54,7 @@ static void expect(const char *text, int cursor)
     if (strcmp(E.text, text) != 0 || E.cursor != cursor)
     {
         printf("FAIL: expected \"%s\" cursor %d, got \"%s\" cursor %d\n", text, cursor, E.text, E.cursor);
+        fflush(stdout); /* assert aborts: do not lose the message in the buffer */
         assert(0);
     }
     assert(E.len == (int)strlen(E.text));
@@ -325,6 +326,131 @@ int main(void)
     E.anchor = -4;
     press(KEY_LEFT, 0);
     assert(E.cursor >= 0 && E.cursor <= E.len);
+
+    /* ---- Unicode: UTF-8 text, positions always between characters ---- */
+    {
+        const char *KA = "\xe0\xa6\x95", *KHA = "\xe0\xa6\x96"; /* ক খ: 3 bytes each */
+        char want[64];
+        KeyEvent k;
+
+        /* a typed Unicode character (the key event carries the code point) is inserted as UTF-8 */
+        fresh();
+        memset(&k, 0, sizeof k);
+        k.pressed = 1;
+        k.ch = 0x995;
+        assert(ui_edit_key(&E, &k) == 1);
+        expect(KA, 3);
+        type("a");
+        k.ch = 0x1F600; /* above U+FFFF: 4 bytes */
+        assert(ui_edit_key(&E, &k) == 1);
+        snprintf(want, sizeof want, "%sa\xf0\x9f\x98\x80", KA);
+        expect(want, 3 + 1 + 4);
+        k.ch = 0xD800; /* not a character */
+        assert(ui_edit_key(&E, &k) == 0);
+
+        /* arrows, Backspace and Delete move over whole characters */
+        press(KEY_LEFT, 0);
+        expect(want, 4);
+        press(KEY_LEFT, 0);
+        expect(want, 3);
+        press(KEY_LEFT, 0);
+        expect(want, 0);
+        press(KEY_RIGHT, 0);
+        expect(want, 3);
+        press(KEY_DELETE, 0); /* deletes "a" (1 byte) */
+        snprintf(want, sizeof want, "%s\xf0\x9f\x98\x80", KA);
+        expect(want, 3);
+        press(KEY_DELETE, 0); /* deletes the 4-byte character */
+        expect(KA, 3);
+        press(KEY_BACKSPACE, 0); /* deletes the 3-byte character */
+        expect("", 0);
+
+        /* set_text and paste keep whole well-formed characters only; control characters and bad bytes are dropped */
+        fresh();
+        snprintf(want, sizeof want, "%s\xff%s\x01%s", KA, KHA, KA);
+        ui_edit_set_text(&E, want);
+        snprintf(want, sizeof want, "%s%s%s", KA, KHA, KA);
+        expect(want, 9);
+        ui_edit_set_text(&E, "\xed\xa0\x80x\xc2\x85y"); /* a surrogate and a C1 control are dropped */
+        expect("xy", 2);
+        ui_edit_set_text(&E, "a\xe0\xa6"); /* a character cut short */
+        expect("a", 1);
+
+        /* the length limit counts bytes and never cuts a character */
+        fresh();
+        E.max = 7;
+        ui_edit_set_text(&E, "\xe0\xa6\x95\xe0\xa6\x96\xe0\xa6\x95"); /* 9 bytes: only two characters fit */
+        snprintf(want, sizeof want, "%s%s", KA, KHA);
+        expect(want, 6);
+        assert(ui_edit_insert(&E, "\xe0\xa6\x95") == 0 && ui_edit_insert(&E, "z") == 1); /* 1 byte of room left */
+        snprintf(want, sizeof want, "%s%sz", KA, KHA);
+        expect(want, 7);
+
+        /* a numeric field takes no Unicode digits-as-letters */
+        fresh();
+        E.flags = UI_EDIT_NUMERIC;
+        ui_edit_set_text(&E, "1\xe0\xa6\x95" "2");
+        expect("12", 2);
+
+        /* undo restores the whole text */
+        fresh();
+        type("ab");
+        press(KEY_LEFT, 0); /* moving the caret ends the typing step */
+        press(KEY_RIGHT, 0);
+        k.ch = 0x995;
+        ui_edit_key(&E, &k);
+        press('z', KMOD_CTRL);
+        expect("ab", 2);
+        press('y', KMOD_CTRL);
+        snprintf(want, sizeof want, "ab%s", KA);
+        expect(want, 5);
+
+        /* a click lands between characters, never inside one: 3 characters of 3 bytes, 8 px per byte in the stub */
+        fresh();
+        snprintf(want, sizeof want, "%s%s%s", KA, KHA, KA);
+        ui_edit_set_text(&E, want);
+        E.field = (UiRect){0, 0, 300, 30};
+        for (int x = 0; x < 100; x++)
+        {
+            NOW += 5000;
+            ui_edit_mouse(&E, 12 + x, 10, 1);
+            ui_edit_mouse(&E, 12 + x, 10, 0);
+            assert(E.cursor == 0 || E.cursor == 3 || E.cursor == 6 || E.cursor == 9);
+        }
+
+        /* hand-edited state in the middle of a character is moved to its start */
+        fresh();
+        ui_edit_set_text(&E, want);
+        E.cursor = 4;
+        E.anchor = 8;
+        press(KEY_END, 0);
+        press(KEY_HOME, 0);
+        E.cursor = 4;
+        E.anchor = 5;
+        press(KEY_RIGHT, KMOD_SHIFT);
+        assert(E.anchor == 3 && E.cursor == 6);
+
+        /* a word is a run of letters of any script */
+        fresh();
+        snprintf(want, sizeof want, "%s%s one", KA, KHA);
+        ui_edit_set_text(&E, want);
+        press(KEY_HOME, 0);
+        press(KEY_RIGHT, KMOD_CTRL);
+        assert(E.cursor == 7); /* over both letters and the space, to the start of "one" */
+        press(KEY_LEFT, KMOD_CTRL);
+        assert(E.cursor == 0);
+
+        /* a password field shows one '*' per character */
+        {
+            fresh();
+            E.flags = UI_EDIT_PASSWORD;
+            snprintf(want, sizeof want, "%s%s", KA, KHA);
+            ui_edit_set_text(&E, want);
+            UiRect rr = {0, 0, 300, 30};
+            ui_edit_draw(rr, &E, "", 1);
+            assert(E.scroll == 0 && E.cursor == 6);
+        }
+    }
 
     printf("edit tests passed\n");
     return 0;

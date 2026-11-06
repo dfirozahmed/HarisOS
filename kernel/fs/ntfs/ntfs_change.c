@@ -1,5 +1,6 @@
 /* NTFS write side: names and collation, timestamps, begin / end of a change, volume checks. */
 #include "ntfs_internal.h"
+#include "utf8.h"
 
 /* ---- names and collation -------------------------------------------------- */
 static u32 up_ch(Ntfs *nt, u32 ch)
@@ -34,12 +35,13 @@ int name_ok(const char *name)
     if (!name)
         return NTFS_ERR_BADNAME;
     u32 n = slen(name);
-    if (n == 0 || n > 255 || name[n - 1] == '.' || name[n - 1] == ' ')
+    /* n counts bytes of the UTF-8 name: at most 255, so also at most 255 UTF-16 units (the limit of an NTFS name) */
+    if (n == 0 || n > 255 || name[n - 1] == '.' || name[n - 1] == ' ' || !utf8_valid(name))
         return NTFS_ERR_BADNAME;
     for (u32 i = 0; i < n; i++)
     {
         u8 c = (u8)name[i];
-        if (c < 0x20 || c >= 0x7F || c == '"' || c == '*' || c == '/' || c == ':' || c == '<' || c == '>' || c == '?' || c == '\\' ||
+        if (c < 0x20 || c == 0x7F || c == '"' || c == '*' || c == '/' || c == ':' || c == '<' || c == '>' || c == '?' || c == '\\' ||
             c == '|')
             return NTFS_ERR_BADNAME;
     }
@@ -51,7 +53,9 @@ int name_ok(const char *name)
  * flags, name. Returns its length. */
 u32 make_key(u8 *key, u64 parent_ref, const char *name, u64 t, u64 alloc, u64 real, u32 flags, u32 ns)
 {
-    u32 nl = slen(name);
+    unsigned short units[255]; /* the name on the disk: UTF-16 (name_ok checked it is valid UTF-8 and short enough) */
+    int nu = utf16_from_utf8(name, units, 255);
+    u32 nl = nu < 0 ? 0 : (u32)nu;
     zero(key, 66 + nl * 2);
     wr64(key, parent_ref);
     for (int i = 0; i < 4; i++)
@@ -62,7 +66,7 @@ u32 make_key(u8 *key, u64 parent_ref, const char *name, u64 t, u64 alloc, u64 re
     key[64] = (u8)nl;
     key[65] = (u8)ns;
     for (u32 i = 0; i < nl; i++)
-        wr16(key + 66 + 2 * i, (u8)name[i]);
+        wr16(key + 66 + 2 * i, units[i]);
     return 66 + nl * 2;
 }
 

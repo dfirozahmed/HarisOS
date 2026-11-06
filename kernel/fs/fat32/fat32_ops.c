@@ -1,5 +1,6 @@
 /* FAT32: create, delete, rename, move. */
 #include "fat32_internal.h"
+#include "utf8.h"
 
 typedef struct
 {
@@ -153,7 +154,11 @@ static int place_entry(Fat *f, u32 dir, const char *name, const u8 proto[32], u3
             ntres = 0;
         }
     }
-    unsigned n = slen(name);
+    unsigned short units[256]; /* the long name as stored: UTF-16 (fat_create / rename checked the name is valid UTF-8) */
+    int nu = utf16_from_utf8(name, units, 255);
+    if (nu < 0)
+        return FAT_ERR_BADNAME;
+    unsigned n = (unsigned)nu;
     u32 nlfn = need_lfn ? (n + 12) / 13 : 0;
     u32 start;
     int r = find_free_run(f, dir, nlfn + 1, &start);
@@ -171,7 +176,7 @@ static int place_entry(Fat *f, u32 dir, const char *name, const u8 proto[32], u3
         for (u32 i = 0; i < 13; i++)
         {
             u32 pos = (k - 1) * 13 + i;
-            u32 ch = pos < n ? (u8)name[pos] : pos == n ? 0x0000 : 0xFFFF;
+            u32 ch = pos < n ? units[pos] : pos == n ? 0x0000 : 0xFFFF;
             wr16(e + LFN_OFFS[i], ch);
         }
         r = f32_slot_write(f, dir, start + (nlfn - k), e);

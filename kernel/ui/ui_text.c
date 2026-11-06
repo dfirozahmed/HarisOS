@@ -1,5 +1,6 @@
 /* HarisUI: Text layout, alignment and style helpers. */
 #include "ui_internal.h"
+#include "utf8.h"
 
 /* ---- text ---------------------------------------------------- */
 const Font *ui_font(UiTextStyle s)
@@ -49,6 +50,8 @@ void ui_text_in_color(UiRect r, const char *s, UiTextStyle st, UiAlign align, Ui
         int n = gfx_text_fit(f, s, r.w - dots);
         if (n > (int)sizeof(buf) - 4)
             n = (int)sizeof(buf) - 4;
+        while (n > 0 && utf8_is_cont((unsigned char)s[n])) /* never cut in the middle of a UTF-8 character */
+            n--;
         for (int i = 0; i < n; i++)
             buf[i] = s[i];
         buf[n] = '.';

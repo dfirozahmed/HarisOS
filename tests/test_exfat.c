@@ -92,7 +92,7 @@ int main(void)
     for (int i = 0; i < 200; i++) longname[i] = (char)('a' + i % 26);
     strcpy(longname + 196, ".txt");                               /* 200 characters */
     xfile_contig(&x, &root, longname, d1, 100);
-    xfile_contig(&x, &root, "caf\xc3\xa9.txt", d1, 10);           /* UTF-8 bytes are not UTF-16: stay ASCII here */
+    xfile_contig(&x, &root, "caf\xc3\xa9.txt", d1, 10);           /* the helper stores each byte as one UTF-16 unit: U+00C3 U+00A9 */
     {   /* a real non-ASCII character: write the entry set by hand with U+00E9 */
         XDir tmp = root;
         xadd(&x, &tmp, "cafX.txt", 0x20, 0, 0, 0, 0);
@@ -135,7 +135,8 @@ int main(void)
     CHECK(find(&r, "fragmented.dat", &e) && !e.nofat && content_ok(&e, 20000, 3, 1000) && content_ok(&e, 20000, 3, 2048));
     CHECK(find(&r, "empty.txt", &e) && e.size == 0 && e.first_cluster == 0 && exfat_read(&F, &e, 0, &e.secondary, 1) == 0);
     CHECK(find(&r, longname, &e) && e.size == 100 && content_ok(&e, 100, 1, 100));
-    CHECK(find(&r, "caf_.txt", &e));                              /* U+00E9 shows as '_' */
+    CHECK(find(&r, "caf\xc3\xa9.txt", &e));                       /* U+00E9 comes back as its UTF-8 bytes C3 A9 */
+    CHECK(find(&r, "caf\xc3\x83\xc2\xa9.txt", &e));               /* U+00C3 U+00A9 are two characters, four bytes */
     CHECK(find(&r, "Docs", &e) && (e.attr & EXFAT_ATTR_DIR));
 
     /* ValidDataLength */

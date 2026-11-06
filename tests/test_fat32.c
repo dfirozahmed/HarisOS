@@ -228,12 +228,45 @@ int main(void)
     CHECK(list_dir(d1.first_cluster) == 115);
     CHECK(fsck() == 0);
 
+    /* ---- Unicode names: UTF-8 in the system, UTF-16 long-name entries on the disk ---- */
+    {
+        const char *bn1 = "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe.txt";                       /* বাংলা.txt */
+        const char *bn2 = "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe\xe0\xa6\xa6\xe0\xa7\x87\xe0\xa6\xb6.txt"; /* বাংলাদেশ.txt */
+        const char *emoji = "x\xf0\x9f\x98\x80y";                                                                      /* a character above U+FFFF */
+        FatEntry u1, u2, u3, back;
+        CHECK(fat_create(&F, root, bn1, 0, &u1) == 0 && u1.nlfn >= 1); /* the short name cannot hold it: long-name entries */
+        CHECK(fat_create(&F, root, bn2, 0, &u2) == 0 && u2.nlfn >= 1);
+        CHECK(fat_create(&F, root, emoji, 0, &u3) == 0 && u3.nlfn == 1); /* 4 UTF-16 units: one entry */
+        CHECK(fat_create(&F, root, bn1, 0, &back) == FAT_ERR_EXISTS);    /* the same name again */
+        CHECK(find(root, bn1, &back) && back.index == u1.index);         /* read back as the same UTF-8 bytes */
+        CHECK(find(root, bn2, &back) && back.index == u2.index && u1.index != u2.index);
+        CHECK(find(root, emoji, &back) && back.index == u3.index);
+        CHECK(fsck() == 0);                                              /* short-name checksums and chains are right */
+        CHECK(fat_create(&F, root, "\xff.txt", 0, &back) == FAT_ERR_BADNAME);           /* not UTF-8 */
+        CHECK(fat_create(&F, root, "\xed\xa0\x80.txt", 0, &back) == FAT_ERR_BADNAME);   /* a UTF-16 surrogate encoded in UTF-8 */
+        {
+            char big[300];
+            int n = 0;
+            for (int i = 0; i < 86; i++) /* 86 characters * 3 bytes = 258 bytes: over the 255 limit */
+                big[n++] = (char)0xe0, big[n++] = (char)0xa6, big[n++] = (char)0x95;
+            big[n] = 0;
+            CHECK(fat_create(&F, root, big, 0, &back) == FAT_ERR_BADNAME);
+            big[3 * 85] = 0; /* 85 * 3 = 255 bytes: allowed, and it comes back whole */
+            CHECK(fat_create(&F, root, big, 0, &back) == 0 && find(root, big, &back));
+            CHECK(fat_delete(&F, &back) == 0);
+        }
+        CHECK(fat_rename(&F, &u1, "plain.txt") == 0 && fat_rename(&F, &u1, bn1) == 0 && find(root, bn1, &back));
+        CHECK(fat_delete(&F, &u3) == 0 && !find(root, emoji, &back));
+        CHECK(fsck() == 0);
+    }
+
     /* ---- remount: everything must be on the disk, not in a cache ---- */
     {
         Fat g;
         CHECK(fat_mount(&g, disk_idx) == 0);
         Fat save = F;
         F = g;
+        CHECK(find(root, "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe.txt", &e));
         CHECK(list_dir(d1.first_cluster) == 115);
         CHECK(find(root, "A very long file name that needs several long-name entries.document", &e));
         F = save;

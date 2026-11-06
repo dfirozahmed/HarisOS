@@ -1,5 +1,6 @@
 /* exFAT write side: clusters of a file, the up-case table. */
 #include "exfat_internal.h"
+#include "utf8.h"
 
 /* ---- clusters of a file: count, chain, append, trim ---- */
 u32 exf_clusters_of(const ExFat *f, u32 size) { return (u32)(((u64)size + f->spc * f->ss - 1) / (f->spc * f->ss)); }
@@ -188,9 +189,11 @@ u16 exf_name_hash(ExFat *f, const char *name)
 {
     load_upcase(f);
     u32 h = 0;
-    for (; *name; name++)
+    unsigned short units[256]; /* the hash is over the UTF-16 form of the name, each unit upper-cased by the volume's table */
+    int nu = utf16_from_utf8(name, units, 256);
+    for (int i = 0; i < nu; i++)
     {
-        u16 u = UPCASE[(u8)*name];
+        u16 u = UPCASE[units[i]];
         h = ((h << 15) | (h >> 1)) & 0xFFFF;
         h = (h + (u & 0xFF)) & 0xFFFF;
         h = ((h << 15) | (h >> 1)) & 0xFFFF;

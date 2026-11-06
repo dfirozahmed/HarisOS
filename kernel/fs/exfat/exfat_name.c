@@ -1,5 +1,6 @@
 /* exFAT write side: names and the entries of a folder. */
 #include "exfat_internal.h"
+#include "utf8.h"
 
 /* ---- names ---- */
 int exf_name_valid(const char *name)
@@ -7,7 +8,8 @@ int exf_name_valid(const char *name)
     u32 n = 0;
     while (name[n])
         n++;
-    if (n == 0 || n > 255 || name[0] == ' ' || name[n - 1] == ' ' || name[n - 1] == '.')
+    /* n counts bytes of the UTF-8 name: at most 255, so also at most 255 UTF-16 units (the limit of a name) */
+    if (n == 0 || n > 255 || name[0] == ' ' || name[n - 1] == ' ' || name[n - 1] == '.' || !utf8_valid(name))
         return 0;
     for (u32 i = 0; i < n; i++)
     {
@@ -177,9 +179,9 @@ int exf_find_free_run(ExFat *f, ExEntry *dir, const ExEntry *dir_parent, u32 nee
 /* build the entry set of a new entry; returns the number of entries */
 u32 exf_make_set(ExFat *f, u8 *set, const char *name, u32 attr, u32 first, u32 size, u32 valid, int nofat, const u8 *times)
 {
-    u32 nlen = 0;
-    while (name[nlen])
-        nlen++;
+    unsigned short units[256]; /* the name on the disk: UTF-16 (the callers checked it with exf_name_valid) */
+    int nu = utf16_from_utf8(name, units, 255);
+    u32 nlen = nu < 0 ? 0 : (u32)nu;
     u32 names = (nlen + 14) / 15, total = 2 + names;
     zero(set, total * 32);
     set[0] = 0x85;
@@ -199,7 +201,7 @@ u32 exf_make_set(ExFat *f, u8 *set, const char *name, u32 attr, u32 first, u32 s
     st[0] = 0xC0;
     st[1] = (u8)(1 | (nofat ? 2 : 0));
     st[3] = (u8)nlen;
-    exf_wr16(st + 4, exf_name_hash(f, name));
+    exf_wr16(st + 4, exf_name_hash(f, name)); /* over the same UTF-16 units, upper-cased */
     exf_wr64(st + 8, valid);
     exf_wr32(st + 20, first);
     exf_wr64(st + 24, size);
@@ -210,7 +212,7 @@ u32 exf_make_set(ExFat *f, u8 *set, const char *name, u32 attr, u32 first, u32 s
         for (u32 c = 0; c < 15; c++)
         {
             u32 idx = n * 15 + c;
-            exf_wr16(ne + 2 + 2 * c, idx < nlen ? (u8)name[idx] : 0);
+            exf_wr16(ne + 2 + 2 * c, idx < nlen ? units[idx] : 0);
         }
     }
     exf_wr16(set + 2, exf_set_checksum(set, total));

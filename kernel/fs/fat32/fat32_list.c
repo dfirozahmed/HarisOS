@@ -1,5 +1,6 @@
 /* FAT32: listing a folder. */
 #include "fat32_internal.h"
+#include "utf8.h"
 
 /* ---- listing ---------------------------------------------------- */
 /* A folder is read in chunks of up to LIST_BUF_BYTES: one disk command per chunk, not one per sector
@@ -9,7 +10,8 @@ static u8 LIST_BUF[LIST_BUF_BYTES];
 
 int fat_list(Fat *f, unsigned dir, FatListFn cb, void *user)
 {
-    char lfn[FAT_NAME_MAX], name[FAT_NAME_MAX];
+    unsigned short lfn[FAT_NAME_MAX]; /* the long name as stored: UTF-16 */
+    char name[FAT_NAME_MAX];
     u32 per_read = LIST_BUF_BYTES / f->ss;
     if (per_read < 1)
         per_read = 1;
@@ -70,7 +72,7 @@ int fat_list(Fat *f, unsigned dir, FatListFn cb, void *user)
                             u32 ch = rd16(e + LFN_OFFS[k]);
                             u32 pos = (u32)(seq - 1) * 13 + (u32)k;
                             if (pos < 255)
-                                lfn[pos] = ch == 0 || ch == 0xFFFF ? 0 : (char)(ch >= 0x20 && ch < 0x7F ? ch : '_');
+                                lfn[pos] = ch == 0 || ch == 0xFFFF ? 0 : (unsigned short)(ch < 0x20 || ch == 0x7F ? '_' : ch);
                         }
                     continue;
                 }
@@ -79,17 +81,18 @@ int fat_list(Fat *f, unsigned dir, FatListFn cb, void *user)
                 lfn_ok = 0;
                 if ((e[11] & FAT_ATTR_VOLUME) || e[0] == '.')
                     continue; /* the volume label, "." and ".." */
-                if (has_lfn)
-                {
-                    int n = 0;
-                    while (n < 255 && lfn[n])
-                        name[n] = lfn[n], n++;
-                    name[n] = 0;
-                }
+                int units = 0;
+                while (has_lfn && units < 255 && lfn[units])
+                    units++;
+                /* Names are UTF-8 inside the system. A long name that needs more than FAT_NAME_MAX - 1 bytes in UTF-8
+                 * (255 UTF-16 units can be up to 765 bytes) cannot be handed out whole: that file shows under its short name. */
+                if (has_lfn && units > 0 && utf8_size_from_utf16(lfn, units) < FAT_NAME_MAX)
+                    utf8_from_utf16(lfn, units, name, FAT_NAME_MAX);
                 else
                 {
                     f32_sfn_to_name(e, name);
-                    used_lfn = 0;
+                    if (!has_lfn) /* a long-name chain that is not valid is not part of this entry; a valid one that does not fit still is */
+                        used_lfn = 0;
                 }
                 FatEntry fe;
                 fe.first_cluster = (u32)rd16(e + 20) << 16 | rd16(e + 26);
