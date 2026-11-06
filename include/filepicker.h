@@ -13,4 +13,8 @@
 
 void filepicker_open(Window *owner, const char *title, const char *start_path, void (*on_pick)(const char *path, void *user), void *user);
 
+/* The same dialog for choosing a FOLDER: only folders are listed, a double click goes into one, and "Select this folder" gives the path of the
+ * folder that is open (not the top level, which only lists the drives). `start_path` is the folder to start in. */
+void filepicker_open_folder(Window *owner, const char *title, const char *start_path, void (*on_pick)(const char *path, void *user), void *user);
+
 #endif

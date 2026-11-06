@@ -19,6 +19,7 @@
 #define BTN_SELECT 2
 
 static Window *FP;
+static int FOLDER_MODE; /* 1 = choosing a folder: only folders are listed and Select gives the open folder */
 static void (*ON_PICK)(const char *path, void *user);
 static void *USER;
 static int DIR = -1;             /* the folder shown (a vfs node) */
@@ -80,6 +81,17 @@ static void load(int dir)
     DIR = dir;
     int total = vfs_list_by(dir, ITEMS, ITEMS_MAX, VFS_SORT_NAME, 0);
     N = total < ITEMS_MAX ? total : ITEMS_MAX;
+    if (FOLDER_MODE) /* folders only (they come first in the list) */
+    {
+        int k = 0;
+        for (int i = 0; i < N; i++)
+        {
+            const VfsNode *c = vfs_node(ITEMS[i]);
+            if (c && c->is_dir)
+                ITEMS[k++] = ITEMS[i];
+        }
+        N = k;
+    }
     SEL = -1;
     SCROLL = 0;
     LAST_ROW = -1;
@@ -99,7 +111,7 @@ static void update_buttons(void)
         return;
     const VfsNode *d = vfs_node(DIR);
     FP->btn[BTN_UP].enabled = d && d->parent >= 0;
-    FP->btn[BTN_SELECT].enabled = is_file_row(SEL);
+    FP->btn[BTN_SELECT].enabled = FOLDER_MODE ? (d && d->parent >= 0) : is_file_row(SEL); /* a folder: any but the top level of drives */
 }
 
 typedef struct
@@ -175,9 +187,19 @@ static void go_up(void)
 static void choose(int row)
 {
     char path[300];
-    if (!is_file_row(row))
-        return;
-    vfs_path(ITEMS[row], path, sizeof path);
+    if (FOLDER_MODE)
+    {
+        const VfsNode *d = vfs_node(DIR);
+        if (!d || d->parent < 0)
+            return;
+        vfs_path(DIR, path, sizeof path);
+    }
+    else
+    {
+        if (!is_file_row(row))
+            return;
+        vfs_path(ITEMS[row], path, sizeof path);
+    }
     void (*cb)(const char *, void *) = ON_PICK;
     void *u = USER;
     wm_close(FP);
@@ -211,12 +233,14 @@ static void fp_draw(Window *w, UiRect body)
     char path[300];
     vfs_path(DIR, path, sizeof path);
     ui_text_in_color(ui_rect(l.head.x, l.head.y + 2, l.head.w - 84, 26), path[1] ? path : "This computer", UI_TEXT_TITLE, UI_ALIGN_LEFT, t->text);
+    if (FOLDER_MODE && DIR >= 0 && vfs_node(DIR) && vfs_node(DIR)->parent < 0)
+        ui_text_in_color(ui_rect(l.head.x, l.head.y + 24, l.head.w - 84, 18), "Open a drive, then the folder to use.", UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
     ui_separator(l.head.x, l.head.y + l.head.h - 6, l.head.w);
     int vis = visible_rows(&l);
     sb_sync(&l);
     ui_scroll_draw(SB.track, &SB);
     if (N == 0)
-        ui_text_in(l.list, "This folder is empty.", UI_TEXT_DIM, UI_ALIGN_CENTER);
+        ui_text_in(l.list, FOLDER_MODE ? "No folders here." : "This folder is empty.", UI_TEXT_DIM, UI_ALIGN_CENTER);
     for (int i = 0; i < vis && SCROLL + i < N; i++)
     {
         int ri = SCROLL + i;
@@ -366,7 +390,7 @@ static void on_select(UiButton *b, void *user)
     choose(SEL);
 }
 
-void filepicker_open(Window *owner, const char *title, const char *start_path, void (*on_pick)(const char *path, void *user), void *user)
+static void open_dialog(Window *owner, const char *title, const char *start_path, void (*on_pick)(const char *path, void *user), void *user, int folder_mode)
 {
     if (FP)
     {
@@ -393,6 +417,7 @@ void filepicker_open(Window *owner, const char *title, const char *start_path, v
     if (!win)
         return;
     FP = win;
+    FOLDER_MODE = folder_mode;
     ON_PICK = on_pick;
     USER = user;
     win->on_key = fp_key;
@@ -422,12 +447,22 @@ void filepicker_open(Window *owner, const char *title, const char *start_path, v
     int tb = ui_theme()->titlebar_h;
     int cw = w - 2, ch = h - tb - 2;
     wm_add_button_ex(win, "Up", UI_BTN_SECONDARY, ui_rect(cw - 8 - 72, 8 + 4, 72, 32), WM_ANCHOR_RIGHT, on_up, win);
-    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 8 - 100 - 8 - 100, ch - 8 - 38, 100, 36), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_cancel, win);
-    wm_add_button_ex(win, "Select", UI_BTN_PRIMARY, ui_rect(cw - 8 - 100, ch - 8 - 38, 100, 36), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_select, win);
+    wm_add_button_ex(win, "Cancel", UI_BTN_SECONDARY, ui_rect(cw - 8 - (folder_mode ? 170 : 100) - 8 - 100, ch - 8 - 38, 100, 36), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_cancel, win);
+    wm_add_button_ex(win, folder_mode ? "Select this folder" : "Select", UI_BTN_PRIMARY, ui_rect(cw - 8 - (folder_mode ? 170 : 100), ch - 8 - 38, folder_mode ? 170 : 100, 36), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_select, win);
     if (SEL >= 0)
     {
         Layout l = layout(wm_content(win));
         keep_visible(&l);
     }
     update_buttons();
+}
+
+void filepicker_open(Window *owner, const char *title, const char *start_path, void (*on_pick)(const char *path, void *user), void *user)
+{
+    open_dialog(owner, title, start_path, on_pick, user, 0);
+}
+
+void filepicker_open_folder(Window *owner, const char *title, const char *start_path, void (*on_pick)(const char *path, void *user), void *user)
+{
+    open_dialog(owner, title && *title ? title : "Choose a folder", start_path, on_pick, user, 1);
 }

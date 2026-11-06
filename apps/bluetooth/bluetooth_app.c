@@ -29,6 +29,7 @@
 #define BTN_CONNECT 2
 #define BTN_BROWSE 3 /* the order of wm_add_button_ex in bluetooth_app_open */
 #define BTN_SEND 4
+#define BTN_FOLDER 5
 
 /* how long each step may take before the app gives up (the stack has time-outs of its own, these are the safety net) */
 #define T_LINK_MS 30000
@@ -51,6 +52,7 @@ static int FILE_CH;              /* the RFCOMM channel of the device's Object Pu
 static int SEND_NODE = -1;       /* the file being sent (a vfs node) */
 static char SEND_NAME[64];
 static unsigned long long RX_T0;     /* when the file being received began */
+static int RX_CUSTOM = -1;        /* the folder the user chose for received files (a vfs node), -1 = the default one */
 static int RECV_ON;              /* visible to other devices, ready to take files */
 static char RECV_PATH[96];       /* the folder they are saved in */
 static int NO_SCAN;                /* the window was opened to send a file: do not start a scan by itself */
@@ -476,8 +478,8 @@ static void bt_draw(Window *w, UiRect body)
     ui_edit_draw(l.file, &w->edits[0], "Path - or press Browse", OP == OP_NONE);
     ui_toggle(l.recv, RECV_ON);
     ui_text_in_color(ui_rect(l.recv.x + 50, l.recv.y - 1, 130, 24), "Receive files", UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
-    ui_text_in_color(ui_rect(l.recv.x + 186, l.recv.y - 1, l.foot.w - 190, 24), RECV_ON ? RECV_PATH : "Phones can then send files to this computer.", UI_TEXT_SMALL, UI_ALIGN_LEFT,
-                     t->text_dim);
+    ui_text_in_color(ui_rect(l.recv.x + 186, l.recv.y - 1, l.foot.w - 190 - 100, 24), RECV_PATH[0] ? RECV_PATH : "Phones can then send files to this computer.", UI_TEXT_SMALL,
+                     UI_ALIGN_LEFT, t->text_dim);
     if (MSG[0])
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 120, l.foot.w - 140, 60), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
     else if (SEL >= 0 && SEL < total && !usable(bt_scan_dev(SEL)))
@@ -790,6 +792,69 @@ static void rx_end(void *ctx, int ok)
     RX_FILL = 0;
 }
 
+/* the folder the user chose, if it is still there and its drive can be written; else -1 */
+static int custom_dest(void)
+{
+    if (RX_CUSTOM < 0)
+        return -1;
+    const VfsNode *n = vfs_node(RX_CUSTOM);
+    int vol = n && n->is_dir ? vfs_volume_of(RX_CUSTOM) : -1;
+    VfsVolInfo vi;
+    if (vol < 0 || vfs_volume_info(vol, &vi) != 0 || !vi.writable || vi.locked || same_ci(vi.fs_name, "RAM"))
+        return -1;
+    return RX_CUSTOM;
+}
+
+/* the picker's answer: use this folder from now on (also while receiving is on, unless a file is coming in) */
+static void folder_picked(const char *path, void *user)
+{
+    (void)user;
+    Window *w = BT_WIN;
+    if (!w)
+        return;
+    int node = vfs_lookup(path);
+    const VfsNode *n = node >= 0 ? vfs_node(node) : 0;
+    int vol = n && n->is_dir ? vfs_volume_of(node) : -1;
+    VfsVolInfo vi;
+    if (vol < 0 || vfs_volume_info(vol, &vi) != 0)
+    {
+        finish(w, 2, "That is not a folder on a drive.");
+        return;
+    }
+    if (!vi.writable || vi.locked || same_ci(vi.fs_name, "RAM"))
+    {
+        finish(w, 2, "That drive cannot be written to (the RAM disk keeps no content, a locked drive is read only).");
+        return;
+    }
+    RX_CUSTOM = node;
+    RECV_PATH[0] = 0;
+    vfs_path(node, RECV_PATH, sizeof RECV_PATH);
+    if (RECV_ON && RX_NODE < 0)
+        RX_DIR = node;
+    char m[100];
+    int k = 0;
+    m[0] = 0;
+    put_str(m, sizeof m, &k, "Received files will be saved in ");
+    put_str(m, sizeof m, &k, RECV_PATH);
+    put_str(m, sizeof m, &k, ".");
+    finish(w, 1, m);
+}
+
+static void on_folder(UiButton *b, void *user)
+{
+    (void)b;
+    Window *w = (Window *)user;
+    BtServeInfo si;
+    bt_serve_info(&si);
+    if (si.receiving)
+    {
+        set_msg(2, "A file is coming in - change the folder when it is done.");
+        wm_invalidate();
+        return;
+    }
+    filepicker_open_folder(w, "Folder for received files", RECV_PATH[0] ? RECV_PATH : "/", folder_picked, 0);
+}
+
 static void set_receive(Window *w, int on)
 {
     if (OP != OP_NONE)
@@ -801,7 +866,9 @@ static void set_receive(Window *w, int on)
             finish(w, 2, "No working Bluetooth adapter.");
             return;
         }
-        RX_DIR = find_dest();
+        RX_DIR = custom_dest();
+        if (RX_DIR < 0)
+            RX_DIR = find_dest();
         if (RX_DIR < 0)
         {
             finish(w, 2, "There is no drive to save files on that can be written.");
@@ -1386,6 +1453,7 @@ static void bluetooth_app_open(void)
     wm_add_button_ex(win, "Connect", UI_BTN_PRIMARY, ui_rect(cw - 8 - 116, ch - 8 - 42, 116, 34), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_connect, win);
     wm_add_button_ex(win, "Browse", UI_BTN_SECONDARY, ui_rect(cw - 8 - 108 - 8 - 92, ch - 8 - FOOT_H + 44, 92, 32), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_browse, win);
     wm_add_button_ex(win, "Send", UI_BTN_PRIMARY, ui_rect(cw - 8 - 108, ch - 8 - FOOT_H + 44, 108, 32), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_send, win);
+    wm_add_button_ex(win, "Folder", UI_BTN_SECONDARY, ui_rect(cw - 8 - 92, ch - 8 - FOOT_H + 84, 92, 28), WM_ANCHOR_RIGHT | WM_ANCHOR_BOTTOM, on_folder, win);
     update_buttons(win);
     if (!NO_SCAN && bt_hci_up() && bt_scan_count() == 0 && bt_scan_state() == BT_SCAN_IDLE && !link_active()) /* nothing to show yet: look around */
         start_scan(win);
