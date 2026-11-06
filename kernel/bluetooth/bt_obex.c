@@ -61,6 +61,8 @@ static struct
 } O;
 
 static unsigned be16(const unsigned char *p) { return (unsigned)p[0] << 8 | p[1]; }
+static void srv_step(unsigned long long now);
+static void srv_reset(void);
 static void put_be16(unsigned char *p, unsigned v)
 {
     p[0] = (unsigned char)(v >> 8);
@@ -351,6 +353,7 @@ static void on_packet(void)
 
 void bt_obex_step(unsigned long long now)
 {
+    srv_step(now);
     if (O.state == OB_IDLE || O.state == OB_DONE || O.state == OB_FAILED)
         return;
     if (!bt_chan_tx_idle())
@@ -446,6 +449,7 @@ void bt_obex_cancel(void)
 
 void bt_obex_reset(void)
 {
+    srv_reset();
     if (bt_obex_state() == BT_OBEX_RUNNING)
     {
         O.state = OB_FAILED;
@@ -475,4 +479,334 @@ int bt_obex_line(char *buf, unsigned cap)
     }
     buf[n] = 0;
     return (int)n;
+}
+
+/* ---- the server: a phone sends us a file ----
+ * The same OBEX packets, the other way round. The phone connects (0x80), sends PUT requests (0x02 / final 0x82) with the file name, its length
+ * and the data in Body headers (the last with End-of-Body, or the final bit), and disconnects (0x81). We answer each one: 0xA0 OK, 0x90 Continue
+ * (more please), or an error (0xC0 bad request, 0xC3 forbidden, 0xD0 internal error: the drive could not take the data). The bytes go to a "sink"
+ * (the program that owns the drive): begin(name, size), write(data) ..., end(ok). A packet is answered from the step, not from the receive
+ * handler, because sending data must not happen inside one. */
+#define SRV_RX_MAX 1100
+#define SRV_PKT_MAX 1024 /* the biggest packet we say we take */
+#define SRV_IDLE_MS 30000
+#define RSP_BAD_REQUEST 0xC0
+#define RSP_FORBIDDEN 0xC3
+#define RSP_INTERNAL 0xD0
+#define RSP_NOT_IMPL 0xD1
+
+static struct
+{
+    int on;
+    BtObexSink sk;
+    int in_file;
+    unsigned size, got;
+    char name[64];
+    unsigned files;
+    int last_ok;
+    unsigned long long t_last;
+    unsigned char acc[SRV_RX_MAX];
+    unsigned acc_len;
+    int pkt_ready;
+} V;
+
+static unsigned be32(const unsigned char *p) { return (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3]; }
+
+void bt_obex_serve(const BtObexSink *sink)
+{
+    if (sink)
+    {
+        V.sk.begin = sink->begin;
+        V.sk.write = sink->write;
+        V.sk.end = sink->end;
+        V.sk.ctx = sink->ctx;
+        V.on = 1;
+    }
+    else
+    {
+        srv_reset();
+        V.on = 0;
+    }
+}
+
+static void srv_abort(void)
+{
+    if (V.in_file)
+    {
+        V.in_file = 0;
+        V.last_ok = 0;
+        if (V.sk.end)
+            V.sk.end(V.sk.ctx, 0);
+    }
+}
+
+static void srv_reset(void)
+{
+    srv_abort();
+    V.acc_len = 0;
+    V.pkt_ready = 0;
+}
+
+void bt_obex_srv_rx(const unsigned char *d, unsigned n)
+{
+    if (!V.on || V.pkt_ready)
+        return;
+    for (unsigned i = 0; i < n; i++)
+    {
+        if (V.acc_len >= SRV_RX_MAX)
+        {
+            V.acc_len = 0; /* longer than we said we take: forget it */
+            return;
+        }
+        V.acc[V.acc_len++] = d[i];
+    }
+    if (V.acc_len >= 3)
+    {
+        unsigned need = be16(V.acc + 1);
+        if (need < 3 || need > SRV_RX_MAX)
+        {
+            V.acc_len = 0;
+            return;
+        }
+        if (V.acc_len >= need)
+            V.pkt_ready = 1;
+    }
+}
+
+/* UTF-16BE text (the name of a file) to UTF-8; stops at a zero character */
+static void from_utf16(const unsigned char *p, unsigned bytes, char *out, unsigned cap)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i + 1 < bytes; i += 2)
+    {
+        unsigned c = be16(p + i);
+        if (c == 0 || n + 5 > cap)
+            break;
+        if (c >= 0xD800 && c < 0xDC00 && i + 3 < bytes)
+        {
+            unsigned lo = be16(p + i + 2);
+            if (lo >= 0xDC00 && lo < 0xE000)
+            {
+                c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
+                i += 2;
+            }
+        }
+        if (c < 0x80)
+            out[n++] = (char)c;
+        else if (c < 0x800)
+        {
+            out[n++] = (char)(0xC0 | (c >> 6));
+            out[n++] = (char)(0x80 | (c & 0x3F));
+        }
+        else if (c < 0x10000)
+        {
+            out[n++] = (char)(0xE0 | (c >> 12));
+            out[n++] = (char)(0x80 | ((c >> 6) & 0x3F));
+            out[n++] = (char)(0x80 | (c & 0x3F));
+        }
+        else
+        {
+            out[n++] = (char)(0xF0 | (c >> 18));
+            out[n++] = (char)(0x80 | ((c >> 12) & 0x3F));
+            out[n++] = (char)(0x80 | ((c >> 6) & 0x3F));
+            out[n++] = (char)(0x80 | (c & 0x3F));
+        }
+    }
+    out[n] = 0;
+}
+
+static void srv_respond(unsigned code, const unsigned char *extra, unsigned n)
+{
+    unsigned char a[16];
+    a[0] = (unsigned char)code;
+    a[1] = 0;
+    a[2] = (unsigned char)(3 + n);
+    for (unsigned i = 0; i < n; i++)
+        a[3 + i] = extra[i];
+    if (bt_rfcomm_send(a, 3 + n) < 0)
+        srv_abort(); /* the phone cannot be told anything: it is gone */
+}
+
+typedef struct
+{
+    char name[64];
+    int have_name, have_len, have_body;
+    unsigned total;
+    const unsigned char *body;
+    unsigned body_len;
+} SrvHdr;
+
+/* the headers of a request; 0 if one is damaged */
+static int srv_headers(const unsigned char *p, unsigned left, SrvHdr *h)
+{
+    h->name[0] = 0;
+    h->have_name = h->have_len = h->have_body = 0;
+    h->total = h->body_len = 0;
+    h->body = 0;
+    while (left)
+    {
+        unsigned id = p[0], hl;
+        switch (id >> 6)
+        {
+        case 0:
+        case 1:
+            if (left < 3)
+                return 0;
+            hl = be16(p + 1);
+            if (hl < 3)
+                return 0;
+            break;
+        case 2:
+            hl = 2;
+            break;
+        default:
+            hl = 5;
+        }
+        if (hl > left)
+            return 0;
+        if (id == H_NAME)
+        {
+            from_utf16(p + 3, hl - 3, h->name, sizeof h->name);
+            h->have_name = h->name[0] != 0;
+        }
+        else if (id == H_LENGTH && hl == 5)
+        {
+            h->total = be32(p + 1);
+            h->have_len = 1;
+        }
+        else if (id == H_BODY || id == H_END_OF_BODY)
+        {
+            h->body = p + 3;
+            h->body_len = hl - 3;
+            h->have_body = 1;
+        }
+        p += hl;
+        left -= hl;
+    }
+    return 1;
+}
+
+static void srv_put(int final)
+{
+    SrvHdr h;
+    unsigned len = be16(V.acc + 1);
+    if (!srv_headers(V.acc + 3, len - 3, &h))
+    {
+        srv_abort();
+        srv_respond(RSP_BAD_REQUEST, 0, 0);
+        return;
+    }
+    if (!V.in_file)
+    {
+        if (!h.have_name)
+        {
+            srv_respond(RSP_BAD_REQUEST, 0, 0);
+            return;
+        }
+        if (final && !h.have_body && !h.have_len) /* a PUT with a name and nothing else asks to delete that file */
+        {
+            srv_respond(RSP_FORBIDDEN, 0, 0);
+            return;
+        }
+        unsigned size = h.have_len ? h.total : 0xFFFFFFFFu;
+        if (!V.sk.begin || V.sk.begin(V.sk.ctx, h.name, size) != 0)
+        {
+            srv_respond(RSP_INTERNAL, 0, 0);
+            return;
+        }
+        V.in_file = 1;
+        V.size = size;
+        V.got = 0;
+        unsigned k = 0;
+        for (; h.name[k] && k < sizeof V.name - 1; k++)
+            V.name[k] = h.name[k];
+        V.name[k] = 0;
+    }
+    if (h.body_len)
+    {
+        if (!V.sk.write || V.sk.write(V.sk.ctx, h.body, h.body_len) != 0)
+        {
+            srv_abort();
+            srv_respond(RSP_INTERNAL, 0, 0);
+            return;
+        }
+        V.got += h.body_len;
+    }
+    if (final)
+    {
+        V.in_file = 0;
+        V.files++;
+        V.last_ok = 1;
+        if (V.sk.end)
+            V.sk.end(V.sk.ctx, 1);
+        srv_respond(RSP_OK, 0, 0);
+    }
+    else
+        srv_respond(RSP_CONTINUE, 0, 0);
+}
+
+static void srv_packet(void)
+{
+    unsigned op = V.acc[0];
+    switch (op)
+    {
+    case OP_CONNECT:
+    {
+        unsigned char x[4] = {0x10, 0x00, (unsigned char)(SRV_PKT_MAX >> 8), (unsigned char)SRV_PKT_MAX};
+        srv_respond(RSP_OK, x, 4);
+        break;
+    }
+    case OP_DISCONNECT:
+        srv_abort();
+        srv_respond(RSP_OK, 0, 0);
+        break;
+    case OP_ABORT:
+        srv_abort();
+        srv_respond(RSP_OK, 0, 0);
+        break;
+    case OP_PUT:
+    case OP_PUT | OP_FINAL:
+        srv_put(op & OP_FINAL);
+        break;
+    default:
+        srv_respond(RSP_NOT_IMPL, 0, 0);
+    }
+    V.acc_len = 0;
+    V.pkt_ready = 0;
+}
+
+static void srv_step(unsigned long long now)
+{
+    if (!V.on)
+        return;
+    if (bt_rfcomm_state() != BT_RF_OPEN || !bt_rfcomm_is_server())
+    {
+        if (V.in_file || V.acc_len)
+            srv_reset();
+        return;
+    }
+    if (!V.pkt_ready)
+    {
+        if (V.in_file && now && now - V.t_last > SRV_IDLE_MS)
+            srv_abort(); /* the phone stopped in the middle of a file */
+        return;
+    }
+    if (!bt_chan_tx_idle())
+        return;
+    V.t_last = now;
+    srv_packet();
+}
+
+void bt_serve_info(BtServeInfo *o)
+{
+    o->on = V.on;
+    o->receiving = V.in_file;
+    unsigned k = 0;
+    for (; V.name[k] && k < sizeof o->name - 1; k++)
+        o->name[k] = V.name[k];
+    o->name[k] = 0;
+    o->got = V.got;
+    o->total = V.size == 0xFFFFFFFFu ? 0 : V.size;
+    o->files = V.files;
+    o->last_ok = V.last_ok;
 }

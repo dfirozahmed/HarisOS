@@ -157,7 +157,7 @@ void bt_pair_event(const unsigned char *e, unsigned len)
     case EV_PIN_CODE_REQUEST: /* the device wants a PIN (old style pairing): ours only when we started the pairing */
         if (plen < 6)
             return;
-        if (pairing())
+        if (pairing() || bt_serve_on())
         {
             for (int i = 0; i < 6; i++)
                 r[i] = p[i];
@@ -173,7 +173,7 @@ void bt_pair_event(const unsigned char *e, unsigned len)
     case EV_IO_CAPA_REQUEST: /* the chip needs our input / output abilities */
         if (plen < 6)
             return;
-        if (pairing())
+        if (pairing() || bt_serve_on()) /* (serving: a device that wants to send us a file pairs first) */
         {
             for (int i = 0; i < 6; i++)
                 r[i] = p[i];
@@ -200,7 +200,7 @@ void bt_pair_event(const unsigned char *e, unsigned len)
     case EV_USER_CONFIRM_REQUEST: /* address, a number both sides would show: with no display on our side it is "Just Works": accept */
         if (plen < 6)
             return;
-        push(pairing() ? OP_USER_CONFIRM_REPLY : OP_USER_CONFIRM_NEG_REPLY, p, 6);
+        push(pairing() || bt_serve_on() ? OP_USER_CONFIRM_REPLY : OP_USER_CONFIRM_NEG_REPLY, p, 6);
         break;
     case EV_SIMPLE_PAIR_COMPLETE: /* status, address */
         if (plen >= 7 && same6(P.addr, p + 1))
@@ -276,6 +276,27 @@ int bt_pair_start(void)
     return 0;
 }
 
+/* Secure Simple Pairing on, the events about it enabled, a name for the device's list: once after the chip started */
+void bt_pair_setup(void)
+{
+    unsigned char r[8];
+    unsigned n;
+    if (P.setup_done)
+        return;
+    unsigned char mode = 1;
+    static const unsigned char mask[8] = BT_EVENT_MASK;
+    unsigned char name[248];
+    for (unsigned i = 0; i < sizeof name; i++)
+        name[i] = 0;
+    static const char NAME[] = "HarisOS";
+    for (unsigned i = 0; i < sizeof NAME - 1; i++)
+        name[i] = (unsigned char)NAME[i];
+    bt_cmd(OP_SET_EVENT_MASK, mask, 8, r, sizeof r, &n, 1000);
+    bt_cmd(OP_WRITE_SSP_MODE, &mode, 1, r, sizeof r, &n, 1000);
+    bt_cmd(OP_WRITE_LOCAL_NAME, name, sizeof name, r, sizeof r, &n, 1000);
+    P.setup_done = 1;
+}
+
 void bt_pair_step(unsigned long long now)
 {
     unsigned char r[8];
@@ -288,22 +309,7 @@ void bt_pair_step(unsigned long long now)
     }
     if (P.state == PS_START && bt_link_state() == BT_LINK_UP)
     {
-        if (!P.setup_done)
-        {
-            /* Secure Simple Pairing on, the events about it enabled, a name for the device's list */
-            unsigned char mode = 1;
-            static const unsigned char mask[8] = BT_EVENT_MASK;
-            unsigned char name[248];
-            for (unsigned i = 0; i < sizeof name; i++)
-                name[i] = 0;
-            static const char NAME[] = "HarisOS";
-            for (unsigned i = 0; i < sizeof NAME - 1; i++)
-                name[i] = (unsigned char)NAME[i];
-            bt_cmd(OP_SET_EVENT_MASK, mask, 8, r, sizeof r, &n, 1000);
-            bt_cmd(OP_WRITE_SSP_MODE, &mode, 1, r, sizeof r, &n, 1000);
-            bt_cmd(OP_WRITE_LOCAL_NAME, name, sizeof name, r, sizeof r, &n, 1000);
-            P.setup_done = 1;
-        }
+        bt_pair_setup();
         unsigned char h[2] = {(unsigned char)P.handle, (unsigned char)(P.handle >> 8)};
         P.state = PS_AUTH; /* before the command: the events follow at once */
         int st = bt_cmd(OP_AUTH_REQUESTED, h, 2, r, sizeof r, &n, 1000); /* Command Status */

@@ -13,6 +13,7 @@
 #include "desktop.h"
 #include "mouse.h"
 #include "taskbar.h"
+#include "toast.h"
 #include "timer.h"
 #include "ui.h"
 #include "vfs.h"
@@ -20,7 +21,7 @@
 
 #define ROW_H 46
 #define HEAD_H 76
-#define FOOT_H 150
+#define FOOT_H 184
 #define BTN_SCAN 0
 #define BTN_DISCONNECT 1
 #define BTN_CONNECT 2
@@ -46,6 +47,8 @@ enum { BTM_CONNECT, BTM_DISCONNECT, BTM_COPY_NAME, BTM_COPY_ADDR, BTM_SCAN }; /*
 static int FILE_CH;              /* the RFCOMM channel of the device's Object Push service (it takes files), 0 = it has none */
 static int SEND_NODE = -1;       /* the file being sent (a vfs node) */
 static char SEND_NAME[64];
+static int RECV_ON;              /* visible to other devices, ready to take files */
+static char RECV_PATH[96];       /* the folder they are saved in */
 static int DISC_AFTER;           /* Disconnect was pressed during a transfer: cancel it, then disconnect */
 static int VOL_DRAG;             /* the left button went down on the volume slider and is still held */
 static char MSG[100];
@@ -190,6 +193,11 @@ static unsigned long long signature(void)
     bt_obex_progress(&done, &total);
     s = s * 101 + (total ? (unsigned)((unsigned long long)done * 100 / total) : 0);
     s = s * 7 + (unsigned)bt_obex_state();
+    BtServeInfo si;
+    bt_serve_info(&si);
+    s = s * 7 + (unsigned)si.receiving + 2 * (unsigned)si.on;
+    s = s * 101 + (si.total ? (unsigned)((unsigned long long)si.got * 100 / si.total) : si.got / 4096);
+    s = s * 1000 + si.files;
     if (OP == OP_SCAN)
         s = s * 1024 + (unsigned)scan_percent(); /* the progress bar */
     else if (OP != OP_NONE)
@@ -200,7 +208,7 @@ static unsigned long long signature(void)
 /* ---- layout ---- */
 typedef struct
 {
-    UiRect head, list, foot, volume, file;
+    UiRect head, list, foot, volume, file, recv;
 } Layout;
 
 static Layout layout(UiRect body)
@@ -212,6 +220,7 @@ static Layout layout(UiRect body)
     ui_cut_right(&r, UI_SCROLL_W);
     l.list = r;
     l.volume = ui_rect(l.foot.x + 76, l.foot.y + 12, l.foot.w - 76 - 56, 20);
+    l.recv = ui_rect(l.foot.x + 2, l.foot.y + 88, 40, 22); /* the "Receive files" switch */
     l.file = ui_rect(l.foot.x + 76, l.foot.y + 44, l.foot.w - 76 - 124, 30); /* the path of the file to send; the Send button is to its right */
     return l;
 }
@@ -276,6 +285,8 @@ static void bt_draw(Window *w, UiRect body)
     UiRgb col = t->text_dim;
     int audio = bt_a2dp_audio_ready();
     BtLinkState ls = bt_link_state();
+    BtServeInfo si;
+    bt_serve_info(&si);
 
     /* the title: what the radio is doing */
     if (!bt_hci_up())
@@ -283,6 +294,12 @@ static void bt_draw(Window *w, UiRect body)
     else if (OP >= OP_STOP_AV)
     {
         put_str(line, sizeof line, &n, "Disconnecting...");
+        col = t->warning;
+    }
+    else if (si.receiving)
+    {
+        put_str(line, sizeof line, &n, "Receiving ");
+        put_str(line, sizeof line, &n, si.name);
         col = t->warning;
     }
     else if (OP == OP_SEND)
@@ -319,6 +336,18 @@ static void bt_draw(Window *w, UiRect body)
     n = 0;
     if (!bt_hci_up())
         bt_status(line, sizeof line);
+    else if (si.receiving)
+    {
+        put_dec(line, sizeof line, &n, si.total ? (unsigned)((unsigned long long)si.got * 100 / si.total) : 0);
+        put_str(line, sizeof line, &n, "% - ");
+        put_dec(line, sizeof line, &n, si.got);
+        if (si.total)
+        {
+            put_str(line, sizeof line, &n, " of ");
+            put_dec(line, sizeof line, &n, si.total);
+        }
+        put_str(line, sizeof line, &n, " bytes");
+    }
     else if (OP == OP_SEND)
     {
         unsigned done, total;
@@ -344,10 +373,12 @@ static void bt_draw(Window *w, UiRect body)
     else if (ls == BT_LINK_UP)
         put_str(line, sizeof line, &n, audio ? "Sound from the Player goes to this device." : FILE_CH ? "This device accepts files: type a path below." : "Linked, but the music stream is not open.");
     else
-        put_str(line, sizeof line, &n, bt_scan_count() ? "Pick a device below." : "Put the headset in pairing mode, then press Scan.");
+        put_str(line, sizeof line, &n, RECV_ON ? "Visible as HarisOS - send a file to it from the phone." : bt_scan_count() ? "Pick a device below." : "Put the headset in pairing mode, then press Scan.");
     ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 32, l.head.w - 48 - 240, 22), line, UI_TEXT_DIM, UI_ALIGN_LEFT, t->text_dim);
     if (OP == OP_SCAN)
         ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 240, 8), scan_percent());
+    else if (si.receiving)
+        ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 240, 8), si.total ? (int)((unsigned long long)si.got * 100 / si.total) : 0);
     else if (OP == OP_SEND)
     {
         unsigned done, total;
@@ -419,10 +450,14 @@ static void bt_draw(Window *w, UiRect body)
     else
         ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 46, l.foot.w - 4, 26), "To send a file, connect a phone or computer that accepts files.", UI_TEXT_SMALL, UI_ALIGN_LEFT,
                          t->text_dim);
+    ui_toggle(l.recv, RECV_ON);
+    ui_text_in_color(ui_rect(l.recv.x + 50, l.recv.y - 1, 130, 24), "Receive files", UI_TEXT_BODY, UI_ALIGN_LEFT, t->text);
+    ui_text_in_color(ui_rect(l.recv.x + 186, l.recv.y - 1, l.foot.w - 190, 24), RECV_ON ? RECV_PATH : "Phones can then send files to this computer.", UI_TEXT_SMALL, UI_ALIGN_LEFT,
+                     t->text_dim);
     if (MSG[0])
-        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 84, l.foot.w - 140, 56), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 120, l.foot.w - 140, 60), MSG, UI_TEXT_SMALL, UI_ALIGN_LEFT, MSG_KIND == 1 ? t->success : t->danger);
     else if (SEL >= 0 && SEL < total && !usable(bt_scan_dev(SEL)))
-        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 84, l.foot.w - 140, 56), "This kind of device has no sound or file service this app can use.", UI_TEXT_SMALL,
+        ui_text_in_color(ui_rect(l.foot.x + 2, l.foot.y + 120, l.foot.w - 140, 60), "This kind of device has no sound or file service this app can use.", UI_TEXT_SMALL,
                          UI_ALIGN_LEFT, t->warning);
     if (MENU.open && w != wm_top())
         ui_menu_close(&MENU); /* focus moved elsewhere (another window or a dialog) */
@@ -523,6 +558,243 @@ static void start_send(Window *w)
     begin(OP_SEND);
     update_buttons(w);
     wm_invalidate();
+}
+
+/* ---- receiving: where the files go, and the sink that writes them ---- */
+static int same_ci(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++)
+    {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z')
+            x = (char)(x + 32);
+        if (y >= 'A' && y <= 'Z')
+            y = (char)(y + 32);
+        if (x != y)
+            return 0;
+    }
+    return *a == *b;
+}
+
+/* The folder "Bluetooth" on the first drive that can be written (the RAM disk keeps no content, so it is no place for files). -1 if there is none. */
+static int find_dest(void)
+{
+    for (int v = 0; v < vfs_volume_count(); v++)
+    {
+        VfsVolInfo vi;
+        if (vfs_volume_info(v, &vi) != 0 || !vi.writable || vi.locked || same_ci(vi.fs_name, "RAM"))
+            continue;
+        int ids[128];
+        int n = vfs_list(vi.node, ids, 128);
+        if (n > 128)
+            n = 128;
+        int dir = -1;
+        for (int i = 0; i < n; i++)
+        {
+            const VfsNode *c = vfs_node(ids[i]);
+            if (c && c->is_dir && same_ci(c->name, "Bluetooth"))
+                dir = ids[i];
+        }
+        if (dir < 0)
+            dir = vfs_add(vi.node, "Bluetooth", 1, 0);
+        return dir >= 0 ? dir : vi.node; /* (if the folder cannot be made, the files go to the drive's top folder) */
+    }
+    return -1;
+}
+
+/* A name the phone sent, made safe for a file system: no folders (only the part after the last / or \\), no characters FAT forbids, no leading or
+ * trailing dots and spaces, not longer than 120 bytes; "received.bin" if nothing is left. */
+static void clean_name(const char *in, char *out, int cap)
+{
+    const char *base = in;
+    for (const char *q = in; *q; q++)
+        if (*q == '/' || *q == '\\')
+            base = q + 1;
+    int n = 0;
+    for (; *base && n < cap - 1 && n < 120; base++)
+    {
+        unsigned char c = (unsigned char)*base;
+        if (c < 32 || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+            c = '_';
+        out[n++] = (char)c;
+    }
+    while (n > 0 && (out[n - 1] == '.' || out[n - 1] == ' '))
+        n--;
+    int a = 0;
+    while (a < n && (out[a] == '.' || out[a] == ' '))
+        a++;
+    for (int i = a; i < n; i++)
+        out[i - a] = out[i];
+    n -= a;
+    out[n] = 0;
+    if (n == 0)
+    {
+        const char *d = "received.bin";
+        for (n = 0; d[n]; n++)
+            out[n] = d[n];
+        out[n] = 0;
+    }
+}
+
+/* the file in `dir`: under the name given, or "name (2).ext", "name (3).ext" ... when it exists */
+static int create_unique(int dir, const char *name)
+{
+    int id = vfs_add(dir, name, 0, 0);
+    if (id >= 0)
+        return id;
+    int len = 0, dot = -1;
+    while (name[len])
+        len++;
+    for (int i = 1; i < len; i++)
+        if (name[i] == '.')
+            dot = i;
+    if (dot < 0)
+        dot = len;
+    for (unsigned k = 2; k < 30; k++)
+    {
+        char nm[160];
+        int m = 0;
+        for (int i = 0; i < dot && m < 130; i++)
+            nm[m++] = name[i];
+        nm[m] = 0;
+        put_str(nm, sizeof nm, &m, " (");
+        put_dec(nm, sizeof nm, &m, k);
+        put_str(nm, sizeof nm, &m, ")");
+        put_str(nm, sizeof nm, &m, name + dot);
+        id = vfs_add(dir, nm, 0, 0);
+        if (id >= 0)
+            return id;
+    }
+    return -1;
+}
+
+static int RX_DIR = -1;       /* the folder (a vfs node) */
+static int RX_NODE = -1;      /* the file being written */
+static unsigned RX_OFF;       /* bytes of it already on the drive */
+static unsigned char RX_BUF[8192]; /* written in big pieces: a drive is slow with small ones */
+static unsigned RX_FILL;
+static char RX_NAME[64];
+
+static int rx_flush(void)
+{
+    if (RX_FILL == 0)
+        return 0;
+    int r = vfs_write(RX_NODE, RX_OFF, RX_BUF, RX_FILL);
+    if (r != (int)RX_FILL)
+        return -1;
+    RX_OFF += RX_FILL;
+    RX_FILL = 0;
+    return 0;
+}
+
+static int rx_begin(void *ctx, const char *name, unsigned size)
+{
+    (void)ctx;
+    (void)size;
+    if (RX_DIR < 0 || RX_NODE >= 0)
+        return -1;
+    char clean[128];
+    clean_name(name, clean, sizeof clean);
+    int id = create_unique(RX_DIR, clean);
+    if (id < 0)
+        return -1;
+    RX_NODE = id;
+    RX_OFF = RX_FILL = 0;
+    const VfsNode *f = vfs_node(id);
+    int k = 0;
+    RX_NAME[0] = 0;
+    put_str(RX_NAME, sizeof RX_NAME, &k, f ? f->name : clean);
+    return 0;
+}
+
+static int rx_write(void *ctx, const unsigned char *d, unsigned n)
+{
+    (void)ctx;
+    if (RX_NODE < 0)
+        return -1;
+    while (n)
+    {
+        unsigned part = sizeof RX_BUF - RX_FILL;
+        if (part > n)
+            part = n;
+        for (unsigned i = 0; i < part; i++)
+            RX_BUF[RX_FILL + i] = d[i];
+        RX_FILL += part;
+        d += part;
+        n -= part;
+        if (RX_FILL == sizeof RX_BUF && rx_flush() != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static void rx_end(void *ctx, int ok)
+{
+    (void)ctx;
+    if (RX_NODE < 0)
+        return;
+    if (ok && rx_flush() != 0)
+        ok = 0;
+    char m[TOAST_TEXT_MAX];
+    int k = 0;
+    m[0] = 0;
+    if (ok)
+    {
+        put_str(m, sizeof m, &k, "Received ");
+        put_str(m, sizeof m, &k, RX_NAME);
+        put_str(m, sizeof m, &k, " (");
+        put_dec(m, sizeof m, &k, RX_OFF);
+        put_str(m, sizeof m, &k, " bytes) in ");
+        put_str(m, sizeof m, &k, RECV_PATH);
+        toast_show(TOAST_SUCCESS, m);
+    }
+    else
+    {
+        vfs_remove(RX_NODE); /* a broken file is no use */
+        put_str(m, sizeof m, &k, "Receiving ");
+        put_str(m, sizeof m, &k, RX_NAME);
+        put_str(m, sizeof m, &k, " did not finish - the part received was removed.");
+        toast_show(TOAST_WARNING, m);
+    }
+    RX_NODE = -1;
+    RX_FILL = 0;
+}
+
+static void set_receive(Window *w, int on)
+{
+    if (OP != OP_NONE)
+        return;
+    if (on)
+    {
+        if (!bt_hci_up())
+        {
+            finish(w, 2, "No working Bluetooth adapter.");
+            return;
+        }
+        RX_DIR = find_dest();
+        if (RX_DIR < 0)
+        {
+            finish(w, 2, "There is no drive to save files on that can be written.");
+            return;
+        }
+        RECV_PATH[0] = 0;
+        vfs_path(RX_DIR, RECV_PATH, sizeof RECV_PATH);
+        BtObexSink sink = {rx_begin, rx_write, rx_end, 0};
+        int r = bt_serve_set(1, &sink);
+        if (r != 0)
+        {
+            finish(w, 2, "The chip could not be made visible.");
+            return;
+        }
+        RECV_ON = 1;
+        finish(w, 1, "On. On the phone: send a file by Bluetooth to HarisOS (pair if it asks - there is no PIN).");
+    }
+    else
+    {
+        bt_serve_set(0, 0);
+        RECV_ON = 0;
+        finish(w, 1, "Receiving is off.");
+    }
 }
 
 static void start_scan(Window *w)
@@ -857,6 +1129,11 @@ static int bt_press(Window *w, int x, int y)
     {
         VOL_DRAG = 1;
         bt_a2dp_set_volume(vol_at(&l, x));
+        return 1;
+    }
+    if (ui_contains(ui_rect(l.recv.x, l.recv.y, 190, l.recv.h), x, y))
+    {
+        set_receive(w, !RECV_ON);
         return 1;
     }
     if (bt_link_state() == BT_LINK_UP && FILE_CH && w->edits[0].field.w > 0 && ui_contains(w->edits[0].field, x, y))

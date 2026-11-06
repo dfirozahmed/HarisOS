@@ -117,6 +117,11 @@ static int fake_send(void *ctx, const unsigned char *pkt, unsigned len)
     case 0x0413: /* Set Connection Encryption */
         cs(op, F.auth_status);
         break;
+    case 0x0409: /* Accept Connection Request */
+        cs(op, 0);
+        break;
+    case 0x0C1A: /* Write Scan Enable */
+    case 0x0C24: /* Write Class of Device */
     case 0x0C01:
     case 0x0C13:
     case 0x0C56:
@@ -737,6 +742,226 @@ void task_sleep_ms(unsigned ms)
 }
 
 #include "../kernel/audio/audio_bt.c"
+
+/* ---- receiving files: the phone is the one who connects ---- */
+static unsigned char RX_GOT[4096];
+static unsigned RX_LEN;
+static char RX_NAME[64];
+static int RX_BEGAN, RX_ENDED, RX_OK;
+
+static int rx_begin(void *c, const char *name, unsigned size)
+{
+    (void)c;
+    (void)size;
+    RX_BEGAN++;
+    strncpy(RX_NAME, name, sizeof RX_NAME - 1);
+    RX_LEN = 0;
+    return 0;
+}
+
+static int rx_write(void *c, const unsigned char *d, unsigned n)
+{
+    (void)c;
+    memcpy(RX_GOT + RX_LEN, d, n);
+    RX_LEN += n;
+    return 0;
+}
+
+static void rx_end(void *c, int ok)
+{
+    (void)c;
+    RX_ENDED++;
+    RX_OK = ok;
+}
+
+static const BtObexSink RX_SINK = {rx_begin, rx_write, rx_end, 0};
+
+/* the phone's L2CAP Connection Request, our answer and the configuration both ways; returns our channel id */
+static unsigned phone_channel(unsigned psm, unsigned phone_cid)
+{
+    unsigned id = 0, dl = 0;
+    const unsigned char *d = 0;
+    unsigned char rq[4] = {(unsigned char)psm, (unsigned char)(psm >> 8), (unsigned char)phone_cid, (unsigned char)(phone_cid >> 8)};
+    dev_sig(0x02, 0x21, rq, 4);
+    bt_poll();
+    CHECK(last_sig(0x03, &id, &d, &dl) && id == 0x21 && dl == 8 && le16(d + 2) == phone_cid && le16(d + 4) == 0); /* Connection Response: success */
+    unsigned ours = le16(d);
+    unsigned cfg_id = 0;
+    CHECK(last_sig(0x04, &cfg_id, &d, &dl) && le16(d) == phone_cid); /* our Configuration Request */
+    unsigned char cq[4] = {(unsigned char)ours, (unsigned char)(ours >> 8), 0, 0};
+    dev_sig(0x04, 0x22, cq, 4);
+    bt_poll();
+    unsigned char cr[6] = {(unsigned char)ours, (unsigned char)(ours >> 8), 0, 0, 0, 0};
+    dev_sig(0x05, cfg_id, cr, 6);
+    bt_poll();
+    return ours;
+}
+
+/* an RFCOMM frame from the phone (it is the initiator) to our channel */
+static void phone_rf(unsigned our_cid, unsigned addr, unsigned ctrl, const unsigned char *d, unsigned n)
+{
+    unsigned char f[1100];
+    unsigned len = bt_rfcomm_build(f, sizeof f, addr, ctrl, d, n);
+    dev_pdu(our_cid, f, len);
+    bt_poll();
+    bt_poll();
+}
+
+/* the last RFCOMM frame we sent on the phone's channel */
+static int our_rf(unsigned phone_cid, BtRfFrame *fr)
+{
+    const unsigned char *d = 0;
+    unsigned dl = 0;
+    return last_data(phone_cid, &d, &dl) && bt_rfcomm_parse(d, dl, fr) == 0;
+}
+
+static void recv_tests(void)
+{
+    /* not serving: a page from a device is ignored, and so is a channel request */
+    {
+        fresh();
+        unsigned char cr[10];
+        memcpy(cr, ADDR_LSB, 6);
+        cr[6] = 0x0C;
+        cr[7] = 0x02;
+        cr[8] = 0x5A;
+        cr[9] = 1;
+        ev6(0x04, cr, 10);
+        bt_poll();
+        CHECK(bt_link_state() == BT_LINK_NONE && !has_cmd(0x0409));
+        CHECK(bt_serve_on() == 0);
+    }
+
+    fresh();
+    RX_BEGAN = RX_ENDED = RX_OK = 0;
+    CHECK(bt_serve_set(1, &RX_SINK) == 0 && bt_serve_on() == 1);
+    CHECK(has_cmd(0x0C1A) && has_cmd(0x0C24));
+    for (int i = 0; i < F.nsent; i++)
+    {
+        if (F.sent[i] == 0x0C1A)
+            CHECK(F.npar[i] == 1 && F.par[i][0] == 3); /* inquiry scan and page scan */
+        if (F.sent[i] == 0x0C24)
+            CHECK(F.npar[i] == 3 && F.par[i][0] == 0x0C && F.par[i][1] == 0x01 && F.par[i][2] == 0x10);
+    }
+
+    /* the phone pages us */
+    unsigned char cr[10];
+    memcpy(cr, ADDR_LSB, 6);
+    cr[6] = 0x0C;
+    cr[7] = 0x02;
+    cr[8] = 0x5A;
+    cr[9] = 1;
+    ev6(0x04, cr, 10);
+    bt_poll(); /* the event is handled, and the Accept goes out from the same step */
+    CHECK(has_cmd(0x0409));
+    {
+        int at = -1;
+        for (int i = 0; i < F.nsent; i++)
+            if (F.sent[i] == 0x0409)
+                at = i;
+        CHECK(at >= 0 && F.npar[at] == 7 && memcmp(F.par[at], ADDR_LSB, 6) == 0 && F.par[at][6] == 1); /* stay the slave */
+    }
+    CHECK(!has_cmd(0x0408)); /* no paging to cancel */
+    ev_conn_complete(0, HANDLE, ADDR_LSB);
+    bt_poll();
+    CHECK(bt_link_state() == BT_LINK_UP);
+
+    /* it asks our SDP server which channel takes files */
+    unsigned sdp_cid = phone_channel(1, 0x0090);
+    {
+        /* ServiceSearchAttributeRequest as phones send it: pattern {Object Push}, all attributes */
+        const unsigned char req[] = {0x06, 0x00, 0x05, 0x00, 0x0F, 0x35, 0x03, 0x19, 0x11, 0x05, 0xFF, 0xFF, 0x35, 0x05, 0x0A, 0x00, 0x00, 0xFF, 0xFF, 0x00};
+        dev_pdu(sdp_cid, req, sizeof req);
+        bt_poll();
+        bt_poll();
+        const unsigned char *d = 0;
+        unsigned dl = 0;
+        CHECK(last_data(0x0090, &d, &dl) && dl > 20 && d[0] == 0x07 && d[1] == 0 && d[2] == 5);
+        unsigned cnt = dl > 7 ? ((unsigned)d[5] << 8 | d[6]) : 0;
+        BtSdpService s[2];
+        CHECK(dl > 8 && 7 + cnt + 1 == dl && bt_sdp_parse(d + 7, cnt, s, 2) == 1);
+        CHECK(s[0].class_id[0] == 0x1105 && s[0].has_rfcomm && s[0].rfcomm == BT_SERVE_CHANNEL);
+        CHECK(strcmp(s[0].name, "HarisOS") == 0 && s[0].profile == 0x1105);
+    }
+
+    /* it opens RFCOMM, the multiplexer and our channel */
+    unsigned rf_cid = phone_channel(3, 0x0091);
+    CHECK(bt_rfcomm_state() == BT_RF_OPENING && bt_rfcomm_is_server());
+    BtRfFrame fr;
+    phone_rf(rf_cid, 0x03, 0x3F, 0, 0); /* SABM on DLCI 0 */
+    CHECK(our_rf(0x0091, &fr) && fr.dlci == 0 && (fr.ctrl & ~0x10u) == 0x63 && fr.addr == 0x03); /* UA */
+    phone_rf(rf_cid, BT_SERVE_CHANNEL << 3 | 3, 0x3F, 0, 0); /* SABM on our channel */
+    CHECK(bt_rfcomm_state() == BT_RF_OPEN);
+    CHECK(our_rf(0x0091, &fr) && fr.dlci == 0 && fr.data[0] == 0xE3 && fr.data[2] == (BT_SERVE_CHANNEL << 3 | 3) && fr.addr == 0x01); /* our MSC command */
+    {
+        unsigned char msc[4] = {0xE1, 5, (unsigned char)(BT_SERVE_CHANNEL << 3 | 3), 0x8D};
+        phone_rf(rf_cid, 0x03, 0xEF, msc, 4); /* its answer */
+    }
+
+    /* OBEX: connect, one file in two pieces, disconnect */
+    unsigned dlci = BT_SERVE_CHANNEL << 1;
+    {
+        const unsigned char con[] = {0x80, 0x00, 0x07, 0x10, 0x00, 0x20, 0x00};
+        phone_rf(rf_cid, dlci << 2 | 3, 0xEF, con, sizeof con);
+        CHECK(our_rf(0x0091, &fr) && fr.dlci == dlci && fr.addr == (dlci << 2 | 1) && fr.len == 7 && fr.data[0] == 0xA0 && fr.data[5] == 0x04); /* OK, we take 1024 */
+        unsigned short name16[] = {'h', 'i', '.', 't', 'x', 't', 0};
+        unsigned char pkt[400];
+        unsigned n = bt_obex_put_packet(pkt, sizeof pkt, 0, name16, 7, 10, 1, 0, (const unsigned char *)"01234", 5);
+        phone_rf(rf_cid, dlci << 2 | 3, 0xEF, pkt, n);
+        CHECK(our_rf(0x0091, &fr) && fr.len == 3 && fr.data[0] == 0x90); /* continue */
+        CHECK(RX_BEGAN == 1 && strcmp(RX_NAME, "hi.txt") == 0 && RX_LEN == 5);
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, 0, 0, 10, 0, 1, (const unsigned char *)"56789", 5);
+        phone_rf(rf_cid, dlci << 2 | 3, 0xEF, pkt, n);
+        CHECK(our_rf(0x0091, &fr) && fr.len == 3 && fr.data[0] == 0xA0);
+        CHECK(RX_ENDED == 1 && RX_OK == 1 && RX_LEN == 10 && memcmp(RX_GOT, "0123456789", 10) == 0);
+        BtServeInfo si;
+        bt_serve_info(&si);
+        CHECK(si.on && !si.receiving && si.files == 1 && si.last_ok);
+        /* a file that starts and then the link goes away: the sink is told to throw it away */
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, name16, 7, 100, 1, 0, (const unsigned char *)"abc", 3);
+        phone_rf(rf_cid, dlci << 2 | 3, 0xEF, pkt, n);
+        CHECK(RX_BEGAN == 2 && RX_ENDED == 1);
+        bt_serve_info(&si);
+        CHECK(si.receiving && si.got == 3 && si.total == 100);
+        ev_disc_complete(HANDLE, 0x13);
+        bt_poll();
+        CHECK(RX_ENDED == 2 && RX_OK == 0);
+        bt_serve_info(&si);
+        CHECK(!si.receiving && !si.last_ok);
+    }
+
+    /* the phone comes again (a new link): everything works from the start; closing the data channel leaves the multiplexer */
+    {
+        ev6(0x04, cr, 10);
+        bt_poll();
+        ev_conn_complete(0, HANDLE, ADDR_LSB);
+        bt_poll();
+        CHECK(bt_link_state() == BT_LINK_UP);
+        unsigned c2 = phone_channel(3, 0x0092);
+        phone_rf(c2, 0x03, 0x3F, 0, 0);
+        phone_rf(c2, BT_SERVE_CHANNEL << 3 | 3, 0x3F, 0, 0);
+        CHECK(bt_rfcomm_state() == BT_RF_OPEN);
+        phone_rf(c2, BT_SERVE_CHANNEL << 3 | 3, 0x53, 0, 0); /* DISC on the data channel */
+        CHECK(our_rf(0x0092, &fr) && (fr.ctrl & ~0x10u) == 0x63);
+        CHECK(bt_rfcomm_state() == BT_RF_OPENING); /* the multiplexer waits for the next SABM */
+        phone_rf(c2, BT_SERVE_CHANNEL << 3 | 3, 0x3F, 0, 0);
+        CHECK(bt_rfcomm_state() == BT_RF_OPEN);
+        /* a channel we do not have gets DM */
+        phone_rf(c2, 6 << 3 | 3, 0x3F, 0, 0);
+        CHECK(our_rf(0x0092, &fr) && (fr.ctrl & ~0x10u) == 0x0F);
+    }
+
+    /* serving off: the phone's next channel request is refused */
+    {
+        CHECK(bt_serve_set(0, 0) == 0 && bt_serve_on() == 0);
+        unsigned id = 0, dl = 0;
+        const unsigned char *d = 0;
+        unsigned char rq[4] = {1, 0, 0x99, 0};
+        dev_sig(0x02, 0x31, rq, 4);
+        bt_poll();
+        CHECK(last_sig(0x03, &id, &d, &dl) && id == 0x31 && le16(d + 4) == 2); /* PSM not supported */
+    }
+}
 
 int main(void)
 {
@@ -2502,6 +2727,8 @@ int main(void)
         CHECK(bt_a2dp_ring_pending() == 0);
         NEXT_MTU = MTU;
     }
+
+    recv_tests();
 
     printf("bt_link: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

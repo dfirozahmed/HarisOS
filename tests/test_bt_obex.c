@@ -272,6 +272,236 @@ static void fresh(void)
     TX_IDLE = 1;
 }
 
+/* ---- the server side: a phone sends us files ---- */
+static int SK_FAIL_BEGIN, SK_FAIL_WRITE, SK_BEGAN, SK_ENDED, SK_OK;
+static unsigned char SK_DATA[4096];
+static unsigned SK_LEN, SK_SIZE;
+static char SK_NAME[64];
+
+static int sk_begin(void *c, const char *name, unsigned size)
+{
+    (void)c;
+    if (SK_FAIL_BEGIN)
+        return -1;
+    SK_BEGAN++;
+    SK_SIZE = size;
+    strncpy(SK_NAME, name, sizeof SK_NAME - 1);
+    SK_LEN = 0;
+    return 0;
+}
+
+static int sk_write(void *c, const unsigned char *d, unsigned n)
+{
+    (void)c;
+    if (SK_FAIL_WRITE)
+        return -1;
+    memcpy(SK_DATA + SK_LEN, d, n);
+    SK_LEN += n;
+    return 0;
+}
+
+static void sk_end(void *c, int ok)
+{
+    (void)c;
+    SK_ENDED++;
+    SK_OK = ok;
+}
+
+static const BtObexSink SINK = {sk_begin, sk_write, sk_end, 0};
+
+#define DLCI_SRV (BT_SERVE_CHANNEL << 1)
+
+/* the phone's frame to us, then the main loop runs a few times */
+static void ph_frame(unsigned addr, unsigned ctrl, const unsigned char *d, unsigned n)
+{
+    unsigned char f[1200];
+    unsigned len = bt_rfcomm_build(f, sizeof f, addr, ctrl, d, n);
+    CHECK(len > 0);
+    bt_rfcomm_rx(f, len);
+    for (int i = 0; i < 3; i++)
+    {
+        NOW += 20;
+        bt_rfcomm_step(NOW);
+        bt_obex_step(NOW);
+    }
+}
+
+static void ph_obex(const unsigned char *d, unsigned n) { ph_frame(DLCI_SRV << 2 | 3, 0xEF, d, n); }
+
+/* the last frame we sent: its first data byte (the OBEX response code), or -1 */
+static int resp_code(void)
+{
+    BtRfFrame fr;
+    if (OUT_N == 0 || bt_rfcomm_parse(OUT[OUT_N - 1], OUT_LEN[OUT_N - 1], &fr) != 0 || fr.dlci != DLCI_SRV || fr.len < 3)
+        return -1;
+    return fr.data[0];
+}
+
+static void srv_start(void)
+{
+    fresh();
+    SK_FAIL_BEGIN = SK_FAIL_WRITE = SK_BEGAN = SK_ENDED = SK_OK = 0;
+    SK_LEN = 0;
+    bt_obex_serve(&SINK);
+    CHECK(bt_rfcomm_accept(1, bt_obex_srv_rx) == 0 && bt_rfcomm_is_server());
+    CHAN_STATE = BT_CHAN_OPEN;
+    ph_frame(0x03, 0x3F, 0, 0);                  /* SABM DLCI 0 */
+    ph_frame(DLCI_SRV << 2 | 3, 0x3F, 0, 0);     /* SABM our channel */
+    CHECK(bt_rfcomm_state() == BT_RF_OPEN);
+    OUT_N = 0;
+}
+
+static void srv_tests(void)
+{
+    static const unsigned short NAME[] = {'a', '.', 'b', 'i', 'n', 0};
+    unsigned char pkt[600];
+    unsigned n;
+
+    /* the opening handshake as seen from the phone */
+    fresh();
+    bt_obex_serve(&SINK);
+    CHECK(bt_rfcomm_accept(1, bt_obex_srv_rx) == 0);
+    CHECK(bt_rfcomm_accept(1, bt_obex_srv_rx) == BT_E_LINK_BUSY);
+    CHAN_STATE = BT_CHAN_OPEN;
+    ph_frame(0x03, 0x3F, 0, 0);
+    {
+        BtRfFrame fr;
+        CHECK(OUT_N >= 1 && bt_rfcomm_parse(OUT[0], OUT_LEN[0], &fr) == 0 && fr.addr == 0x03 && (fr.ctrl & ~0x10u) == 0x63);
+    }
+    OUT_N = 0;
+    /* the phone asks for parameter negotiation with credit flow control: the answer says no credits */
+    {
+        unsigned char pn[10] = {0x20 << 2 | 3, 8 << 1 | 1, DLCI_SRV, 0xF0, 0, 0, 0xFF, 0, 0, 7};
+        ph_frame(0x03, 0xEF, pn, 10);
+        BtRfFrame fr;
+        CHECK(OUT_N == 1 && bt_rfcomm_parse(OUT[0], OUT_LEN[0], &fr) == 0 && fr.data[0] == (0x20 << 2 | 1) && fr.data[3] == 0 && fr.data[9] == 0);
+        CHECK(fr.data[6] == BT_RF_MAX_FRAME && fr.data[7] == 0); /* the frame size is cut to what we take */
+    }
+    OUT_N = 0;
+    /* a channel other than ours: DM */
+    ph_frame(5 << 3 | 3, 0x3F, 0, 0);
+    {
+        BtRfFrame fr;
+        CHECK(OUT_N == 1 && bt_rfcomm_parse(OUT[0], OUT_LEN[0], &fr) == 0 && (fr.ctrl & ~0x10u) == 0x0F);
+    }
+    OUT_N = 0;
+    ph_frame(DLCI_SRV << 2 | 3, 0x3F, 0, 0);
+    CHECK(bt_rfcomm_state() == BT_RF_OPEN);
+
+    /* connect, a file in three packets */
+    srv_start();
+    {
+        const unsigned char con[] = {0x80, 0, 7, 0x10, 0, 0x04, 0x00};
+        ph_obex(con, sizeof con);
+        CHECK(resp_code() == 0xA0);
+        unsigned char body[300];
+        for (int i = 0; i < 300; i++)
+            body[i] = (unsigned char)(i ^ 0x5A);
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 450, 1, 0, body, 200);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0x90 && SK_BEGAN == 1 && strcmp(SK_NAME, "a.bin") == 0 && SK_SIZE == 450 && SK_LEN == 200);
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, 0, 0, 0, 0, 0, body, 200);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0x90 && SK_LEN == 400);
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, 0, 0, 0, 0, 1, body, 50);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0xA0 && SK_LEN == 450 && SK_ENDED == 1 && SK_OK == 1);
+        CHECK(memcmp(SK_DATA, body, 200) == 0 && memcmp(SK_DATA + 200, body, 200) == 0 && memcmp(SK_DATA + 400, body, 50) == 0);
+        /* a second file on the same connection, then the goodbye */
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 3, 1, 1, (const unsigned char *)"xyz", 3);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0xA0 && SK_BEGAN == 2 && SK_ENDED == 2 && SK_LEN == 3);
+        const unsigned char dis[] = {0x81, 0, 3};
+        ph_obex(dis, sizeof dis);
+        CHECK(resp_code() == 0xA0);
+    }
+
+    /* requests that are refused */
+    srv_start();
+    {
+        /* no name */
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 3, 0, 1, (const unsigned char *)"abc", 3);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0xC0 && SK_BEGAN == 0);
+        /* a name and nothing else: a request to delete the file */
+        unsigned char del[] = {0x82, 0, 14, 0x01, 0, 11, 0, 'a', 0, '.', 0, 'b', 0, 0};
+        del[2] = sizeof del;
+        del[5] = sizeof del - 3;
+        ph_obex(del, sizeof del);
+        CHECK(resp_code() == 0xC3 && SK_BEGAN == 0);
+        /* the sink does not want it (no drive) */
+        SK_FAIL_BEGIN = 1;
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 3, 1, 1, (const unsigned char *)"abc", 3);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0xD0);
+        SK_FAIL_BEGIN = 0;
+        /* a request we do not know */
+        const unsigned char get[] = {0x83, 0, 3};
+        ph_obex(get, sizeof get);
+        CHECK(resp_code() == 0xD1);
+        /* a damaged header list */
+        unsigned char bad[] = {0x82, 0, 9, 0x01, 0xFF, 0xFF, 0, 0, 0};
+        ph_obex(bad, sizeof bad);
+        CHECK(resp_code() == 0xC0);
+        /* a packet longer than we said we take is dropped; the next good one is answered */
+        unsigned char huge[8] = {0x02, 0x0F, 0xFF};
+        ph_obex(huge, sizeof huge);
+        OUT_N = 0;
+        const unsigned char con[] = {0x80, 0, 7, 0x10, 0, 0x04, 0x00};
+        ph_obex(con, sizeof con);
+        CHECK(resp_code() == 0xA0);
+    }
+
+    /* the drive fails in the middle; the phone breaks off; nothing comes for a long time */
+    srv_start();
+    {
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 100, 1, 0, (const unsigned char *)"abc", 3);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0x90 && SK_BEGAN == 1);
+        SK_FAIL_WRITE = 1;
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, 0, 0, 0, 0, 0, (const unsigned char *)"def", 3);
+        ph_obex(pkt, n);
+        CHECK(resp_code() == 0xD0 && SK_ENDED == 1 && SK_OK == 0);
+        SK_FAIL_WRITE = 0;
+    }
+    srv_start();
+    {
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 100, 1, 0, (const unsigned char *)"abc", 3);
+        ph_obex(pkt, n);
+        const unsigned char abort_[] = {0xFF, 0, 3};
+        ph_obex(abort_, sizeof abort_);
+        CHECK(resp_code() == 0xA0 && SK_ENDED == 1 && SK_OK == 0);
+    }
+    srv_start();
+    {
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 100, 1, 0, (const unsigned char *)"abc", 3);
+        ph_obex(pkt, n);
+        NOW += 31000;
+        bt_obex_step(NOW);
+        CHECK(SK_ENDED == 1 && SK_OK == 0);
+    }
+    srv_start();
+    {
+        n = bt_obex_put_packet(pkt, sizeof pkt, 0, NAME, 6, 100, 1, 0, (const unsigned char *)"abc", 3);
+        ph_obex(pkt, n);
+        bt_rfcomm_reset(); /* the link ended */
+        bt_obex_step(NOW);
+        CHECK(SK_ENDED == 1 && SK_OK == 0);
+        BtServeInfo si;
+        bt_serve_info(&si);
+        CHECK(si.on && !si.receiving);
+        bt_obex_serve(0);
+        bt_serve_info(&si);
+        CHECK(!si.on);
+    }
+    /* switched off: nothing is taken */
+    fresh();
+    bt_obex_serve(0);
+    bt_obex_srv_rx((const unsigned char *)"\x80\x00\x07", 3);
+    bt_obex_step(NOW);
+    CHECK(OUT_N == 0);
+}
+
 int main(void)
 {
     /* ---- frame check sequence and framing ---- */
@@ -533,6 +763,8 @@ int main(void)
         bt_rfcomm_rx(disc, l);
         CHECK(bt_rfcomm_state() == BT_RF_CLOSED);
     }
+
+    srv_tests();
 
     printf("bt_obex / bt_rfcomm: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

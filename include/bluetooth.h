@@ -210,7 +210,10 @@ typedef struct
 
 unsigned bt_sdp_request(unsigned char *out, unsigned cap, unsigned tid, unsigned max_bytes, const unsigned char *cont, unsigned contlen);
 int bt_sdp_parse(const unsigned char *lists, unsigned len, BtSdpService *out, unsigned max); /* the AttributeLists: services found, or -1 */
-const char *bt_sdp_uuid_name(unsigned uuid); /* "A2DP sink" ... or "" */
+const char *bt_sdp_uuid_name(unsigned uuid);
+/* The server side: the answer to one SDP request of a phone (PDU 0x02, 0x04 or 0x06) about our one record, "Object Push" on RFCOMM channel
+ * `channel`. Returns the length of the answer PDU, or 0 if there is nothing to send. `out` should hold 200 bytes. */
+unsigned bt_sdps_answer(const unsigned char *req, unsigned n, unsigned char *out, unsigned cap, unsigned channel); /* "A2DP sink" ... or "" */
 int bt_sdp_browse(void);                     /* 0 = started; BT_E_NOT_UP without a link, BT_E_LINK_BUSY while one runs */
 
 /* ---- pairing and link security (kernel/bluetooth/bt_pair.c) ----
@@ -340,6 +343,8 @@ void bt_rfcomm_set_rx(void (*rx)(const unsigned char *data, unsigned n)); /* who
 void bt_rfcomm_rx(const unsigned char *d, unsigned n);     /* a PDU of the L2CAP channel */
 void bt_rfcomm_step(unsigned long long now);
 void bt_rfcomm_reset(void);                                /* the link ended */
+int bt_rfcomm_accept(int slot, void (*rx)(const unsigned char *data, unsigned n)); /* a device opened an L2CAP channel to PSM 3 (slot): we are the server. 0 = taken */
+int bt_rfcomm_is_server(void);                                                     /* the open channel was started by the device */
 const char *bt_rfcomm_why(int *code);                      /* why it failed (static text) */
 
 /* ---- OBEX: Object Push, sending one file to a phone or computer (kernel/bluetooth/bt_obex.c) ----
@@ -357,6 +362,37 @@ void bt_obex_cancel(void);
 void bt_obex_step(unsigned long long now);
 void bt_obex_reset(void);
 int bt_obex_line(char *buf, unsigned cap);
+
+/* ---- receiving files (the server side of Object Push) ----
+ * bt_serve_set(1, sink) makes the chip visible and connectable (name "HarisOS", class "computer, laptop, object transfer"), accepts a device's
+ * connection, answers its SDP questions with one record (Object Push on RFCOMM channel BT_SERVE_CHANNEL), accepts its RFCOMM channel and OBEX
+ * requests, and hands the file to the sink. Pairing requests of the device are accepted ("just works", PIN 0000). bt_serve_set(0, 0) switches it off
+ * (a connection that exists stays). The sink's functions are called from bt_poll(); they must not block for long. */
+#define BT_SERVE_CHANNEL 9
+typedef struct
+{
+    int (*begin)(void *ctx, const char *name, unsigned size);        /* a file starts (name in UTF-8, as the phone gave it; size 0xFFFFFFFF = not told): 0 = take it */
+    int (*write)(void *ctx, const unsigned char *data, unsigned n);  /* the next bytes: 0 = taken */
+    void (*end)(void *ctx, int ok);                                  /* complete (ok = 1), or broken off (ok = 0: throw away what was written) */
+    void *ctx;
+} BtObexSink;
+
+typedef struct
+{
+    int on;
+    int receiving;       /* a file is coming in */
+    char name[64];       /* ... its name, bytes so far, and size (0 = not told) */
+    unsigned got, total;
+    unsigned files;      /* files completed since start */
+    int last_ok;         /* the last file: 1 complete, 0 broken off */
+} BtServeInfo;
+
+int bt_serve_set(int on, const BtObexSink *sink); /* 0, or a BT_E_* value (BT_E_NOT_UP: no working chip) */
+int bt_serve_on(void);
+void bt_serve_info(BtServeInfo *out);
+void bt_obex_serve(const BtObexSink *sink);       /* (internal) takes or drops the sink */
+void bt_obex_srv_rx(const unsigned char *d, unsigned n); /* (internal) data of the open RFCOMM channel */
+void bt_pair_setup(void);                         /* (internal) Secure Simple Pairing on, event mask, name: once per chip start */
 unsigned bt_obex_put_packet(unsigned char *out, unsigned cap, const unsigned char *cid, const unsigned short *name16, unsigned name_chars, unsigned total,
                             int first, int final, const unsigned char *body, unsigned body_len); /* one PUT request; its size, 0 if it does not fit */
 
@@ -365,6 +401,7 @@ unsigned bt_obex_put_packet(unsigned char *out, unsigned cap, const unsigned cha
 #define BT_USER_AVDTP_SIG 2
 #define BT_USER_AVDTP_MEDIA 3
 #define BT_USER_RFCOMM 4
+#define BT_USER_SDP_SRV 5 /* a phone asks our SDP server */
 enum { BT_CHAN_FREE = 0, BT_CHAN_CONNECTING, BT_CHAN_CONFIG, BT_CHAN_OPEN, BT_CHAN_CLOSING };
 int bt_chan_open(unsigned psm, int user);  /* asks the device for a channel to this service; the slot (0 ..) or -1 */
 void bt_chan_close(int slot);

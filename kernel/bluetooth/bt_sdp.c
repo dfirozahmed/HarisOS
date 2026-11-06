@@ -299,3 +299,226 @@ const char *bt_sdp_uuid_name(unsigned uuid)
     default: return "";
     }
 }
+
+/* ---- the server side: the one service record we offer, "Object Push" (receive files) ----
+ * A phone that wants to send us a file asks our SDP server, over its own L2CAP channel to PSM 1, which RFCOMM channel carries the file service. The
+ * three requests phones use are answered: ServiceSearch (0x02: which records match), ServiceAttribute (0x04: the attributes of a record) and
+ * ServiceSearchAttribute (0x06: both in one go). There is one record, handle 0x00010001, and no answer is ever cut into pieces (no continuation). */
+#define SRV_HANDLE 0x00010001u
+#define SRV_ATTRS 8
+
+typedef struct
+{
+    unsigned id, len;
+    unsigned char v[24];
+} SrvAttr;
+
+static void srv_attr(SrvAttr *a, unsigned id, const unsigned char *v, unsigned n)
+{
+    a->id = id;
+    a->len = n;
+    for (unsigned i = 0; i < n; i++)
+        a->v[i] = v[i];
+}
+
+/* the record's attributes in ascending order of attribute id */
+static void srv_record(SrvAttr *a, unsigned channel)
+{
+    static const unsigned char handle[] = {0x0A, 0x00, 0x01, 0x00, 0x01};
+    static const unsigned char classes[] = {0x35, 0x03, 0x19, 0x11, 0x05}; /* Object Push */
+    unsigned char proto[] = {0x35, 0x11, 0x35, 0x03, 0x19, 0x01, 0x00, 0x35, 0x05, 0x19, 0x00, 0x03, 0x08, 0, 0x35, 0x03, 0x19, 0x00, 0x08}; /* L2CAP, RFCOMM channel, OBEX */
+    static const unsigned char browse[] = {0x35, 0x03, 0x19, 0x10, 0x02};                                    /* public browse group */
+    static const unsigned char lang[] = {0x35, 0x09, 0x09, 0x65, 0x6E, 0x09, 0x00, 0x6A, 0x09, 0x01, 0x00}; /* "en", UTF-8, names start at 0x0100 */
+    static const unsigned char prof[] = {0x35, 0x08, 0x35, 0x06, 0x19, 0x11, 0x05, 0x09, 0x01, 0x00};       /* Object Push profile 1.0 */
+    static const unsigned char name[] = {0x25, 0x07, 'H', 'a', 'r', 'i', 's', 'O', 'S'};
+    static const unsigned char formats[] = {0x35, 0x02, 0x08, 0xFF}; /* any object format */
+    proto[13] = (unsigned char)channel;
+    srv_attr(&a[0], 0x0000, handle, sizeof handle);
+    srv_attr(&a[1], 0x0001, classes, sizeof classes);
+    srv_attr(&a[2], 0x0004, proto, sizeof proto);
+    srv_attr(&a[3], 0x0005, browse, sizeof browse);
+    srv_attr(&a[4], 0x0006, lang, sizeof lang);
+    srv_attr(&a[5], 0x0009, prof, sizeof prof);
+    srv_attr(&a[6], 0x0100, name, sizeof name);
+    srv_attr(&a[7], 0x0303, formats, sizeof formats);
+}
+
+/* is attribute `id` in the AttributeIDList (a sequence of 16-bit ids and 32-bit ranges)? */
+static int attr_wanted(const unsigned char *list, unsigned n, unsigned id)
+{
+    unsigned t, h, d;
+    if (!element(list, n, &t, &h, &d) || t != 6)
+        return 0;
+    const unsigned char *p = list + h;
+    unsigned left = d;
+    while (left)
+    {
+        unsigned t2, h2, d2;
+        if (!element(p, left, &t2, &h2, &d2) || t2 != 1)
+            return 0;
+        if (d2 == 2 && be16(p + h2) == id)
+            return 1;
+        if (d2 == 4 && id >= be16(p + h2) && id <= be16(p + h2 + 2))
+            return 1;
+        p += h2 + d2;
+        left -= h2 + d2;
+    }
+    return 0;
+}
+
+/* does our record match the pattern (a sequence of UUIDs)? Every UUID in it must be one the record contains. */
+static int pattern_matches(const unsigned char *pat, unsigned n)
+{
+    unsigned t, h, d;
+    if (!element(pat, n, &t, &h, &d) || t != 6)
+        return 0;
+    const unsigned char *p = pat + h;
+    unsigned left = d;
+    while (left)
+    {
+        unsigned t2, h2, d2;
+        if (!element(p, left, &t2, &h2, &d2) || t2 != 3)
+            return 0;
+        unsigned u = uuid_of(p + h2, d2);
+        if (u != 0x0100 && u != 0x0003 && u != 0x0008 && u != 0x1002 && u != 0x1105)
+            return 0;
+        p += h2 + d2;
+        left -= h2 + d2;
+    }
+    return 1;
+}
+
+/* the matching attributes as the pairs (id, value) of one record, wrapped in a sequence; returns its length or 0 if it does not fit */
+static unsigned srv_pairs(unsigned char *out, unsigned cap, unsigned channel, const unsigned char *list, unsigned listn)
+{
+    SrvAttr a[SRV_ATTRS];
+    srv_record(a, channel);
+    unsigned n = 2;
+    if (cap < 2)
+        return 0;
+    for (int i = 0; i < SRV_ATTRS; i++)
+    {
+        if (!attr_wanted(list, listn, a[i].id))
+            continue;
+        if (n + 3 + a[i].len > cap)
+            return 0;
+        out[n++] = 0x09;
+        out[n++] = (unsigned char)(a[i].id >> 8);
+        out[n++] = (unsigned char)a[i].id;
+        for (unsigned k = 0; k < a[i].len; k++)
+            out[n++] = a[i].v[k];
+    }
+    if (n - 2 > 255)
+        return 0;
+    out[0] = 0x35;
+    out[1] = (unsigned char)(n - 2);
+    return n;
+}
+
+static unsigned srv_error(unsigned char *out, unsigned cap, unsigned tid, unsigned code)
+{
+    if (cap < 7)
+        return 0;
+    out[0] = 0x01;
+    out[1] = (unsigned char)(tid >> 8);
+    out[2] = (unsigned char)tid;
+    out[3] = 0;
+    out[4] = 2;
+    out[5] = (unsigned char)(code >> 8);
+    out[6] = (unsigned char)code;
+    return 7;
+}
+
+unsigned bt_sdps_answer(const unsigned char *req, unsigned n, unsigned char *out, unsigned cap, unsigned channel)
+{
+    if (n < 5 || cap < 16)
+        return 0;
+    unsigned pdu = req[0], tid = be16(req + 1), plen = be16(req + 3);
+    if (5 + plen > n)
+        return srv_error(out, cap, tid, 0x0003);
+    const unsigned char *p = req + 5;
+    unsigned left = plen;
+    unsigned t, h, d;
+    out[1] = (unsigned char)(tid >> 8);
+    out[2] = (unsigned char)tid;
+    if (pdu == 0x02) /* ServiceSearchRequest: pattern, max record count (2), continuation (1) */
+    {
+        if (!element(p, left, &t, &h, &d) || h + d + 3 > left)
+            return srv_error(out, cap, tid, 0x0003);
+        if (p[h + d + 2] != 0)
+            return srv_error(out, cap, tid, 0x0005);
+        int match = pattern_matches(p, h + d) && be16(p + h + d) > 0;
+        out[0] = 0x03;
+        out[3] = 0;
+        out[4] = (unsigned char)(match ? 9 : 5);
+        out[5] = 0;
+        out[6] = (unsigned char)(match ? 1 : 0); /* total records */
+        out[7] = 0;
+        out[8] = (unsigned char)(match ? 1 : 0); /* records in this answer */
+        unsigned k = 9;
+        if (match)
+        {
+            out[k++] = (unsigned char)(SRV_HANDLE >> 24);
+            out[k++] = (unsigned char)(SRV_HANDLE >> 16);
+            out[k++] = (unsigned char)(SRV_HANDLE >> 8);
+            out[k++] = (unsigned char)SRV_HANDLE;
+        }
+        out[k++] = 0; /* no continuation */
+        return k;
+    }
+    if (pdu == 0x04) /* ServiceAttributeRequest: handle (4), max bytes (2), attribute list, continuation (1) */
+    {
+        if (left < 7 || !element(p + 6, left - 6, &t, &h, &d) || 6 + h + d + 1 > left)
+            return srv_error(out, cap, tid, 0x0003);
+        if (p[6 + h + d] != 0)
+            return srv_error(out, cap, tid, 0x0005);
+        if (be32(p) != SRV_HANDLE)
+            return srv_error(out, cap, tid, 0x0002);
+        unsigned m = srv_pairs(out + 7, cap - 8, channel, p + 6, h + d);
+        if (!m)
+            return srv_error(out, cap, tid, 0x0003);
+        out[0] = 0x05;
+        out[5] = (unsigned char)(m >> 8);
+        out[6] = (unsigned char)m;
+        out[7 + m] = 0;
+        out[3] = (unsigned char)((m + 3) >> 8);
+        out[4] = (unsigned char)(m + 3);
+        return 5 + 2 + m + 1;
+    }
+    if (pdu == 0x06) /* ServiceSearchAttributeRequest: pattern, max bytes (2), attribute list, continuation (1) */
+    {
+        if (!element(p, left, &t, &h, &d) || h + d + 2 > left)
+            return srv_error(out, cap, tid, 0x0003);
+        unsigned plen1 = h + d, off = plen1 + 2;
+        unsigned t2, h2, d2;
+        if (!element(p + off, left - off, &t2, &h2, &d2) || off + h2 + d2 + 1 > left)
+            return srv_error(out, cap, tid, 0x0003);
+        if (p[off + h2 + d2] != 0)
+            return srv_error(out, cap, tid, 0x0005);
+        unsigned char *lists = out + 7;
+        unsigned m;
+        if (pattern_matches(p, plen1))
+        {
+            unsigned r = srv_pairs(lists + 2, cap - 10, channel, p + off, h2 + d2);
+            if (!r)
+                return srv_error(out, cap, tid, 0x0003);
+            lists[0] = 0x35;
+            lists[1] = (unsigned char)r;
+            m = r + 2;
+        }
+        else
+        {
+            lists[0] = 0x35;
+            lists[1] = 0;
+            m = 2;
+        }
+        out[0] = 0x07;
+        out[5] = (unsigned char)(m >> 8);
+        out[6] = (unsigned char)m;
+        out[7 + m] = 0;
+        out[3] = (unsigned char)((m + 3) >> 8);
+        out[4] = (unsigned char)(m + 3);
+        return 5 + 2 + m + 1;
+    }
+    return srv_error(out, cap, tid, 0x0003);
+}

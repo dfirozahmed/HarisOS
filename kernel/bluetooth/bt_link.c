@@ -18,6 +18,10 @@
 #define EV_AUTH_COMPLETE 0x06
 #define EV_PIN_CODE_REQUEST 0x16
 #define EV_LINK_KEY_REQUEST 0x17
+#define EV_CONNECTION_REQUEST 0x04
+#define OP_ACCEPT_CONNECTION 0x0409
+#define OP_WRITE_SCAN_ENABLE 0x0C1A
+#define OP_WRITE_CLASS_OF_DEVICE 0x0C24
 
 #define PKT_TYPES 0xCC18 /* DM1 DH1 DM3 DH3 DM5 DH5 allowed; the "EDR not allowed" bits 0 = allowed */
 #define CONNECT_LIMIT_MS 25000
@@ -59,6 +63,7 @@ static struct
     int fail_status;           /* BT_LINK_FAILED: the HCI status or BT_E_* */
     int last_reason;           /* how the last link ended: HCI reason, or -1 = never was one */
     int want_close;
+    int incoming;              /* the device made the connection (we serve): there is no paging to cancel */
     int auth_status;           /* Authentication Complete status seen on this link, -1 = none */
 
     /* the probe */
@@ -93,6 +98,19 @@ static void chan_data(unsigned cid, const unsigned char *d, unsigned n);
 static void chan_reset(void);
 static void chan_link_down(void);
 static void sdp_step(unsigned long long now);
+
+/* serving (receiving files): the phone connects to us */
+static struct
+{
+    int on;
+    int accept_pending; /* a Connection Request came in: Accept Connection Request goes out from the step */
+} SV;
+static struct
+{
+    int slot;
+    unsigned len; /* 0 = nothing waits */
+    unsigned char req[128];
+} SS; /* a request of a phone to our SDP server; answered from the step (an answer is longer than the queue takes) */
 
 static unsigned le16(const unsigned char *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
 static unsigned le32(const unsigned char *p) { return le16(p) | (le16(p + 2) << 16); }
@@ -314,7 +332,7 @@ static void sig_pdu(const unsigned char *p, unsigned n)
  * A channel is opened with a Connection Request (which service, by PSM, and our end's channel id); the device answers with its own end's id.
  * Then each side sends a Configuration Request (options, here none: the defaults, 672 byte MTU) and answers the other's. When both are done the
  * channel is open and data goes in PDUs addressed to the other end's id. Closed with a Disconnection Request. Core specification volume 3 part A. */
-#define CHAN_N 3
+#define CHAN_N 4
 #define CHAN_BASE_CID 0x0040
 #define SDP_PSM 1
 #define SDP_ACC_MAX 2560
@@ -371,6 +389,7 @@ static void chan_reset(void)
     SD.nsvc = 0;
     SD.acc_len = 0;
     SD.send = SD.want_close = 0;
+    SS.len = 0;
     bt_avdtp_reset();
     bt_rfcomm_reset();
     bt_obex_reset();
@@ -498,6 +517,39 @@ static int chan_sig(unsigned code, unsigned id, const unsigned char *d, unsigned
     unsigned char r[8];
     switch (code)
     {
+    case SIG_CONNECTION_REQ: /* psm (2), the device's channel id (2): when we serve, SDP (1) and RFCOMM (3) are ours */
+    {
+        if (n < 4 || !SV.on)
+            return 0;
+        unsigned psm = le16(d), rcid = le16(d + 2);
+        int user = psm == SDP_PSM ? BT_USER_SDP_SRV : psm == 3 ? BT_USER_RFCOMM : 0;
+        int slot = -1;
+        for (int i = 0; i < CHAN_N && slot < 0; i++)
+            if (CH[i].state == CH_FREE)
+                slot = i;
+        if (!user || slot < 0 || (user == BT_USER_RFCOMM && bt_rfcomm_accept(slot, bt_obex_srv_rx) != 0))
+            return 0; /* the generic answer follows: refused */
+        Chan *c = &CH[slot];
+        c->state = CH_CONFIG;
+        c->user = user;
+        c->psm = psm;
+        c->scid = CHAN_BASE_CID + (unsigned)slot;
+        c->dcid = rcid;
+        c->mtu = 672;
+        c->cfg_acked = c->cfg_peer = 0;
+        c->result = 0;
+        c->t0 = bt_now();
+        put16(r, c->scid); /* our end of the channel */
+        put16(r + 2, rcid);
+        put16(r + 4, 0);   /* success */
+        put16(r + 6, 0);
+        sig_queue(SIG_CONNECTION_RSP, id, r, 8);
+        c->cfg_id = (unsigned char)next_id();
+        put16(r, c->dcid);
+        put16(r + 2, 0); /* no options */
+        sig_queue(SIG_CONFIG_REQ, c->cfg_id, r, 4);
+        return 1;
+    }
     case SIG_CONNECTION_RSP: /* dcid (2), scid (2), result (2), status (2) */
     {
         if (n < 8)
@@ -680,7 +732,51 @@ static void chan_data(unsigned cid, const unsigned char *d, unsigned n)
         bt_avdtp_rx(c->user, d, n);
     else if (c->user == BT_USER_RFCOMM)
         bt_rfcomm_rx(d, n);
+    else if (c->user == BT_USER_SDP_SRV && SS.len == 0 && n <= sizeof SS.req)
+    {
+        for (unsigned i = 0; i < n; i++)
+            SS.req[i] = d[i];
+        SS.slot = (int)(c - CH);
+        SS.len = n;
+    }
 }
+
+/* answer the phone's SDP request (from the step: after the queued PDUs, so the order is kept) */
+static void sdps_step(void)
+{
+    if (SS.len == 0 || !bt_chan_tx_idle())
+        return;
+    unsigned char out[200];
+    unsigned m = bt_sdps_answer(SS.req, SS.len, out, sizeof out, BT_SERVE_CHANNEL);
+    SS.len = 0;
+    if (m)
+        bt_chan_send(SS.slot, out, m);
+}
+
+/* Visible and connectable (page and inquiry scan), with the class "computer / laptop / object transfer", or off again. The sink gets the files. */
+int bt_serve_set(int on, const BtObexSink *sink)
+{
+    if (!bt_hci_up())
+        return BT_E_NOT_UP;
+    unsigned char r[8], scan = on ? 3 : 0;
+    unsigned n;
+    if (on)
+    {
+        static const unsigned char cod[3] = {0x0C, 0x01, 0x10}; /* least significant byte first: 0x10010C */
+        bt_pair_setup();
+        bt_obex_serve(sink);
+        bt_cmd(OP_WRITE_CLASS_OF_DEVICE, cod, 3, r, sizeof r, &n, 1000);
+    }
+    int st = bt_cmd(OP_WRITE_SCAN_ENABLE, &scan, 1, r, sizeof r, &n, 1000);
+    if (st != 0)
+        return st;
+    SV.on = on != 0;
+    if (!on)
+        bt_obex_serve(0);
+    return 0;
+}
+
+int bt_serve_on(void) { return SV.on; }
 
 /* what the last service discovery found */
 int bt_sdp_status(void)
@@ -866,6 +962,20 @@ void bt_link_event(const unsigned char *e, unsigned len)
             }
         }
         break;
+    case EV_CONNECTION_REQUEST: /* address (6), class of device (3), link type (1): a device pages us; when we serve we take it (from the step) */
+        if (plen >= 10 && SV.on && p[9] == 1 && !SV.accept_pending && (L.state == BT_LINK_NONE || L.state == BT_LINK_FAILED))
+        {
+            int last_reason = L.last_reason;
+            bt_link_reset();
+            L.last_reason = last_reason;
+            for (int i = 0; i < 6; i++)
+                L.addr[i] = p[i];
+            L.incoming = 1;
+            L.state = BT_LINK_CONNECTING; /* before the answer: Connection Complete follows it */
+            L.t0 = bt_now();
+            SV.accept_pending = 1;
+        }
+        break;
     case EV_DISCONNECTION_COMPLETE:
         /* status (1), handle (2), reason (1) */
         if (plen >= 4 && (L.state == BT_LINK_UP || L.state == BT_LINK_CLOSING) && (le16(p + 1) & 0x0FFF) == L.handle && p[0] == 0)
@@ -963,13 +1073,29 @@ void bt_link_step(void)
     /* answers the chip waits for (key, PIN, pairing), and the pairing itself: these use bt_cmd, so they are not sent from inside an event handler */
     bt_pair_step(now);
 
+    if (SV.accept_pending)
+    {
+        SV.accept_pending = 0;
+        unsigned char a[7];
+        for (int i = 0; i < 6; i++)
+            a[i] = L.addr[i];
+        a[6] = 1; /* stay the slave: the device that paged is the master */
+        int st = bt_cmd(OP_ACCEPT_CONNECTION, a, 7, r, sizeof r, &n, 1000); /* Command Status; Connection Complete follows */
+        if (st != 0)
+        {
+            L.fail_status = st;
+            L.state = BT_LINK_FAILED;
+        }
+    }
+
     if (L.state == BT_LINK_CONNECTING)
     {
         if (L.want_close || (now && now - L.t0 > CONNECT_LIMIT_MS))
         {
             L.fail_status = L.want_close ? 0x16 : BT_E_TIMEOUT; /* 0x16: we gave up on purpose */
             L.want_close = 0;
-            bt_cmd(OP_CREATE_CONNECTION_CANCEL, L.addr, 6, r, sizeof r, &n, 1000);
+            if (!L.incoming)
+                bt_cmd(OP_CREATE_CONNECTION_CANCEL, L.addr, 6, r, sizeof r, &n, 1000);
             L.state = BT_LINK_FAILED;
         }
         return;
@@ -1045,6 +1171,7 @@ void bt_link_step(void)
     }
 
     bt_a2dp_step(now); /* audio, after the signalling that is waiting */
+    sdps_step(); /* our answers to the phone's questions */
     bt_obex_step(now); /* file data, after the queued control frames (it sends its own, bigger, PDUs at once) */
 
     if (L.probe == 1)

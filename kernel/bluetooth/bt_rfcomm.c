@@ -32,8 +32,9 @@
 #define MCC_NSC 0x04
 #define STEP_LIMIT_MS 10000
 #define CLOSE_LIMIT_MS 3000
+#define SERVE_WAIT_MS 30000
 
-enum { S_IDLE, S_L2CAP, S_MUX, S_DLC, S_OPEN, S_CLOSING, S_CLOSED, S_FAILED };
+enum { S_IDLE, S_L2CAP, S_MUX, S_DLC, S_OPEN, S_CLOSING, S_CLOSED, S_FAILED, S_SRV, S_SRV_MUX }; /* S_SRV: a device opened the L2CAP channel, waiting for its SABM; S_SRV_MUX: the multiplexer is up, waiting for the data channel */
 
 static struct
 {
@@ -43,6 +44,7 @@ static struct
     const char *why;
     int code;
     unsigned long long t0;
+    int initiator;      /* 1 = we opened the channel (commands carry C/R = 1), 0 = the device did */
     int tx_paused;      /* the device said FCoff: do not send data */
     int want_close_l2;  /* close the L2CAP channel from the next step (not from inside a handler) */
     int sabm_dlc;       /* send the data channel's SABM from the next step (set by the UA of the multiplexer) */
@@ -108,8 +110,8 @@ int bt_rfcomm_parse(const unsigned char *p, unsigned n, BtRfFrame *f)
 }
 
 /* ---- sending ---- */
-static unsigned addr_cmd(unsigned dlci) { return dlci << 2 | 3; }  /* the initiator's commands and its UIH frames: C/R = 1 */
-static unsigned addr_rsp(unsigned dlci) { return dlci << 2 | 1; }  /* its answers: C/R = 0 */
+static unsigned addr_cmd(unsigned dlci) { return dlci << 2 | (R.initiator ? 3 : 1); } /* the initiator's commands and UIH frames: C/R = 1; the other side's: 0 */
+static unsigned addr_rsp(unsigned dlci) { return dlci << 2 | (R.initiator ? 1 : 3); } /* answers: the opposite */
 
 /* queue a control frame (small); safe inside handlers */
 static void ctl(unsigned addr, unsigned ctrl, const unsigned char *data, unsigned n)
@@ -136,7 +138,7 @@ static void mcc(unsigned type, int command, const unsigned char *val, unsigned n
 static void send_msc(void)
 {
     unsigned char v[2];
-    v[0] = (unsigned char)addr_cmd(R.dlci); /* the DLCI the signals are for, in address form (EA and C/R set) */
+    v[0] = (unsigned char)(R.dlci << 2 | 3); /* the DLCI the signals are for, in address form (EA and C/R always set) */
     v[1] = 0x8D;                             /* EA, RTC (ready to communicate), RTR (ready to receive), DV (data valid) */
     mcc(MCC_MSC, 1, v, 2);
 }
@@ -253,15 +255,31 @@ void bt_rfcomm_rx(const unsigned char *d, unsigned n)
         break;
     case F_DISC: /* the device closes */
         ctl(addr_rsp(f.dlci), F_UA | F_PF, 0, 0);
-        if (f.dlci == 0 || f.dlci == R.dlci)
+        if (!R.initiator && f.dlci != 0 && f.dlci == R.dlci && R.state == S_OPEN)
+            R.state = S_SRV_MUX; /* only the data channel: the device may open it again on the same multiplexer */
+        else if (f.dlci == 0 || f.dlci == R.dlci)
         {
             if (R.state != S_FAILED)
                 R.state = S_CLOSED;
             R.want_close_l2 = 1;
         }
         break;
-    case F_SABM: /* we do not serve channels */
-        ctl(addr_rsp(f.dlci), F_DM | F_PF, 0, 0);
+    case F_SABM: /* a device opens the multiplexer and then our one channel (when we serve); anything else gets DM */
+        if (!R.initiator && f.dlci == 0 && R.state == S_SRV)
+        {
+            ctl(addr_rsp(0), F_UA | F_PF, 0, 0);
+            R.state = S_SRV_MUX;
+            R.t0 = bt_now();
+        }
+        else if (!R.initiator && f.dlci == (BT_SERVE_CHANNEL << 1) && R.state == S_SRV_MUX)
+        {
+            ctl(addr_rsp(f.dlci), F_UA | F_PF, 0, 0);
+            R.dlci = f.dlci;
+            R.state = S_OPEN;
+            R.send_msc = 1;
+        }
+        else
+            ctl(addr_rsp(f.dlci), F_DM | F_PF, 0, 0);
         break;
     case F_UIH:
         if (f.dlci == 0)
@@ -288,6 +306,8 @@ int bt_rfcomm_open(unsigned channel)
         return BT_E_LINK_BUSY;
     R.slot = slot;
     R.dlci = channel << 1; /* we started the connection: the direction bit is 0 */
+    R.initiator = 1;
+    R.rx = 0;
     R.state = S_L2CAP;
     R.why = 0;
     R.code = 0;
@@ -316,6 +336,24 @@ void bt_rfcomm_close(void)
     }
 }
 
+int bt_rfcomm_accept(int slot, void (*rx)(const unsigned char *data, unsigned n))
+{
+    if (R.state == S_L2CAP || R.state == S_MUX || R.state == S_DLC || R.state == S_OPEN || R.state == S_CLOSING || R.state == S_SRV || R.state == S_SRV_MUX)
+        return BT_E_LINK_BUSY;
+    R.slot = slot;
+    R.initiator = 0;
+    R.dlci = 0;
+    R.state = S_SRV;
+    R.why = 0;
+    R.code = 0;
+    R.t0 = bt_now();
+    R.tx_paused = R.want_close_l2 = R.sabm_dlc = R.send_msc = 0;
+    R.rx = rx;
+    return 0;
+}
+
+int bt_rfcomm_is_server(void) { return !R.initiator; }
+
 BtRfState bt_rfcomm_state(void)
 {
     switch (R.state)
@@ -323,6 +361,8 @@ BtRfState bt_rfcomm_state(void)
     case S_L2CAP:
     case S_MUX:
     case S_DLC:
+    case S_SRV:
+    case S_SRV_MUX:
         return BT_RF_OPENING;
     case S_OPEN:
         return BT_RF_OPEN;
@@ -416,6 +456,13 @@ void bt_rfcomm_step(unsigned long long now)
         if (bt_chan_state(R.slot) != BT_CHAN_OPEN)
             R.state = S_CLOSED;
         break;
+    case S_SRV:
+    case S_SRV_MUX:
+        if (bt_chan_state(R.slot) == BT_CHAN_FREE)
+            R.state = S_CLOSED; /* the device closed the L2CAP channel */
+        else if (now && now - R.t0 > SERVE_WAIT_MS)
+            fail("the device never opened the channel", 0);
+        break;
     case S_CLOSING:
         if (bt_chan_state(R.slot) != BT_CHAN_OPEN || (now && now - R.t0 > CLOSE_LIMIT_MS))
         {
@@ -436,7 +483,7 @@ void bt_rfcomm_reset(void)
         R.why = "link ended";
         R.code = 0;
     }
-    else if (R.state == S_OPEN || R.state == S_CLOSING)
+    else if (R.state == S_OPEN || R.state == S_CLOSING || R.state == S_SRV || R.state == S_SRV_MUX)
         R.state = S_CLOSED;
     R.want_close_l2 = R.sabm_dlc = R.send_msc = 0;
 }

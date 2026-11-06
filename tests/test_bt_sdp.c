@@ -191,6 +191,110 @@ int main(void)
         CHECK(cases > 1000); /* the loops really ran */
     }
 
+    /* ---- the server side: our one record, Object Push ---- */
+    {
+        unsigned char out[200];
+        BtSdpService s[2];
+        /* ServiceSearchAttributeRequest as a phone sends it: pattern {Object Push}, all attributes */
+        const unsigned char rq6[] = {0x06, 0x00, 0x07, 0x00, 0x0F, 0x35, 0x03, 0x19, 0x11, 0x05, 0xFF, 0xFF, 0x35, 0x05, 0x0A, 0x00, 0x00, 0xFF, 0xFF, 0x00};
+        unsigned n = bt_sdps_answer(rq6, sizeof rq6, out, sizeof out, 9);
+        CHECK(n > 40 && out[0] == 0x07 && out[1] == 0 && out[2] == 7);
+        unsigned plen = ((unsigned)out[3] << 8) | out[4], cnt = ((unsigned)out[5] << 8) | out[6];
+        CHECK(plen + 5 == n && cnt + 3 == plen && out[n - 1] == 0); /* byte count, list, no continuation */
+        CHECK(bt_sdp_parse(out + 7, cnt, s, 2) == 1);
+        CHECK(s[0].class_id[0] == 0x1105 && s[0].has_rfcomm && s[0].rfcomm == 9 && s[0].profile == 0x1105 && s[0].profile_ver == 0x0100);
+        CHECK(strcmp(s[0].name, "HarisOS") == 0);
+        /* another channel number is reflected */
+        n = bt_sdps_answer(rq6, sizeof rq6, out, sizeof out, 17);
+        CHECK(n > 40 && bt_sdp_parse(out + 7, ((unsigned)out[5] << 8) | out[6], s, 2) == 1 && s[0].rfcomm == 17);
+        /* the generic pattern phones use to browse (L2CAP) and the public browse group match too; a service we do not have does not */
+        unsigned char r2[sizeof rq6];
+        memcpy(r2, rq6, sizeof rq6);
+        r2[8] = 0x01;
+        r2[9] = 0x00; /* UUID 0x0100 */
+        n = bt_sdps_answer(r2, sizeof r2, out, sizeof out, 9);
+        CHECK(n > 40 && ((unsigned)out[5] << 8 | out[6]) > 10);
+        r2[8] = 0x10;
+        r2[9] = 0x02;
+        n = bt_sdps_answer(r2, sizeof r2, out, sizeof out, 9);
+        CHECK(n > 40);
+        r2[8] = 0x11;
+        r2[9] = 0x0B; /* A2DP sink: not ours */
+        n = bt_sdps_answer(r2, sizeof r2, out, sizeof out, 9);
+        CHECK(n == 10 && out[0] == 0x07 && out[5] == 0 && out[6] == 2 && out[7] == 0x35 && out[8] == 0 && out[9] == 0); /* an empty list */
+
+        /* ServiceSearchRequest: the handle */
+        const unsigned char rq2[] = {0x02, 0x00, 0x09, 0x00, 0x08, 0x35, 0x03, 0x19, 0x11, 0x05, 0x00, 0x10, 0x00};
+        n = bt_sdps_answer(rq2, sizeof rq2, out, sizeof out, 9);
+        CHECK(n == 14 && out[0] == 0x03 && out[2] == 9 && out[4] == 9 && out[6] == 1 && out[8] == 1);
+        CHECK(out[9] == 0 && out[10] == 1 && out[11] == 0 && out[12] == 1 && out[13] == 0);
+        unsigned char rq2b[sizeof rq2];
+        memcpy(rq2b, rq2, sizeof rq2);
+        rq2b[9] = 0x0B; /* UUID 0x110B: A2DP sink */
+        n = bt_sdps_answer(rq2b, sizeof rq2b, out, sizeof out, 9);
+        CHECK(n == 10 && out[0] == 0x03 && out[6] == 0 && out[8] == 0);
+
+        /* ServiceAttributeRequest: only the name */
+        const unsigned char rq4[] = {0x04, 0x00, 0x0A, 0x00, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0xFF, 0x35, 0x03, 0x09, 0x01, 0x00, 0x00};
+        n = bt_sdps_answer(rq4, sizeof rq4, out, sizeof out, 9);
+        CHECK(n > 10 && out[0] == 0x05 && out[2] == 10);
+        cnt = ((unsigned)out[5] << 8) | out[6];
+        CHECK(cnt == 14 && out[7] == 0x35 && out[8] == 12 && out[9] == 0x09 && out[10] == 0x01 && out[11] == 0x00 && out[12] == 0x25 && memcmp(out + 14, "HarisOS", 7) == 0);
+        CHECK(n == 7 + cnt + 1 && out[n - 1] == 0);
+        /* a range of attribute ids picks several */
+        const unsigned char rq4r[] = {0x04, 0x00, 0x0B, 0x00, 0x0E, 0x00, 0x01, 0x00, 0x01, 0x00, 0xFF, 0x35, 0x05, 0x0A, 0x00, 0x00, 0x00, 0x05, 0x00};
+        n = bt_sdps_answer(rq4r, sizeof rq4r, out, sizeof out, 9);
+        CHECK(n > 40 && out[0] == 0x05 && out[8] > 30); /* handle, classes, protocols, browse groups: four of the eight */
+        /* wrong record handle */
+        unsigned char rq4h[sizeof rq4];
+        memcpy(rq4h, rq4, sizeof rq4);
+        rq4h[8] = 0x77;
+        n = bt_sdps_answer(rq4h, sizeof rq4h, out, sizeof out, 9);
+        CHECK(n == 7 && out[0] == 0x01 && out[5] == 0 && out[6] == 2);
+        /* a continuation state we never gave */
+        unsigned char rqc[sizeof rq6];
+        memcpy(rqc, rq6, sizeof rq6);
+        rqc[sizeof rq6 - 1] = 1;
+        n = bt_sdps_answer(rqc, sizeof rqc, out, sizeof out, 9);
+        CHECK(n == 7 && out[0] == 0x01 && out[6] == 5);
+        /* a request that is not one */
+        const unsigned char junk[] = {0x77, 0x00, 0x01, 0x00, 0x00};
+        n = bt_sdps_answer(junk, sizeof junk, out, sizeof out, 9);
+        CHECK(n == 7 && out[0] == 0x01 && out[6] == 3);
+        CHECK(bt_sdps_answer(junk, 3, out, sizeof out, 9) == 0 && bt_sdps_answer(rq6, sizeof rq6, out, 8, 9) == 0);
+
+        /* every cut-off and every damaged byte of the three requests: some answer or none, never a crash or an overrun (the request sits at the end of a page) */
+        const unsigned char *reqs[3] = {rq6, rq2, rq4};
+        const unsigned sizes[3] = {sizeof rq6, sizeof rq2, sizeof rq4};
+        int cases = 0;
+        for (int r = 0; r < 3; r++)
+        {
+            for (unsigned cut = 0; cut <= sizes[r]; cut++)
+            {
+                unsigned char *g = guarded(cut ? cut : 1);
+                memcpy(g, reqs[r], cut);
+                unsigned m = bt_sdps_answer(g, cut, out, sizeof out, 9);
+                CHECK(m <= sizeof out);
+                cases++;
+            }
+            for (unsigned i = 0; i < sizes[r]; i++)
+            {
+                static const unsigned char vals[] = {0x00, 0x01, 0x7F, 0x80, 0xFF, 0x35, 0x25, 0x09};
+                for (unsigned v = 0; v < sizeof vals; v++)
+                {
+                    unsigned char *g = guarded(sizes[r]);
+                    memcpy(g, reqs[r], sizes[r]);
+                    g[i] = vals[v];
+                    unsigned m = bt_sdps_answer(g, sizes[r], out, sizeof out, 9);
+                    CHECK(m <= sizeof out);
+                    cases++;
+                }
+            }
+        }
+        CHECK(cases > 100);
+        CHECK(strcmp(bt_sdp_uuid_name(0x1105), "file push (OPP)") == 0 && strcmp(bt_sdp_uuid_name(0x1106), "file transfer (FTP)") == 0);
+    }
+
     /* ---- the names ---- */
     CHECK(strcmp(bt_sdp_uuid_name(0x110B), "A2DP sink") == 0 && strcmp(bt_sdp_uuid_name(0x110A), "A2DP source") == 0);
     CHECK(strcmp(bt_sdp_uuid_name(0x1108), "headset") == 0 && strcmp(bt_sdp_uuid_name(0x111E), "hands-free") == 0);
