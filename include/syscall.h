@@ -170,6 +170,11 @@
  *   SYS_AUDIO_VOLUME (64) rdi = -1 to ask, or 0 .. 100 (percent; values outside are clamped) to set the master volume, also while a
  *                  sound plays. Returns the volume now in force (0 .. 100), or -1 when there is no sound hardware with an output.
  *   SYS_SLEEP (65) rdi = milliseconds (1 .. 5000; more is cut to 5000): the calling thread sleeps that long (other threads run). 0.
+ *   SYS_BTSCAN (67) rdi = SYS_BTSCAN_START (0xFFFF): start a Bluetooth device scan (about 10 s plus names; it runs in the background); returns 0, or
+ *                  negative (-100 no working Bluetooth chip, -101 a scan is already running, other: the HCI status / error of the chip).
+ *                  Otherwise rdi = line number, rsi = pointer to a buffer, rdx = its size (2 .. 256): one line of the scan result as text
+ *                  (bt_scan_line in bluetooth.h): line 0 is a summary starting with "idle", "scanning", "names" or "done", lines 1 .. n one device
+ *                  each. Returns the length of the line, or -1 (no such line, does not fit, bad buffer).
  *   SYS_AUDIO_STOP (66) rdi = 1: ask the sound that plays now to stop. SYS_AUDIO_PLAY (in any process) then returns -113 at once (before it starts
  *                  or, if it is playing, within a few milliseconds) and the request is used up. rdi = 0: take back a request nobody used (a player that
  *                  asked for a stop when nothing was playing any more). 0. A program that stops another program's sound first waits for
@@ -269,6 +274,8 @@
 #define SYS_AUDIO_VOLUME 64
 #define SYS_SLEEP 65
 #define SYS_AUDIO_STOP 66
+#define SYS_BTSCAN 67
+#define SYS_BTSCAN_START 0xFFFF /* SYS_BTSCAN: rdi value that starts a scan instead of reading a line */
 #define SYS_AUDIO_MAX (8u << 20) /* the largest WAV image SYS_AUDIO_PLAY takes */
 
 /* SYS_SOCKET types */

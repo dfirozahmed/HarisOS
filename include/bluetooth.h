@@ -27,6 +27,8 @@ typedef struct
     /* 0 once the chip is unplugged or broken. */
     int (*alive)(void *ctx);
     void *ctx;
+    /* Milliseconds since boot (for time-outs of scans); may be 0 for a transport without a clock: then nothing times out. */
+    unsigned long long (*now_ms)(void *ctx);
 } BtTransport;
 
 typedef enum
@@ -99,5 +101,50 @@ void bt_status(char *buf, unsigned cap);
 /* Send one HCI command and wait for its Command Complete / Command Status event. `ret` (if not 0) receives the return parameters
  * (the first byte is the HCI status). Returns the HCI status (0 = success), or a BT_E_* value. */
 int bt_cmd(unsigned opcode, const void *params, unsigned plen, unsigned char *ret, unsigned ret_max, unsigned *ret_len, unsigned timeout_ms);
+
+/* ---- device discovery (kernel/bluetooth/bt_scan.c) ----
+ * bt_scan_start() sends an Inquiry (about 10 s, the chip listens for devices that are in "discoverable" mode), the answers are collected
+ * from the events, then the names of the devices that did not tell theirs are asked for one by one. All of it is stepped by bt_poll(),
+ * which the main loop calls: nothing blocks. Needs bt_hci_up(). */
+#define BT_SCAN_MAX 16
+#define BT_NAME_MAX 40
+
+typedef enum
+{
+    BT_SCAN_IDLE = 0, /* nothing scanned yet */
+    BT_SCAN_INQUIRY,  /* listening for devices */
+    BT_SCAN_NAMES,    /* asking the devices without a name for it */
+    BT_SCAN_DONE
+} BtScanState;
+
+typedef struct
+{
+    unsigned char addr[6]; /* as the chip reports it: least significant byte first */
+    unsigned char cls[3];  /* class of device, least significant byte first */
+    int has_rssi;
+    signed char rssi;      /* dBm; closer to 0 = nearer */
+    unsigned char name_state; /* 0 unknown, 1 have it, 2 asked for, 3 the device did not answer */
+    unsigned char psrm;    /* page scan repetition mode, needed for the name request */
+    unsigned short clock;  /* clock offset */
+    char name[BT_NAME_MAX];
+} BtScanDev;
+
+#define BT_E_NOT_UP (-100)  /* bt_scan_start: no working chip */
+#define BT_E_SCANNING (-101) /* ... a scan is already running */
+
+int bt_scan_start(void);
+void bt_poll(void); /* call often (every pass of the main loop): handles events, steps the scan */
+BtScanState bt_scan_state(void);
+int bt_scan_count(void);
+const BtScanDev *bt_scan_dev(int i);
+/* The scan as lines of text (like net_wifi_scan_line): line 0 is a summary that starts with "idle", "scanning", "names" or "done",
+ * lines 1 .. n one device each. Returns the length of the line, or -1 if there is no such line or it does not fit in `cap`. */
+int bt_scan_line(unsigned index, char *buf, unsigned cap);
+
+/* ---- between bt_hci.c and bt_scan.c ---- */
+unsigned long long bt_now(void);
+void bt_scan_event(const unsigned char *evt, unsigned len); /* an event nobody waits for in bt_cmd */
+void bt_scan_step(void);
+void bt_scan_reset(void); /* the chip was reset or unplugged: forget the setup and the list */
 
 #endif

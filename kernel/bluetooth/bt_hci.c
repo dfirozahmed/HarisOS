@@ -56,9 +56,25 @@ void bt_rx_event(const unsigned char *evt, unsigned len)
 /* An event nobody is waiting for. Later stages (inquiry results, connections, ...) hook in here. */
 static void on_event(const unsigned char *e, unsigned len)
 {
-    (void)len;
     if (e[0] == EV_HARDWARE_ERROR)
         B.info.hw_errors++;
+    else
+        bt_scan_event(e, len);
+}
+
+unsigned long long bt_now(void) { return B.attached && B.t.now_ms ? B.t.now_ms(B.t.ctx) : 0; }
+
+void bt_poll(void)
+{
+    if (!B.attached || B.info.state != BT_HCI_UP)
+        return;
+    while (B.tail != B.head)
+    {
+        const EvSlot *s = &B.q[B.tail % EVQ_N];
+        on_event(s->data, s->len);
+        B.tail++;
+    }
+    bt_scan_step();
 }
 
 int bt_cmd(unsigned opcode, const void *params, unsigned plen, unsigned char *ret, unsigned ret_max, unsigned *ret_len, unsigned timeout_ms)
@@ -140,6 +156,7 @@ static void start(void)
 {
     unsigned short vid = B.info.vid;
     unsigned char r[16];
+    bt_scan_reset(); /* a reset puts the chip's settings back to the defaults */
     unsigned n;
     int st;
 
@@ -225,6 +242,7 @@ void bt_fw_report(BtFwState state, const char *why, int code, unsigned fw_versio
 
 void bt_detach(void)
 {
+    bt_scan_reset();
     B.attached = 0;
     B.info.state = BT_ABSENT;
 }

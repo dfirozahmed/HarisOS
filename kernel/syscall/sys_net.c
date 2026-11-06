@@ -72,6 +72,24 @@ long long sys_wifiscan(const SyscallFrame *f)
     return n;
 }
 
+/* SYS_BTSCAN: rdi = SYS_BTSCAN_START to start a Bluetooth scan (0 or a negative reason), else rdi = line number, rsi = buffer, rdx = its size
+ * (2 .. 256): one line of the scan result; its length or -1. */
+long long sys_btscan(const SyscallFrame *f)
+{
+    const AddressSpace *as = task_address_space();
+    if (!as || !process_current())
+        return -1;
+    if (f->rdi == SYS_BTSCAN_START)
+        return bt_scan_start();
+    if (f->rdi > 0xFFFE || f->rdx < 2 || f->rdx > 256 || !aspace_user_ok(as, f->rsi, f->rdx, 1))
+        return -1;
+    char line[256];
+    int n = bt_scan_line((unsigned)f->rdi, line, (unsigned)f->rdx);
+    if (n < 0 || (unsigned)n >= (unsigned)f->rdx)
+        return -1;
+    copy_to_user(f->rsi, line, (unsigned)n + 1);
+    return n;
+}
 
 /* SYS_BIND: rdi = socket descriptor
 , rsi = local address (0 = any; nothing else is accepted: there is one address), rdx = port 1 .. 65535.

@@ -748,6 +748,7 @@ void kernel_main(const BootInfo *info)
             cpuload_section_end(4);
             worked = 1;
         }
+        bt_poll(); /* Bluetooth: events from the chip, steps of a running device scan (does nothing without a chip) */
         if (pmm_ok && blk_generation() != blk_seen) /* a USB drive came or went (found inside mouse_poll) */
         {
             volume_sync(); /* the File Explorer notices through vfs_generation() */

@@ -132,7 +132,7 @@ static int fake_alive(void *ctx)
     return !F.dead;
 }
 
-static const BtTransport T = {fake_send, fake_wait, fake_alive, 0};
+static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, 0};
 
 static void reset_fake(void) { memset(&F, 0, sizeof F); }
 

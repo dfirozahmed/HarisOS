@@ -142,6 +142,12 @@ static int bt_alive(void *ctx)
     return !bt_gone();
 }
 
+static unsigned long long bt_clock(void *ctx)
+{
+    (void)ctx;
+    return timer_ready() ? timer_ms() : 0;
+}
+
 /* Configure the three endpoints of the device in DEV[di], select its configuration, read the USB ids and start the HCI side.
  * Returns 1 if the device was handled (kept, or given up for good), 0 if it is worth another try. */
 int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd)
@@ -227,6 +233,7 @@ int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd)
     t.wait_step = bt_wait_step;
     t.alive = bt_alive;
     t.ctx = b;
+    t.now_ms = bt_clock;
     bt_attach(&t, b->vid, b->pid); /* reset + version: even if the chip does not answer, the device stays and the status says why */
     return 1;
 }

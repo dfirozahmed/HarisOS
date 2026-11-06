@@ -134,6 +134,8 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_accept(f);
     case SYS_WIFISCAN:
         return sys_wifiscan(f);
+    case SYS_BTSCAN:
+        return sys_btscan(f);
     case SYS_CLOCK:
         return sys_clock(f);
     case SYS_TIME:

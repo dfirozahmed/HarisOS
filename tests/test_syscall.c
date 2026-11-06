@@ -812,6 +812,24 @@ int net_wifi_scan_line(unsigned index, char *buf, unsigned cap)
     memcpy(buf, LINES[index], n + 1);
     return (int)n;
 }
+/* the Bluetooth scan the kernel would hold: a summary and one device; a scan can be started once */
+static int BT_START_RESULT = 0, BT_STARTS = 0, BT_PRESENT = 1;
+int bt_scan_start(void)
+{
+    BT_STARTS++;
+    return BT_START_RESULT;
+}
+int bt_scan_line(unsigned index, char *buf, unsigned cap)
+{
+    static const char *const LINES[] = {"done: 1 device", "64:6c:80:0b:aa:60  rssi -54  headphones  Buds"};
+    if (!BT_PRESENT || index >= 2)
+        return -1;
+    unsigned n = (unsigned)strlen(LINES[index]);
+    if (n + 1 > cap)
+        return -1;
+    memcpy(buf, LINES[index], n + 1);
+    return (int)n;
+}
 int sock_resolve(const char *name, unsigned char ip[4])
 {
     if (strcmp(name, "example.com") == 0)
@@ -2515,6 +2533,33 @@ int main(void)
         WIFI_SCAN = 0;
         CHECK(call(SYS_WIFISCAN, 0, U(line), sizeof line) == -1);                      /* no scan result */
         WIFI_SCAN = 1;
+    }
+
+    /* ================= SYS_BTSCAN ================= */
+
+    reset();
+    {
+        char line[256];
+        memset(line, 'x', sizeof line);
+        CHECK(call(SYS_BTSCAN, 0, U(line), sizeof line) == 14 && strcmp(line, "done: 1 device") == 0);
+        CHECK(OK_WRITE == 1 && OK_LEN == sizeof line);                                  /* the buffer was checked for writing */
+        CHECK(call(SYS_BTSCAN, 1, U(line), sizeof line) == 45 && strncmp(line, "64:6c:80:0b:aa:60", 17) == 0);
+        CHECK(call(SYS_BTSCAN, 2, U(line), sizeof line) == -1);                         /* past the end */
+        CHECK(call(SYS_BTSCAN, 1, U(line), 10) == -1);                                  /* the line does not fit */
+        CHECK(call(SYS_BTSCAN, 0, U(line), 1) == -1 && call(SYS_BTSCAN, 0, U(line), 257) == -1);
+        CHECK(call(SYS_BTSCAN, 0xFFFE, U(line), sizeof line) == -1 && call(SYS_BTSCAN, 0x10000, U(line), sizeof line) == -1);
+        USER_OK = 0;
+        CHECK(call(SYS_BTSCAN, 0, U(line), sizeof line) == -1);                         /* bad pointer */
+        USER_OK = 1;
+        BT_PRESENT = 0;
+        CHECK(call(SYS_BTSCAN, 0, U(line), sizeof line) == -1);                         /* no chip */
+        BT_PRESENT = 1;
+        /* starting a scan needs no buffer: the result of bt_scan_start() goes back as it is */
+        int before = BT_STARTS;
+        CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 0, 0) == 0 && BT_STARTS == before + 1);
+        BT_START_RESULT = -101;
+        CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 0, 0) == -101);
+        BT_START_RESULT = 0;
     }
 
     /* ================= sockets: the server calls ================= */

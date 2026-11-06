@@ -73,6 +73,8 @@
 #define SYS_AUDIO_VOLUME 64
 #define SYS_SLEEP 65
 #define SYS_AUDIO_STOP 66
+#define SYS_BTSCAN 67
+#define SYS_BTSCAN_START 0xFFFF
 #define SYS_SOCK_STREAM 1
 #define SYS_GUI_DESTROY 0
 #define SYS_GUI_SET_TITLE 1
@@ -233,6 +235,7 @@ static inline long long sys_audio_volume(long long percent) { return syscall3(SY
 static inline void sys_sleep(unsigned ms) { syscall3(SYS_SLEEP, ms, 0, 0); }
 /* stop the sound that plays: sys_audio_stop(1) asks (the player's sys_audio_play returns -113), sys_audio_stop(0) takes an unused request back */
 static inline void sys_audio_stop(int request) { syscall3(SYS_AUDIO_STOP, request, 0, 0); }
+static inline long long sys_btscan(unsigned index, char *buf, usize cap) { return syscall3(SYS_BTSCAN, index, (long long)(usize)buf, (long long)cap); }
 /* Unix time in seconds (the real-time clock read as UTC), or -1 */
 static inline long long sys_time(void) { return syscall3(SYS_TIME, 0, 0, 0); }
 static inline long long sys_wifiscan(unsigned index, char *buf, usize cap) { return syscall3(SYS_WIFISCAN, index, (long long)(usize)buf, (long long)cap); }
