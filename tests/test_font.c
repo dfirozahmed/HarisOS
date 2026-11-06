@@ -1,5 +1,6 @@
 #include "font.h"
 #include "font_bn.h"
+#include "font_ext.h"
 #include "shape_bn.h"
 #include "utf8.h"
 #include <assert.h>
@@ -172,6 +173,42 @@ int main(void)
         assert(gfx_text_w(&font_ui_14, "\xff") == q && gfx_text_w(&font_ui_14, "\xe4\xb8\xad") == q);
         assert(gfx_text_w(&font_ui_14, "\xe0\xa6") == q); /* truncated character */
         assert(gfx_text_w(&font_ui_14, "\xe0\xa6\x84") == q); /* U+0984: unassigned */
+    }
+
+    /* ---- Latin-1, Latin Extended-A, Greek, Cyrillic: drawn from the extra faces, not '?' ---- */
+    {
+        int q = gfx_text_w(&font_ui_14, "?");
+        const char *e_acute = "\xc3\xa9", *eur = "\xe2\x82\xac", *alpha = "\xce\xb1", *ya = "\xd0\xaf"; /* é € α Я */
+        const char *priv = "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82";                            /* Привет */
+        assert(gfx_text_w(&font_ui_14, e_acute) > 0);
+        assert(gfx_text_w(&font_ui_14, priv) > 0);
+        assert(gfx_text_w(&font_ui_14, priv) != gfx_text_w(&font_ui_14, "??????")); /* six characters of their own widths, not six '?' */
+        /* the glyphs have pixels, and a bigger size is wider */
+        int calls = blend_calls;
+        test_clip = (GfxClip){-100000, -100000, 100000, 100000};
+        gfx_text(&font_ui_14, 10, 5, priv, gfx_rgb(255, 255, 255));
+        assert(blend_calls > calls);
+        assert(gfx_text_w(&font_ui_20, ya) > gfx_text_w(&font_ui_14, ya));
+        assert(gfx_text_w(&font_ui_32, alpha) > gfx_text_w(&font_ui_12, alpha));
+        /* fit: whole characters (2 bytes each here) */
+        assert(gfx_text_fit(&font_ui_14, priv, gfx_text_w(&font_ui_14, "\xd0\x9f\xd1\x80\xd0\xb8")) == 6);
+        assert(gfx_text_fit(&font_ui_14, priv, gfx_text_w(&font_ui_14, priv)) == 12);
+        assert(gfx_text_fit(&font_ui_14, priv, 1) == 0);
+        /* mixing with ASCII and Bengali: widths add up (within rounding) */
+        int mixed = gfx_text_w(&font_ui_14, "a\xc3\xa9\xd0\xaf\xe0\xa6\x95");
+        int sum = gfx_text_w(&font_ui_14, "a") + gfx_text_w(&font_ui_14, e_acute) + gfx_text_w(&font_ui_14, ya) +
+                  gfx_text_w(&font_ui_14, "\xe0\xa6\x95");
+        assert(mixed >= sum - 3 && mixed <= sum + 3);
+        /* every size has the characters, and the euro sign and non-breaking space too */
+        assert(gfx_text_w(&font_ui_12, eur) > 0 && gfx_text_w(&font_ui_16, eur) > 0 && gfx_text_w(&font_bold_20, eur) > 0);
+        assert(gfx_text_w(&font_med_14, "\xc2\xa0") > 0); /* U+00A0 has width but nothing to draw */
+        /* what no font has is still '?': Chinese, an emoji, a Greek letter that Noto leaves out of the table, U+FFFD */
+        assert(gfx_text_w(&font_ui_14, "\xe4\xb8\xad") == q && gfx_text_w(&font_ui_14, "\xf0\x9f\x98\x80") == q);
+        assert(gfx_text_w(&font_ui_14, "\xef\xbf\xbd") == q);
+        /* ext_cp is sorted (the lookup is a binary search) and holds no ASCII */
+        for (unsigned i = 1; i < ext_n; i++)
+            assert(ext_cp[i - 1] < ext_cp[i]);
+        assert(ext_cp[0] >= 0x80);
     }
 
     puts("Font regression tests passed.");

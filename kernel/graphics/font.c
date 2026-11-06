@@ -6,6 +6,7 @@
  * the Bengali font of the same size. Drawing, measuring and fitting all walk the text through lay_next, so they
  * always agree on where every glyph is. */
 #include "font.h"
+#include "font_ext.h"
 #include "shape_bn.h"
 #include "utf8.h"
 
@@ -14,6 +15,38 @@ static const FontGlyph *glyph_for(const Font *f, unsigned ch)
     if (ch < f->first || ch > f->last)
         ch = '?';
     return &f->glyphs[ch - f->first];
+}
+
+/* The position of character cp in the extra faces (font_ext.h), -1 if they do not have it. ext_cp is sorted: a binary search. */
+static int ext_index(unsigned cp)
+{
+    int lo = 0, hi = (int)ext_n - 1;
+    while (lo <= hi)
+    {
+        int mid = (lo + hi) / 2;
+        unsigned v = ext_cp[mid];
+        if (v == cp)
+            return mid;
+        if (v < cp)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return -1;
+}
+
+/* The extra face of the size nearest to the Latin font's (the same five sizes as the Bengali faces). */
+static const Font *ext_face_for_size(int size)
+{
+    if (size <= 13)
+        return &font_ext_12;
+    if (size <= 15)
+        return &font_ext_14;
+    if (size <= 18)
+        return &font_ext_16;
+    if (size <= 26)
+        return &font_ext_20;
+    return &font_ext_32;
 }
 
 /* One glyph to draw. newline = 1: a line break (no glyph). */
@@ -108,10 +141,22 @@ static int lay_next(Lay *l, const Font *f, LayItem *it, const char **end)
     }
     l->s = p;
     l->prev_bn = 0;
-    it->font = f;
-    it->g = glyph_for(f, cp);
-    it->adv = it->g->advance;
     *end = p;
+    if ((cp < f->first || cp > f->last) && cp < 0x10000) /* not in the Latin font: Latin-1, Greek, Cyrillic ... from the extra face */
+    {
+        int e = ext_index(cp);
+        if (e >= 0)
+        {
+            const Font *face = ext_face_for_size(f->size);
+            it->font = face;
+            it->g = &face->glyphs[e];
+            it->adv = it->g->advance;
+            return 1;
+        }
+    }
+    it->font = f;
+    it->g = glyph_for(f, cp); /* '?' for what no font has */
+    it->adv = it->g->advance;
     return 1;
 }
 
