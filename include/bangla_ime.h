@@ -48,6 +48,8 @@ int ime_active(void);
 int ime_mode(void); /* IME_OFF, or the Bangla layout in use */
 void ime_set_active(int on);
 void ime_set_layout(int layout); /* IME_PHONETIC or IME_NATIONAL (does not turn Bangla on) */
+/* The next typing language: off -> phonetic -> national -> off (a click on the label in the tray). */
+void ime_cycle(void);
 
 /* Forget the word being typed (focus moved, the mouse was clicked ...): the next letter starts a new one. */
 void ime_reset(void);

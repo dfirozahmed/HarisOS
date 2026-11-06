@@ -294,6 +294,24 @@ int main(void)
     typed("ami");
     CHECK(strcmp(text(), "\xe0\xa6\x86\xe0\xa6\xae\xe0\xa6\xbf") == 0);
 
+    /* a click on the language label: off -> phonetic -> national -> off, and a word being typed is dropped */
+    ime_set_active(0);
+    ime_cycle();
+    CHECK(ime_mode() == IME_PHONETIC);
+    fresh();
+    typed("k");
+    ime_cycle(); /* the word "k" is over: the national layout starts clean */
+    CHECK(ime_mode() == IME_NATIONAL);
+    keym('j', 0);
+    CHECK(strcmp(text(), "\xe0\xa6\x95\xe0\xa6\x95") == 0); /* the first ক from "k", the second from the key J */
+    ime_cycle();
+    CHECK(ime_mode() == IME_OFF && !ime_active());
+    ime_cycle();
+    CHECK(ime_mode() == IME_PHONETIC); /* from off it starts at the phonetic layout, whatever was used before */
+    ime_set_active(0);
+    ime_set_layout(IME_PHONETIC);
+    ime_set_active(1);
+
     /* off again */
     key(' ', KMOD_CTRL);
     CHECK(!ime_active() && ime_mode() == IME_OFF);

@@ -1,5 +1,6 @@
 /* Desktop keyboard and pointer event routing. */
 #include "audio.h"
+#include "bangla_ime.h"
 #include "desktop.h"
 #include "taskbar.h"
 #include "startmenu.h"
@@ -42,6 +43,13 @@ int desktop_pointer(int x, int y, unsigned buttons)
         volmenu_close();
         deskmenu_close();
         desktop_open_wifi();
+    }
+    /* a click on the typing-language label in the tray ("EN" / "অভ্র" / "জাতীয়") switches to the next one, as Ctrl+Space does */
+    int lang_changed = 0;
+    if (on_bar && !wm_dragging() && (buttons & MOUSE_LEFT) && !(LAST_BTN & MOUSE_LEFT) && taskbar_lang_at(x, y))
+    {
+        ime_cycle();
+        lang_changed = taskbar_set_ime(ime_mode()); /* the label is drawn again at once */
     }
     int vol_toggle = on_bar && !wm_dragging() && (buttons & MOUSE_LEFT) && !(LAST_BTN & MOUSE_LEFT) && taskbar_volume_at(x, y);
     if (vol_toggle)
@@ -100,7 +108,7 @@ int desktop_pointer(int x, int y, unsigned buttons)
     gfx_cursor_set_shape(shape);
 
     /* The taskbar only sees the mouse when no window is being dragged. */
-    int bar_changed = desktop_refresh_taskbar(); /* its buttons must match the windows before a click is handled */
+    int bar_changed = desktop_refresh_taskbar() | lang_changed; /* its buttons must match the windows before a click is handled */
     bar_changed |= taskbar_pointer(wm_dragging() ? -1 : x, wm_dragging() ? -1 : y, buttons);
     return desktop_finish_input(bar_changed);
 }

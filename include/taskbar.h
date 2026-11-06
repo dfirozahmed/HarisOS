@@ -58,6 +58,7 @@ void taskbar_bounds(int *x, int *y, int *w, int *h);
  * changed, so the taskbar must be redrawn. taskbar_volume_at() says whether (x, y) is on the speaker (valid after the taskbar was drawn):
  * the mouse wheel over it changes the volume (desktop_input.c). */
 int taskbar_set_volume(int percent);
+int taskbar_lang_at(int x, int y); /* (x, y) is on the typing-language label (valid after the taskbar was drawn): a click there switches it */
 int taskbar_set_ime(int mode); /* the typing-language label in the tray (0 EN, 1 Bangla phonetic, 2 Bangla national): 1 if it changed (redraw) */
 int taskbar_volume_at(int x, int y);
 int taskbar_volume_center(void);

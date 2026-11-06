@@ -200,6 +200,20 @@ void ime_set_active(int on)
     ime_reset();
 }
 
+void ime_cycle(void)
+{
+    if (!ACTIVE)
+    {
+        LAYOUT = IME_PHONETIC;
+        ACTIVE = 1;
+    }
+    else if (LAYOUT == IME_PHONETIC)
+        LAYOUT = IME_NATIONAL;
+    else
+        ACTIVE = 0;
+    ime_reset();
+}
+
 void ime_set_layout(int layout)
 {
     LAYOUT = layout == IME_NATIONAL ? IME_NATIONAL : IME_PHONETIC;

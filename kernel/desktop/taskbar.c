@@ -163,6 +163,12 @@ int taskbar_set_battery(int percent, int charging, int ac)
 }
 
 static int IME_MODE; /* 0 = Latin letters, 1 = Bangla phonetic, 2 = Bangla national layout (see bangla_ime.h) */
+static int LANG_X, LANG_Y, LANG_W, LANG_H; /* the typing-language label's area, set by the last draw */
+
+int taskbar_lang_at(int x, int y)
+{
+    return LANG_W > 0 && x >= LANG_X && x < LANG_X + LANG_W && y >= LANG_Y && y < LANG_Y + LANG_H;
+}
 
 int taskbar_set_ime(int mode)
 {
@@ -366,6 +372,7 @@ void taskbar_draw(void)
         bat_w = ui_text_width(bat_txt, UI_TEXT_SMALL) + 6;
     }
     int plug_w = BAT_AC ? 20 + 6 : 0; /* the plug beside the battery: 20 px and a gap */
+    LANG_W = 0; /* set again below if the tray is drawn */
     int lang_w = 52 + 8; /* the typing language ("EN", "অভ্র", "জাতীয়"): 52 px and a gap */
     int tray_w = lang_w + 14 + 20 + 14 + 22 + 14 + plug_w + 26 + 14 + bat_w;
     int tx = rx - cw - 14 - tray_w;
@@ -378,6 +385,10 @@ void taskbar_draw(void)
                          : IME_MODE == 2 ? "\xe0\xa6\x9c\xe0\xa6\xbe\xe0\xa6\xa4\xe0\xa7\x80\xe0\xa6\xaf"
                                          : "EN",
                          UI_TEXT_SMALL, UI_ALIGN_CENTER, IME_MODE ? t->accent : t->text_dim);
+        LANG_X = tx; /* a click on the label (and the pill's left end around it) switches the language */
+        LANG_Y = cy - 17;
+        LANG_W = lang_w + 6;
+        LANG_H = 34;
         int ix = tx + lang_w + 14 + 10;
         ui_icon(UI_ICON_WIFI, ix, cy, 20, WIFI == 1 ? t->text : WIFI == 2 ? t->warning : t->text_dim);
         WIFI_X = ix - 10 - 7;
