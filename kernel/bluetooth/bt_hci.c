@@ -482,6 +482,12 @@ static void putd(Out *o, unsigned v)
         putc_(o, t[--k]);
 }
 
+void bt_note_cmd_error(int code)
+{
+    B.info.cmd_errors++;
+    B.info.last_cmd_code = code;
+}
+
 void bt_status(char *buf, unsigned cap)
 {
     if (!cap)
@@ -575,4 +581,38 @@ void bt_status(char *buf, unsigned cap)
             puts_(&o, " (starting)");
     }
     buf[o.n] = 0;
+}
+
+int bt_diag_line(char *buf, unsigned cap)
+{
+    if (cap < 2)
+        return -1;
+    char st[100];
+    bt_status(st, sizeof st);
+    Out o = {buf, cap, 0};
+    puts_(&o, "chip: ");
+    puts_(&o, st);
+    if (B.attached)
+    {
+        puts_(&o, "; usb ");
+        puts_(&o, B.t.alive(B.t.ctx) ? "up" : "DOWN");
+        puts_(&o, ", command errors ");
+        putd(&o, B.info.cmd_errors);
+        puts_(&o, " (last code ");
+        if (B.info.last_cmd_code < 0)
+        {
+            putc_(&o, '-');
+            putd(&o, (unsigned)-B.info.last_cmd_code);
+        }
+        else
+            putd(&o, (unsigned)B.info.last_cmd_code);
+        puts_(&o, "), events dropped ");
+        putd(&o, B.info.dropped);
+        puts_(&o, ", hardware errors ");
+        putd(&o, B.info.hw_errors);
+    }
+    if (o.n + 1 >= cap && cap > 1)
+        o.n = cap - 1;
+    buf[o.n] = 0;
+    return (int)o.n;
 }

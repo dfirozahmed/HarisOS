@@ -125,9 +125,23 @@ static int bt_send_cmd(void *ctx, const unsigned char *pkt, unsigned len)
     for (unsigned i = 0; i < len; i++)
         x->dma[i] = pkt[i];
     int code = control(x, b->slot, &d->ep0, 0x20, 0, 0, 0, (u16)len, 0);
-    if (code == 6)
+    if (code == 6) /* STALL: the chip did not take the command, so sending it again is safe (a time-out would not be: it may have taken it) */
+    {
+        bt_note_cmd_error(code);
         ep_recover(x, b->slot, 1, &d->ep0);
-    return ctrl_ok(code) ? 0 : -1;
+        delay_ms(2);
+        for (unsigned i = 0; i < len; i++)
+            x->dma[i] = pkt[i];
+        code = control(x, b->slot, &d->ep0, 0x20, 0, 0, 0, (u16)len, 0);
+        if (code == 6)
+            ep_recover(x, b->slot, 1, &d->ep0);
+    }
+    if (!ctrl_ok(code))
+    {
+        bt_note_cmd_error(code);
+        return -1;
+    }
+    return 0;
 }
 
 /* One HCI ACL packet on the bulk OUT endpoint: a single transfer. The device takes the length from the packet's own header, so there is

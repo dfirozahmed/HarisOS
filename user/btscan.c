@@ -46,6 +46,8 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
     else if (r != 0)
     {
         fdprintf(2, "btscan: the chip refused the scan (%d)\n", (int)r);
+        if (sys_btlink(0xC0, line, sizeof line) >= 0) /* what the driver knows about the chip: its state and the USB errors */
+            fdprintf(2, "%s\n", line);
         sys_exit(1);
     }
     fdprintf(1, "scanning for Bluetooth devices (about 10 seconds) ...\n");

@@ -1278,6 +1278,8 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
 {
     if (cap < 2)
         return -1;
+    if (index == 0xC0) /* the chip and its USB link */
+        return bt_diag_line(buf, cap);
     if (index >= 0xB0) /* the audio line */
         return bt_a2dp_line(index - 0xB0, buf, cap);
     if (index >= 0xA0) /* the A2DP lines */

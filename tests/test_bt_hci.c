@@ -165,6 +165,29 @@ int main(void)
     if (strcmp(line, "BT 0bda:b00a hci 8 rev 000c sub 8821 mfr 93 rom 3, addr 11:22:33:44:55:66"))
         printf("  got: %s\n", line);
 
+    /* 1b. the diagnostic line: the status, whether the USB link is alive, what could not be delivered */
+    {
+        char dl[300];
+        CHECK(bt_diag_line(dl, sizeof dl) > 0);
+        CHECK(strcmp(dl, "chip: BT 0bda:b00a hci 8 rev 000c sub 8821 mfr 93 rom 3, addr 11:22:33:44:55:66; usb up, command errors 0 (last code 0), events dropped 0, hardware errors 0") == 0);
+        bt_note_cmd_error(6);
+        bt_note_cmd_error(-1);
+        CHECK(bt_info()->cmd_errors == 2 && bt_info()->last_cmd_code == -1);
+        bt_diag_line(dl, sizeof dl);
+        CHECK(strstr(dl, "usb up, command errors 2 (last code -1)") != 0);
+        F.dead = 1;
+        bt_diag_line(dl, sizeof dl);
+        CHECK(strstr(dl, "usb DOWN") != 0);
+        F.dead = 0;
+        for (unsigned cap = 2; cap < 40; cap++) /* always terminated, never longer than the buffer */
+        {
+            memset(dl, 'x', sizeof dl);
+            int n = bt_diag_line(dl, cap);
+            CHECK(n >= 0 && (unsigned)n < cap && strlen(dl) == (size_t)n);
+        }
+        CHECK(bt_diag_line(dl, 1) == -1);
+    }
+
     /* 2. other events and answers for other commands arrive in between: they must not be taken for the answer */
     reset_fake();
     F.noise_first = 1;
@@ -265,6 +288,10 @@ int main(void)
     CHECK(bt_cmd(0x0C03, 0, 0, 0, 0, 0, 10) == BT_E_BUSY);
     bt_status(line, sizeof line);
     CHECK(strcmp(line, "no Bluetooth chip") == 0);
+    {
+        char dl[300];
+        CHECK(bt_diag_line(dl, sizeof dl) > 0 && strcmp(dl, "chip: no Bluetooth chip") == 0);
+    }
     unsigned ev_after = bt_info()->events;
     bt_rx_event(ok, sizeof ok); /* late event from an unplugged chip */
     CHECK(bt_info()->events == ev_after);

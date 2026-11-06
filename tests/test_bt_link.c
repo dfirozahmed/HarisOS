@@ -1928,6 +1928,8 @@ int main(void)
             peak = abs(AUD[2 * i]) > peak ? abs(AUD[2 * i]) : peak;
         CHECK(peak > 7800 && peak < 8600); /* a quarter of full scale */
         CHECK(abs(AUD[2 * (d + 0)]) < 600); /* it starts softly: no click */
+        /* the chip line (0xC0): the status and the USB link, for finding out why a command did not go */
+        CHECK(bt_link_line(0xC0, buf, sizeof buf) > 0 && strncmp(buf, "chip: BT 0bda:b00a", 18) == 0 && strstr(buf, "usb up, command errors 0"));
         /* nothing more is sent after the end */
         run_ms(500, 10);
         CHECK(media_packets() == 54);

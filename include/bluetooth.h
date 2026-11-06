@@ -78,6 +78,8 @@ typedef struct
     unsigned short acl_mtu;   /* largest ACL data packet the chip takes (Read Buffer Size) */
     unsigned short acl_pkts;  /* ACL packets the chip can hold at a time (flow control credits) */
     unsigned acl_rx, acl_tx, acl_dropped; /* ACL packets received / sent / dropped (queue full) */
+    unsigned cmd_errors;      /* HCI commands the transport could not deliver (USB control transfers that failed) */
+    int last_cmd_code;        /* ... and the transport's code for the last one (USB: the completion code, -1 = no answer in time) */
 } BtInfo;
 
 /* bt_cmd() results below zero */
@@ -94,6 +96,9 @@ void bt_rx_event(const unsigned char *evt, unsigned len);                   /* o
 void bt_rx_event_chunk(const unsigned char *data, unsigned len);            /* a piece of the event stream (one USB packet): put together by the length byte */
 void bt_rx_acl(const unsigned char *pkt, unsigned len);                     /* one complete HCI ACL data packet */
 void bt_rx_acl_chunk(const unsigned char *data, unsigned len);              /* a piece of the ACL stream (one USB packet): put together by the length field */
+void bt_note_cmd_error(int code); /* the transport could not deliver a command: counted, shown by bt_diag_line() */
+/* One line for the person who has to find out why the chip does not answer: the status line, whether the USB link is alive, the errors. */
+int bt_diag_line(char *buf, unsigned cap);
 void bt_fw_report(BtFwState state, const char *why, int code, unsigned fw_version, unsigned done, unsigned total); /* firmware outcome, for the status line */
 void bt_restart(void); /* Reset + read the versions and the address again (after a firmware patch changed the chip) */
 
