@@ -12,7 +12,7 @@
 #define HARIS_VFS_H
 
 #define VFS_MAX_NODES 2048
-#define VFS_NAME_MAX 96 /* including the final 0; longer names of a drive are cut when shown */
+#define VFS_NAME_MAX 256 /* including the final 0: 255 bytes of UTF-8, the longest name the file systems allow (a Bengali letter takes 3) */
 #define VFS_FS_BYTES 24 /* room for a drive's own locator in a node */
 #define VFS_ROOT 0
 #define VFS_MAX_VOLUMES 8

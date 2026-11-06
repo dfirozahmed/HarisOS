@@ -71,6 +71,9 @@ void copy_name(char *dst, const char *src)
     int i = 0;
     for (; src[i] && i < VFS_NAME_MAX - 1; i++)
         dst[i] = src[i];
+    if (src[i]) /* cut: back to the start of the last character that fits whole (names are UTF-8) */
+        while (i > 0 && ((unsigned char)src[i] & 0xC0) == 0x80)
+            i--;
     dst[i] = 0;
 }
 
