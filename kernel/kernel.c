@@ -669,6 +669,7 @@ void kernel_main(const BootInfo *info)
         gfx_repaint_all();
     }
     (void)amd_gpu_bringup_backlight(); /* brightness slider -> the panel's own backlight (target machine only) */
+    look_apply_brightness(); /* the saved brightness (THEME.CFG) over what the backlight reported */
     (void)amd_gpu_bringup_flip(); /* PSP_LEVEL 11: DCN page-flip test (nothing otherwise) */
 
     /* The first user program: INIT.ELF in a Terminal window, if the boot disk has it. It keeps the shell running; closing

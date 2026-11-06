@@ -19,6 +19,7 @@ static UiRgb ACCENT;
 static unsigned int *PIC; /* the picture in use, screen size (ui_set_wallpaper_image) */
 static int PIC_NODE = -1;
 static const char *MSG = "";
+static int SAVED_BRIGHT = -1; /* "brightness=" of THEME.CFG, -1 = none */
 
 /* ---- small string helpers (no libc) ---- */
 static int slen(const char *s)
@@ -316,6 +317,14 @@ void look_save_brightness(void)
     save();
 }
 
+/* gfx_backlight_driver() (the panel's own backlight, registered after look_load) replaces the brightness with what the hardware
+ * reports, so the saved value is set again once the driver is in place. */
+void look_apply_brightness(void)
+{
+    if (SAVED_BRIGHT >= 0)
+        gfx_set_brightness(SAVED_BRIGHT);
+}
+
 void look_load(void)
 {
     char text[CFG_MAX + 1];
@@ -359,7 +368,10 @@ void look_load(void)
                 for (; val[nd] >= '0' && val[nd] <= '9' && nd < 4; nd++)
                     v = v * 10 + (val[nd] - '0');
                 if (nd > 0)
+                {
+                    SAVED_BRIGHT = v;
                     gfx_set_brightness(v); /* clamped to GFX_BRIGHTNESS_MIN..MAX */
+                }
             }
             else if ((val = after(line, "wallpaper=")))
             {

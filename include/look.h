@@ -38,6 +38,7 @@ void look_set_screenoff(int seconds);
 /* Brightness 10..100 (gfx_set_brightness): "brightness=" in THEME.CFG, applied at boot by look_load(). The Display Settings app
  * sets it with gfx_set_brightness() and then calls this to write the current value to THEME.CFG. */
 void look_save_brightness(void);
+void look_apply_brightness(void); /* sets the loaded value again; call after the panel backlight driver is registered */
 
 /* The folder the settings files (THEME.CFG, ICONS.CFG) are written to: where THEME.CFG is, else the boot disk, else the first
  * drive that can be written; -1 = none. A vfs node for vfs_save(). */
