@@ -106,6 +106,17 @@ static int same_addr(const unsigned char *a, const unsigned char *b)
 }
 
 /* ---- what the stack says ---- */
+/* The chip gives no percentage for a scan. The inquiry lasts about 10 seconds (bt_scan.c), so the bar follows the clock up to 90 %; asking
+ * the devices for their names has no known length and holds at 95 %. */
+#define SCAN_INQUIRY_MS 10240
+static int scan_percent(void)
+{
+    if (bt_scan_state() == BT_SCAN_NAMES)
+        return 95;
+    unsigned long long el = timer_ms() - OP_T0;
+    return el >= SCAN_INQUIRY_MS ? 90 : (int)(el * 90 / SCAN_INQUIRY_MS);
+}
+
 static int link_active(void)
 {
     BtLinkState s = bt_link_state();
@@ -166,7 +177,9 @@ static unsigned long long signature(void)
     s = s * 64 + (unsigned)bt_scan_count();
     s = s * 7 + (unsigned)bt_a2dp_audio_ready();
     s = s * 128 + (unsigned)bt_a2dp_volume();
-    if (OP != OP_NONE)
+    if (OP == OP_SCAN)
+        s = s * 1024 + (unsigned)scan_percent(); /* the progress bar */
+    else if (OP != OP_NONE)
         s = s * 1024 + (unsigned)((timer_ms() - OP_T0) / 1000); /* the seconds counter in the header */
     return s;
 }
@@ -301,6 +314,8 @@ static void bt_draw(Window *w, UiRect body)
     else
         put_str(line, sizeof line, &n, bt_scan_count() ? "Pick a device below." : "Put the headset in pairing mode, then press Scan.");
     ui_text_in_color(ui_rect(l.head.x + 48, l.head.y + 32, l.head.w - 48 - 240, 22), line, UI_TEXT_DIM, UI_ALIGN_LEFT, t->text_dim);
+    if (OP == OP_SCAN)
+        ui_progress(ui_rect(l.head.x + 48, l.head.y + 58, l.head.w - 48 - 240, 8), scan_percent());
     ui_separator(l.head.x, l.head.y + l.head.h - 6, l.head.w);
 
     /* the list */
