@@ -179,6 +179,7 @@
  *                  byte: 00:11:22:33:44:55 is 0x001122334455): connect to that Bluetooth device (it must be in range and connectable; the chip must not be
  *                  scanning). It runs in the background. Returns 0, or negative (-100 no working chip, -101 scanning, -102 a link exists, other: HCI status).
  *                  rdi = SYS_BTLINK_DISCONNECT (0x1001): end the link (or stop connecting). 0.
+ *                  rdi = SYS_BTLINK_SDP (0x1002): ask the connected device for its services (SDP). 0, or negative (-100 no link, -102 already asking).
  *                  Otherwise rdi = line number (0 .. 0xFFF), rsi = pointer to a buffer, rdx = its size (2 .. 256): one line of text about the link
  *                  (bt_link_line in bluetooth.h): line 0 the state ("idle", "connecting", "connected", "closing", "failed", "closed"), 1 the echo
  *                  probe, 2 the features the device reported, 3 counters. Returns the length of the line or -1.
@@ -285,6 +286,7 @@
 #define SYS_BTLINK 68
 #define SYS_BTLINK_CONNECT 0x1000    /* SYS_BTLINK: rdi values that act instead of reading a line */
 #define SYS_BTLINK_DISCONNECT 0x1001
+#define SYS_BTLINK_SDP 0x1002 /* SYS_BTLINK: list the services of the device (a channel to its service directory); result in lines 4 and up */
 #define SYS_BTSCAN_START 0xFFFF /* SYS_BTSCAN: rdi value that starts a scan instead of reading a line */
 #define SYS_AUDIO_MAX (8u << 20) /* the largest WAV image SYS_AUDIO_PLAY takes */
 

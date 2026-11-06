@@ -310,6 +310,110 @@ static void up(void)
     bt_poll();
 }
 
+
+/* ---- channels and SDP ---- */
+#include "bt_sdp_fixture.h"
+
+#define DEV_CID 0x0077 /* the device's end of the channel we open */
+
+/* the last signalling command with this code that the host sent */
+static int last_sig(unsigned code, unsigned *id, const unsigned char **d, unsigned *dl)
+{
+    collect();
+    for (int i = NPDU - 1; i >= 0; i--)
+        if (sig_of(i, id, d, dl) == (int)code)
+            return 1;
+    return 0;
+}
+
+/* the last PDU the host sent to this channel number (not the signalling channel): its data after the L2CAP header */
+static int last_data(unsigned cid, const unsigned char **d, unsigned *dl)
+{
+    collect();
+    for (int i = NPDU - 1; i >= 0; i--)
+        if (PDU[i].len >= 4 && le16(PDU[i].data + 2) == cid)
+        {
+            *d = PDU[i].data + 4;
+            *dl = PDU[i].len - 4;
+            return 1;
+        }
+    return 0;
+}
+
+/* the device sends an L2CAP PDU on a channel (our end `cid`) */
+static void dev_pdu(unsigned cid, const unsigned char *data, unsigned n)
+{
+    unsigned char pdu[1100];
+    pdu[0] = (unsigned char)n;
+    pdu[1] = (unsigned char)(n >> 8);
+    pdu[2] = (unsigned char)cid;
+    pdu[3] = (unsigned char)(cid >> 8);
+    memcpy(pdu + 4, data, n);
+    to_host_frag(HANDLE, 2, pdu, 4 + n, 64);
+}
+
+/* the device's Connection Response */
+static void dev_conn_rsp(unsigned id, unsigned result)
+{
+    unsigned char r[8];
+    r[0] = result == 0 || result == 1 ? DEV_CID & 0xFF : 0;
+    r[1] = result == 0 || result == 1 ? DEV_CID >> 8 : 0;
+    r[2] = 0x40;
+    r[3] = 0;
+    r[4] = (unsigned char)result;
+    r[5] = 0;
+    r[6] = r[7] = 0;
+    dev_sig(0x03, id, r, 8);
+}
+
+/* the device's answer to an SDP request: this piece of the attribute lists and a continuation state (cl bytes) */
+static void dev_sdp_answer(unsigned tid, const unsigned char *piece, unsigned n, const unsigned char *cont, unsigned cl)
+{
+    unsigned char b[1000];
+    unsigned plen = 2 + n + 1 + cl;
+    b[0] = 0x07;
+    b[1] = (unsigned char)(tid >> 8);
+    b[2] = (unsigned char)tid;
+    b[3] = (unsigned char)(plen >> 8);
+    b[4] = (unsigned char)plen;
+    b[5] = (unsigned char)(n >> 8);
+    b[6] = (unsigned char)n;
+    memcpy(b + 7, piece, n);
+    b[7 + n] = (unsigned char)cl;
+    if (cl)
+        memcpy(b + 8 + n, cont, cl);
+    dev_pdu(0x40, b, 8 + n + cl);
+}
+
+/* a link, an SDP browse, and what the host sent for it: the id of its Connection Request */
+static unsigned sdp_open_start(void)
+{
+    up();
+    CHECK(bt_sdp_browse() == 0);
+    bt_poll();
+    unsigned id = 0, dl = 0;
+    const unsigned char *d = 0;
+    CHECK(last_sig(0x02, &id, &d, &dl) && dl == 4 && le16(d) == 1 && le16(d + 2) == 0x40); /* PSM 1 (SDP), our end 0x40 */
+    return id;
+}
+
+/* the device accepts and configures; ends when the channel is open and the request has gone out. Returns the id of our Configuration Request. */
+static unsigned sdp_open_finish(unsigned conn_id)
+{
+    dev_conn_rsp(conn_id, 0);
+    bt_poll();
+    unsigned cfg_id = 0, dl = 0;
+    const unsigned char *d = 0;
+    CHECK(last_sig(0x04, &cfg_id, &d, &dl) && dl == 4 && le16(d) == DEV_CID);
+    unsigned char cq[8] = {0x40, 0, 0, 0, 1, 2, 0xA0, 0x02};
+    dev_sig(0x04, 0x50, cq, 8);
+    bt_poll();
+    unsigned char cr[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+    dev_sig(0x05, cfg_id, cr, 6);
+    bt_poll();
+    return cfg_id;
+}
+
 int main(void)
 {
     char buf[256];
@@ -319,7 +423,7 @@ int main(void)
     CHECK(bt_link_connect(ADDR) == BT_E_NOT_UP);
     CHECK(bt_link_state() == BT_LINK_NONE);
     CHECK(line_is(0, "idle: no link yet"));
-    CHECK(bt_link_line(4, buf, sizeof buf) == -1 && bt_link_line(0, buf, 1) == -1);
+    CHECK(bt_link_line(5, buf, sizeof buf) == -1 && bt_link_line(0, buf, 1) == -1); /* line 4 is the SDP state; services start at 5 */
 
     /* 2. Read Buffer Size was read at start-up */
     fresh();
@@ -677,6 +781,253 @@ int main(void)
         bt_rx_acl(wrong, 8);                      /* length field says 3 but 4 bytes follow */
         bt_rx_acl(wrong, 3);
         CHECK(bt_info()->acl_rx == rx);
+    }
+
+
+    /* ================= channels and SDP ================= */
+    {
+        /* the records of a headset as the device would send them */
+        Buf recs = {{0}, 0}, lists = {{0}, 0};
+        rec_a2dp(&recs);
+        rec_headset(&recs);
+        add_seq(&lists, &recs, 0);
+        unsigned half = lists.n / 2;
+
+        /* 16. the whole story: channel, request, an answer in two pieces (continuation), channel closed */
+        unsigned conn_id = sdp_open_start();
+        CHECK(line_is(4, "sdp: opening a channel to the service directory"));
+        CHECK(bt_sdp_browse() == BT_E_LINK_BUSY);
+        dev_conn_rsp(conn_id, 0);
+        bt_poll();
+        unsigned cfg_id = 0, id, dl;
+        const unsigned char *d;
+        CHECK(last_sig(0x04, &cfg_id, &d, &dl) && dl == 4 && le16(d) == DEV_CID && le16(d + 2) == 0); /* our Configuration Request: no options */
+        unsigned char cq[8] = {0x40, 0, 0, 0, 1, 2, 0xA0, 0x02}; /* the device's: for our end 0x40, MTU option 672 */
+        dev_sig(0x04, 0x50, cq, 8);
+        bt_poll();
+        CHECK(last_sig(0x05, &id, &d, &dl) && id == 0x50 && dl == 6 && le16(d) == DEV_CID && le16(d + 2) == 0 && le16(d + 4) == 0); /* we accept */
+        CHECK(line_is(4, "sdp: opening a channel to the service directory")); /* ours is not acknowledged yet */
+        unsigned char cr[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+        dev_sig(0x05, cfg_id, cr, 6);
+        bt_poll();
+        CHECK(line_is(4, "sdp: asking, 0 bytes so far"));
+        {
+            unsigned char exp[64];
+            unsigned en = bt_sdp_request(exp, sizeof exp, 1, 400, 0, 0);
+            CHECK(last_data(DEV_CID, &d, &dl) && dl == en && memcmp(d, exp, en) == 0); /* the request, transaction 1 */
+        }
+        /* the first piece comes with a bookmark: the device wants us to ask again */
+        static const unsigned char bm[2] = {0xAA, 0xBB};
+        F.clock += 40;
+        dev_sdp_answer(1, lists.b, half, bm, 2);
+        bt_poll();
+        {
+            char want[64];
+            snprintf(want, sizeof want, "sdp: asking, %u bytes so far", half); /* the first piece is kept while the rest is asked for */
+            CHECK(line_is(4, want));
+        }
+        {
+            unsigned char exp[64];
+            unsigned en = bt_sdp_request(exp, sizeof exp, 2, 400, bm, 2);
+            CHECK(last_data(DEV_CID, &d, &dl) && dl == en && memcmp(d, exp, en) == 0); /* transaction 2, with the bookmark */
+        }
+        dev_sdp_answer(2, lists.b + half, lists.n - half, 0, 0);
+        bt_poll();
+        CHECK(line_is(4, "sdp: 2 services"));
+        CHECK(line_is(5, "service: A2DP sink 0x110b; profile A2DP v1.2; psm 0x19; \"Audio Sink\""));
+        CHECK(line_is(6, "service: headset 0x1108, unknown 0x1203; profile headset v1.2; rfcomm channel 1; \"Headset\""));
+        CHECK(bt_link_line(7, buf, sizeof buf) == -1);
+        /* the channel is closed from our side: Disconnection Request with the two ends */
+        CHECK(last_sig(0x06, &id, &d, &dl) && dl == 4 && le16(d) == DEV_CID && le16(d + 2) == 0x40);
+        unsigned disc_id = id;
+        dev_sig(0x07, disc_id, d, 4);
+        bt_poll();
+        /* a second browse starts from nothing */
+        CHECK(bt_sdp_browse() == 0);
+        CHECK(line_is(4, "sdp: opening a channel to the service directory") && bt_link_line(5, buf, sizeof buf) == -1);
+        bt_poll();
+        CHECK(last_sig(0x02, &id, &d, &dl) && le16(d + 2) == 0x40); /* the channel number is free again */
+
+        /* 16b. answers with the wrong identifier belong to another request: they are ignored */
+        conn_id = sdp_open_start();
+        dev_conn_rsp((conn_id + 1) & 0xFF, 0);
+        bt_poll();
+        CHECK(line_is(4, "sdp: opening a channel to the service directory"));
+        collect();
+        {
+            int configs = 0;
+            for (int i = 0; i < NPDU; i++)
+                configs += sig_of(i, &id, &d, &dl) == 0x04;
+            CHECK(configs == 0); /* no Configuration Request: the channel was not accepted */
+        }
+        dev_conn_rsp(conn_id, 0); /* the right one */
+        bt_poll();
+        CHECK(last_sig(0x04, &cfg_id, &d, &dl));
+        {
+            unsigned char cq3[8] = {0x40, 0, 0, 0, 1, 2, 0xA0, 0x02};
+            dev_sig(0x04, 0x50, cq3, 8);
+            unsigned char cr3[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+            dev_sig(0x05, (cfg_id + 1) & 0xFF, cr3, 6); /* acknowledges some other Configuration Request */
+            bt_poll();
+            CHECK(line_is(4, "sdp: opening a channel to the service directory"));
+            dev_sig(0x05, cfg_id, cr3, 6);
+            bt_poll();
+            CHECK(line_is(4, "sdp: asking, 0 bytes so far"));
+        }
+
+        /* 17. a channel that is refused: PSM not supported, security block, no resources */
+        static const struct { unsigned result; const char *line; } REFUSALS[] = {
+            {2, "sdp: failed: channel refused (PSM not supported)"},
+            {3, "sdp: failed: channel refused (security block)"},
+            {4, "sdp: failed: channel refused (no resources)"},
+            {9, "sdp: failed: channel refused (code 9)"}};
+        for (unsigned i = 0; i < 4; i++)
+        {
+            conn_id = sdp_open_start();
+            dev_conn_rsp(conn_id, REFUSALS[i].result);
+            bt_poll();
+            CHECK(line_is(4, REFUSALS[i].line));
+        }
+        /* pending first, then yes */
+        conn_id = sdp_open_start();
+        dev_conn_rsp(conn_id, 1);
+        bt_poll();
+        CHECK(line_is(4, "sdp: opening a channel to the service directory"));
+        F.clock += 4000; /* the time limit starts again with every "pending" */
+        dev_conn_rsp(conn_id, 1);
+        F.clock += 4000;
+        bt_poll();
+        CHECK(line_is(4, "sdp: opening a channel to the service directory"));
+        cfg_id = sdp_open_finish(conn_id);
+        (void)cfg_id;
+        CHECK(line_is(4, "sdp: asking, 0 bytes so far"));
+        /* the device refuses our configuration */
+        conn_id = sdp_open_start();
+        dev_conn_rsp(conn_id, 0);
+        bt_poll();
+        CHECK(last_sig(0x04, &cfg_id, &d, &dl));
+        unsigned char bad[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 2, 0};
+        dev_sig(0x05, cfg_id, bad, 6);
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: channel refused (configuration refused, result 2)"));
+        /* a Command Reject for our request */
+        conn_id = sdp_open_start();
+        unsigned char rej[2] = {0, 0};
+        dev_sig(0x01, conn_id, rej, 2);
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: channel refused (rejected)"));
+        /* nobody answers the Connection Request */
+        conn_id = sdp_open_start();
+        F.clock += 5500;
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: no channel"));
+
+        /* 18. the channel is open but the answer does not come, or is wrong */
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        F.clock += 5500;
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: no answer"));
+        CHECK(last_sig(0x06, &id, &d, &dl)); /* the channel is closed all the same */
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        {
+            unsigned char err[7] = {0x01, 0, 1, 0, 2, 0, 3}; /* error response, transaction 1, error code 3 */
+            dev_pdu(0x40, err, 7);
+            bt_poll();
+            CHECK(line_is(4, "sdp: failed: the device refused (code 3)"));
+        }
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        dev_sdp_answer(99, lists.b, lists.n, 0, 0); /* an answer to a question we did not ask */
+        bt_poll();
+        CHECK(line_is(4, "sdp: asking, 0 bytes so far"));
+        {
+            unsigned char odd[5] = {0x03, 0, 1, 0, 0}; /* some other PDU */
+            dev_pdu(0x40, odd, 5);
+            bt_poll();
+            CHECK(line_is(4, "sdp: failed: unexpected answer (code 3)"));
+        }
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        {
+            unsigned char junk[3] = {0x09, 0x00, 0x01}; /* complete, but not a list of records */
+            dev_sdp_answer(1, junk, 3, 0, 0);
+            bt_poll();
+            CHECK(line_is(4, "sdp: failed: answer not understood"));
+        }
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        {
+            /* piece after piece with bookmarks until it is too much */
+            unsigned char piece[400];
+            memset(piece, 0x35, sizeof piece);
+            unsigned tid = 1;
+            for (int i = 0; i < 6; i++)
+            {
+                dev_sdp_answer(tid++, piece, 400, bm, 2);
+                bt_poll();
+            }
+            CHECK(line_is(4, "sdp: asking, 2400 bytes so far"));
+            dev_sdp_answer(tid++, piece, 400, bm, 2);
+            bt_poll();
+            CHECK(line_is(4, "sdp: failed: answer too long"));
+        }
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        {
+            unsigned char b[40];
+            memset(b, 0, sizeof b);
+            b[0] = 0x07; b[1] = 0; b[2] = 1; b[3] = 0; b[4] = 6; b[5] = 0; b[6] = 40; /* says 40 bytes of data in 6 bytes of parameters */
+            dev_pdu(0x40, b, 11);
+            bt_poll();
+            CHECK(line_is(4, "sdp: failed: answer too short"));
+        }
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        {
+            unsigned char b[40];
+            memset(b, 0, sizeof b);
+            b[0] = 0x07; b[1] = 0; b[2] = 1; b[3] = 0; b[4] = 22; b[5] = 0; b[6] = 0; b[7] = 20; /* a bookmark of 20 bytes: more than the 16 allowed */
+            dev_pdu(0x40, b, 5 + 22);
+            bt_poll();
+            CHECK(line_is(4, "sdp: failed: bad continuation"));
+        }
+
+        /* 19. the link ends while we ask */
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        ev_disc_complete(HANDLE, 0x13);
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: link ended"));
+        CHECK(bt_sdp_browse() == BT_E_NOT_UP); /* no link */
+
+        /* 20. the device closes the channel itself, and things about channels that do not exist */
+        conn_id = sdp_open_start();
+        sdp_open_finish(conn_id);
+        {
+            unsigned char dr[4] = {0x40, 0, DEV_CID & 0xFF, DEV_CID >> 8}; /* Disconnection Request: our end, its end */
+            dev_sig(0x06, 0x61, dr, 4);
+            bt_poll();
+            CHECK(last_sig(0x07, &id, &d, &dl) && id == 0x61 && dl == 4); /* answered with a Disconnection Response */
+            unsigned char data[5] = {0x07, 0, 1, 0, 0};
+            dev_pdu(0x40, data, 5); /* data for the channel that is gone: nothing happens */
+            dev_pdu(0x55, data, 5); /* data for a channel number nobody has */
+            bt_poll();
+        }
+        up();
+        {
+            unsigned char cq2[4] = {0x40, 0, 0, 0}; /* Configuration Request for a channel we never opened: Command Reject as before */
+            dev_sig(0x04, 0x62, cq2, 4);
+            bt_poll();
+            CHECK(last_sig(0x01, &id, &d, &dl) && id == 0x62);
+            unsigned char r5[6] = {0x77, 0, 0, 0, 0, 0}; /* answers for requests we never made: ignored */
+            dev_sig(0x03, 0x63, r5, 6);
+            dev_sig(0x05, 0x64, r5, 6);
+            dev_sig(0x07, 0x65, r5, 4);
+            bt_poll();
+            CHECK(bt_link_state() == BT_LINK_UP);
+        }
     }
 
     printf("bt_link: %d checks, %d failed\n", checks, failures);

@@ -1,7 +1,8 @@
 /* HarisOS user program: btlink AA:BB:CC:DD:EE:FF
  * Connects to a Bluetooth device (a headset, a phone ...: it must be switched on, in range and ready to be connected, which is often the same
- * "pairing" mode that btscan needs), tests that data flows both ways on the L2CAP signalling channel, prints what the device told, and ends
- * the link again. Take the address from btscan. Nothing is paired or remembered. */
+ * "pairing" mode that btscan needs), tests that data flows both ways on the L2CAP signalling channel, asks it for its list of services (SDP:
+ * does it play stereo music (A2DP), is it only for calls ...), prints what the device told, and ends the link again. Take the address from
+ * btscan. Nothing is paired or remembered. */
 #include "libc.h"
 
 #define WAIT_MS 40000
@@ -108,6 +109,28 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
             fdprintf(2, "btlink: gave up waiting\n");
             break;
         }
+    }
+    if (ok) /* the link is up: the list of services. It runs in the kernel; line 4 tells when it is over. */
+    {
+        long long sr = syscall3(SYS_BTLINK, SYS_BTLINK_SDP, 0, 0);
+        if (sr == 0)
+        {
+            fdprintf(1, "asking for the services ...\n");
+            long long t0 = sys_clock();
+            for (;;)
+            {
+                sys_sleep(250);
+                if (sys_btlink(4, line, sizeof line) < 0 || starts(line, "sdp: failed") || (line[5] >= '0' && line[5] <= '9'))
+                    break; /* "sdp: N services" or a failure */
+                if (sys_clock() - t0 > 20000)
+                {
+                    fdprintf(2, "btlink: gave up waiting for the services\n");
+                    break;
+                }
+            }
+        }
+        else
+            fdprintf(2, "btlink: could not ask for the services (%d)\n", (int)sr);
     }
     show();
     syscall3(SYS_BTLINK, SYS_BTLINK_DISCONNECT, 0, 0);

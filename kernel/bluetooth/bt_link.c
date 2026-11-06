@@ -31,7 +31,9 @@
 #define SIG_CONNECTION_REQ 0x02
 #define SIG_CONNECTION_RSP 0x03
 #define SIG_CONFIG_REQ 0x04
+#define SIG_CONFIG_RSP 0x05
 #define SIG_DISCONNECTION_REQ 0x06
+#define SIG_DISCONNECTION_RSP 0x07
 #define SIG_ECHO_REQ 0x08
 #define SIG_ECHO_RSP 0x09
 #define SIG_INFO_REQ 0x0A
@@ -41,8 +43,8 @@
 #define INFO_FIXED_CHANNELS 0x0003
 
 #define TXQ_N 10 /* the ACL queue of the core holds 8 packets, each can ask for one answer */
-#define PDU_MAX 48
-#define RX_MAX 320
+#define PDU_MAX 64
+#define RX_MAX 700 /* the default L2CAP MTU is 672 bytes, plus the 4 byte header */
 
 typedef struct
 {
@@ -87,6 +89,12 @@ static struct
     unsigned acl_rx, acl_other;
 } L;
 
+static int chan_sig(unsigned code, unsigned id, const unsigned char *d, unsigned n);
+static void chan_data(unsigned cid, const unsigned char *d, unsigned n);
+static void chan_reset(void);
+static void chan_link_down(void);
+static void sdp_step(unsigned long long now);
+
 static unsigned le16(const unsigned char *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
 static unsigned le32(const unsigned char *p) { return le16(p) | (le16(p + 2) << 16); }
 static void put16(unsigned char *p, unsigned v)
@@ -102,6 +110,7 @@ void bt_link_reset(void)
         z[i] = 0;
     L.last_reason = -1;
     L.auth_status = -1;
+    chan_reset();
 }
 
 BtLinkState bt_link_state(void) { return L.state; }
@@ -124,6 +133,19 @@ static void sig_queue(unsigned code, unsigned id, const unsigned char *data, uns
     p->len = (unsigned char)(8 + n);
 }
 
+/* The same for data on a channel (not the signalling channel): PDU = length (2), channel id of the device's end (2), data. */
+static void data_queue(unsigned cid, const unsigned char *data, unsigned n)
+{
+    if (L.txh - L.txt >= TXQ_N || n > PDU_MAX - 4)
+        return;
+    Pdu *p = &L.txq[L.txh++ % TXQ_N];
+    put16(p->data, n);
+    put16(p->data + 2, cid);
+    for (unsigned i = 0; i < n; i++)
+        p->data[4 + i] = data[i];
+    p->len = (unsigned char)(4 + n);
+}
+
 static unsigned next_id(void)
 {
     if (++L.sig_id == 0) /* 0 is not a valid identifier */
@@ -137,6 +159,8 @@ static void sig_command(unsigned code, unsigned id, const unsigned char *d, unsi
 {
     unsigned char r[16];
     L.peer_cmds++;
+    if (chan_sig(code, id, d, n)) /* about a channel we opened */
+        return;
     switch (code)
     {
     case SIG_COMMAND_REJECT:
@@ -252,6 +276,400 @@ static void sig_pdu(const unsigned char *p, unsigned n)
     }
 }
 
+/* ---- L2CAP channels and the SDP client ----
+ * A channel is opened with a Connection Request (which service, by PSM, and our end's channel id); the device answers with its own end's id.
+ * Then each side sends a Configuration Request (options, here none: the defaults, 672 byte MTU) and answers the other's. When both are done the
+ * channel is open and data goes in PDUs addressed to the other end's id. Closed with a Disconnection Request. Core specification volume 3 part A. */
+#define CHAN_N 3
+#define CHAN_BASE_CID 0x0040
+#define SDP_PSM 1
+#define SDP_ACC_MAX 2560
+#define SDP_MAX_BYTES 400 /* the most attribute data the device may put in one answer */
+#define CHAN_LIMIT_MS 5000
+#define SDP_LIMIT_MS 5000
+
+enum { CH_FREE, CH_CONNECTING, CH_CONFIG, CH_OPEN, CH_CLOSING };
+
+typedef struct
+{
+    int state;
+    unsigned psm, scid, dcid, mtu; /* scid: our end, dcid: the device's end; mtu: the most we may send in one PDU */
+    unsigned char conn_id, cfg_id, disc_id;
+    int cfg_acked, cfg_peer;       /* our Configuration Request was accepted / we accepted the device's */
+    unsigned long long t0;
+    int result;                    /* why a Connection Response refused (kept after the channel is gone) */
+} Chan;
+
+static Chan CH[CHAN_N];
+
+enum { SDP_IDLE, SDP_OPENING, SDP_ASKING, SDP_DONE, SDP_FAILED };
+
+static const char WHY_CHANNEL[] = "channel refused"; /* the only failure whose code is an L2CAP result */
+
+static struct
+{
+    int state;
+    const char *why;
+    int code;
+    int chan;
+    unsigned tid;
+    int send, want_close;
+    unsigned long long t0;
+    unsigned char acc[SDP_ACC_MAX]; /* the attribute lists, piece by piece (the device may answer in several) */
+    unsigned acc_len;
+    unsigned char cont[16];         /* continuation state: the device's bookmark for "send the rest" */
+    unsigned contlen;
+    BtSdpService svc[BT_SDP_MAX];
+    int nsvc;
+} SD;
+
+static void chan_reset(void)
+{
+    for (int i = 0; i < CHAN_N; i++)
+    {
+        CH[i].state = CH_FREE;
+        CH[i].result = 0;
+    }
+    SD.state = SDP_IDLE;
+    SD.why = 0;
+    SD.code = 0;
+    SD.nsvc = 0;
+    SD.acc_len = 0;
+    SD.send = SD.want_close = 0;
+}
+
+static void sdp_fail(const char *why, int code)
+{
+    SD.state = SDP_FAILED;
+    SD.why = why;
+    SD.code = code;
+    SD.want_close = 1;
+}
+
+/* the link is gone: every channel with it */
+static void chan_link_down(void)
+{
+    if (SD.state == SDP_OPENING || SD.state == SDP_ASKING)
+    {
+        SD.state = SDP_FAILED;
+        SD.why = "link ended";
+        SD.code = 0;
+    }
+    for (int i = 0; i < CHAN_N; i++)
+        CH[i].state = CH_FREE;
+    SD.want_close = 0;
+}
+
+static int chan_open(unsigned psm)
+{
+    for (int i = 0; i < CHAN_N; i++)
+    {
+        Chan *c = &CH[i];
+        if (c->state != CH_FREE)
+            continue;
+        c->state = CH_CONNECTING;
+        c->psm = psm;
+        c->scid = CHAN_BASE_CID + (unsigned)i;
+        c->dcid = 0;
+        c->mtu = 672;
+        c->cfg_acked = c->cfg_peer = 0;
+        c->result = 0;
+        c->t0 = bt_now();
+        c->conn_id = (unsigned char)next_id();
+        unsigned char d[4];
+        put16(d, psm);
+        put16(d + 2, c->scid);
+        sig_queue(SIG_CONNECTION_REQ, c->conn_id, d, 4);
+        return i;
+    }
+    return -1;
+}
+
+static void chan_close(int i)
+{
+    Chan *c = &CH[i];
+    if (c->state == CH_OPEN || c->state == CH_CONFIG)
+    {
+        unsigned char d[4];
+        put16(d, c->dcid);
+        put16(d + 2, c->scid);
+        c->disc_id = (unsigned char)next_id();
+        sig_queue(SIG_DISCONNECTION_REQ, c->disc_id, d, 4);
+        c->state = CH_CLOSING;
+        c->t0 = bt_now();
+    }
+    else
+        c->state = CH_FREE;
+}
+
+static Chan *chan_by_scid(unsigned scid)
+{
+    for (int i = 0; i < CHAN_N; i++)
+        if (CH[i].state != CH_FREE && CH[i].scid == scid)
+            return &CH[i];
+    return 0;
+}
+
+static void chan_check_open(Chan *c)
+{
+    if (c->state == CH_CONFIG && c->cfg_acked && c->cfg_peer)
+        c->state = CH_OPEN;
+}
+
+/* Signalling commands that concern a channel. Returns 1 if the command was taken care of here. */
+static int chan_sig(unsigned code, unsigned id, const unsigned char *d, unsigned n)
+{
+    unsigned char r[8];
+    switch (code)
+    {
+    case SIG_CONNECTION_RSP: /* dcid (2), scid (2), result (2), status (2) */
+    {
+        if (n < 8)
+            return 1;
+        Chan *c = chan_by_scid(le16(d + 2));
+        if (!c || c->state != CH_CONNECTING || c->conn_id != id)
+            return 1;
+        unsigned result = le16(d + 4);
+        if (result == 0)
+        {
+            c->dcid = le16(d);
+            c->state = CH_CONFIG;
+            c->cfg_id = (unsigned char)next_id();
+            put16(r, c->dcid);
+            put16(r + 2, 0); /* no continuation, no options */
+            sig_queue(SIG_CONFIG_REQ, c->cfg_id, r, 4);
+            c->t0 = bt_now();
+        }
+        else if (result == 1) /* pending (the device is still deciding) */
+            c->t0 = bt_now();
+        else
+        {
+            c->result = (int)result;
+            c->state = CH_FREE;
+        }
+        return 1;
+    }
+    case SIG_CONFIG_RSP: /* scid (2: the device's end), flags (2), result (2), options */
+    {
+        if (n < 6)
+            return 1;
+        for (int i = 0; i < CHAN_N; i++)
+        {
+            Chan *c = &CH[i];
+            if (c->state == CH_CONFIG && c->dcid == le16(d) && c->cfg_id == id)
+            {
+                if (le16(d + 4) == 0)
+                {
+                    c->cfg_acked = 1;
+                    chan_check_open(c);
+                }
+                else
+                {
+                    c->result = 0x100 + (int)le16(d + 4); /* configuration refused */
+                    c->state = CH_FREE;
+                }
+            }
+        }
+        return 1;
+    }
+    case SIG_CONFIG_REQ: /* dcid (2: our end), flags (2), options */
+    {
+        if (n < 4)
+            return 0;
+        Chan *c = chan_by_scid(le16(d));
+        if (!c || (c->state != CH_CONFIG && c->state != CH_OPEN))
+            return 0; /* not ours: the generic answer (Command Reject) follows */
+        for (unsigned o = 4; o + 2 <= n;) /* options: type (1), length (1), value; type 1 is the MTU the device accepts */
+        {
+            unsigned len = d[o + 1];
+            if (o + 2 + len > n)
+                break;
+            if ((d[o] & 0x7F) == 1 && len == 2)
+                c->mtu = le16(d + o + 2);
+            o += 2 + len;
+        }
+        put16(r, c->dcid);
+        put16(r + 2, 0); /* flags */
+        put16(r + 4, 0); /* result: success */
+        sig_queue(SIG_CONFIG_RSP, id, r, 6);
+        c->cfg_peer = 1;
+        chan_check_open(c);
+        return 1;
+    }
+    case SIG_DISCONNECTION_REQ: /* dcid (2: our end), scid (2: the device's end) */
+    {
+        if (n < 4)
+            return 0;
+        Chan *c = chan_by_scid(le16(d));
+        if (!c)
+            return 0;
+        sig_queue(SIG_DISCONNECTION_RSP, id, d, 4);
+        c->state = CH_FREE;
+        return 1;
+    }
+    case SIG_DISCONNECTION_RSP:
+        for (int i = 0; i < CHAN_N; i++)
+            if (CH[i].state == CH_CLOSING && CH[i].disc_id == id)
+                CH[i].state = CH_FREE;
+        return 1;
+    case SIG_COMMAND_REJECT: /* a request of ours was refused: let the channel go (the echo / information logic sees it too) */
+        for (int i = 0; i < CHAN_N; i++)
+        {
+            Chan *c = &CH[i];
+            if ((c->state == CH_CONNECTING && c->conn_id == id) || (c->state == CH_CONFIG && c->cfg_id == id))
+            {
+                c->result = 0x200;
+                c->state = CH_FREE;
+            }
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* ---- the SDP client ---- */
+
+/* An SDP PDU from the device: PDU id (1), transaction id (2), parameter length (2), parameters. */
+static void sdp_rx(const unsigned char *d, unsigned n)
+{
+    if (SD.state != SDP_ASKING || n < 5)
+        return;
+    unsigned pdu = d[0], tid = ((unsigned)d[1] << 8) | d[2], plen = ((unsigned)d[3] << 8) | d[4];
+    if (5 + plen > n || (tid & 0xFFFF) != (SD.tid & 0xFFFF))
+        return;
+    const unsigned char *p = d + 5;
+    if (pdu == 0x01) /* error response: error code (2) */
+    {
+        sdp_fail("the device refused", plen >= 2 ? (int)(((unsigned)p[0] << 8) | p[1]) : 0);
+        return;
+    }
+    if (pdu != 0x07 || plen < 3)
+    {
+        sdp_fail("unexpected answer", (int)pdu);
+        return;
+    }
+    /* ServiceSearchAttributeResponse: byte count of this piece (2), the piece, continuation state (1 + bytes) */
+    unsigned cnt = ((unsigned)p[0] << 8) | p[1];
+    if (2 + cnt + 1 > plen)
+    {
+        sdp_fail("answer too short", 0);
+        return;
+    }
+    unsigned cl = p[2 + cnt];
+    if (cl > sizeof SD.cont || 2 + cnt + 1 + cl > plen)
+    {
+        sdp_fail("bad continuation", 0);
+        return;
+    }
+    if (SD.acc_len + cnt > SDP_ACC_MAX)
+    {
+        sdp_fail("answer too long", 0);
+        return;
+    }
+    for (unsigned i = 0; i < cnt; i++)
+        SD.acc[SD.acc_len++] = p[2 + i];
+    if (cl)
+    {
+        for (unsigned i = 0; i < cl; i++)
+            SD.cont[i] = p[2 + cnt + 1 + i];
+        SD.contlen = cl;
+        SD.send = 1; /* the rest: another request with the bookmark (sent from sdp_step) */
+        return;
+    }
+    int k = bt_sdp_parse(SD.acc, SD.acc_len, SD.svc, BT_SDP_MAX);
+    if (k < 0)
+    {
+        sdp_fail("answer not understood", 0);
+        return;
+    }
+    SD.nsvc = k;
+    SD.state = SDP_DONE;
+    SD.want_close = 1;
+}
+
+static void chan_data(unsigned cid, const unsigned char *d, unsigned n)
+{
+    Chan *c = chan_by_scid(cid);
+    if (!c || c->state != CH_OPEN)
+        return;
+    if (SD.state == SDP_ASKING && c == &CH[SD.chan])
+        sdp_rx(d, n);
+}
+
+int bt_sdp_browse(void)
+{
+    if (L.state != BT_LINK_UP)
+        return BT_E_NOT_UP;
+    if (SD.state == SDP_OPENING || SD.state == SDP_ASKING)
+        return BT_E_LINK_BUSY;
+    SD.nsvc = 0;
+    SD.acc_len = 0;
+    SD.contlen = 0;
+    SD.send = SD.want_close = 0;
+    SD.why = 0;
+    SD.code = 0;
+    SD.tid = 0; /* a new channel, a new numbering of the transactions */
+    SD.chan = chan_open(SDP_PSM);
+    if (SD.chan < 0)
+        return BT_E_LINK_BUSY;
+    SD.state = SDP_OPENING;
+    return 0;
+}
+
+static void sdp_step(unsigned long long now)
+{
+    /* channels that take too long to close are just forgotten */
+    for (int i = 0; i < CHAN_N; i++)
+        if (CH[i].state == CH_CLOSING && now && now - CH[i].t0 > CHAN_LIMIT_MS)
+            CH[i].state = CH_FREE;
+
+    if (SD.state == SDP_OPENING)
+    {
+        Chan *c = &CH[SD.chan];
+        if (c->state == CH_OPEN)
+        {
+            SD.state = SDP_ASKING;
+            SD.acc_len = 0;
+            SD.contlen = 0;
+            SD.send = 1;
+        }
+        else if (c->state == CH_FREE)
+        {
+            SD.state = SDP_FAILED;
+            SD.why = WHY_CHANNEL;
+            SD.code = c->result;
+        }
+        else if (now && now - c->t0 > CHAN_LIMIT_MS)
+        {
+            c->state = CH_FREE;
+            SD.state = SDP_FAILED;
+            SD.why = "no channel";
+            SD.code = 0;
+        }
+    }
+    if (SD.state == SDP_ASKING)
+    {
+        if (SD.send)
+        {
+            unsigned char req[PDU_MAX];
+            SD.send = 0;
+            SD.tid++;
+            unsigned n = bt_sdp_request(req, sizeof req, SD.tid, SDP_MAX_BYTES, SD.cont, SD.contlen);
+            data_queue(CH[SD.chan].dcid, req, n);
+            SD.t0 = now;
+        }
+        else if (now && now - SD.t0 > SDP_LIMIT_MS)
+            sdp_fail("no answer", 0);
+    }
+    if (SD.want_close)
+    {
+        SD.want_close = 0;
+        if (SD.chan >= 0 && SD.chan < CHAN_N)
+            chan_close(SD.chan);
+    }
+}
+
 /* ---- ACL data from the device ---- */
 
 void bt_link_acl(const unsigned char *pkt, unsigned len)
@@ -299,7 +717,8 @@ void bt_link_acl(const unsigned char *pkt, unsigned len)
         L.rx_need = 0;
         if (cid == 1)
             sig_pdu(L.rx + 4, L.rx_have - 4);
-        /* other channels: none open yet */
+        else
+            chan_data(cid, L.rx + 4, L.rx_have - 4);
         L.rx_have = 0;
     }
 }
@@ -346,6 +765,7 @@ void bt_link_event(const unsigned char *e, unsigned len)
             L.last_reason = p[3];
             L.state = BT_LINK_NONE;
             bt_acl_reset_credits();
+            chan_link_down();
         }
         break;
     case EV_AUTH_COMPLETE:
@@ -513,6 +933,8 @@ void bt_link_step(void)
         L.fix_state = 1;
     }
 
+    sdp_step(now);
+
     /* send what is queued; copy the entry first, sending may handle events that queue more */
     while (L.txt != L.txh && L.state == BT_LINK_UP)
     {
@@ -590,6 +1012,117 @@ static void put_addr(Out *o)
         if (k)
             putc_(o, ':');
     }
+}
+
+static void put_version(Out *o, unsigned v)
+{
+    puts_(o, "v");
+    putd(o, (int)(v >> 8));
+    putc_(o, '.');
+    putd(o, (int)(v & 0xFF));
+}
+
+/* Line 4 and up: the SDP result. */
+static int sdp_line(unsigned index, Out *o)
+{
+    if (index == 4)
+    {
+        switch (SD.state)
+        {
+        case SDP_IDLE:
+            puts_(o, "sdp: -");
+            break;
+        case SDP_OPENING:
+            puts_(o, "sdp: opening a channel to the service directory");
+            break;
+        case SDP_ASKING:
+            puts_(o, "sdp: asking, ");
+            putd(o, (int)SD.acc_len);
+            puts_(o, " bytes so far");
+            break;
+        case SDP_DONE:
+            puts_(o, "sdp: ");
+            putd(o, SD.nsvc);
+            puts_(o, SD.nsvc == 1 ? " service" : " services");
+            break;
+        default:
+            puts_(o, "sdp: failed: ");
+            puts_(o, SD.why ? SD.why : "?");
+            if (SD.code)
+            {
+                puts_(o, " (");
+                if (SD.why == WHY_CHANNEL && SD.code == 2)
+                    puts_(o, "PSM not supported");
+                else if (SD.why == WHY_CHANNEL && SD.code == 3)
+                    puts_(o, "security block");
+                else if (SD.why == WHY_CHANNEL && SD.code == 4)
+                    puts_(o, "no resources");
+                else if (SD.why == WHY_CHANNEL && SD.code >= 0x100)
+                {
+                    puts_(o, SD.code >= 0x200 ? "rejected" : "configuration refused, result ");
+                    if (SD.code < 0x200)
+                        putd(o, SD.code - 0x100);
+                }
+                else
+                {
+                    puts_(o, "code ");
+                    putd(o, SD.code);
+                }
+                puts_(o, ")");
+            }
+        }
+        return 1;
+    }
+    if (index >= 5 && SD.state == SDP_DONE && index - 5 < (unsigned)SD.nsvc)
+    {
+        const BtSdpService *s = &SD.svc[index - 5];
+        const char *w = bt_sdp_uuid_name(s->class_id[0]);
+        puts_(o, "service: ");
+        if (!s->class_id[0])
+            puts_(o, "(no class)");
+        else
+        {
+            puts_(o, *w ? w : "unknown");
+            puts_(o, " 0x");
+            putx(o, s->class_id[0], 4);
+        }
+        if (s->class_id[1])
+        {
+            puts_(o, ", ");
+            w = bt_sdp_uuid_name(s->class_id[1]);
+            puts_(o, *w ? w : "unknown");
+            puts_(o, " 0x");
+            putx(o, s->class_id[1], 4);
+        }
+        if (s->profile)
+        {
+            puts_(o, "; profile ");
+            w = bt_sdp_uuid_name(s->profile);
+            puts_(o, *w ? w : "0x");
+            if (!*w)
+                putx(o, s->profile, 4);
+            puts_(o, " ");
+            put_version(o, s->profile_ver);
+        }
+        if (s->has_psm)
+        {
+            puts_(o, "; psm 0x");
+            putx(o, s->psm, 2);
+        }
+        if (s->has_rfcomm)
+        {
+            puts_(o, "; rfcomm channel ");
+            putd(o, (int)s->rfcomm);
+        }
+        if (s->name[0])
+        {
+            puts_(o, "; \"");
+            puts_(o, s->name);
+            puts_(o, "\"");
+        }
+        return 1;
+    }
+    return 0;
 }
 
 /* HCI status / reason codes people meet (Core specification volume 1 part F) */
@@ -735,7 +1268,8 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
         }
         break;
     default:
-        return -1;
+        if (!sdp_line(index, &o))
+            return -1;
     }
     buf[o.n] = 0;
     if (o.cut)

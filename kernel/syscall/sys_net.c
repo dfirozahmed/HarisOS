@@ -114,6 +114,8 @@ long long sys_btlink(const SyscallFrame *f)
     }
     if (f->rdi == SYS_BTLINK_DISCONNECT)
         return bt_link_disconnect();
+    if (f->rdi == SYS_BTLINK_SDP)
+        return bt_sdp_browse();
     if (f->rdi > 0xFFF || f->rdx < 2 || f->rdx > 256 || !aspace_user_ok(as, f->rsi, f->rdx, 1))
         return -1;
     char line[256];

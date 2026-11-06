@@ -182,6 +182,30 @@ int bt_link_line(unsigned index, char *buf, unsigned cap);
 int bt_acl_send(unsigned handle, const unsigned char *pdu, unsigned len);
 void bt_acl_reset_credits(void); /* the link ended: whatever was in the chip's buffers is gone */
 
+/* ---- service discovery (SDP): kernel/bluetooth/bt_sdp.c reads the answers, bt_link.c asks ----
+ * A device lists what it can do in "service records". bt_sdp_browse() opens an L2CAP channel to the device's service directory (PSM 1) over
+ * the link, asks for all records and closes the channel; the result is in the text lines 4 and up of bt_link_line(): line 4 the state
+ * ("sdp: opening", "asking", "N services", "failed: ..."), then one line per service. Needs a link that is up. */
+#define BT_SDP_MAX 16
+
+typedef struct
+{
+    unsigned class_id[2];     /* the 16-bit service class numbers (first two; 0 = none): 0x110B = A2DP sink, 0x1108 = headset ... */
+    unsigned profile;         /* the profile it follows (0 = none given) */
+    unsigned profile_ver;     /* ... and its version, major in the high byte */
+    int has_psm;
+    unsigned psm;             /* the L2CAP channel number to connect to (0x19 = AVDTP, the music channel) */
+    int has_rfcomm;
+    unsigned rfcomm;          /* RFCOMM channel (serial-like services: hands-free, headset) */
+    unsigned avdtp_ver;
+    char name[24];
+} BtSdpService;
+
+unsigned bt_sdp_request(unsigned char *out, unsigned cap, unsigned tid, unsigned max_bytes, const unsigned char *cont, unsigned contlen);
+int bt_sdp_parse(const unsigned char *lists, unsigned len, BtSdpService *out, unsigned max); /* the AttributeLists: services found, or -1 */
+const char *bt_sdp_uuid_name(unsigned uuid); /* "A2DP sink" ... or "" */
+int bt_sdp_browse(void);                     /* 0 = started; BT_E_NOT_UP without a link, BT_E_LINK_BUSY while one runs */
+
 /* ---- between bt_hci.c and bt_scan.c / bt_link.c ---- */
 void bt_link_event(const unsigned char *evt, unsigned len);
 void bt_link_acl(const unsigned char *pkt, unsigned len);

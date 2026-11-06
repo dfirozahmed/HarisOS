@@ -839,6 +839,12 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
     memcpy(buf, LINES[index], n + 1);
     return (int)n;
 }
+static int BT_SDP_RESULT = 0, BT_SDP_CALLS = 0;
+int bt_sdp_browse(void)
+{
+    BT_SDP_CALLS++;
+    return BT_SDP_RESULT;
+}
 static int BT_COEX_LAST = -99;
 void bt_coex(int mode) { BT_COEX_LAST = mode; }
 int bt_scan_start(void)
@@ -2608,7 +2614,7 @@ int main(void)
         CHECK(call(SYS_BTLINK, 2, U(line), sizeof line) == -1);                    /* past the end */
         CHECK(call(SYS_BTLINK, 0, U(line), 10) == -1);                             /* does not fit */
         CHECK(call(SYS_BTLINK, 0, U(line), 1) == -1 && call(SYS_BTLINK, 0, U(line), 257) == -1);
-        CHECK(call(SYS_BTLINK, 0x1002, U(line), sizeof line) == -1);               /* not a line, not a command */
+        CHECK(call(SYS_BTLINK, 0x1003, U(line), sizeof line) == -1);               /* not a line, not a command */
         USER_OK = 0;
         CHECK(call(SYS_BTLINK, 0, U(line), sizeof line) == -1);                    /* bad pointer */
         USER_OK = 1;
@@ -2620,6 +2626,10 @@ int main(void)
         CHECK(call(SYS_BTLINK, SYS_BTLINK_CONNECT, 0x010203040506ULL, 0) == -102); /* the reason is passed on */
         BT_LINK_RESULT = 0;
         CHECK(call(SYS_BTLINK, SYS_BTLINK_DISCONNECT, 0, 0) == 0 && BT_DISC_CALLS == 1);
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_SDP, 0, 0) == 0 && BT_SDP_CALLS == 1);  /* list the services */
+        BT_SDP_RESULT = -100;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_SDP, 0, 0) == -100);                    /* the reason is passed on */
+        BT_SDP_RESULT = 0;
     }
 
     /* ================= sockets: the server calls ================= */
