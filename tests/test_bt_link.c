@@ -441,6 +441,93 @@ static unsigned sdp_open_finish(unsigned conn_id)
     return cfg_id;
 }
 
+
+/* ---- A2DP / AVDTP ---- */
+#define SIG_CID_DEV 0x0077   /* the device's end of the signalling channel; ours is 0x40 (the first slot) */
+#define MEDIA_CID_DEV 0x0078 /* ... of the media channel; ours is 0x41 */
+
+/* an AVDTP message from the device to our end `ours` of a channel */
+static void dev_av(unsigned ours, unsigned label, unsigned mtype, unsigned sig, const unsigned char *par, unsigned n)
+{
+    unsigned char b[40];
+    b[0] = (unsigned char)((label << 4) | mtype);
+    b[1] = (unsigned char)sig;
+    if (n)
+        memcpy(b + 2, par, n);
+    dev_pdu(ours, b, 2 + n);
+}
+
+/* the last AVDTP message of the host to the device's end `dcid`: 1 and its parts if it was a command */
+static int last_av(unsigned dcid, unsigned *label, unsigned *sig, const unsigned char **par, unsigned *pn)
+{
+    const unsigned char *d;
+    unsigned dl;
+    if (!last_data(dcid, &d, &dl) || dl < 2)
+        return 0;
+    *label = d[0] >> 4;
+    *sig = d[1] & 0x3F;
+    *par = d + 2;
+    *pn = dl - 2;
+    return (d[0] & 3) == 0;
+}
+
+/* a channel to the device: its Connection Response, its Configuration Request (for our end), its answer to ours */
+static void chan_handshake(unsigned our_cid, unsigned dev_cid)
+{
+    unsigned id = 0, dl = 0;
+    const unsigned char *d = 0;
+    CHECK(last_sig(0x02, &id, &d, &dl) && dl == 4 && le16(d) == 0x19 && le16(d + 2) == our_cid); /* Connection Request for AVDTP (PSM 0x19) */
+    unsigned char r[8] = {(unsigned char)dev_cid, (unsigned char)(dev_cid >> 8), (unsigned char)our_cid, (unsigned char)(our_cid >> 8), 0, 0, 0, 0};
+    dev_sig(0x03, id, r, 8);
+    bt_poll();
+    unsigned cfg_id = 0;
+    CHECK(last_sig(0x04, &cfg_id, &d, &dl) && le16(d) == dev_cid);
+    unsigned char cq[8] = {(unsigned char)our_cid, (unsigned char)(our_cid >> 8), 0, 0, 1, 2, 0xA0, 0x02};
+    dev_sig(0x04, 0x50 + (our_cid & 0x0F), cq, 8);
+    bt_poll();
+    unsigned char cr[6] = {(unsigned char)our_cid, (unsigned char)(our_cid >> 8), 0, 0, 0, 0};
+    dev_sig(0x05, cfg_id, cr, 6);
+    bt_poll();
+}
+
+/* a link, the A2DP sequence started, the signalling channel open: the host has sent Discover */
+static void av_open_sig(void)
+{
+    up();
+    CHECK(bt_avdtp_start() == 0);
+    CHECK(line_is(0xA0, "a2dp: opening the signalling channel"));
+    bt_poll();
+    chan_handshake(0x40, SIG_CID_DEV);
+}
+
+/* the device's usual answers */
+static const unsigned char SEPS[] = {0x04, 0x00, 0x0A, 0x08, 0x0C, 0x08}; /* 1: source, free. 2: sink, in use. 3: sink, free */
+static const unsigned char HCAPS[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x3F, 0xFF, 0x02, 0x35, 0x08, 0x00};
+
+/* answer the last command of the host with Accept and these parameters */
+static void av_accept(unsigned dcid, unsigned sig_expected, const unsigned char *par, unsigned n)
+{
+    unsigned label = 0, sig = 0, pn = 0;
+    const unsigned char *p = 0;
+    CHECK(last_av(dcid, &label, &sig, &p, &pn) && sig == sig_expected);
+    dev_av(0x40, label, 2, sig, par, n);
+    bt_poll();
+}
+
+/* the sequence up to a media channel being opened */
+static void av_to_open(void)
+{
+    av_open_sig();
+    unsigned label, sig, pn;
+    const unsigned char *p;
+    CHECK(last_av(SIG_CID_DEV, &label, &sig, &p, &pn) && sig == 0x01 && pn == 0);          /* Discover */
+    CHECK(line_is(0xA0, "a2dp: asking for the stream endpoints"));
+    av_accept(SIG_CID_DEV, 0x01, SEPS, sizeof SEPS);
+    CHECK(line_is(0xA0, "a2dp: reading what the endpoint can do"));
+    CHECK(last_av(SIG_CID_DEV, &label, &sig, &p, &pn) && sig == 0x02 && pn == 1 && p[0] == 0x0C); /* Get Capabilities of endpoint 3 */
+    av_accept(SIG_CID_DEV, 0x02, HCAPS, sizeof HCAPS);
+}
+
 int main(void)
 {
     char buf[256];
@@ -1391,6 +1478,303 @@ int main(void)
             CHECK(sig_of(2, &id3, &d3, &dl3) == 0x0A && le16(d3) == 3); /* the third is the one that waited: not lost, not doubled */
         }
         CHECK(line_is(0x91, "acl tx: sent 3, not taken 1, credits 1 of 2, packet size 20"));
+    }
+
+
+    /* ================= A2DP (AVDTP) ================= */
+    {
+        unsigned label, sig, pn;
+        const unsigned char *p;
+
+        /* 27. the whole sequence: channel, Discover, Get Capabilities, Set Configuration, Open, media channel, Start; then Close */
+        av_to_open();
+        CHECK(line_is(0xA0, "a2dp: setting the codec"));
+        CHECK(last_av(SIG_CID_DEV, &label, &sig, &p, &pn) && sig == 0x03 && pn == 12);
+        {
+            static const unsigned char want[] = {0x0C, 0x04, 0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x11, 0x15, 0x02, 0x33};
+            CHECK(memcmp(p, want, 12) == 0); /* endpoint 3, ours 1, 48 kHz joint stereo, 16 blocks, 8 subbands, loudness, bitpool 2 .. 51 */
+        }
+        CHECK(line_is(0xA1, "a2dp: sink endpoint 3 offers SBC 48/44.1 kHz joint/stereo/dual/mono, bitpool 2-53"));
+        CHECK(line_is(0xA2, "a2dp: configuration -")); /* chosen, but not "configured" until the sink accepts */
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        CHECK(line_is(0xA2, "a2dp: configured 48 kHz joint stereo, 16 blocks, 8 subbands, loudness, bitpool 51"));
+        CHECK(line_is(0xA0, "a2dp: opening the stream"));
+        CHECK(last_av(SIG_CID_DEV, &label, &sig, &p, &pn) && sig == 0x06 && pn == 1 && p[0] == 0x0C); /* Open */
+        av_accept(SIG_CID_DEV, 0x06, 0, 0);
+        CHECK(line_is(0xA0, "a2dp: opening the media channel"));
+        chan_handshake(0x41, MEDIA_CID_DEV); /* the second channel to PSM 0x19 */
+        CHECK(line_is(0xA0, "a2dp: starting the stream"));
+        CHECK(last_av(SIG_CID_DEV, &label, &sig, &p, &pn) && sig == 0x07 && pn == 1 && p[0] == 0x0C); /* Start */
+        CHECK(!bt_avdtp_streaming());
+        av_accept(SIG_CID_DEV, 0x07, 0, 0);
+        CHECK(line_is(0xA0, "a2dp: streaming (the sink accepted Start)"));
+        CHECK(bt_avdtp_streaming());
+        CHECK(bt_avdtp_start() == BT_E_LINK_BUSY);
+        CHECK(bt_link_line(0xA3, buf, sizeof buf) == -1);
+        /* the device may send media control packets on the media channel: nothing to do with them */
+        {
+            unsigned char junk[6] = {1, 2, 3, 4, 5, 6};
+            dev_pdu(0x41, junk, 6);
+            bt_poll();
+            CHECK(bt_avdtp_streaming());
+        }
+        /* close: Close, the device accepts, both channels are disconnected */
+        CHECK(bt_avdtp_stop() == 0);
+        bt_poll();
+        CHECK(line_is(0xA0, "a2dp: closing the stream"));
+        CHECK(last_av(SIG_CID_DEV, &label, &sig, &p, &pn) && sig == 0x08 && pn == 1 && p[0] == 0x0C);
+        av_accept(SIG_CID_DEV, 0x08, 0, 0);
+        CHECK(line_is(0xA0, "a2dp: closed"));
+        {
+            unsigned idd, dld;
+            const unsigned char *dd;
+            CHECK(last_sig(0x06, &idd, &dd, &dld) && dld == 4); /* Disconnection Requests for the channels */
+            collect();
+            int discs = 0;
+            for (int i = 0; i < NPDU; i++)
+                discs += sig_of(i, &idd, &dd, &dld) == 0x06;
+            CHECK(discs == 2);
+        }
+        CHECK(!bt_avdtp_streaming());
+        CHECK(bt_avdtp_start() == 0); /* and it can be done again */
+
+        /* 28. a label belongs to its command: answers with another label or signal are ignored; labels count up */
+        av_open_sig();
+        {
+            unsigned l1 = 0, s1 = 0, n1 = 0;
+            const unsigned char *p1;
+            CHECK(last_av(SIG_CID_DEV, &l1, &s1, &p1, &n1) && s1 == 1);
+            dev_av(0x40, (l1 + 1) & 15, 2, 1, SEPS, sizeof SEPS); /* wrong label */
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: asking for the stream endpoints"));
+            dev_av(0x40, l1, 2, 2, SEPS, sizeof SEPS); /* wrong signal */
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: asking for the stream endpoints"));
+            dev_av(0x40, l1, 2, 1, SEPS, sizeof SEPS);
+            bt_poll();
+            unsigned l2 = 0, s2 = 0, n2 = 0;
+            const unsigned char *p2;
+            CHECK(last_av(SIG_CID_DEV, &l2, &s2, &p2, &n2) && s2 == 2 && l2 == ((l1 + 1) & 15)); /* the next command has the next label */
+        }
+
+        /* 29. the device asks us something: general reject, as for any command we do not understand */
+        {
+            unsigned char par[1] = {0};
+            dev_av(0x40, 5, 0, 1, par, 0); /* a Discover command from the device */
+            bt_poll();
+            const unsigned char *d;
+            unsigned dl;
+            CHECK(last_data(SIG_CID_DEV, &d, &dl) && dl == 2 && d[0] == ((5 << 4) | 1) && d[1] == 0x01); /* label 5, general reject, signal 1 */
+            (void)par;
+        }
+
+        /* 30. things that go wrong, one by one */
+        /* the signalling channel is refused: security block */
+        up();
+        CHECK(bt_avdtp_start() == 0);
+        bt_poll();
+        {
+            unsigned id = 0, dl = 0;
+            const unsigned char *d = 0;
+            CHECK(last_sig(0x02, &id, &d, &dl));
+            dev_conn_rsp(id, 3);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: the signalling channel was refused (0x03)"));
+        }
+        /* Discover is rejected / not answered / answered with nonsense / lists no free sink */
+        av_open_sig();
+        {
+            unsigned l = 0, sg = 0, n = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n));
+            unsigned char err[1] = {0x19};
+            dev_av(0x40, l, 3, 1, err, 1);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: Discover was refused (0x19)"));
+        }
+        av_open_sig();
+        F.clock += 6500;
+        bt_poll();
+        CHECK(line_is(0xA0, "a2dp: failed: Discover got no answer"));
+        av_open_sig();
+        {
+            static const unsigned char odd[3] = {0x04, 0x00, 0x08};
+            av_accept(SIG_CID_DEV, 0x01, odd, 3);
+            CHECK(line_is(0xA0, "a2dp: failed: the Discover answer is damaged"));
+        }
+        av_open_sig();
+        {
+            static const unsigned char none[4] = {0x04, 0x00, 0x0A, 0x08}; /* a source and a sink that is in use */
+            av_accept(SIG_CID_DEV, 0x01, none, 4);
+            CHECK(line_is(0xA0, "a2dp: failed: the device has no free audio sink endpoint"));
+        }
+        av_open_sig();
+        {
+            unsigned l = 0, sg = 0, n = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n));
+            dev_av(0x40, l, 1, 1, 0, 0); /* general reject: the device does not know the command */
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: the device does not know this command (0x01)"));
+        }
+        /* Get Capabilities refused: the other form of the question, Get All Capabilities, is tried once */
+        av_open_sig();
+        av_accept(SIG_CID_DEV, 0x01, SEPS, sizeof SEPS);
+        {
+            unsigned l = 0, sg = 0, n = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n) && sg == 0x02);
+            unsigned char err[1] = {0x19};
+            dev_av(0x40, l, 3, 2, err, 1);
+            bt_poll();
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n) && sg == 0x0C && n == 1 && pp[0] == 0x0C); /* Get All Capabilities */
+            CHECK(line_is(0xA0, "a2dp: reading what the endpoint can do"));
+            av_accept(SIG_CID_DEV, 0x0C, HCAPS, sizeof HCAPS);
+            CHECK(line_is(0xA0, "a2dp: setting the codec"));
+        }
+        av_open_sig();
+        av_accept(SIG_CID_DEV, 0x01, SEPS, sizeof SEPS);
+        {
+            unsigned l = 0, sg = 0, n = 0;
+            const unsigned char *pp;
+            unsigned char err[1] = {0x19};
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n));
+            dev_av(0x40, l, 3, 2, err, 1);
+            bt_poll();
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n) && sg == 0x0C);
+            dev_av(0x40, l, 3, 0x0C, err, 1); /* refused again: that is the end */
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: Get All Capabilities was refused (0x19)"));
+        }
+        /* capabilities we cannot use */
+        {
+            static const unsigned char c16[] = {0x07, 0x06, 0x00, 0x00, 0x8F, 0xFF, 0x02, 0x35}; /* 16 kHz only */
+            static const unsigned char cmo[] = {0x07, 0x06, 0x00, 0x00, 0x3C, 0xFF, 0x02, 0x35}; /* dual channel and mono only */
+            static const unsigned char cbp[] = {0x07, 0x06, 0x00, 0x00, 0x3F, 0xFF, 0x3C, 0x46}; /* bitpool 60 .. 70 */
+            static const unsigned char cnc[] = {0x01, 0x00};                                     /* no codec at all */
+            static const unsigned char ccut[] = {0x07, 0x06, 0x00};                              /* damaged */
+            static const struct { const unsigned char *c; unsigned n; const char *line; } BAD[] = {
+                {c16, sizeof c16, "a2dp: failed: no sampling rate in common (48 or 44.1 kHz)"},
+                {cmo, sizeof cmo, "a2dp: failed: no channel mode in common (joint stereo or stereo)"},
+                {cbp, sizeof cbp, "a2dp: failed: no usable bitpool"},
+                {cnc, sizeof cnc, "a2dp: failed: the endpoint has no SBC codec"},
+                {ccut, sizeof ccut, "a2dp: failed: the capabilities are damaged"}};
+            for (unsigned i = 0; i < sizeof BAD / sizeof BAD[0]; i++)
+            {
+                av_open_sig();
+                av_accept(SIG_CID_DEV, 0x01, SEPS, sizeof SEPS);
+                av_accept(SIG_CID_DEV, 0x02, BAD[i].c, BAD[i].n);
+                CHECK(line_is(0xA0, BAD[i].line));
+            }
+        }
+        /* Set Configuration refused: the error is the last byte (the category comes before it) */
+        av_to_open();
+        {
+            unsigned char err[2] = {0x07, 0x29};
+            unsigned l = 0, sg = 0, n = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n) && sg == 0x03);
+            dev_av(0x40, l, 3, 3, err, 2);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: Set Configuration was refused (0x29)"));
+        }
+        /* Open refused, Start refused, the media channel refused or never opened */
+        av_to_open();
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        {
+            unsigned char err[1] = {0x31};
+            unsigned l = 0, sg = 0, n = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n) && sg == 0x06);
+            dev_av(0x40, l, 3, 6, err, 1);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: Open was refused (0x31)"));
+        }
+        av_to_open();
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        av_accept(SIG_CID_DEV, 0x06, 0, 0);
+        {
+            unsigned id = 0, dl = 0;
+            const unsigned char *d = 0;
+            CHECK(last_sig(0x02, &id, &d, &dl) && le16(d + 2) == 0x41);
+            unsigned char r[8] = {0, 0, 0x41, 0, 3, 0, 0, 0}; /* the media channel: security block */
+            dev_sig(0x03, id, r, 8);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: the media channel was refused (0x03)"));
+        }
+        av_to_open();
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        av_accept(SIG_CID_DEV, 0x06, 0, 0);
+        F.clock += 12500; /* nobody answers the second Connection Request */
+        bt_poll();
+        CHECK(line_is(0xA0, "a2dp: failed: the media channel did not open"));
+        av_to_open();
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        av_accept(SIG_CID_DEV, 0x06, 0, 0);
+        chan_handshake(0x41, MEDIA_CID_DEV);
+        {
+            unsigned char err[1] = {0x31};
+            unsigned l = 0, sg = 0, n = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &n) && sg == 0x07);
+            dev_av(0x40, l, 3, 7, err, 1);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: Start was refused (0x31)"));
+        }
+        /* the signalling channel does not open in time */
+        up();
+        CHECK(bt_avdtp_start() == 0);
+        bt_poll();
+        F.clock += 12500;
+        bt_poll();
+        CHECK(line_is(0xA0, "a2dp: failed: the signalling channel did not open"));
+
+        /* 31. the device closes a channel, or the link ends, while the stream is on */
+        av_to_open();
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        av_accept(SIG_CID_DEV, 0x06, 0, 0);
+        chan_handshake(0x41, MEDIA_CID_DEV);
+        av_accept(SIG_CID_DEV, 0x07, 0, 0);
+        CHECK(bt_avdtp_streaming());
+        {
+            unsigned char dr[4] = {0x41, 0, MEDIA_CID_DEV & 0xFF, MEDIA_CID_DEV >> 8}; /* Disconnection Request for the media channel */
+            dev_sig(0x06, 0x66, dr, 4);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: the device closed the media channel"));
+        }
+        av_to_open();
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        {
+            unsigned char dr[4] = {0x40, 0, SIG_CID_DEV & 0xFF, SIG_CID_DEV >> 8}; /* ... the signalling channel */
+            dev_sig(0x06, 0x67, dr, 4);
+            bt_poll();
+            CHECK(line_is(0xA0, "a2dp: failed: the device closed the signalling channel"));
+        }
+        av_to_open();
+        ev_disc_complete(HANDLE, 0x13);
+        bt_poll();
+        CHECK(line_is(0xA0, "a2dp: failed: link ended"));
+        CHECK(bt_avdtp_start() == BT_E_NOT_UP);
+        /* stopping when nothing runs, or before the stream is open, is harmless */
+        CHECK(bt_avdtp_stop() == 0);
+        av_open_sig();
+        CHECK(bt_avdtp_stop() == 0);
+        bt_poll();
+        CHECK(line_is(0xA0, "a2dp: closed"));
+        /* Close is not answered: after 3 s the channels are closed anyway */
+        av_to_open();
+        av_accept(SIG_CID_DEV, 0x03, 0, 0);
+        av_accept(SIG_CID_DEV, 0x06, 0, 0);
+        chan_handshake(0x41, MEDIA_CID_DEV);
+        av_accept(SIG_CID_DEV, 0x07, 0, 0);
+        CHECK(bt_avdtp_stop() == 0);
+        bt_poll();
+        F.clock += 3500;
+        bt_poll();
+        CHECK(line_is(0xA0, "a2dp: closed"));
+        /* before anything: all lines say so */
+        bt_detach();
+        CHECK(bt_avdtp_start() == BT_E_NOT_UP);
     }
 
     printf("bt_link: %d checks, %d failed\n", checks, failures);

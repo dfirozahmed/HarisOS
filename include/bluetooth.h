@@ -228,6 +228,69 @@ void bt_pair_event(const unsigned char *evt, unsigned len);
 void bt_pair_step(unsigned long long now);
 void bt_pair_reset(void);
 
+/* ---- A2DP: AVDTP, the control side of music streaming (kernel/bluetooth/bt_avdtp.c) ----
+ * bt_avdtp_start() runs, over the link (which should be paired and encrypted: most headsets insist), the sequence that prepares a music stream:
+ * a channel to the device's AVDTP service (PSM 0x19), Discover (which stream endpoints does it have), Get Capabilities (what the audio sink can
+ * do), Set Configuration (one SBC setting out of those), Open, a second channel for the audio itself (the media channel) and Start. The state
+ * and what was agreed are in the text lines 0xA0 .. 0xA2 of bt_link_line(). bt_avdtp_stop() closes the stream and the channels. Needs a link. */
+typedef struct
+{
+    unsigned char seid; /* the number of the stream endpoint */
+    int in_use;
+    int media_type;     /* 0 = audio */
+    int sink;           /* 1 = it receives (a headset), 0 = it sends */
+} BtAvSep;
+
+typedef struct
+{
+    int has_sbc, has_transport, has_delay;
+    unsigned freq;      /* what the SBC codec of the endpoint allows, as masks in the form used on the air: sampling rate 1 = 48 kHz, 2 = 44.1, 4 = 32, 8 = 16 */
+    unsigned mode;      /* channel mode: 1 joint stereo, 2 stereo, 4 dual channel, 8 mono */
+    unsigned blocks;    /* blocks per frame: 1 = 16, 2 = 12, 4 = 8, 8 = 4 */
+    unsigned bands;     /* subbands: 1 = 8, 2 = 4 */
+    unsigned alloc;     /* bit allocation: 1 = loudness, 2 = SNR */
+    unsigned min_bitpool, max_bitpool;
+} BtSbcCaps;
+
+typedef struct
+{
+    unsigned freq, mode, blocks, bands, alloc; /* one value each (same codes as in BtSbcCaps) */
+    unsigned bitpool;                          /* the one we will use (the largest the sink takes up to our aim) */
+    unsigned min_bitpool;                      /* the sink's smallest */
+} BtSbcConfig;
+
+#define BT_AV_NO_SBC (-1)
+#define BT_AV_NO_FREQ (-2)
+#define BT_AV_NO_MODE (-3)
+#define BT_AV_NO_BLOCKS (-4)
+#define BT_AV_NO_BANDS (-5)
+#define BT_AV_NO_ALLOC (-6)
+#define BT_AV_NO_BITPOOL (-7)
+
+int bt_avdtp_parse_discover(const unsigned char *p, unsigned n, BtAvSep *out, unsigned max);
+int bt_avdtp_parse_caps(const unsigned char *p, unsigned n, BtSbcCaps *out);
+int bt_avdtp_choose(const BtSbcCaps *caps, BtSbcConfig *cfg);
+unsigned bt_avdtp_set_config(unsigned char *out, unsigned cap, unsigned acp_seid, unsigned int_seid, const BtSbcConfig *cfg);
+int bt_avdtp_start(void);
+int bt_avdtp_stop(void);
+int bt_avdtp_streaming(void); /* 1 while the sink has accepted Start */
+int bt_avdtp_line(unsigned index, char *buf, unsigned cap);
+
+/* ---- L2CAP channels for the protocols above (bt_link.c): SDP and AVDTP use these ---- */
+#define BT_USER_SDP 1
+#define BT_USER_AVDTP_SIG 2
+#define BT_USER_AVDTP_MEDIA 3
+enum { BT_CHAN_FREE = 0, BT_CHAN_CONNECTING, BT_CHAN_CONFIG, BT_CHAN_OPEN, BT_CHAN_CLOSING };
+int bt_chan_open(unsigned psm, int user);  /* asks the device for a channel to this service; the slot (0 ..) or -1 */
+void bt_chan_close(int slot);
+int bt_chan_state(int slot);               /* BT_CHAN_* */
+int bt_chan_result(int slot);              /* why the device refused (the L2CAP result: 2 PSM not supported, 3 security block ...), 0 = no refusal */
+unsigned bt_chan_mtu(int slot);
+int bt_chan_queue(int slot, const unsigned char *data, unsigned n); /* a small PDU (up to 60 bytes) in the send queue: 0 or -1. Fine inside handlers. */
+void bt_avdtp_rx(int user, const unsigned char *data, unsigned n);  /* data that arrived on an AVDTP channel */
+void bt_avdtp_step(unsigned long long now);
+void bt_avdtp_reset(void);                                          /* the link ended */
+
 /* ---- between bt_hci.c and bt_scan.c / bt_link.c ---- */
 void bt_link_event(const unsigned char *evt, unsigned len);
 void bt_link_acl(const unsigned char *pkt, unsigned len);

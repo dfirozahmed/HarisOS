@@ -327,6 +327,7 @@ enum { CH_FREE, CH_CONNECTING, CH_CONFIG, CH_OPEN, CH_CLOSING };
 typedef struct
 {
     int state;
+    int user;                      /* who the data of this channel goes to: BT_USER_* */
     unsigned psm, scid, dcid, mtu; /* scid: our end, dcid: the device's end; mtu: the most we may send in one PDU */
     unsigned char conn_id, cfg_id, disc_id;
     int cfg_acked, cfg_peer;       /* our Configuration Request was accepted / we accepted the device's */
@@ -370,6 +371,7 @@ static void chan_reset(void)
     SD.nsvc = 0;
     SD.acc_len = 0;
     SD.send = SD.want_close = 0;
+    bt_avdtp_reset();
 }
 
 static void sdp_fail(const char *why, int code)
@@ -390,12 +392,13 @@ static void chan_link_down(void)
         SD.why = "link ended";
         SD.code = 0;
     }
+    bt_avdtp_reset(); /* before the channels are forgotten: it says "link ended" */
     for (int i = 0; i < CHAN_N; i++)
         CH[i].state = CH_FREE;
     SD.want_close = 0;
 }
 
-static int chan_open(unsigned psm)
+static int chan_open(unsigned psm, int user)
 {
     for (int i = 0; i < CHAN_N; i++)
     {
@@ -403,6 +406,7 @@ static int chan_open(unsigned psm)
         if (c->state != CH_FREE)
             continue;
         c->state = CH_CONNECTING;
+        c->user = user;
         c->psm = psm;
         c->scid = CHAN_BASE_CID + (unsigned)i;
         c->dcid = 0;
@@ -442,6 +446,24 @@ static Chan *chan_by_scid(unsigned scid)
     for (int i = 0; i < CHAN_N; i++)
         if (CH[i].state != CH_FREE && CH[i].scid == scid)
             return &CH[i];
+    return 0;
+}
+
+/* what the protocols on top (AVDTP) may do with channels */
+int bt_chan_open(unsigned psm, int user) { return chan_open(psm, user); }
+void bt_chan_close(int slot)
+{
+    if (slot >= 0 && slot < CHAN_N)
+        chan_close(slot);
+}
+int bt_chan_state(int slot) { return slot >= 0 && slot < CHAN_N ? CH[slot].state : CH_FREE; }
+int bt_chan_result(int slot) { return slot >= 0 && slot < CHAN_N ? CH[slot].result : 0; }
+unsigned bt_chan_mtu(int slot) { return slot >= 0 && slot < CHAN_N ? CH[slot].mtu : 0; }
+int bt_chan_queue(int slot, const unsigned char *data, unsigned n)
+{
+    if (slot < 0 || slot >= CHAN_N || CH[slot].state != CH_OPEN || L.txh - L.txt >= TXQ_N || n > PDU_MAX - 4)
+        return -1;
+    data_queue(CH[slot].dcid, data, n);
     return 0;
 }
 
@@ -630,8 +652,13 @@ static void chan_data(unsigned cid, const unsigned char *d, unsigned n)
     Chan *c = chan_by_scid(cid);
     if (!c || c->state != CH_OPEN)
         return;
-    if (SD.state == SDP_ASKING && c == &CH[SD.chan])
-        sdp_rx(d, n);
+    if (c->user == BT_USER_SDP)
+    {
+        if (SD.state == SDP_ASKING && c == &CH[SD.chan])
+            sdp_rx(d, n);
+    }
+    else if (c->user == BT_USER_AVDTP_SIG || c->user == BT_USER_AVDTP_MEDIA)
+        bt_avdtp_rx(c->user, d, n);
 }
 
 int bt_sdp_browse(void)
@@ -647,7 +674,7 @@ int bt_sdp_browse(void)
     SD.why = 0;
     SD.code = 0;
     SD.tid = 0; /* a new channel, a new numbering of the transactions */
-    SD.chan = chan_open(SDP_PSM);
+    SD.chan = chan_open(SDP_PSM, BT_USER_SDP);
     if (SD.chan < 0)
         return BT_E_LINK_BUSY;
     SD.state = SDP_OPENING;
@@ -957,6 +984,7 @@ void bt_link_step(void)
     }
 
     sdp_step(now);
+    bt_avdtp_step(now);
 
     /* send what is queued; copy the entry first, sending may handle events that queue more */
     while (L.txt != L.txh && L.state == BT_LINK_UP)
@@ -1235,6 +1263,8 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
 {
     if (cap < 2)
         return -1;
+    if (index >= 0xA0) /* the A2DP lines */
+        return bt_avdtp_line(index - 0xA0, buf, cap);
     if (index >= 0x90) /* diagnostics */
         return diag_line(index - 0x90, buf, cap);
     if (index >= 0x80) /* the pairing lines */

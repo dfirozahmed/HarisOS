@@ -1,9 +1,11 @@
-/* HarisOS user program: btlink AA:BB:CC:DD:EE:FF [pair]
+/* HarisOS user program: btlink AA:BB:CC:DD:EE:FF [pair|a2dp]
  * Connects to a Bluetooth device (a headset, a phone ...: it must be switched on, in range and ready to be connected, which is often the same
  * "pairing" mode that btscan needs), tests that data flows both ways on the L2CAP signalling channel, asks it for its list of services (SDP:
  * does it play stereo music (A2DP), is it only for calls ...), prints what the device told, and ends the link again. Take the address from
  * btscan. With the word "pair" it also pairs with the device first (the device must be in pairing mode: for a headset usually a blinking
- * light after holding the button): secure simple pairing, or the old PIN 0000. The link key is kept in memory only, until the next restart. */
+ * light after holding the button): secure simple pairing, or the old PIN 0000. The link key is kept in memory only, until the next restart.
+ * With "a2dp" it pairs, lists the services and then prepares a music stream with the device (AVDTP: finds its audio endpoint, chooses an SBC
+ * setting, opens the stream and the media channel, starts it), holds it for two seconds and closes it. No sound is sent yet. */
 #include "libc.h"
 
 #define WAIT_MS 40000
@@ -59,12 +61,13 @@ static void show(void)
 
 __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, char **argv)
 {
-    if (argc < 2 || parse_addr(argv[1]) < 0 || (argc >= 3 && !starts(argv[2], "pair")))
+    if (argc < 2 || parse_addr(argv[1]) < 0 || (argc >= 3 && !starts(argv[2], "pair") && !starts(argv[2], "a2dp")))
     {
-        fdprintf(2, "usage: btlink AA:BB:CC:DD:EE:FF [pair]   (the address from btscan)\n");
+        fdprintf(2, "usage: btlink AA:BB:CC:DD:EE:FF [pair|a2dp]   (the address from btscan)\n");
         sys_exit(1);
     }
-    int want_pair = argc >= 3;
+    int want_a2dp = argc >= 3 && starts(argv[2], "a2dp");
+    int want_pair = argc >= 3; /* a music stream needs the link paired and encrypted */
     long long r = syscall3(SYS_BTLINK, SYS_BTLINK_CONNECT, parse_addr(argv[1]), 0);
     if (r == -100)
     {
@@ -157,6 +160,41 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
         }
         else
             fdprintf(2, "btlink: could not ask for the services (%d)\n", (int)sr);
+    }
+    if (ok && want_a2dp) /* the music stream: lines 0xA0 .. 0xA2 */
+    {
+        long long ar = syscall3(SYS_BTLINK, SYS_BTLINK_A2DP, 0, 0);
+        if (ar == 0)
+        {
+            fdprintf(1, "preparing the music stream (up to 40 seconds) ...\n");
+            long long t0 = sys_clock();
+            for (;;)
+            {
+                sys_sleep(250);
+                if (sys_btlink(0xA0, line, sizeof line) < 0 || starts(line, "a2dp: streaming") || starts(line, "a2dp: failed") || starts(line, "a2dp: closed"))
+                    break;
+                if (sys_clock() - t0 > 40000)
+                {
+                    fdprintf(2, "btlink: gave up waiting for the stream\n");
+                    break;
+                }
+            }
+            for (unsigned i = 0xA0; sys_btlink(i, line, sizeof line) >= 0; i++)
+                fdprintf(1, "%s\n", line);
+            if (sys_btlink(0xA0, line, sizeof line) >= 0 && starts(line, "a2dp: streaming"))
+                sys_sleep(2000); /* hold the stream open a moment */
+            syscall3(SYS_BTLINK, SYS_BTLINK_A2DP_STOP, 0, 0);
+            for (int i = 0; i < 40; i++)
+            {
+                sys_sleep(250);
+                if (sys_btlink(0xA0, line, sizeof line) < 0 || starts(line, "a2dp: closed") || starts(line, "a2dp: failed"))
+                    break;
+            }
+            if (sys_btlink(0xA0, line, sizeof line) >= 0)
+                fdprintf(1, "%s\n", line);
+        }
+        else
+            fdprintf(2, "btlink: could not start the stream (%d)\n", (int)ar);
     }
     show();
     syscall3(SYS_BTLINK, SYS_BTLINK_DISCONNECT, 0, 0);

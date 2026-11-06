@@ -118,6 +118,10 @@ long long sys_btlink(const SyscallFrame *f)
         return bt_sdp_browse();
     if (f->rdi == SYS_BTLINK_PAIR)
         return bt_pair_start();
+    if (f->rdi == SYS_BTLINK_A2DP)
+        return bt_avdtp_start();
+    if (f->rdi == SYS_BTLINK_A2DP_STOP)
+        return bt_avdtp_stop();
     if (f->rdi > 0xFFF || f->rdx < 2 || f->rdx > 256 || !aspace_user_ok(as, f->rsi, f->rdx, 1))
         return -1;
     char line[256];

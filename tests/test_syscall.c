@@ -839,6 +839,17 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
     memcpy(buf, LINES[index], n + 1);
     return (int)n;
 }
+static int BT_AV_RESULT = 0, BT_AV_STARTS = 0, BT_AV_STOPS = 0;
+int bt_avdtp_start(void)
+{
+    BT_AV_STARTS++;
+    return BT_AV_RESULT;
+}
+int bt_avdtp_stop(void)
+{
+    BT_AV_STOPS++;
+    return 0;
+}
 static int BT_PAIR_RESULT = 0, BT_PAIR_CALLS = 0;
 int bt_pair_start(void)
 {
@@ -2620,7 +2631,7 @@ int main(void)
         CHECK(call(SYS_BTLINK, 2, U(line), sizeof line) == -1);                    /* past the end */
         CHECK(call(SYS_BTLINK, 0, U(line), 10) == -1);                             /* does not fit */
         CHECK(call(SYS_BTLINK, 0, U(line), 1) == -1 && call(SYS_BTLINK, 0, U(line), 257) == -1);
-        CHECK(call(SYS_BTLINK, 0x1004, U(line), sizeof line) == -1);               /* not a line, not a command */
+        CHECK(call(SYS_BTLINK, 0x1006, U(line), sizeof line) == -1);               /* not a line, not a command */
         USER_OK = 0;
         CHECK(call(SYS_BTLINK, 0, U(line), sizeof line) == -1);                    /* bad pointer */
         USER_OK = 1;
@@ -2640,6 +2651,11 @@ int main(void)
         BT_PAIR_RESULT = -102;
         CHECK(call(SYS_BTLINK, SYS_BTLINK_PAIR, 0, 0) == -102);                     /* the reason is passed on */
         BT_PAIR_RESULT = 0;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP, 0, 0) == 0 && BT_AV_STARTS == 1);   /* prepare a music stream */
+        BT_AV_RESULT = -102;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP, 0, 0) == -102);                     /* the reason is passed on */
+        BT_AV_RESULT = 0;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP_STOP, 0, 0) == 0 && BT_AV_STOPS == 1);
     }
 
     /* ================= sockets: the server calls ================= */
