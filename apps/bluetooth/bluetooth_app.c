@@ -50,6 +50,7 @@ enum { BTM_CONNECT, BTM_DISCONNECT, BTM_COPY_NAME, BTM_COPY_ADDR, BTM_SCAN }; /*
 static int FILE_CH;              /* the RFCOMM channel of the device's Object Push service (it takes files), 0 = it has none */
 static int SEND_NODE = -1;       /* the file being sent (a vfs node) */
 static char SEND_NAME[64];
+static unsigned long long RX_T0;     /* when the file being received began */
 static int RECV_ON;              /* visible to other devices, ready to take files */
 static char RECV_PATH[96];       /* the folder they are saved in */
 static int NO_SCAN;                /* the window was opened to send a file: do not start a scan by itself */
@@ -79,6 +80,26 @@ static void put_dec(char *s, int cap, int *n, unsigned v)
     while (k && *n < cap - 1)
         s[(*n)++] = tmp[--k];
     s[*n] = 0;
+}
+
+/* ", 12.3 s, 160.4 KB/s": the time a transfer has taken so far and its speed (the speed only once a tenth of a second has passed) */
+static void put_stats(char *s, int cap, int *n, unsigned bytes, unsigned long long ms)
+{
+    unsigned t = (unsigned)(ms / 100); /* tenths of a second */
+    put_str(s, cap, n, ", ");
+    put_dec(s, cap, n, t / 10);
+    put_str(s, cap, n, ".");
+    put_dec(s, cap, n, t % 10);
+    put_str(s, cap, n, " s");
+    if (ms >= 100)
+    {
+        unsigned long long r = (unsigned long long)bytes * 10000 / ms / 1024; /* tenths of KB per second */
+        put_str(s, cap, n, ", ");
+        put_dec(s, cap, n, (unsigned)(r / 10));
+        put_str(s, cap, n, ".");
+        put_dec(s, cap, n, (unsigned)(r % 10));
+        put_str(s, cap, n, " KB/s");
+    }
 }
 
 static int starts(const char *s, const char *w)
@@ -202,6 +223,8 @@ static unsigned long long signature(void)
     s = s * 7 + (unsigned)si.receiving + 2 * (unsigned)si.on;
     s = s * 101 + (si.total ? (unsigned)((unsigned long long)si.got * 100 / si.total) : si.got / 4096);
     s = s * 1000 + si.files;
+    if (si.receiving)
+        s = s * 4096 + (unsigned)((timer_ms() - RX_T0) / 1000); /* the clock in the header */
     if (OP == OP_SCAN)
         s = s * 1024 + (unsigned)scan_percent(); /* the progress bar */
     else if (OP != OP_NONE)
@@ -352,6 +375,7 @@ static void bt_draw(Window *w, UiRect body)
             put_dec(line, sizeof line, &n, si.total);
         }
         put_str(line, sizeof line, &n, " bytes");
+        put_stats(line, sizeof line, &n, si.got, timer_ms() - RX_T0);
     }
     else if (OP == OP_SEND)
     {
@@ -363,6 +387,7 @@ static void bt_draw(Window *w, UiRect body)
         put_str(line, sizeof line, &n, " of ");
         put_dec(line, sizeof line, &n, total);
         put_str(line, sizeof line, &n, " bytes");
+        put_stats(line, sizeof line, &n, done, timer_ms() - OP_T0);
     }
     else if (OP != OP_NONE && OP != OP_SCAN)
     {
@@ -702,6 +727,7 @@ static int rx_begin(void *ctx, const char *name, unsigned size)
         return -1;
     RX_NODE = id;
     RX_OFF = RX_FILL = 0;
+    RX_T0 = timer_ms();
     const VfsNode *f = vfs_node(id);
     int k = 0;
     RX_NAME[0] = 0;
@@ -746,7 +772,9 @@ static void rx_end(void *ctx, int ok)
         put_str(m, sizeof m, &k, RX_NAME);
         put_str(m, sizeof m, &k, " (");
         put_dec(m, sizeof m, &k, RX_OFF);
-        put_str(m, sizeof m, &k, " bytes) in ");
+        put_str(m, sizeof m, &k, " bytes");
+        put_stats(m, sizeof m, &k, RX_OFF, timer_ms() - RX_T0);
+        put_str(m, sizeof m, &k, ") in ");
         put_str(m, sizeof m, &k, RECV_PATH);
         toast_show(TOAST_SUCCESS, m);
     }
@@ -955,7 +983,9 @@ static int bt_tick(Window *w)
             put_str(m, sizeof m, &k, SEND_NAME);
             put_str(m, sizeof m, &k, " (");
             put_dec(m, sizeof m, &k, total);
-            put_str(m, sizeof m, &k, " bytes).");
+            put_str(m, sizeof m, &k, " bytes");
+            put_stats(m, sizeof m, &k, total, timer_ms() - OP_T0);
+            put_str(m, sizeof m, &k, ").");
             finish(w, 1, m);
         }
         else if (os == BT_OBEX_FAILED)
