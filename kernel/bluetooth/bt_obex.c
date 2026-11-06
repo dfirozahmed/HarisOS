@@ -487,8 +487,8 @@ int bt_obex_line(char *buf, unsigned cap)
  * (more please), or an error (0xC0 bad request, 0xC3 forbidden, 0xD0 internal error: the drive could not take the data). The bytes go to a "sink"
  * (the program that owns the drive): begin(name, size), write(data) ..., end(ok). A packet is answered from the step, not from the receive
  * handler, because sending data must not happen inside one. */
-#define SRV_RX_MAX 1100
-#define SRV_PKT_MAX 1024 /* the biggest packet we say we take */
+#define SRV_PKT_MAX 32768 /* the biggest packet we say we take: the phone waits for an answer after every packet, so a bigger one means fewer waits */
+#define SRV_RX_MAX (SRV_PKT_MAX + 200)
 #define SRV_IDLE_MS 30000
 #define RSP_BAD_REQUEST 0xC0
 #define RSP_FORBIDDEN 0xC3

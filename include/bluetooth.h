@@ -152,7 +152,7 @@ void bt_set_coex_hook(void (*hook)(int mode));
 void bt_coex(int mode); /* pass a mode on to the hook */
 
 int bt_scan_start(void);
-void bt_poll(void); /* call often (every pass of the main loop): handles events, steps the scan */
+int bt_poll(void); /* call often (every pass of the main loop): handles events, steps the scan. 1 if events or data came in (do not sleep before the next pass) */
 BtScanState bt_scan_state(void);
 int bt_scan_count(void);
 const BtScanDev *bt_scan_dev(int i);
@@ -331,7 +331,8 @@ typedef struct
     unsigned len;
 } BtRfFrame;
 
-#define BT_RF_MAX_FRAME 127 /* the data bytes of one frame (N1 default) */
+#define BT_RF_MAX_FRAME 127 /* the data bytes of one frame we send (N1 default) */
+#define BT_RF_MAX_N1 667    /* the biggest frame we take: it must fit one L2CAP PDU of the default 672 bytes with its 4 byte frame header and check byte */
 unsigned char bt_rfcomm_fcs(const unsigned char *p, unsigned n);                       /* frame check sequence over n bytes */
 unsigned bt_rfcomm_build(unsigned char *out, unsigned cap, unsigned addr, unsigned ctrl, const unsigned char *data, unsigned n); /* one frame; its size, 0 if it does not fit */
 int bt_rfcomm_parse(const unsigned char *p, unsigned n, BtRfFrame *f);                 /* 0 = a good frame, -1 = too short or bad check sequence */

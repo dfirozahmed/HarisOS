@@ -25,7 +25,7 @@ typedef struct
     unsigned char data[EVQ_BYTES];
 } EvSlot;
 
-#define ACLQ_N 8
+#define ACLQ_N 64 /* a phone sends a file as a stream of small packets; the main loop empties the queue once per pass */
 #define ACL_BYTES 1032 /* 4 header bytes + up to 1028 of data */
 
 typedef struct
@@ -183,10 +183,11 @@ static void drain_acl(void)
 
 unsigned long long bt_now(void) { return B.attached && B.t.now_ms ? B.t.now_ms(B.t.ctx) : 0; }
 
-void bt_poll(void)
+int bt_poll(void)
 {
     if (!B.attached || B.info.state != BT_HCI_UP)
-        return;
+        return 0;
+    int busy = B.tail != B.head || B.atail != B.ahead; /* something came in: the caller should come back at once, not sleep */
     while (B.tail != B.head)
     {
         const EvSlot *s = &B.q[B.tail % EVQ_N];
@@ -196,6 +197,7 @@ void bt_poll(void)
     drain_acl();
     bt_scan_step();
     bt_link_step();
+    return busy;
 }
 
 int bt_cmd(unsigned opcode, const void *params, unsigned plen, unsigned char *ret, unsigned ret_max, unsigned *ret_len, unsigned timeout_ms)

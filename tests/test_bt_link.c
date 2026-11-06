@@ -903,7 +903,7 @@ static void recv_tests(void)
     {
         const unsigned char con[] = {0x80, 0x00, 0x07, 0x10, 0x00, 0x20, 0x00};
         phone_rf(rf_cid, dlci << 2 | 3, 0xEF, con, sizeof con);
-        CHECK(our_rf(0x0091, &fr) && fr.dlci == dlci && fr.addr == (dlci << 2 | 1) && fr.len == 7 && fr.data[0] == 0xA0 && fr.data[5] == 0x04); /* OK, we take 1024 */
+        CHECK(our_rf(0x0091, &fr) && fr.dlci == dlci && fr.addr == (dlci << 2 | 1) && fr.len == 7 && fr.data[0] == 0xA0 && fr.data[5] == 0x80); /* OK, we take 32768 */
         unsigned short name16[] = {'h', 'i', '.', 't', 'x', 't', 0};
         unsigned char pkt[400];
         unsigned n = bt_obex_put_packet(pkt, sizeof pkt, 0, name16, 7, 10, 1, 0, (const unsigned char *)"01234", 5);
@@ -1322,7 +1322,7 @@ int main(void)
         bt_rx_acl_chunk(a, 7);                    /* the stream recovered */
         CHECK(bt_info()->acl_rx - acl0 == 8);
         /* more packets than the queue holds: dropped and counted, no crash */
-        for (int i = 0; i < 20; i++)
+        for (int i = 0; i < 100; i++)
             bt_rx_acl_chunk(a, 7);
         CHECK(bt_info()->acl_dropped > 0);
         unsigned char wrong[8] = {0x23, 0x21, 3, 0, 1, 2, 3, 4};

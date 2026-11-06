@@ -673,7 +673,7 @@ static int create_unique(int dir, const char *name)
 static int RX_DIR = -1;       /* the folder (a vfs node) */
 static int RX_NODE = -1;      /* the file being written */
 static unsigned RX_OFF;       /* bytes of it already on the drive */
-static unsigned char RX_BUF[8192]; /* written in big pieces: a drive is slow with small ones */
+static unsigned char RX_BUF[65536]; /* written in big pieces: a drive is slow with small ones */
 static unsigned RX_FILL;
 static char RX_NAME[64];
 

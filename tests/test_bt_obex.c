@@ -274,7 +274,7 @@ static void fresh(void)
 
 /* ---- the server side: a phone sends us files ---- */
 static int SK_FAIL_BEGIN, SK_FAIL_WRITE, SK_BEGAN, SK_ENDED, SK_OK;
-static unsigned char SK_DATA[4096];
+static unsigned char SK_DATA[24000];
 static unsigned SK_LEN, SK_SIZE;
 static char SK_NAME[64];
 
@@ -371,11 +371,11 @@ static void srv_tests(void)
     OUT_N = 0;
     /* the phone asks for parameter negotiation with credit flow control: the answer says no credits */
     {
-        unsigned char pn[10] = {0x20 << 2 | 3, 8 << 1 | 1, DLCI_SRV, 0xF0, 0, 0, 0xFF, 0, 0, 7};
+        unsigned char pn[10] = {0x20 << 2 | 3, 8 << 1 | 1, DLCI_SRV, 0xF0, 0, 0, 0xE8, 0x03, 0, 7}; /* a frame size of 1000 */
         ph_frame(0x03, 0xEF, pn, 10);
         BtRfFrame fr;
         CHECK(OUT_N == 1 && bt_rfcomm_parse(OUT[0], OUT_LEN[0], &fr) == 0 && fr.data[0] == (0x20 << 2 | 1) && fr.data[3] == 0 && fr.data[9] == 0);
-        CHECK(fr.data[6] == BT_RF_MAX_FRAME && fr.data[7] == 0); /* the frame size is cut to what we take */
+        CHECK(fr.data[6] == (BT_RF_MAX_N1 & 0xFF) && fr.data[7] == (BT_RF_MAX_N1 >> 8)); /* the frame size is cut to what one L2CAP PDU holds */
     }
     OUT_N = 0;
     /* a channel other than ours: DM */
@@ -416,6 +416,20 @@ static void srv_tests(void)
         CHECK(resp_code() == 0xA0);
     }
 
+    /* a big packet, cut into frames of 600 bytes as a phone does after a bigger frame size was agreed */
+    srv_start();
+    {
+        static unsigned char big[20000], bigpkt[21000];
+        for (unsigned i = 0; i < sizeof big; i++)
+            big[i] = (unsigned char)(i * 7 + (i >> 8));
+        unsigned m = bt_obex_put_packet(bigpkt, sizeof bigpkt, 0, NAME, 6, sizeof big, 1, 1, big, sizeof big);
+        CHECK(m > sizeof big);
+        for (unsigned off = 0; off < m; off += 600)
+            ph_obex(bigpkt + off, m - off < 600 ? m - off : 600);
+        CHECK(resp_code() == 0xA0 && SK_BEGAN == 1 && SK_LEN == sizeof big && SK_ENDED == 1 && SK_OK == 1);
+        CHECK(memcmp(SK_DATA, big, sizeof big) == 0);
+    }
+
     /* requests that are refused */
     srv_start();
     {
@@ -444,7 +458,7 @@ static void srv_tests(void)
         ph_obex(bad, sizeof bad);
         CHECK(resp_code() == 0xC0);
         /* a packet longer than we said we take is dropped; the next good one is answered */
-        unsigned char huge[8] = {0x02, 0x0F, 0xFF};
+        unsigned char huge[8] = {0x02, 0xFF, 0xFF};
         ph_obex(huge, sizeof huge);
         OUT_N = 0;
         const unsigned char con[] = {0x80, 0, 7, 0x10, 0, 0x04, 0x00};

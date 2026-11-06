@@ -175,10 +175,10 @@ static void on_mcc(const unsigned char *d, unsigned n)
                 {
                     v[1] = 0; /* no credit based flow control */
                     v[7] = 0;
-                    if ((unsigned)v[4] + ((unsigned)v[5] << 8) > BT_RF_MAX_FRAME)
+                    if ((unsigned)v[4] + ((unsigned)v[5] << 8) > BT_RF_MAX_N1) /* a frame must fit one L2CAP PDU */
                     {
-                        v[4] = BT_RF_MAX_FRAME;
-                        v[5] = 0;
+                        v[4] = (unsigned char)(BT_RF_MAX_N1 & 0xFF);
+                        v[5] = (unsigned char)(BT_RF_MAX_N1 >> 8);
                     }
                 }
                 mcc(type, 0, v, len);
