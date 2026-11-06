@@ -84,6 +84,7 @@ static int copy_in(AddressSpace *as, u64 va, const unsigned char *src, u64 n)
 void process_free(void *p)
 {
     process_release_files((Process *)p); /* (normally done at exit: this catches any other way a process can go away) */
+    process_lazy_report((Process *)p);
     kfree(((Process *)p)->lazy); /* (NULL for a program that was loaded whole) */
     kfree(p);
 }
@@ -381,6 +382,8 @@ int process_spawn_elf_lazy(const char *name, int node, unsigned file_size, const
         im->name[i] = vn->name[i];
     im->name[i] = 0;
     im->nseg = info.nseg;
+    im->reads = im->pages = im->bytes = 0;
+    im->ms = 0;
     u64 heap_base = 0;
     for (int k = 0; k < info.nseg; k++)
     {

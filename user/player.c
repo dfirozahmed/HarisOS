@@ -766,16 +766,14 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
     VOLUME = (int)sys_audio_volume(-1);
 
     int first = SEL;
-    if (first >= 0)
-    {
-        SEL = -1; /* play_track loads the info of a song that is not the selected one yet */
-        play_track(first, 0);
-    }
-    render();
+    SEL = -1; /* play_track loads the info of a song that is not the selected one yet */
+    render(); /* the window shows its first picture at once: starting the song reads the drive and takes a while */
     sys_gui_present(h, 0, 0, 0, 0);
+    if (first >= 0)
+        play_track(first, 0);
 
     long long last_draw = 0;
-    int dirty = 0, done = 0;
+    int dirty = first >= 0, done = 0; /* (drawn again at once when a song was started) */
     while (!done)
     {
         GuiEvent ev;

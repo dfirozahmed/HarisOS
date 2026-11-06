@@ -83,6 +83,8 @@ unsigned char *read_whole(int node, unsigned *size_out, int *err)
             return 0;
         }
         done += (unsigned)got;
+        if (task_current() != 0)
+            task_yield(); /* a system call (a program starting another): the main loop that polls the mouse gets a turn between the pieces */
         /* A big program (Player is 2 MB) from a USB drive takes seconds, and the main loop that polls the mouse is busy reading.
          * Between the pieces the arrow is moved, so the pointer does not look frozen. Only the main loop may draw. */
         if (task_current() == 0 && gfx_ready())

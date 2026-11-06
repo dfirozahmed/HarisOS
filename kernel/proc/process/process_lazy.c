@@ -24,9 +24,18 @@ static int image_ok(const LazyImage *im)
     return 1;
 }
 
-/* Make the page at `page` (page aligned) exist if it belongs to a segment of the program. 1 = it is there now (it was, or it was
- * loaded), 0 = no segment has it, -1 = it should be there but cannot be loaded (no memory, the file is gone or unreadable). */
-static int fill_page(const LazyImage *im, AddressSpace *as, u64 page)
+/* Pages loaded by one page fault when the file's bytes go on: a drive is slow per request (a USB stick: a transfer of its own for every
+ * read, whatever its size), so the pages after the one that was touched are read in the same request. A program walks its data forward,
+ * and the next pages are mostly wanted a moment later (the fonts of Player are 1.5 MiB of such pages). */
+#define READ_AHEAD_PAGES 16
+
+static unsigned flags_of(const ElfSegment *s) { return ((s->flags & ELF_PF_W) ? ASPACE_WRITE : 0) | ((s->flags & ELF_PF_X) ? ASPACE_EXEC : 0); }
+
+/* Make the page at `page` (page aligned) exist if it belongs to a segment of the program, together with up to READ_AHEAD_PAGES - 1 pages
+ * that follow it in the file and are not there yet. 1 = the page is there now (it was, or it was loaded), 0 = no segment has it, -1 = it
+ * should be there but cannot be loaded (no memory, the file is gone or unreadable); a failure of a read-ahead page alone is not one: that
+ * page simply loads later, when it is touched. */
+static int fill_page(LazyImage *im, AddressSpace *as, u64 page)
 {
     u64 phys;
     if (aspace_translate(as, page, &phys) == 0)
@@ -38,17 +47,34 @@ static int fill_page(const LazyImage *im, AddressSpace *as, u64 page)
         unsigned dst, len;
         if (!elf_page_source(s, page, &file_off, &dst, &len))
             continue;
-        unsigned char *buf = 0; /* (heap, not stack: a 4 KiB frame needs the stack probe __chkstk, which the kernel does not have) */
+
+        /* how many pages one read covers: this one, then the pages that continue in the file where it ends */
+        unsigned npages = 1, total = len;
+        if (len && dst + len == 4096)
+            while (npages < READ_AHEAD_PAGES)
+            {
+                u64 next = page + (u64)npages * 4096, off2;
+                unsigned dst2, len2;
+                if (!elf_page_source(s, next, &off2, &dst2, &len2) || len2 == 0 || dst2 != 0 || aspace_translate(as, next, &phys) == 0)
+                    break;
+                total += len2;
+                npages++;
+                if (len2 < 4096)
+                    break;
+            }
+
+        unsigned long long t0 = timer_ms();
+        unsigned char *buf = 0; /* (heap, not stack: a frame of 4 KiB or more needs the stack probe __chkstk, which the kernel does not have) */
         if (len)
         {
             if (!image_ok(im))
                 return -1;
-            buf = kmalloc(4096);
+            buf = kmalloc(total);
             if (!buf)
                 return -1;
-            for (unsigned done = 0; done < len;)
+            for (unsigned done = 0; done < total;)
             {
-                int got = vfs_read(im->node, (unsigned)(file_off + done), buf + done, len - done);
+                int got = vfs_read(im->node, (unsigned)(file_off + done), buf + done, total - done);
                 if (got <= 0)
                 {
                     kfree(buf);
@@ -57,16 +83,31 @@ static int fill_page(const LazyImage *im, AddressSpace *as, u64 page)
                 done += (unsigned)got;
             }
         }
-        unsigned flags = ((s->flags & ELF_PF_W) ? ASPACE_WRITE : 0) | ((s->flags & ELF_PF_X) ? ASPACE_EXEC : 0);
-        int ok = aspace_map_new(as, page, flags) == 0 && aspace_translate(as, page, &phys) == 0;
-        if (ok)
+
+        unsigned used = 0; /* bytes of buf placed so far */
+        int result = 1;
+        for (unsigned k = 0; k < npages; k++)
         {
-            volatile unsigned char *to = (volatile unsigned char *)phys + dst; /* (the new page is zero: only the file's bytes are copied; no memcpy) */
-            for (unsigned k = 0; k < len; k++)
-                to[k] = buf[k];
+            u64 va = page + (u64)k * 4096, off2;
+            unsigned dst2, len2;
+            elf_page_source(s, va, &off2, &dst2, &len2);
+            if (aspace_map_new(as, va, flags_of(s)) != 0 || aspace_translate(as, va, &phys) != 0)
+            {
+                if (k == 0)
+                    result = -1; /* the page that was asked for: a real failure; later ones just load when they are touched */
+                break;
+            }
+            volatile unsigned char *to = (volatile unsigned char *)phys + dst2; /* (a new page is zero: only the file's bytes are copied; no memcpy) */
+            for (unsigned b = 0; b < len2; b++)
+                to[b] = buf[used + b];
+            used += len2;
         }
         kfree(buf); /* (NULL for a page that is only .bss) */
-        return ok ? 1 : -1;
+        im->reads += len ? 1 : 0;
+        im->pages += used || len == 0 ? npages : 0;
+        im->bytes += total;
+        im->ms += timer_ms() - t0;
+        return result;
     }
     return 0;
 }
@@ -88,7 +129,7 @@ void process_lazy_ensure(const AddressSpace *as, u64 va, u64 len)
     Process *p = process_current();
     if (!p || !p->lazy || as != task_address_space() || len == 0 || va + len < va)
         return;
-    const LazyImage *im = p->lazy;
+    LazyImage *im = p->lazy;
     for (int i = 0; i < im->nseg; i++) /* only the parts of the range that lie in a segment: a huge bogus length costs nothing */
     {
         u64 lo = im->seg[i].vaddr & ~4095ULL, hi = (im->seg[i].vaddr + im->seg[i].memsz + 4095) & ~4095ULL;
@@ -105,7 +146,7 @@ int process_lazy_populate_all(Process *p, AddressSpace *as)
 {
     if (!p->lazy)
         return 0;
-    const LazyImage *im = p->lazy;
+    LazyImage *im = p->lazy;
     for (int i = 0; i < im->nseg; i++)
     {
         u64 lo = im->seg[i].vaddr & ~4095ULL, hi = (im->seg[i].vaddr + im->seg[i].memsz + 4095) & ~4095ULL;
@@ -121,4 +162,20 @@ void process_lazy_free(Process *p)
 {
     kfree(p->lazy); /* (NULL is fine) */
     p->lazy = 0;
+}
+
+void process_lazy_report(const Process *p)
+{
+    const LazyImage *im = p->lazy;
+    if (!im)
+        return;
+    serial_puts("process: demand paged program loaded ");
+    serial_putd((long long)im->pages);
+    serial_puts(" pages in ");
+    serial_putd((long long)im->reads);
+    serial_puts(" reads, ");
+    serial_putd((long long)(im->bytes / 1024));
+    serial_puts(" KiB, ");
+    serial_putd((long long)im->ms);
+    serial_puts(" ms\n");
 }

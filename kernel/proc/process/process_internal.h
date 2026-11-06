@@ -28,6 +28,8 @@ typedef struct LazyImage
     char name[VFS_NAME_MAX];
     int nseg;
     ElfSegment seg[ELF_MAX_SEGMENTS];
+    unsigned reads, pages, bytes; /* what the loads did so far (printed when the process ends): file reads, pages made, bytes read */
+    unsigned long long ms;        /* time spent in them, ms */
 } LazyImage;
 
 /* ---- types, constants and variables used by more than one file ---- */
@@ -55,6 +57,7 @@ int load_segments(AddressSpace *as, const ElfInfo *info, const void *file, u64 *
 void process_lazy_ensure(const AddressSpace *as, u64 va, u64 len); /* the kernel is about to use [va, va+len): load the pages of it that are not there yet */
 int process_lazy_populate_all(Process *p, AddressSpace *as);       /* load every page, then forget the image (before a fork); 0, or -1 */
 void process_lazy_free(Process *p);
+void process_lazy_report(const Process *p); /* one serial line: how much a demand paged program loaded and how long it took */
 
 /* ---- process_exit.c ---- */
 void purge_exits(int owner);
