@@ -267,6 +267,8 @@ int bt_cmd(unsigned opcode, const void *params, unsigned plen, unsigned char *re
     return BT_E_TIMEOUT;
 }
 
+unsigned bt_acl_credits(void) { return B.credits; }
+
 void bt_acl_reset_credits(void)
 {
     B.credits = B.info.acl_pkts;
@@ -298,8 +300,8 @@ int bt_acl_send(unsigned handle, const unsigned char *pdu, unsigned len)
                 break;
             if (!B.t.alive(B.t.ctx))
                 return BT_E_TRANSPORT;
-            if (++waited > 10000) /* 1 s */
-                return BT_E_TIMEOUT;
+            if (++waited > 2000) /* 200 ms: the caller (bt_poll) may try again later. After a few pieces of a PDU went out the caller cannot. */
+                return off == 0 ? BT_E_TIMEOUT : BT_E_PARTIAL;
             B.t.wait_step(B.t.ctx);
         }
         /* handle (12 bits) and flags: packet boundary 0 = first piece of a PDU, 1 = continuation; length of the data */

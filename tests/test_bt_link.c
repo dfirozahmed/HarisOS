@@ -743,7 +743,7 @@ int main(void)
         for (int i = 0; i < 44; i++)
             pdu[i] = (unsigned char)i;
         pdu[0] = 40; pdu[1] = 0; pdu[2] = 1; pdu[3] = 0; /* an L2CAP PDU of 44 bytes in all */
-        CHECK(bt_acl_send(HANDLE, pdu, 44) == BT_E_TIMEOUT); /* 20 + 20 fit in the two credits; the third piece has to wait */
+        CHECK(bt_acl_send(HANDLE, pdu, 44) == BT_E_PARTIAL); /* 20 + 20 fit in the two credits; the third piece has to wait: it cannot be taken back */
         CHECK(F.nacl == 2);
         F.auto_credit = 1;
         F.nacl = 0;
@@ -947,7 +947,40 @@ int main(void)
         conn_id = sdp_open_start();
         F.clock += 5500;
         bt_poll();
-        CHECK(line_is(4, "sdp: failed: no channel"));
+        CHECK(line_is(4, "sdp: opening a channel to the service directory")); /* 5.5 s is not enough: a device may take its time */
+        F.clock += 5000;
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: no answer to the connection request"));
+        /* the device answered the Connection Request but never configured its side / never accepted ours */
+        conn_id = sdp_open_start();
+        dev_conn_rsp(conn_id, 0);
+        bt_poll();
+        F.clock += 10500;
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: the configuration did not start"));
+        conn_id = sdp_open_start();
+        dev_conn_rsp(conn_id, 0);
+        bt_poll();
+        {
+            unsigned char cqx[8] = {0x40, 0, 0, 0, 1, 2, 0xA0, 0x02};
+            dev_sig(0x04, 0x50, cqx, 8); /* the device configures its side, ours is not accepted */
+            bt_poll();
+        }
+        F.clock += 10500;
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: the device never accepted our configuration"));
+        conn_id = sdp_open_start();
+        dev_conn_rsp(conn_id, 0);
+        bt_poll();
+        {
+            last_sig(0x04, &cfg_id, &d, &dl);
+            unsigned char crx[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+            dev_sig(0x05, cfg_id, crx, 6); /* the device accepts ours but never sends its own */
+            bt_poll();
+        }
+        F.clock += 10500;
+        bt_poll();
+        CHECK(line_is(4, "sdp: failed: the device never sent its configuration"));
 
         /* 18. the channel is open but the answer does not come, or is wrong */
         conn_id = sdp_open_start();
@@ -1279,6 +1312,65 @@ int main(void)
         CHECK(bt_link_state() == BT_LINK_UP);
         CHECK(bt_pair_start() == 0 && line_is(0x80, "pair: authenticating"));
         bt_pair_forget();
+    }
+
+
+    /* ================= diagnostics ================= */
+    {
+        /* the log of what was said on the signalling channel, and the sending statistics */
+        up();
+        CHECK(line_is(0x90, "sig: ->08 ->0a/2 ->0a/3"));
+        CHECK(line_is(0x91, "acl tx: sent 3, not taken 0, credits 1 of 2, packet size 20"));
+        {
+            unsigned a = 0, b = 0, c = 0;
+            const unsigned char *d2;
+            unsigned dl2;
+            collect();
+            sig_of(0, &a, &d2, &dl2);
+            sig_of(1, &b, &d2, &dl2);
+            sig_of(2, &c, &d2, &dl2);
+            unsigned char x[8] = {2, 0, 0, 0, 0xA8, 0, 0, 0};
+            dev_sig(0x0B, b, x, 8);
+            unsigned char rej[2] = {0, 0};
+            dev_sig(0x01, c, rej, 2);
+            bt_poll();
+        }
+        CHECK(line_is(0x90, "sig: ->08 ->0a/2 ->0a/3 <-0b/2 <-01"));
+        CHECK(bt_link_line(0x92, buf, sizeof buf) == -1);
+        /* only the last ten are shown, oldest first */
+        for (int i = 0; i < 14; i++)
+        {
+            unsigned char t2[2] = {2, 0};
+            dev_sig(0x0A, 0x70 + i, t2, 2);
+            bt_poll();
+        }
+        CHECK(bt_link_line(0x90, buf, sizeof buf) > 0 && strncmp(buf, "sig: ", 5) == 0);
+        {
+            int n_arrows = 0;
+            for (const char *q = buf; *q; q++)
+                n_arrows += (q[0] == '-' && q[1] == '>') || (q[0] == '<' && q[1] == '-');
+            CHECK(n_arrows == 10);
+        }
+
+        /* the chip does not take a packet right now (no credits): nothing is lost, it goes out when there is room */
+        fresh();
+        F.auto_credit = 0;
+        CHECK(bt_link_connect(ADDR) == 0);
+        ev_conn_complete(0, HANDLE, ADDR_LSB);
+        bt_poll();
+        CHECK(F.nacl == 2); /* two credits: echo and the first Information Request; the third waited */
+        CHECK(line_is(0x91, "acl tx: sent 2, not taken 1, credits 0 of 2, packet size 20"));
+        F.auto_credit = 1; /* the chip reports the two packets as done */
+        bt_poll();
+        bt_poll();
+        CHECK(F.nacl == 3);
+        collect();
+        {
+            unsigned id3 = 0, dl3 = 0;
+            const unsigned char *d3;
+            CHECK(sig_of(2, &id3, &d3, &dl3) == 0x0A && le16(d3) == 3); /* the third is the one that waited: not lost, not doubled */
+        }
+        CHECK(line_is(0x91, "acl tx: sent 3, not taken 1, credits 1 of 2, packet size 20"));
     }
 
     printf("bt_link: %d checks, %d failed\n", checks, failures);

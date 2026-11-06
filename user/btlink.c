@@ -168,5 +168,7 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
     }
     if (sys_btlink(0, line, sizeof line) >= 0)
         fdprintf(1, "%s\n", line);
+    for (unsigned i = 0x90; sys_btlink(i, line, sizeof line) >= 0; i++) /* diagnostics: what was said on the signalling channel */
+        fdprintf(1, "%s\n", line);
     sys_exit(ok ? 0 : 1);
 }

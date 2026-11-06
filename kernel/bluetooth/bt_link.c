@@ -83,6 +83,9 @@ static struct
     unsigned char rx[RX_MAX];  /* the L2CAP PDU being put together from ACL fragments */
     unsigned rx_have, rx_need;
     unsigned acl_rx, acl_other;
+    unsigned tx_sent, tx_fail;     /* ACL packets handed to the chip / attempts the chip did not take */
+    unsigned char trace[16][2];    /* the last signalling commands, both ways: direction + code, and a detail */
+    unsigned ntrace;
 } L;
 
 static int chan_sig(unsigned code, unsigned id, const unsigned char *d, unsigned n);
@@ -118,10 +121,40 @@ BtLinkState bt_link_state(void) { return L.state; }
 /* ---- sending signalling commands ---- */
 
 /* Queue one command on the signalling channel (cid 1): PDU = length (2), cid (2), command code, id, command length (2), data. */
+/* The log of signalling commands: what we sent (tx) and what the device sent, each with the one detail that tells the most (the PSM of a
+ * Connection Request, the result of a response, the type of an Information Request ...). For the person who has to find out why a
+ * channel does not open. */
+static unsigned trace_aux(int tx, unsigned code, const unsigned char *d, unsigned n)
+{
+    (void)tx;
+    switch (code)
+    {
+    case SIG_CONNECTION_REQ: /* psm */
+    case SIG_INFO_REQ:       /* type */
+    case SIG_INFO_RSP:       /* type */
+    case SIG_COMMAND_REJECT: /* reason */
+        return n >= 2 ? le16(d) : 0;
+    case SIG_CONNECTION_RSP: /* dcid, scid, result */
+    case SIG_CONFIG_RSP:     /* scid, flags, result */
+        return code == SIG_CONNECTION_RSP ? (n >= 6 ? le16(d + 4) : 0) : (n >= 6 ? le16(d + 4) : 0);
+    default:
+        return 0;
+    }
+}
+
+static void trace_add(int tx, unsigned code, const unsigned char *d, unsigned n)
+{
+    unsigned char *t = L.trace[L.ntrace++ % 16];
+    t[0] = (unsigned char)((tx ? 0x80 : 0) | (code & 0x7F));
+    unsigned a = trace_aux(tx, code, d, n);
+    t[1] = (unsigned char)(a > 255 ? 255 : a);
+}
+
 static void sig_queue(unsigned code, unsigned id, const unsigned char *data, unsigned n)
 {
     if (L.txh - L.txt >= TXQ_N || n > PDU_MAX - 8)
         return;
+    trace_add(1, code, data, n);
     Pdu *p = &L.txq[L.txh++ % TXQ_N];
     put16(p->data, 4 + n);
     put16(p->data + 2, 1);
@@ -159,6 +192,7 @@ static void sig_command(unsigned code, unsigned id, const unsigned char *d, unsi
 {
     unsigned char r[16];
     L.peer_cmds++;
+    trace_add(0, code, d, n);
     if (chan_sig(code, id, d, n)) /* about a channel we opened */
         return;
     switch (code)
@@ -285,7 +319,7 @@ static void sig_pdu(const unsigned char *p, unsigned n)
 #define SDP_PSM 1
 #define SDP_ACC_MAX 2560
 #define SDP_MAX_BYTES 400 /* the most attribute data the device may put in one answer */
-#define CHAN_LIMIT_MS 5000
+#define CHAN_LIMIT_MS 10000
 #define SDP_LIMIT_MS 5000
 
 enum { CH_FREE, CH_CONNECTING, CH_CONFIG, CH_OPEN, CH_CLOSING };
@@ -643,9 +677,13 @@ static void sdp_step(unsigned long long now)
         }
         else if (now && now - c->t0 > CHAN_LIMIT_MS)
         {
+            /* where did it stop? the Connection Response, our Configuration being accepted, or the device's own Configuration Request */
+            SD.why = c->state == CH_CONNECTING ? "no answer to the connection request"
+                     : (!c->cfg_acked && !c->cfg_peer) ? "the configuration did not start"
+                     : c->cfg_acked ? "the device never sent its configuration"
+                                    : "the device never accepted our configuration";
             c->state = CH_FREE;
             SD.state = SDP_FAILED;
-            SD.why = "no channel";
             SD.code = 0;
         }
     }
@@ -921,9 +959,18 @@ void bt_link_step(void)
     /* send what is queued; copy the entry first, sending may handle events that queue more */
     while (L.txt != L.txh && L.state == BT_LINK_UP)
     {
-        Pdu p = L.txq[L.txt++ % TXQ_N];
-        if (bt_acl_send(L.handle, p.data, p.len) < 0)
+        Pdu p = L.txq[L.txt % TXQ_N];
+        int rc = bt_acl_send(L.handle, p.data, p.len);
+        if (rc < 0)
+        {
+            L.tx_fail++;
+            if (rc == BT_E_TIMEOUT && L.tx_fail < 40) /* the chip has no room right now, nothing went out: the PDU stays, next poll */
+                break;
+            L.txt++; /* it cannot be sent whole (or the chip keeps refusing): given up */
             break;
+        }
+        L.txt++;
+        L.tx_sent++;
     }
 
     if (L.probe == 1)
@@ -1108,6 +1155,51 @@ static int sdp_line(unsigned index, Out *o)
     return 0;
 }
 
+/* Lines 0x90 and 0x91: what was said on the signalling channel (last 10 commands, "->" ours, "<-" the device's) and the sending statistics. */
+static int diag_line(unsigned index, char *buf, unsigned cap)
+{
+    if (cap < 2 || index > 1)
+        return -1;
+    Out o = {buf, cap, 0, 0};
+    if (index == 0)
+    {
+        puts_(&o, "sig:");
+        unsigned shown = L.ntrace < 10 ? L.ntrace : 10;
+        for (unsigned i = L.ntrace - shown; i < L.ntrace; i++)
+        {
+            const unsigned char *t = L.trace[i % 16];
+            unsigned code = t[0] & 0x7F;
+            puts_(&o, (t[0] & 0x80) ? " ->" : " <-");
+            putx(&o, code, 2);
+            if (t[1] || code == SIG_CONNECTION_RSP || code == SIG_CONFIG_RSP)
+            {
+                putc_(&o, '/');
+                putx(&o, t[1], t[1] > 15 ? 2 : 1);
+            }
+        }
+        if (!shown)
+            puts_(&o, " -");
+    }
+    else
+    {
+        const BtInfo *bi = bt_info();
+        puts_(&o, "acl tx: sent ");
+        putd(&o, (int)L.tx_sent);
+        puts_(&o, ", not taken ");
+        putd(&o, (int)L.tx_fail);
+        puts_(&o, ", credits ");
+        putd(&o, (int)bt_acl_credits());
+        puts_(&o, " of ");
+        putd(&o, bi->acl_pkts);
+        puts_(&o, ", packet size ");
+        putd(&o, bi->acl_mtu);
+    }
+    buf[o.n] = 0;
+    if (o.cut)
+        return -1;
+    return (int)o.n;
+}
+
 /* HCI status / reason codes people meet (Core specification volume 1 part F) */
 static const char *reason_word(int code)
 {
@@ -1141,6 +1233,8 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
 {
     if (cap < 2)
         return -1;
+    if (index >= 0x90) /* diagnostics */
+        return diag_line(index - 0x90, buf, cap);
     if (index >= 0x80) /* the pairing lines */
         return bt_pair_line(index - 0x80, buf, cap);
     Out o = {buf, cap, 0, 0};

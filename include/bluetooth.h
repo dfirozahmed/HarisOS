@@ -85,6 +85,7 @@ typedef struct
 #define BT_E_TIMEOUT (-2)
 #define BT_E_SHORT (-3) /* the answer is too short to hold what was asked for */
 #define BT_E_BUSY (-4)  /* no chip attached */
+#define BT_E_PARTIAL (-5) /* bt_acl_send: the chip stopped taking packets after some pieces of the PDU went out */
 
 /* ---- transport side ---- */
 void bt_attach(const BtTransport *t, unsigned short vid, unsigned short pid); /* runs the start-up commands (blocks for a while) */
@@ -181,6 +182,7 @@ int bt_link_line(unsigned index, char *buf, unsigned cap);
  * waits (a little) for room in the chip's buffers. Not to be called from inside an event or ACL handler. 0 or a BT_E_* value. */
 int bt_acl_send(unsigned handle, const unsigned char *pdu, unsigned len);
 void bt_acl_reset_credits(void); /* the link ended: whatever was in the chip's buffers is gone */
+unsigned bt_acl_credits(void);   /* ACL packets we may send right now */
 
 /* ---- service discovery (SDP): kernel/bluetooth/bt_sdp.c reads the answers, bt_link.c asks ----
  * A device lists what it can do in "service records". bt_sdp_browse() opens an L2CAP channel to the device's service directory (PSM 1) over
