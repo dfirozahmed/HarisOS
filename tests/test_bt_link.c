@@ -435,7 +435,7 @@ static unsigned sdp_open_finish(unsigned conn_id)
     unsigned char cq[8] = {0x40, 0, 0, 0, 1, 2, 0xA0, 0x02};
     dev_sig(0x04, 0x50, cq, 8);
     bt_poll();
-    unsigned char cr[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+    unsigned char cr[6] = {0x40, 0, 0, 0, 0, 0}; /* the answer names OUR end of the channel (0x40), as Linux and the real headset do */
     dev_sig(0x05, cfg_id, cr, 6);
     bt_poll();
     return cfg_id;
@@ -834,7 +834,7 @@ int main(void)
         bt_poll();
         CHECK(last_sig(0x05, &id, &d, &dl) && id == 0x50 && dl == 6 && le16(d) == DEV_CID && le16(d + 2) == 0 && le16(d + 4) == 0); /* we accept */
         CHECK(line_is(4, "sdp: opening a channel to the service directory")); /* ours is not acknowledged yet */
-        unsigned char cr[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+        unsigned char cr[6] = {0x40, 0, 0, 0, 0, 0};
         dev_sig(0x05, cfg_id, cr, 6);
         bt_poll();
         CHECK(line_is(4, "sdp: asking, 0 bytes so far"));
@@ -893,13 +893,33 @@ int main(void)
         {
             unsigned char cq3[8] = {0x40, 0, 0, 0, 1, 2, 0xA0, 0x02};
             dev_sig(0x04, 0x50, cq3, 8);
-            unsigned char cr3[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+            unsigned char cr3[6] = {0x40, 0, 0, 0, 0, 0};
             dev_sig(0x05, (cfg_id + 1) & 0xFF, cr3, 6); /* acknowledges some other Configuration Request */
             bt_poll();
             CHECK(line_is(4, "sdp: opening a channel to the service directory"));
             dev_sig(0x05, cfg_id, cr3, 6);
             bt_poll();
             CHECK(line_is(4, "sdp: asking, 0 bytes so far"));
+        }
+
+        /* 16c. the Configuration Response names OUR end of the channel. A device that sends its own channel number is tolerated (the
+         * identifier says which request it answers); a number that is neither does not count */
+        {
+            static const unsigned cids[3] = {DEV_CID, 0x0123, 0x0040}; /* its own, unrelated, ours */
+            static const int opens[3] = {1, 0, 1};
+            for (int k = 0; k < 3; k++)
+            {
+                conn_id = sdp_open_start();
+                dev_conn_rsp(conn_id, 0);
+                bt_poll();
+                CHECK(last_sig(0x04, &cfg_id, &d, &dl));
+                unsigned char cqz[8] = {0x40, 0, 0, 0, 1, 2, 0xA0, 0x02};
+                dev_sig(0x04, 0x50, cqz, 8);
+                unsigned char crz[6] = {(unsigned char)cids[k], (unsigned char)(cids[k] >> 8), 0, 0, 0, 0};
+                dev_sig(0x05, cfg_id, crz, 6);
+                bt_poll();
+                CHECK(line_is(4, opens[k] ? "sdp: asking, 0 bytes so far" : "sdp: opening a channel to the service directory"));
+            }
         }
 
         /* 17. a channel that is refused: PSM not supported, security block, no resources */
@@ -933,7 +953,7 @@ int main(void)
         dev_conn_rsp(conn_id, 0);
         bt_poll();
         CHECK(last_sig(0x04, &cfg_id, &d, &dl));
-        unsigned char bad[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 2, 0};
+        unsigned char bad[6] = {0x40, 0, 0, 0, 2, 0};
         dev_sig(0x05, cfg_id, bad, 6);
         bt_poll();
         CHECK(line_is(4, "sdp: failed: channel refused (configuration refused, result 2)"));
@@ -974,7 +994,7 @@ int main(void)
         bt_poll();
         {
             last_sig(0x04, &cfg_id, &d, &dl);
-            unsigned char crx[6] = {DEV_CID & 0xFF, DEV_CID >> 8, 0, 0, 0, 0};
+            unsigned char crx[6] = {0x40, 0, 0, 0, 0, 0};
             dev_sig(0x05, cfg_id, crx, 6); /* the device accepts ours but never sends its own */
             bt_poll();
         }

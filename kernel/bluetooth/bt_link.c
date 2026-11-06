@@ -484,14 +484,16 @@ static int chan_sig(unsigned code, unsigned id, const unsigned char *d, unsigned
         }
         return 1;
     }
-    case SIG_CONFIG_RSP: /* scid (2: the device's end), flags (2), result (2), options */
+    case SIG_CONFIG_RSP: /* scid (2), flags (2), result (2), options. The scid is the CID of the endpoint the answer is for: OURS (as Linux
+                          * l2cap_config_rsp reads it: it looks the channel up by its own scid). A device that sends its own CID instead is tolerated:
+                          * the identifier names the request exactly. */
     {
         if (n < 6)
             return 1;
         for (int i = 0; i < CHAN_N; i++)
         {
             Chan *c = &CH[i];
-            if (c->state == CH_CONFIG && c->dcid == le16(d) && c->cfg_id == id)
+            if (c->state == CH_CONFIG && (c->scid == le16(d) || c->dcid == le16(d)) && c->cfg_id == id)
             {
                 if (le16(d + 4) == 0)
                 {
