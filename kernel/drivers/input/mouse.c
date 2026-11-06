@@ -247,11 +247,34 @@ int mouse_poll(MouseState *out)
     return changed;
 }
 
+int mouse_peek(int *x, int *y)
+{
+    if (!PRESENT && !USB_OK && !I2C_OK)
+        return 0;
+    /* Same sources as mouse_poll(), but BUTTONS is not stored (mouse_poll() works it out again and sees the change itself) and
+     * the wheel is dropped. PS/2 bytes are not touched: they stay queued for mouse_poll(). */
+    int dx = 0, dy = 0, wheel = 0;
+    unsigned buttons = 0;
+    if (USB_OK)
+        usb_poll(&dx, &dy, &wheel, &buttons);
+    if (I2C_OK)
+        i2c_hid_poll(&dx, &dy, &wheel, &buttons);
+    if (dx || dy)
+    {
+        X = clamp(X + accel(dx), 0, SW - 1);
+        Y = clamp(Y + accel(dy), 0, SH - 1);
+    }
+    *x = X;
+    *y = Y;
+    return 1;
+}
+
 #else /* not x86: no PS/2 controller */
 
 int mouse_init(int w, int h) { (void)w; (void)h; return -1; }
 int mouse_present(void) { return 0; }
 int mouse_sources(void) { return 0; }
+int mouse_peek(int *x, int *y) { (void)x; (void)y; return 0; }
 int mouse_poll(MouseState *out)
 {
     out->x = out->y = out->dx = out->dy = out->wheel = 0;

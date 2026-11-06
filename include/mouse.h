@@ -26,6 +26,11 @@ int mouse_init(int screen_w, int screen_h);
 /* Returns 1 if anything changed (movement, wheel or buttons), else 0. */
 int mouse_poll(MouseState *out);
 
+/* For code that blocks the main loop for a while (reading a big file from a USB drive): takes the pointer movement that has
+ * arrived, so the arrow can be drawn at its new place. Buttons and the wheel are left alone: the next mouse_poll() still sees
+ * every press and release. 0 without a mouse. */
+int mouse_peek(int *x, int *y);
+
 int mouse_present(void);
 
 /* Which back-ends found a device: MOUSE_SRC_* bits (used by the Device Manager). */

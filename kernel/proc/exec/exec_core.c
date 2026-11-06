@@ -1,5 +1,7 @@
 /* Running a program that is a file on a drive: find, read, load, start. */
 #include "exec_internal.h"
+#include "gfx.h"
+#include "mouse.h"
 
 /* HarisOS exec: see include/exec.h. */
 
@@ -81,6 +83,14 @@ unsigned char *read_whole(int node, unsigned *size_out, int *err)
             return 0;
         }
         done += (unsigned)got;
+        /* A big program (Player is 2 MB) from a USB drive takes seconds, and the main loop that polls the mouse is busy reading.
+         * Between the pieces the arrow is moved, so the pointer does not look frozen. Only the main loop may draw. */
+        if (task_current() == 0 && gfx_ready())
+        {
+            int mx, my;
+            if (mouse_peek(&mx, &my))
+                gfx_cursor_move(mx, my);
+        }
     }
     *size_out = size;
     return buf;
