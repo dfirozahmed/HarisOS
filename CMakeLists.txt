@@ -205,6 +205,7 @@ set(KERNEL_SOURCES
     kernel/drivers/net/rtl8821ce/rtl8821ce_select.c         # Realtek RTL8821CE Wi-Fi: choosing a network at run time
     kernel/net/wpa.c                 # network: WPA2 crypto (SHA-1, HMAC, PBKDF2, AES, the 4-way handshake; host-tested)
     kernel/audio/wav.c                       # sound: WAV file header and conversion to 48 kHz stereo (host-tested)
+    kernel/audio/audio_bt.c                  # sound: to a Bluetooth headset (A2DP ring)
     kernel/audio/audio.c                     # sound: audio_play_wav, the part programs use
     kernel/drivers/audio/hda/hda_ctrl.c      # sound: Intel HD Audio controller (reset, CORB / RIRB, output stream; polled)
     kernel/drivers/audio/hda/hda_codec.c     # sound: HD Audio codec graph (output paths pin <- DAC; host-tested)
@@ -441,7 +442,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan btscan btlink gstest play vol player)
+set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan btscan btlink btaudio gstest play vol player)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

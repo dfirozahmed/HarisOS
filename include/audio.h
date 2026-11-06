@@ -20,6 +20,10 @@
 void audio_stop(int request);
 int audio_stop_requested(void);
 
+/* Sound to a Bluetooth headset (kernel/audio/audio_bt.c): ready when an A2DP stream is open at 48 kHz (see btaudio) */
+int audio_bt_ready(void);
+int audio_bt_play(const short *stereo48k, unsigned long frames);
+
 int audio_play_wav(const unsigned char *file, unsigned long len);
 
 /*   audio_volume();               master volume 0..100 (%), or -1 when there is no sound hardware with an output

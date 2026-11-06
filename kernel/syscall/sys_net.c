@@ -119,7 +119,7 @@ long long sys_btlink(const SyscallFrame *f)
     if (f->rdi == SYS_BTLINK_PAIR)
         return bt_pair_start();
     if (f->rdi == SYS_BTLINK_A2DP)
-        return bt_avdtp_start();
+        return f->rsi == 1 ? bt_avdtp_start_keep() : bt_avdtp_start();
     if (f->rdi == SYS_BTLINK_A2DP_STOP)
         return bt_avdtp_stop();
     if (f->rdi == SYS_BTLINK_TONE)

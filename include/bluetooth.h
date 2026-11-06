@@ -277,6 +277,10 @@ int bt_avdtp_parse_caps(const unsigned char *p, unsigned n, BtSbcCaps *out);
 int bt_avdtp_choose(const BtSbcCaps *caps, BtSbcConfig *cfg);
 unsigned bt_avdtp_set_config(unsigned char *out, unsigned cap, unsigned acp_seid, unsigned int_seid, const BtSbcConfig *cfg);
 int bt_avdtp_start(void);
+int bt_avdtp_start_keep(void); /* the same, but stays "ready" after Open: the stream is started when audio comes and suspended when it stops (bt_a2dp_*) */
+int bt_avdtp_ready(void);      /* the stream is open and its media channel usable, started or not */
+int bt_avdtp_stream_start(void);   /* Start, when ready: 1 if the command went out */
+int bt_avdtp_stream_suspend(void); /* Suspend, when streaming: 1 if the command went out */
 int bt_avdtp_stop(void);
 int bt_avdtp_streaming(void); /* 1 while the sink has accepted Start */
 int bt_avdtp_line(unsigned index, char *buf, unsigned cap);
@@ -287,10 +291,20 @@ int bt_avdtp_line(unsigned index, char *buf, unsigned cap);
  * is the text line 0xB0 of bt_link_line(). Later the audio of programs goes the same way. */
 int bt_a2dp_tone(unsigned seconds); /* 0 = started; BT_E_NOT_UP: no stream; BT_E_LINK_BUSY: it plays already */
 void bt_a2dp_stop_audio(void);
+/* The audio of programs: samples are put into a ring (bt_a2dp_ring_write) by the program's side; the main loop's bt_a2dp_step starts the stream
+ * when they come, sends them as SBC in RTP at the speed of the music, and suspends the stream when they stop. */
+int bt_a2dp_audio_ready(void);                                        /* the stream is open and agreed at 48 kHz: audio can go to it */
+int bt_a2dp_producer_begin(void);                                     /* 0, or BT_E_LINK_BUSY if a program (or the tune) uses the stream */
+void bt_a2dp_producer_end(void);
+unsigned bt_a2dp_ring_write(const short *stereo, unsigned frames);    /* returns how many sample frames fitted; never blocks */
+unsigned bt_a2dp_ring_pending(void);                                  /* sample frames in the ring */
+void bt_a2dp_flush(void);                                             /* drop what is in the ring */
+int bt_a2dp_volume(void);                                             /* software volume 0 .. 100 % (the headset has its own too) */
+int bt_a2dp_set_volume(int percent);
 int bt_a2dp_line(unsigned index, char *buf, unsigned cap);
 void bt_a2dp_step(unsigned long long now);
 void bt_a2dp_reset(void);
-int bt_avdtp_media(int *slot, BtSbcConfig *cfg); /* 1 while streaming: the media channel's slot and the agreed setting */
+int bt_avdtp_media(int *slot, BtSbcConfig *cfg); /* 1 while the stream is open (bt_avdtp_ready()): the media channel's slot and the agreed setting */
 int bt_chan_send(int slot, const unsigned char *data, unsigned n); /* one PDU on the channel now (the media packets: up to 1000 bytes). Not inside handlers. */
 
 /* ---- L2CAP channels for the protocols above (bt_link.c): SDP and AVDTP use these ---- */

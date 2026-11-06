@@ -851,6 +851,12 @@ int bt_avdtp_start(void)
     BT_AV_STARTS++;
     return BT_AV_RESULT;
 }
+static int BT_AV_KEEPS = 0;
+int bt_avdtp_start_keep(void)
+{
+    BT_AV_KEEPS++;
+    return BT_AV_RESULT;
+}
 int bt_avdtp_stop(void)
 {
     BT_AV_STOPS++;
@@ -2660,6 +2666,10 @@ int main(void)
         CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP, 0, 0) == 0 && BT_AV_STARTS == 1);   /* prepare a music stream */
         BT_AV_RESULT = -102;
         CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP, 0, 0) == -102);                     /* the reason is passed on */
+        BT_AV_RESULT = 0;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP, 1, 0) == 0 && BT_AV_KEEPS == 1 && BT_AV_STARTS == 2); /* rsi = 1: the stream stays open ("keep"), plain start not used */
+        BT_AV_RESULT = -102;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP, 1, 0) == -102);
         BT_AV_RESULT = 0;
         CHECK(call(SYS_BTLINK, SYS_BTLINK_A2DP_STOP, 0, 0) == 0 && BT_AV_STOPS == 1);
         CHECK(call(SYS_BTLINK, SYS_BTLINK_TONE, 6, 0) == 0 && BT_TONE_SECONDS == 6);      /* a test tune for 6 seconds */

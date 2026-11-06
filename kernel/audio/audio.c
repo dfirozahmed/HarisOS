@@ -1,14 +1,16 @@
 /* Sound for programs: turns a WAV file image into 48 kHz stereo samples and hands them to the HD Audio driver. */
 #include "audio.h"
+#include "bluetooth.h"
 #include "hda.h"
 #include "pmm.h"
 #include "usb.h"
 #include "wav.h"
 
-/* Volume belongs to the device that plays: HD Audio when there is one, else the USB sound device (if it has a volume control). */
-int audio_volume(void) { return hda_ready() ? hda_volume() : usb_audio_volume(); }
+/* Volume belongs to the device that plays: a Bluetooth headset when one is connected for audio (a software volume here), else HD Audio when
+ * there is one, else the USB sound device (if it has a volume control). */
+int audio_volume(void) { return audio_bt_ready() ? bt_a2dp_volume() : hda_ready() ? hda_volume() : usb_audio_volume(); }
 
-int audio_set_volume(int percent) { return hda_ready() ? hda_set_volume(percent) : usb_audio_set_volume(percent); }
+int audio_set_volume(int percent) { return audio_bt_ready() ? bt_a2dp_set_volume(percent) : hda_ready() ? hda_set_volume(percent) : usb_audio_set_volume(percent); }
 
 int audio_volume_step(int delta)
 {
@@ -38,8 +40,9 @@ int audio_play_wav(const unsigned char *file, unsigned long len)
     int e = wav_parse(file, len, &wi);
     if (e)
         return e;
-    int use_hda = hda_ready();
-    if (!use_hda && !usb_audio_ready())
+    int use_bt = audio_bt_ready(); /* a connected headset wins: that is what the person asked for with btaudio */
+    int use_hda = !use_bt && hda_ready();
+    if (!use_bt && !use_hda && !usb_audio_ready())
         return AUDIO_ERR_NONE;
     unsigned long frames = wav_frames_48k(&wi);
     if (frames == 0 || frames > HDA_MAX_FRAMES)
@@ -50,9 +53,11 @@ int audio_play_wav(const unsigned char *file, unsigned long len)
     if (!buf)
         return AUDIO_ERR_MEMORY;
     wav_to_48k_stereo16(file, &wi, (short *)buf, frames);
-    int r = use_hda ? hda_play_pcm((const short *)buf, frames) : usb_audio_play_pcm((const short *)buf, frames); /* HD Audio first, else a USB sound device */
+    int r = use_bt ? audio_bt_play((const short *)buf, frames) : use_hda ? hda_play_pcm((const short *)buf, frames) : usb_audio_play_pcm((const short *)buf, frames);
     pmm_free_contiguous(buf, pages);
     if (stopped())
         return AUDIO_ERR_STOPPED;
+    if (r == AUDIO_ERR_STOPPED)
+        return r;
     return r == 0 ? 0 : AUDIO_ERR_BUSY; /* the only way to fail here is a stream that is in use or does not move */
 }

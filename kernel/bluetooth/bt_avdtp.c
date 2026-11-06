@@ -21,6 +21,7 @@
 #define SIG_OPEN 0x06
 #define SIG_START 0x07
 #define SIG_CLOSE 0x08
+#define SIG_SUSPEND 0x09
 #define SIG_GET_ALL_CAPABILITIES 0x0C
 
 #define MSG_COMMAND 0
@@ -186,6 +187,8 @@ enum
     AV_MEDIACHAN,  /* opening the media channel */
     AV_STARTING,
     AV_STREAMING,
+    AV_READY,      /* "keep" mode: the stream is open and its media channel too, but the sink was not told to expect audio (Start) */
+    AV_SUSPENDING, /* Suspend sent: audio stops, the stream stays open */
     AV_CLOSING,
     AV_CLOSED,
     AV_FAILED
@@ -211,6 +214,7 @@ static struct
     int configured;
     BtSbcConfig cfg;
     int tried_all;             /* Get All Capabilities was used after Get Capabilities was refused */
+    int keep;                  /* stay ready after Open instead of starting at once: the stream is started when audio comes, suspended when it stops */
 } A;
 
 static const char *sig_name(unsigned sig)
@@ -224,6 +228,7 @@ static const char *sig_name(unsigned sig)
     case SIG_OPEN: return "Open";
     case SIG_START: return "Start";
     case SIG_CLOSE: return "Close";
+    case SIG_SUSPEND: return "Suspend";
     default: return "a command";
     }
 }
@@ -336,6 +341,9 @@ static void accepted(unsigned sig, const unsigned char *p, unsigned n)
     case SIG_START:
         A.state = AV_STREAMING;
         return;
+    case SIG_SUSPEND:
+        A.state = AV_READY;
+        return;
     case SIG_CLOSE:
         if (A.media >= 0)
             bt_chan_close(A.media);
@@ -398,7 +406,7 @@ void bt_avdtp_rx(int user, const unsigned char *d, unsigned n)
     }
 }
 
-int bt_avdtp_start(void)
+static int start_common(int keep)
 {
     if (bt_link_state() != BT_LINK_UP)
         return BT_E_NOT_UP;
@@ -414,15 +422,19 @@ int bt_avdtp_start(void)
     A.sig = bt_chan_open(AVDTP_PSM, BT_USER_AVDTP_SIG);
     if (A.sig < 0)
         return BT_E_LINK_BUSY;
+    A.keep = keep;
     A.state = AV_SIGCHAN;
     A.t0 = bt_now();
     return 0;
 }
 
+int bt_avdtp_start(void) { return start_common(0); }
+int bt_avdtp_start_keep(void) { return start_common(1); }
+
 int bt_avdtp_stop(void)
 {
     bt_a2dp_stop_audio(); /* the sound stops before the stream is closed */
-    if (A.state == AV_STREAMING || A.state == AV_STARTING)
+    if (A.state == AV_STREAMING || A.state == AV_STARTING || A.state == AV_READY || A.state == AV_SUSPENDING)
     {
         A.state = AV_CLOSING;
         send_seid_command(SIG_CLOSE);
@@ -493,8 +505,13 @@ void bt_avdtp_step(unsigned long long now)
         int st = bt_chan_state(A.media);
         if (st == BT_CHAN_OPEN)
         {
-            A.state = AV_STARTING; /* the stream is open and its channel is there: tell the sink that audio follows */
-            send_seid_command(SIG_START);
+            if (A.keep)
+                A.state = AV_READY; /* open and waiting: bt_avdtp_stream_start() tells the sink when audio comes */
+            else
+            {
+                A.state = AV_STARTING; /* the stream is open and its channel is there: tell the sink that audio follows */
+                send_seid_command(SIG_START);
+            }
         }
         else if (st == BT_CHAN_FREE)
             fail("the media channel was refused", bt_chan_result(A.media));
@@ -502,7 +519,7 @@ void bt_avdtp_step(unsigned long long now)
             fail("the media channel did not open", 0);
         return;
     }
-    if (A.state == AV_STREAMING && A.media >= 0 && bt_chan_state(A.media) != BT_CHAN_OPEN)
+    if ((A.state == AV_STREAMING || A.state == AV_READY || A.state == AV_SUSPENDING) && A.media >= 0 && bt_chan_state(A.media) != BT_CHAN_OPEN)
     {
         fail("the device closed the media channel", 0);
         return;
@@ -601,6 +618,8 @@ int bt_avdtp_line(unsigned index, char *buf, unsigned cap)
         case AV_MEDIACHAN: puts_(&o, "opening the media channel"); break;
         case AV_STARTING: puts_(&o, "starting the stream"); break;
         case AV_STREAMING: puts_(&o, "streaming (the sink accepted Start)"); break;
+        case AV_READY: puts_(&o, "ready (stream open, no audio yet)"); break;
+        case AV_SUSPENDING: puts_(&o, "suspending the stream"); break;
         case AV_CLOSING: puts_(&o, "closing the stream"); break;
         case AV_CLOSED: puts_(&o, "closed"); break;
         default:
@@ -668,9 +687,32 @@ int bt_avdtp_line(unsigned index, char *buf, unsigned cap)
 
 int bt_avdtp_streaming(void) { return A.state == AV_STREAMING; }
 
+/* the stream is open and its media channel usable (started or not) */
+int bt_avdtp_ready(void) { return (A.state == AV_READY || A.state == AV_STARTING || A.state == AV_STREAMING || A.state == AV_SUSPENDING) && A.media >= 0; }
+
+/* Tell the sink that audio comes (Start). 1 = the command went out, 0 = not now (not ready, or another command is waiting for its answer) */
+int bt_avdtp_stream_start(void)
+{
+    if (A.state != AV_READY || A.pending)
+        return 0;
+    A.state = AV_STARTING;
+    send_seid_command(SIG_START);
+    return A.state == AV_STARTING;
+}
+
+/* Audio stopped: Suspend (the stream stays open, the sink may go quiet or save power). */
+int bt_avdtp_stream_suspend(void)
+{
+    if (A.state != AV_STREAMING || A.pending)
+        return 0;
+    A.state = AV_SUSPENDING;
+    send_seid_command(SIG_SUSPEND);
+    return A.state == AV_SUSPENDING;
+}
+
 int bt_avdtp_media(int *slot, BtSbcConfig *cfg)
 {
-    if (A.state != AV_STREAMING || A.media < 0)
+    if (!bt_avdtp_ready())
         return 0;
     if (slot)
         *slot = A.media;

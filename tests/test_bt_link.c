@@ -1,6 +1,8 @@
 /* Host test of the Bluetooth ACL link and L2CAP signalling (kernel/bluetooth/bt_link.c, and the ACL part of bt_hci.c) against a fake chip
  * and a fake device that answers on the signalling channel. */
 #include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "bluetooth.h"
@@ -639,6 +641,102 @@ static int crossings(int from, int to)
         c += (AUD[2 * (i - 1)] < 0) != (AUD[2 * i] < 0);
     return c;
 }
+
+/* ---- audio of programs: the "keep" mode (stream open, started when sound comes) and the ring ---- */
+
+/* a link with the stream open in keep mode: nothing is started yet */
+static void av_keep_caps(const unsigned char *caps, unsigned n)
+{
+    up();
+    CHECK(bt_avdtp_start_keep() == 0);
+    bt_poll();
+    chan_handshake(0x40, SIG_CID_DEV);
+    av_accept(SIG_CID_DEV, 0x01, SEPS, sizeof SEPS);
+    av_accept(SIG_CID_DEV, 0x02, caps, n);
+    av_accept(SIG_CID_DEV, 0x03, 0, 0);
+    av_accept(SIG_CID_DEV, 0x06, 0, 0);
+    chan_handshake(0x41, MEDIA_CID_DEV);
+}
+
+static void av_keep(void)
+{
+    static const unsigned char CAPS38[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x3F, 0xFF, 0x02, 0x26};
+    av_keep_caps(CAPS38, sizeof CAPS38);
+}
+
+/* the last command of the host, if it is this signal */
+static int last_is(unsigned sig_want)
+{
+    unsigned l = 0, sg = 0, pn = 0;
+    const unsigned char *pp;
+    return last_av(SIG_CID_DEV, &l, &sg, &pp, &pn) && sg == sig_want;
+}
+
+/* the sound in the ring: left a sine of 1 kHz, right one of half the size */
+static short IN[2 * 128 * 80];
+static short *LONG_IN_PTR(void)
+{
+    static short L[2 * 128 * 200];
+    for (int i = 0; i < 2 * 128 * 200; i++)
+        L[i] = (short)(3000 * ((i / 2) % 48 < 24 ? 1 : -1));
+    return L;
+}
+static void make_input(unsigned frames, int amp)
+{
+    for (unsigned i = 0; i < frames; i++)
+    {
+        double v = sin(2 * 3.14159265358979 * 1000.0 * i / 48000.0);
+        IN[2 * i] = (short)(amp * v);
+        IN[2 * i + 1] = (short)(amp * v / 2);
+    }
+}
+
+static int peak_of(int ch, int from, int to)
+{
+    int pk = 0;
+    for (int i = from; i < to; i++)
+        pk = abs(AUD[2 * i + ch]) > pk ? abs(AUD[2 * i + ch]) : pk;
+    return pk;
+}
+
+/* the glue between the Player and the ring (kernel/audio/audio_bt.c), with a sleep that lets the clock and the main loop run, and a device
+ * that answers Start and Suspend */
+static int SLEEP_AUTO;             /* answer Start/Suspend */
+static int STOP_AT;                /* ms of sleep after which audio_stop is requested (0 = never) */
+static int STOP_FLAG;
+static int DROP_AT;                /* ms of sleep after which the link ends (0 = never) */
+static int SLEPT;
+static int ANSWERED = -1;
+
+int audio_stop_requested(void) { return STOP_FLAG; }
+
+void task_sleep_ms(unsigned ms)
+{
+    SLEPT += (int)ms;
+    F.clock += ms;
+    bt_poll();
+    if (SLEEP_AUTO)
+    {
+        unsigned l = 0, sg = 0, pn = 0;
+        const unsigned char *pp;
+        if (last_av(SIG_CID_DEV, &l, &sg, &pp, &pn) && (sg == 0x07 || sg == 0x09) && (int)(l * 16 + sg) != ANSWERED)
+        {
+            ANSWERED = (int)(l * 16 + sg);
+            dev_av(0x40, l, 2, sg, 0, 0);
+            bt_poll();
+        }
+    }
+    if (STOP_AT && SLEPT >= STOP_AT)
+        STOP_FLAG = 1;
+    if (DROP_AT && SLEPT >= DROP_AT)
+    {
+        DROP_AT = 0;
+        ev_disc_complete(HANDLE, 0x13);
+        bt_poll();
+    }
+}
+
+#include "../kernel/audio/audio_bt.c"
 
 int main(void)
 {
@@ -2102,6 +2200,306 @@ int main(void)
             n = media_packets();
             CHECK(n >= 51 && n <= 53);
         }
+
+        /* 40. keep mode: the stream is open but not started; sound makes the host start it */
+        av_keep();
+        CHECK(bt_avdtp_ready() && !bt_avdtp_streaming());
+        CHECK(last_is(0x06)); /* the last command was Open: no Start */
+        CHECK(line_is(0xA0, "a2dp: ready (stream open, no audio yet)"));
+        CHECK(line_is(0xB0, "audio: Bluetooth sink, waiting for audio (stream suspended), volume 100%"));
+        CHECK(bt_a2dp_audio_ready());
+        CHECK(bt_a2dp_tone(1) == BT_E_NOT_UP); /* the tune needs a started stream */
+        run_ms(500, 10);
+        CHECK(media_packets() == 0 && last_is(0x06)); /* quiet: nothing is started */
+        F.nacl = 0;
+        CHECK(bt_a2dp_producer_begin() == 0);
+        CHECK(bt_a2dp_producer_begin() == BT_E_LINK_BUSY);
+        make_input(128 * 40, 8000);
+        CHECK(bt_a2dp_ring_write(IN, 128 * 40) == 128 * 40);
+        CHECK(bt_a2dp_ring_pending() == 128 * 40);
+        bt_poll();
+        bt_poll(); /* the first poll queues Start, the next sends it */
+        CHECK(last_is(0x07)); /* Start */
+        CHECK(media_packets() == 0 && !bt_avdtp_streaming());
+        {
+            unsigned l = 0, sg = 0, pn = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &pn) && sg == 0x07 && pn == 1 && (pp[0] >> 2) != 0); /* with the endpoint */
+            dev_av(0x40, l, 2, 7, 0, 0); /* the sink accepts */
+            bt_poll();
+        }
+        CHECK(bt_avdtp_streaming());
+        run_ms(400, 10);
+        n = media_packets();
+        {
+            int frames2;
+            samples = decode_media(n, &frames2, 89);
+            CHECK(frames2 == 40 && samples == 40 * 128); /* all of it, and nothing more */
+            CHECK(bt_a2dp_ring_pending() == 0);
+            /* the left and the right channel are what was put in (SBC is lossy: the size is right, the delay is the codec's 73 samples) */
+            int pl = peak_of(0, 1000, 4000), pr = peak_of(1, 1000, 4000);
+            CHECK(pl > 7000 && pl < 9000);
+            CHECK(pr > 3400 && pr < 4600);
+            int cr = crossings(73 + 128, 73 + 128 + 4800); /* 100 ms of 1 kHz = 200 crossings */
+            CHECK(cr >= 197 && cr <= 203);
+        }
+        CHECK(line_is(0xB0, "audio: Bluetooth sink, stream started, no audio now, 6 packets of 7 frames (106 ms of sound), 1 underruns, 0 send errors, volume 100%"));
+        bt_a2dp_producer_end();
+
+        /* 41. quiet for 3 s: the stream is suspended (the program is not playing); sound again starts it again */
+        run_ms(2500, 10);
+        CHECK(last_is(0x07));
+        run_ms(1000, 10);
+        CHECK(last_is(0x09)); /* Suspend */
+        CHECK(line_is(0xA0, "a2dp: suspending the stream"));
+        {
+            unsigned l = 0, sg = 0, pn = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &pn) && sg == 0x09);
+            dev_av(0x40, l, 2, 9, 0, 0);
+            bt_poll();
+        }
+        CHECK(bt_avdtp_ready() && !bt_avdtp_streaming());
+        CHECK(line_is(0xA0, "a2dp: ready (stream open, no audio yet)"));
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "waiting for audio (stream suspended)"));
+        {
+            int before2 = media_packets();
+            CHECK(bt_a2dp_producer_begin() == 0);
+            CHECK(bt_a2dp_ring_write(IN, 128 * 10) == 128 * 10);
+            bt_poll();
+            bt_poll();
+            CHECK(last_is(0x07));
+            {
+                unsigned l = 0, sg = 0, pn = 0;
+                const unsigned char *pp;
+                CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &pn) && sg == 0x07);
+                dev_av(0x40, l, 2, 7, 0, 0);
+                bt_poll();
+            }
+            run_ms(200, 10);
+            CHECK(media_packets() - before2 == 2); /* 10 frames: a packet of 7 and one of 3 */
+            CHECK(PDU[media_idx[before2 + 1]].data[4 + 12] == 3);
+            bt_a2dp_producer_end();
+        }
+
+        /* 42. the ring: full at 16384 frames, wraps around, can be flushed */
+        {
+            bt_a2dp_flush();
+            bt_poll();
+            CHECK(bt_a2dp_ring_pending() == 0);
+            CHECK(bt_a2dp_producer_begin() == 0);
+            static short BIG[2 * 20000];
+            for (int i = 0; i < 20000; i++)
+                BIG[2 * i] = BIG[2 * i + 1] = (short)(i & 0x3FFF);
+            CHECK(bt_a2dp_ring_write(BIG, 20000) == 16384);
+            CHECK(bt_a2dp_ring_pending() == 16384 && bt_a2dp_ring_write(BIG, 1) == 0);
+            bt_a2dp_flush(); /* the program is stopped: what is queued is dropped */
+            bt_poll();
+            CHECK(bt_a2dp_ring_pending() == 0);
+            bt_a2dp_producer_end();
+        }
+        {
+            /* wrap-around: write and play more than the ring holds, in pieces; the sound arrives whole */
+            av_keep();
+            CHECK(bt_a2dp_producer_begin() == 0);
+            make_input(128 * 80, 6000);
+            unsigned put = 0, pieces = 0;
+            SLEEP_AUTO = 1;
+            ANSWERED = -1;
+            static short LONG_IN[2 * 128 * 200];
+            for (int i = 0; i < 128 * 200; i++)
+            {
+                LONG_IN[2 * i] = (short)(6000 * sin(2 * 3.14159265358979 * 1000.0 * i / 48000.0));
+                LONG_IN[2 * i + 1] = LONG_IN[2 * i];
+            }
+            while (put < 128 * 200 && pieces < 5000)
+            {
+                put += bt_a2dp_ring_write(LONG_IN + 2 * put, (128 * 200 - put) > 1000 ? 1000 : (128 * 200 - put));
+                task_sleep_ms(5);
+                pieces++;
+            }
+            for (int i = 0; i < 100 && bt_a2dp_ring_pending(); i++)
+                task_sleep_ms(5);
+            task_sleep_ms(100);
+            SLEEP_AUTO = 0;
+            CHECK(put == 128 * 200 && bt_a2dp_ring_pending() == 0);
+            n = media_packets();
+            int frames3;
+            samples = decode_media(n, &frames3, 89);
+            CHECK(frames3 == 200 && samples == 200 * 128);
+            int bad = 0;
+            for (int i = 73 + 1000; i < 25000; i += 1) /* the decoded sound follows the input, delayed by 73 samples (SBC error well below the size) */
+            {
+                int d2 = AUD[2 * i] - LONG_IN[2 * (i - 73)];
+                if (abs(d2) > 1200)
+                    bad++;
+            }
+            CHECK(bad == 0);
+            bt_a2dp_producer_end();
+        }
+
+        /* 43. the program is slower than the sound: an underrun is counted, and the sound goes on without a burst */
+        av_keep();
+        SLEEP_AUTO = 1;
+        ANSWERED = -1;
+        CHECK(bt_a2dp_producer_begin() == 0);
+        make_input(128 * 10, 5000);
+        bt_a2dp_ring_write(IN, 128 * 10);
+        for (int i = 0; i < 20; i++)
+            task_sleep_ms(10);
+        CHECK(bt_avdtp_streaming());
+        before = media_packets();
+        for (int i = 0; i < 40; i++) /* 400 ms of nothing, while the program still plays */
+            task_sleep_ms(10);
+        CHECK(media_packets() == before);
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "1 underruns"));
+        bt_a2dp_ring_write(IN, 128 * 40);
+        task_sleep_ms(10);
+        CHECK(media_packets() - before <= 4); /* the lead is built up again, no burst to catch up */
+        for (int i = 0; i < 60; i++)
+            task_sleep_ms(10);
+        CHECK(bt_a2dp_ring_pending() == 0 && media_packets() - before >= 5);
+        bt_a2dp_producer_end();
+        SLEEP_AUTO = 0;
+
+        /* 44. volume: a software gain on what is sent */
+        CHECK(bt_a2dp_volume() == 100);
+        CHECK(bt_a2dp_set_volume(50) == 50 && bt_a2dp_volume() == 50);
+        CHECK(bt_a2dp_set_volume(150) == 100 && bt_a2dp_set_volume(-4) == 0);
+        CHECK(bt_a2dp_set_volume(50) == 50);
+        av_keep();
+        SLEEP_AUTO = 1;
+        ANSWERED = -1;
+        CHECK(bt_a2dp_producer_begin() == 0);
+        make_input(128 * 40, 8000);
+        bt_a2dp_ring_write(IN, 128 * 40);
+        for (int i = 0; i < 60; i++)
+            task_sleep_ms(10);
+        n = media_packets();
+        {
+            int frames4;
+            samples = decode_media(n, &frames4, 89);
+            int pl = peak_of(0, 1000, 4000), pr = peak_of(1, 1000, 4000);
+            CHECK(pl > 3500 && pl < 4500 && pr > 1700 && pr < 2300); /* half */
+        }
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "volume 50%"));
+        bt_a2dp_producer_end();
+        SLEEP_AUTO = 0;
+        CHECK(bt_a2dp_set_volume(0) == 0);
+        av_keep();
+        SLEEP_AUTO = 1;
+        ANSWERED = -1;
+        CHECK(bt_a2dp_producer_begin() == 0);
+        bt_a2dp_ring_write(IN, 128 * 40);
+        for (int i = 0; i < 60; i++)
+            task_sleep_ms(10);
+        n = media_packets();
+        {
+            int frames4;
+            samples = decode_media(n, &frames4, 89);
+            CHECK(peak_of(0, 0, samples) < 50); /* silence */
+        }
+        bt_a2dp_producer_end();
+        SLEEP_AUTO = 0;
+        CHECK(bt_a2dp_set_volume(100) == 100);
+
+        /* 45. the link ends while sound is queued: the ring is emptied, nothing is ready */
+        av_keep();
+        CHECK(bt_a2dp_producer_begin() == 0);
+        bt_a2dp_ring_write(IN, 128 * 40);
+        ev_disc_complete(HANDLE, 0x13);
+        bt_poll();
+        CHECK(!bt_a2dp_audio_ready() && bt_a2dp_ring_pending() == 0);
+        bt_a2dp_producer_end();
+        CHECK(bt_a2dp_producer_begin() == 0); /* and the next program may begin */
+        bt_a2dp_producer_end();
+
+        /* 46. a sink that agreed on 44.1 kHz only: ready, but the system's 48 kHz audio does not go there */
+        {
+            static const unsigned char CAPS441[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x2F, 0xFF, 0x02, 0x26};
+            av_keep_caps(CAPS441, sizeof CAPS441);
+            CHECK(bt_avdtp_ready() && !bt_a2dp_audio_ready());
+        }
+
+        /* 46b. less than one frame of sound (no program holds the stream) does not start it; a send failure keeps the samples for the next try */
+        av_keep();
+        SLEEP_AUTO = 1;
+        ANSWERED = -1;
+        make_input(128 * 20, 8000);
+        CHECK(bt_a2dp_ring_write(IN, 20) == 20);
+        for (int i = 0; i < 10; i++)
+            task_sleep_ms(10);
+        CHECK(last_is(0x06) && !bt_avdtp_streaming()); /* 20 sample frames: below the smallest SBC frame */
+        CHECK(bt_a2dp_ring_write(IN, 128 * 2) == 128 * 2);
+        for (int i = 0; i < 20; i++)
+            task_sleep_ms(10);
+        CHECK(bt_avdtp_streaming());
+        for (int i = 0; i < 30 && bt_a2dp_ring_pending() >= 128; i++)
+            task_sleep_ms(10);
+        bt_a2dp_flush();
+        task_sleep_ms(10);
+        CHECK(bt_a2dp_ring_pending() == 0);
+        F.acl_fail = 1;
+        CHECK(bt_a2dp_ring_write(IN, 128 * 14) == 128 * 14);
+        for (int i = 0; i < 5; i++)
+            task_sleep_ms(10);
+        CHECK(bt_a2dp_ring_pending() == 128 * 14); /* nothing was taken */
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && !strstr(buf, " 0 send errors"));
+        F.acl_fail = 0;
+        for (int i = 0; i < 60; i++)
+            task_sleep_ms(10);
+        CHECK(bt_a2dp_ring_pending() == 0);
+        SLEEP_AUTO = 0;
+
+        /* 47. the player's side (audio_bt.c): plays a buffer to its end, can be stopped, gives up on a stuck link */
+        av_keep();
+        SLEEP_AUTO = 1;
+        ANSWERED = -1;
+        STOP_FLAG = 0;
+        STOP_AT = 0;
+        DROP_AT = 0;
+        SLEPT = 0;
+        make_input(128 * 40, 8000);
+        CHECK(audio_bt_ready());
+        CHECK(audio_bt_play(IN, 128 * 40 - 50) == 0); /* the end is padded with silence to a whole frame */
+        CHECK(SLEPT >= 40 && SLEPT < 600);            /* it took about as long as the sound, less the lead */
+        CHECK(bt_a2dp_ring_pending() == 0);
+        run_ms(200, 10);
+        {
+            int frames5;
+            samples = decode_media(media_packets(), &frames5, 89);
+            CHECK(frames5 == 40 && samples == 40 * 128);
+        }
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, ", 0 underruns, 0 send errors")); /* a normal end is not an underrun */
+        /* two players at once */
+        CHECK(bt_a2dp_producer_begin() == 0);
+        CHECK(audio_bt_play(IN, 128) == AUDIO_ERR_BUSY);
+        bt_a2dp_producer_end();
+        /* stopped */
+        SLEPT = 0;
+        STOP_AT = 100;
+        STOP_FLAG = 0;
+        CHECK(audio_bt_play(LONG_IN_PTR(), 128 * 200) == AUDIO_ERR_STOPPED);
+        CHECK(SLEPT >= 100 && SLEPT < 300);
+        STOP_AT = 0;
+        STOP_FLAG = 0;
+        bt_poll();
+        CHECK(bt_a2dp_ring_pending() == 0);
+        CHECK(bt_a2dp_producer_begin() == 0); /* the producer was released */
+        bt_a2dp_producer_end();
+        /* the link ends while it plays */
+        SLEPT = 0;
+        DROP_AT = 100;
+        CHECK(audio_bt_play(LONG_IN_PTR(), 128 * 200) == AUDIO_ERR_BUSY);
+        CHECK(SLEPT >= 100 && SLEPT < 300);
+        SLEEP_AUTO = 0;
+        /* the sink never accepts Start: after 3 s the player gives up and leaves nothing behind */
+        av_keep();
+        SLEPT = 0;
+        CHECK(audio_bt_play(IN, 128 * 40) == AUDIO_ERR_BUSY);
+        CHECK(SLEPT >= 3000 && SLEPT < 3300);
+        bt_poll();
+        CHECK(bt_a2dp_ring_pending() == 0);
         NEXT_MTU = MTU;
     }
 

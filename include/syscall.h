@@ -184,6 +184,7 @@
  *                  0, or negative (-100 no link, -102 already pairing). The result is in the text lines 0x80 and 0x81.
  *                  rdi = SYS_BTLINK_A2DP (0x1004): prepare a music stream with the device (AVDTP: discover its audio endpoint, choose an SBC setting, open the
  *                  stream and its media channel, Start). 0, or negative (-100 no link, -102 busy); the progress is in the text lines 0xA0 .. 0xA2.
+ *                  (rsi = 1 with SYS_BTLINK_A2DP: "keep" - the stream stays open and is started only when a program plays sound, see btaudio)
  *                  rdi = SYS_BTLINK_A2DP_STOP (0x1005): close the stream. 0.
  *                  rdi = SYS_BTLINK_TONE (0x1006), rsi = 1 .. 60: play a test tune (three notes, over and over) on the open stream for that many
  *                  seconds, in the background. 0, or negative (-100 no stream, -102 it plays already, -1 bad length). Text line 0xB0 tells how it goes.
