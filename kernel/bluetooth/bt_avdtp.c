@@ -421,6 +421,7 @@ int bt_avdtp_start(void)
 
 int bt_avdtp_stop(void)
 {
+    bt_a2dp_stop_audio(); /* the sound stops before the stream is closed */
     if (A.state == AV_STREAMING || A.state == AV_STARTING)
     {
         A.state = AV_CLOSING;
@@ -666,3 +667,14 @@ int bt_avdtp_line(unsigned index, char *buf, unsigned cap)
 }
 
 int bt_avdtp_streaming(void) { return A.state == AV_STREAMING; }
+
+int bt_avdtp_media(int *slot, BtSbcConfig *cfg)
+{
+    if (A.state != AV_STREAMING || A.media < 0)
+        return 0;
+    if (slot)
+        *slot = A.media;
+    if (cfg)
+        *cfg = A.cfg;
+    return 1;
+}

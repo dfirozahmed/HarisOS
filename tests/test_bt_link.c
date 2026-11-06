@@ -31,7 +31,7 @@ typedef struct
 typedef struct
 {
     unsigned len;
-    unsigned char data[400];
+    unsigned char data[1100];
 } PduCap;
 
 static struct
@@ -44,7 +44,9 @@ static struct
     int auth_status;       /* ... of Authentication Requested and Set Connection Encryption */
     int auto_credit;       /* report Number of Completed Packets for every ACL packet sent */
     unsigned unreported;
-    AclCap acl[64];
+    AclCap acl[700];
+    unsigned mtu;          /* ACL packet size the chip says it takes (Read Buffer Size) */
+    int acl_fail;          /* the chip refuses ACL packets */
     int nacl;
     unsigned char pend[270];
     int have;
@@ -96,7 +98,7 @@ static int fake_send(void *ctx, const unsigned char *pkt, unsigned len)
     }
     case 0x1005:
     {
-        const unsigned char r[8] = {0, MTU, 0, 0x40, PKTS, 0, 4, 0};
+        const unsigned char r[8] = {0, (unsigned char)F.mtu, (unsigned char)(F.mtu >> 8), 0x40, PKTS, 0, 4, 0};
         cc(op, r, 8);
         break;
     }
@@ -150,13 +152,15 @@ static int fake_send(void *ctx, const unsigned char *pkt, unsigned len)
 static int fake_send_acl(void *ctx, const unsigned char *pkt, unsigned len)
 {
     (void)ctx;
-    if (F.nacl < 64)
+    if (F.acl_fail)
+        return -1;
+    if (F.nacl < 700)
     {
         AclCap *a = &F.acl[F.nacl++];
         a->handle = (pkt[0] | ((unsigned)pkt[1] << 8)) & 0x0FFF;
         a->pb = ((pkt[1] >> 4) & 3);
         a->len = pkt[2] | ((unsigned)pkt[3] << 8);
-        if (a->len + 4 != len || a->len > MTU)
+        if (a->len + 4 != len || a->len > F.mtu)
             return -1; /* the host must keep to the chip's packet size */
         memcpy(a->data, pkt + 4, a->len);
     }
@@ -196,17 +200,20 @@ static unsigned long long fake_now(void *ctx)
 
 static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, fake_now, fake_send_acl};
 
+static unsigned NEXT_MTU = MTU; /* the packet size of the next fake chip */
+
 static void fresh(void)
 {
     bt_detach();
     memset(&F, 0, sizeof F);
     F.auto_credit = 1;
     F.clock = 5000;
+    F.mtu = NEXT_MTU;
     bt_attach(&T, 0x0BDA, 0xB00A);
 }
 
 /* ---- what the host sent, as L2CAP PDUs ---- */
-static PduCap PDU[40];
+static PduCap PDU[700];
 static int NPDU;
 
 static void collect(void)
@@ -218,7 +225,7 @@ static void collect(void)
         const AclCap *a = &F.acl[i];
         if (a->pb == 0)
         {
-            if (NPDU >= 40)
+            if (NPDU >= 700)
                 return;
             PDU[NPDU].len = 0;
             NPDU++;
@@ -472,6 +479,8 @@ static int last_av(unsigned dcid, unsigned *label, unsigned *sig, const unsigned
 }
 
 /* a channel to the device: its Connection Response, its Configuration Request (for our end), its answer to ours */
+static unsigned HS_MTU = 672; /* the MTU the device asks for in its Configuration Request: what we may send in one PDU */
+
 static void chan_handshake(unsigned our_cid, unsigned dev_cid)
 {
     unsigned id = 0, dl = 0;
@@ -482,7 +491,7 @@ static void chan_handshake(unsigned our_cid, unsigned dev_cid)
     bt_poll();
     unsigned cfg_id = 0;
     CHECK(last_sig(0x04, &cfg_id, &d, &dl) && le16(d) == dev_cid);
-    unsigned char cq[8] = {(unsigned char)our_cid, (unsigned char)(our_cid >> 8), 0, 0, 1, 2, 0xA0, 0x02};
+    unsigned char cq[8] = {(unsigned char)our_cid, (unsigned char)(our_cid >> 8), 0, 0, 1, 2, (unsigned char)HS_MTU, (unsigned char)(HS_MTU >> 8)};
     dev_sig(0x04, 0x50 + (our_cid & 0x0F), cq, 8);
     bt_poll();
     unsigned char cr[6] = {(unsigned char)our_cid, (unsigned char)(our_cid >> 8), 0, 0, 0, 0};
@@ -526,6 +535,109 @@ static void av_to_open(void)
     CHECK(line_is(0xA0, "a2dp: reading what the endpoint can do"));
     CHECK(last_av(SIG_CID_DEV, &label, &sig, &p, &pn) && sig == 0x02 && pn == 1 && p[0] == 0x0C); /* Get Capabilities of endpoint 3 */
     av_accept(SIG_CID_DEV, 0x02, HCAPS, sizeof HCAPS);
+}
+
+
+/* ---- A2DP audio ---- */
+#include "bt_sbc_ref.h"
+
+/* a link with a running stream (the sink offers these capabilities): everything up to the sink accepting Start */
+static void av_stream_caps(const unsigned char *caps, unsigned n)
+{
+    av_open_sig();
+    av_accept(SIG_CID_DEV, 0x01, SEPS, sizeof SEPS);
+    av_accept(SIG_CID_DEV, 0x02, caps, n);
+    av_accept(SIG_CID_DEV, 0x03, 0, 0);
+    av_accept(SIG_CID_DEV, 0x06, 0, 0);
+    chan_handshake(0x41, MEDIA_CID_DEV);
+    av_accept(SIG_CID_DEV, 0x07, 0, 0);
+    CHECK(bt_avdtp_streaming());
+}
+
+/* the capabilities of the real headset (Til8): bitpool 2 .. 38, so frames of 89 bytes and 7 of them in a 672 byte packet */
+static void av_stream(void)
+{
+    static const unsigned char CAPS38[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x3F, 0xFF, 0x02, 0x26};
+    av_stream_caps(CAPS38, sizeof CAPS38);
+}
+
+/* the media packets sent so far: indexes into PDU[] */
+static int media_idx[600];
+
+static int media_packets(void)
+{
+    collect();
+    int n = 0;
+    for (int i = 0; i < NPDU; i++)
+        if (PDU[i].len >= 4 && le16(PDU[i].data + 2) == MEDIA_CID_DEV && n < 600)
+            media_idx[n++] = i;
+    return n;
+}
+
+/* time passes: the clock moves in steps and the main loop polls */
+static void run_ms(unsigned ms, unsigned step)
+{
+    for (unsigned t = 0; t < ms; t += step)
+    {
+        F.clock += step;
+        bt_poll();
+    }
+}
+
+static unsigned be32(const unsigned char *p) { return ((unsigned)p[0] << 24) | ((unsigned)p[1] << 16) | ((unsigned)p[2] << 8) | p[3]; }
+
+/* decodes every media packet into PCM (left channel) with the reference decoder; checks the RTP and payload headers on the way.
+ * Returns the number of sample frames, and fills *packets and *frames. */
+static short AUD[200000];
+
+static int decode_media(int n, int *frames_total, unsigned fb)
+{
+    RefDec d;
+    ref_init(&d);
+    unsigned seq0 = 0, ts0 = 0;
+    int samples = 0;
+    *frames_total = 0;
+    for (int k = 0; k < n; k++)
+    {
+        const PduCap *pd = &PDU[media_idx[k]];
+        const unsigned char *p = pd->data + 4;
+        unsigned plen = pd->len - 4;
+        CHECK(le16(pd->data) == plen);
+        CHECK(p[0] == 0x80 && p[1] == 0x60);                 /* RTP version 2, payload type 96, no marker */
+        CHECK(be32(p + 8) == 0x48415249u);                  /* the same source id throughout */
+        unsigned seq = ((unsigned)p[2] << 8) | p[3], ts = be32(p + 4);
+        if (k == 0)
+        {
+            seq0 = seq;
+            ts0 = ts;
+            CHECK(seq == 0 && ts == 0);
+        }
+        else
+        {
+            CHECK(seq == ((seq0 + (unsigned)k) & 0xFFFF));
+        }
+        unsigned nf = p[12] & 15;
+        CHECK((p[12] & 0xF0) == 0 && nf >= 1 && nf <= 15); /* not fragmented, a frame count */
+        CHECK(plen == 13 + nf * fb);
+        CHECK(ts == ts0 + (unsigned)*frames_total * 128);   /* the time stamp counts samples */
+        for (unsigned f = 0; f < nf; f++)
+        {
+            RefFrame fi;
+            CHECK(ref_decode(&d, p + 13 + f * fb, fb, AUD + samples * 2, &fi) == (int)fb && fi.crc_ok);
+            samples += 128;
+            (*frames_total)++;
+        }
+    }
+    return samples;
+}
+
+/* sign changes of the decoded tune between two sample positions: twice the frequency times the time */
+static int crossings(int from, int to)
+{
+    int c = 0;
+    for (int i = from + 1; i < to; i++)
+        c += (AUD[2 * (i - 1)] < 0) != (AUD[2 * i] < 0);
+    return c;
 }
 
 int main(void)
@@ -1775,6 +1887,220 @@ int main(void)
         /* before anything: all lines say so */
         bt_detach();
         CHECK(bt_avdtp_start() == BT_E_NOT_UP);
+    }
+
+
+    /* ================= A2DP audio ================= */
+    {
+        NEXT_MTU = 1021; /* a chip that takes big packets: a media packet is one */
+
+        /* 32. no stream: no sound */
+        up();
+        CHECK(bt_a2dp_tone(1) == BT_E_NOT_UP);
+        CHECK(line_is(0xB0, "audio: -"));
+
+        /* 33. a tune on a running stream: packets of 7 frames (what a 672 byte MTU takes of 89 byte frames), sent as the clock runs */
+        av_stream();
+        CHECK(bt_a2dp_tone(0) == -1 && bt_a2dp_tone(61) == -1);
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(1) == 0);
+        CHECK(line_is(0xB0, "audio: playing the test tune, 0 packets of 7 frames (0 ms of sound), 0 underruns, 0 send errors"));
+        CHECK(bt_a2dp_tone(1) == BT_E_LINK_BUSY);
+        bt_poll(); /* the first step sends what the lead asks for: 60 ms of sound = 4 packets (18.7 ms each) */
+        CHECK(media_packets() == 4);
+        run_ms(1000, 10);
+        int n = media_packets();
+        CHECK(n == 54); /* 1 s of sound = 375 frames = 53 packets of 7 and one of 4 */
+        CHECK(line_is(0xB0, "audio: tune finished, 54 packets of 7 frames (1000 ms of sound), 0 underruns, 0 send errors"));
+        int frames;
+        int samples = decode_media(n, &frames, 89);
+        CHECK(frames == 375 && samples == 375 * 128);
+        CHECK(PDU[media_idx[53]].data[4 + 12] == 4); /* the last packet has the frames that were left */
+        CHECK(PDU[media_idx[0]].len == 4 + 13 + 7 * 89);
+        /* what was sent is the tune: 523 Hz for 300 ms, 659 Hz, 784 Hz, then the first again (delay 73 samples of the codec) */
+        int d = 73;
+        int c1 = crossings(d + 2400, d + 12000), c2 = crossings(d + 14400 + 2400, d + 14400 + 12000), c3 = crossings(d + 28800 + 2400, d + 28800 + 12000);
+        CHECK(c1 >= 2 * 523.25 * 0.2 - 3 && c1 <= 2 * 523.25 * 0.2 + 3); /* 9600 samples = 200 ms */
+        CHECK(c2 >= 2 * 659.26 * 0.2 - 3 && c2 <= 2 * 659.26 * 0.2 + 3);
+        CHECK(c3 >= 2 * 783.99 * 0.2 - 3 && c3 <= 2 * 783.99 * 0.2 + 3);
+        int peak = 0;
+        for (int i = 3000; i < 12000; i++)
+            peak = abs(AUD[2 * i]) > peak ? abs(AUD[2 * i]) : peak;
+        CHECK(peak > 7800 && peak < 8600); /* a quarter of full scale */
+        CHECK(abs(AUD[2 * (d + 0)]) < 600); /* it starts softly: no click */
+        /* nothing more is sent after the end */
+        run_ms(500, 10);
+        CHECK(media_packets() == 54);
+        /* the tune can be played again; the packet numbers start again */
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(1) == 0);
+        bt_poll();
+        CHECK(media_packets() == 4);
+
+        /* 34. pacing: after t ms about (t + 60 ms) of sound has been sent */
+        av_stream();
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(10) == 0);
+        bt_poll();
+        run_ms(1000, 10);
+        n = media_packets();
+        CHECK(n >= 56 && n <= 58); /* 1060 ms / 18.67 ms */
+        run_ms(2000, 10);
+        n = media_packets();
+        CHECK(n >= 56 + 106 - 3 && n <= 56 + 106 + 4);
+        /* a stop in the middle: the sound stops, the stream is closed */
+        CHECK(bt_avdtp_stop() == 0);
+        int before_stop = media_packets();
+        run_ms(500, 10);
+        CHECK(media_packets() == before_stop);
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "audio: tune finished") && strstr(buf, "0 send errors"));
+        {
+            unsigned l = 0, sg = 0, pn = 0;
+            const unsigned char *pp;
+            CHECK(last_av(SIG_CID_DEV, &l, &sg, &pp, &pn) && sg == 0x08); /* Close */
+        }
+
+        /* 35. the system was busy: a long gap does not make a burst of packets, the clock starts again */
+        av_stream();
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(10) == 0);
+        bt_poll();
+        run_ms(200, 10);
+        int before = media_packets();
+        F.clock += 2000; /* the main loop was stuck for two seconds */
+        bt_poll();
+        int after = media_packets();
+        CHECK(after - before <= 4 && after - before >= 1);
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "1 underruns"));
+        run_ms(500, 10);
+        CHECK(media_packets() - after >= 20 && media_packets() - after <= 30); /* and then it runs at the right pace again */
+
+        /* 35b. a gap that is not long enough to be an underrun: the catching up is limited to a few packets per step */
+        av_stream();
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(10) == 0);
+        bt_poll();
+        run_ms(200, 10);
+        before = media_packets();
+        F.clock += 200;
+        bt_poll();
+        after = media_packets();
+        CHECK(after - before == 4); /* 200 ms behind would be 14 packets at once */
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "0 underruns"));
+        run_ms(100, 10);
+        CHECK(media_packets() - after >= 6); /* the rest follows in the next steps */
+
+        /* 35c. very small frames: no more than 15 in a packet (the count has four bits) */
+        {
+            static const unsigned char CAPS5[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x3F, 0xFF, 0x02, 0x05}; /* bitpool up to 5: frames of 23 bytes */
+            av_stream_caps(CAPS5, sizeof CAPS5);
+            F.nacl = 0;
+            CHECK(bt_a2dp_tone(1) == 0);
+            bt_poll();
+            CHECK(media_packets() >= 1);
+            CHECK(PDU[media_idx[0]].data[4 + 12] == 15 && PDU[media_idx[0]].len == 4 + 13 + 15 * 23);
+        }
+
+        /* 35d. the notes end softly: no click between them (a note that stopped at full level would jump to the next one) */
+        av_stream();
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(1) == 0);
+        bt_poll();
+        run_ms(1000, 10);
+        n = media_packets();
+        samples = decode_media(n, &frames, 89);
+        CHECK(samples > 20000);
+        {
+            int edge = 73 + 14400; /* the end of the first note, where the codec delay is added */
+            int maxend = 0, maxstart = 0;
+            for (int i = edge - 20; i < edge; i++)
+                maxend = abs(AUD[2 * i]) > maxend ? abs(AUD[2 * i]) : maxend;
+            for (int i = edge; i < edge + 20; i++)
+                maxstart = abs(AUD[2 * i]) > maxstart ? abs(AUD[2 * i]) : maxstart;
+            CHECK(maxend < 1200 && maxstart < 1200);
+            CHECK(abs(AUD[2 * (edge - 1)]) < 300 && abs(AUD[2 * edge]) < 300);
+        }
+
+        /* 36. the chip does not take packets: errors are counted, after twenty the sound is given up */
+        av_stream();
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(10) == 0);
+        F.acl_fail = 1;
+        run_ms(500, 10);
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "failed: the packets are not taken"));
+        F.acl_fail = 0;
+
+        /* 37. the stream ends while sound plays */
+        av_stream();
+        CHECK(bt_a2dp_tone(10) == 0);
+        bt_poll();
+        {
+            unsigned char dr[4] = {0x41, 0, MEDIA_CID_DEV & 0xFF, MEDIA_CID_DEV >> 8}; /* the device closes the media channel */
+            dev_sig(0x06, 0x66, dr, 4);
+            bt_poll();
+        }
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "audio: failed: the stream is not running"));
+        av_stream();
+        CHECK(bt_a2dp_tone(10) == 0);
+        bt_poll();
+        ev_disc_complete(HANDLE, 0x13);
+        bt_poll();
+        CHECK(bt_link_line(0xB0, buf, sizeof buf) > 0 && strstr(buf, "audio: failed"));
+
+        /* 38. a small packet size from the device: fewer frames in a packet, or none fit */
+        HS_MTU = 150;
+        av_stream();
+        F.nacl = 0;
+        CHECK(bt_a2dp_tone(1) == 0);
+        bt_poll();
+        run_ms(1000, 10);
+        n = media_packets();
+        CHECK(n == 375); /* one frame (89 + 13 bytes) per packet */
+        CHECK(PDU[media_idx[0]].len == 4 + 13 + 89 && PDU[media_idx[0]].data[4 + 12] == 1);
+        HS_MTU = 100;
+        av_stream();
+        CHECK(bt_a2dp_tone(1) == -1); /* not even one frame fits */
+        HS_MTU = 672;
+
+        /* 39. 44.1 kHz: the time stamps and the pace follow that rate */
+        {
+            static const unsigned char CAPS441[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x2F, 0xFF, 0x02, 0x26}; /* 44.1 kHz only, bitpool up to 38 */
+            av_open_sig();
+            av_accept(SIG_CID_DEV, 0x01, SEPS, sizeof SEPS);
+            av_accept(SIG_CID_DEV, 0x02, CAPS441, sizeof CAPS441);
+            av_accept(SIG_CID_DEV, 0x03, 0, 0);
+            av_accept(SIG_CID_DEV, 0x06, 0, 0);
+            chan_handshake(0x41, MEDIA_CID_DEV);
+            av_accept(SIG_CID_DEV, 0x07, 0, 0);
+            CHECK(bt_avdtp_streaming());
+            F.nacl = 0;
+            CHECK(bt_a2dp_tone(1) == 0);
+            bt_poll();
+            run_ms(1000, 10);
+            n = media_packets();
+            /* 1 s = 44100 samples = 344.5 frames of 128: 49 packets of 7 frames and one of 1 (frame 345 is cut: whole frames only) */
+            CHECK(n == 50);
+            CHECK(PDU[media_idx[0]].len == 4 + 13 + 7 * 89 && PDU[media_idx[49]].data[4 + 12] == 1); /* 49 packets of 7 frames, then the one frame that is left */
+            CHECK(be32(PDU[media_idx[1]].data + 4 + 4) == 7 * 128); /* the time stamp counts samples */
+            /* the notes keep their pitch: 523 Hz is the same number of cycles in the same time, at the lower rate there are fewer samples */
+            samples = decode_media(n, &frames, 89);
+            CHECK(frames == 344);
+            int dd = 73, w0 = dd + (int)(44100 * 0.01), w1 = dd + (int)(44100 * 0.29); /* 10 ms .. 290 ms of the first note */
+            int cr = crossings(w0, w1);
+            CHECK(cr >= 2 * 523.25 * 0.28 - 3 && cr <= 2 * 523.25 * 0.28 + 3);
+        }
+        /* ... and the pace follows the rate: 1 s of real time is 1060 ms of sound = 52 packets of 20.3 ms (56.8 at 48 kHz) */
+        {
+            static const unsigned char CAPS441[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x2F, 0xFF, 0x02, 0x26};
+            av_stream_caps(CAPS441, sizeof CAPS441);
+            F.nacl = 0;
+            CHECK(bt_a2dp_tone(10) == 0);
+            bt_poll();
+            run_ms(1000, 10);
+            n = media_packets();
+            CHECK(n >= 51 && n <= 53);
+        }
+        NEXT_MTU = MTU;
     }
 
     printf("bt_link: %d checks, %d failed\n", checks, failures);

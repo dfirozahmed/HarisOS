@@ -10,6 +10,7 @@ int bt_chan_open(unsigned psm, int user)
     return -1;
 }
 void bt_chan_close(int slot) { (void)slot; }
+void bt_a2dp_stop_audio(void) {}
 int bt_chan_state(int slot)
 {
     (void)slot;

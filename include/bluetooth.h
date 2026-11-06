@@ -276,6 +276,18 @@ int bt_avdtp_stop(void);
 int bt_avdtp_streaming(void); /* 1 while the sink has accepted Start */
 int bt_avdtp_line(unsigned index, char *buf, unsigned cap);
 
+/* ---- A2DP audio (kernel/bluetooth/bt_a2dp.c) ----
+ * Once the sink has accepted Start (bt_avdtp_streaming()), audio goes on the media channel: SBC frames in RTP packets, paced by the clock.
+ * bt_a2dp_tone() plays a short tune made in the kernel (a test: three notes over and over) for 1 .. 60 seconds, in the background. The state
+ * is the text line 0xB0 of bt_link_line(). Later the audio of programs goes the same way. */
+int bt_a2dp_tone(unsigned seconds); /* 0 = started; BT_E_NOT_UP: no stream; BT_E_LINK_BUSY: it plays already */
+void bt_a2dp_stop_audio(void);
+int bt_a2dp_line(unsigned index, char *buf, unsigned cap);
+void bt_a2dp_step(unsigned long long now);
+void bt_a2dp_reset(void);
+int bt_avdtp_media(int *slot, BtSbcConfig *cfg); /* 1 while streaming: the media channel's slot and the agreed setting */
+int bt_chan_send(int slot, const unsigned char *data, unsigned n); /* one PDU on the channel now (the media packets: up to 1000 bytes). Not inside handlers. */
+
 /* ---- L2CAP channels for the protocols above (bt_link.c): SDP and AVDTP use these ---- */
 #define BT_USER_SDP 1
 #define BT_USER_AVDTP_SIG 2

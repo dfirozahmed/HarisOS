@@ -1,11 +1,13 @@
-/* HarisOS user program: btlink AA:BB:CC:DD:EE:FF [pair|a2dp]
+/* HarisOS user program: btlink AA:BB:CC:DD:EE:FF [pair|a2dp|tone]
  * Connects to a Bluetooth device (a headset, a phone ...: it must be switched on, in range and ready to be connected, which is often the same
  * "pairing" mode that btscan needs), tests that data flows both ways on the L2CAP signalling channel, asks it for its list of services (SDP:
  * does it play stereo music (A2DP), is it only for calls ...), prints what the device told, and ends the link again. Take the address from
  * btscan. With the word "pair" it also pairs with the device first (the device must be in pairing mode: for a headset usually a blinking
  * light after holding the button): secure simple pairing, or the old PIN 0000. The link key is kept in memory only, until the next restart.
  * With "a2dp" it pairs, lists the services and then prepares a music stream with the device (AVDTP: finds its audio endpoint, chooses an SBC
- * setting, opens the stream and the media channel, starts it), holds it for two seconds and closes it. No sound is sent yet. */
+ * setting, opens the stream and the media channel, starts it), holds it for two seconds and closes it.
+ * With "tone" it does the same and plays a test tune of three notes for six seconds on the open stream (SBC audio in RTP packets, made in the
+ * kernel): this is the first sound over Bluetooth. Turn the headset's volume down a little first: the tune is a quarter of full scale. */
 #include "libc.h"
 
 #define WAIT_MS 40000
@@ -61,12 +63,13 @@ static void show(void)
 
 __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, char **argv)
 {
-    if (argc < 2 || parse_addr(argv[1]) < 0 || (argc >= 3 && !starts(argv[2], "pair") && !starts(argv[2], "a2dp")))
+    if (argc < 2 || parse_addr(argv[1]) < 0 || (argc >= 3 && !starts(argv[2], "pair") && !starts(argv[2], "a2dp") && !starts(argv[2], "tone")))
     {
-        fdprintf(2, "usage: btlink AA:BB:CC:DD:EE:FF [pair|a2dp]   (the address from btscan)\n");
+        fdprintf(2, "usage: btlink AA:BB:CC:DD:EE:FF [pair|a2dp|tone]   (the address from btscan)\n");
         sys_exit(1);
     }
-    int want_a2dp = argc >= 3 && starts(argv[2], "a2dp");
+    int want_tone = argc >= 3 && starts(argv[2], "tone");
+    int want_a2dp = argc >= 3 && (starts(argv[2], "a2dp") || want_tone);
     int want_pair = argc >= 3; /* a music stream needs the link paired and encrypted */
     long long r = syscall3(SYS_BTLINK, SYS_BTLINK_CONNECT, parse_addr(argv[1]), 0);
     if (r == -100)
@@ -182,7 +185,30 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
             for (unsigned i = 0xA0; sys_btlink(i, line, sizeof line) >= 0; i++)
                 fdprintf(1, "%s\n", line);
             if (sys_btlink(0xA0, line, sizeof line) >= 0 && starts(line, "a2dp: streaming"))
-                sys_sleep(2000); /* hold the stream open a moment */
+            {
+                if (want_tone)
+                {
+                    long long tr = syscall3(SYS_BTLINK, SYS_BTLINK_TONE, 6, 0);
+                    if (tr == 0)
+                    {
+                        fdprintf(1, "playing the test tune for 6 seconds ...\n");
+                        long long t1 = sys_clock();
+                        for (;;)
+                        {
+                            sys_sleep(250);
+                            if (sys_btlink(0xB0, line, sizeof line) < 0 || !starts(line, "audio: playing") || sys_clock() - t1 > 15000)
+                                break;
+                        }
+                        sys_sleep(300); /* the sink plays what it has buffered */
+                        if (sys_btlink(0xB0, line, sizeof line) >= 0)
+                            fdprintf(1, "%s\n", line);
+                    }
+                    else
+                        fdprintf(2, "btlink: could not play the tune (%d)\n", (int)tr);
+                }
+                else
+                    sys_sleep(2000); /* hold the stream open a moment */
+            }
             syscall3(SYS_BTLINK, SYS_BTLINK_A2DP_STOP, 0, 0);
             for (int i = 0; i < 40; i++)
             {

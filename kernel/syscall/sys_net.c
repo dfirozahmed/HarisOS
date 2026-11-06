@@ -122,6 +122,8 @@ long long sys_btlink(const SyscallFrame *f)
         return bt_avdtp_start();
     if (f->rdi == SYS_BTLINK_A2DP_STOP)
         return bt_avdtp_stop();
+    if (f->rdi == SYS_BTLINK_TONE)
+        return f->rsi > 60 ? -1 : bt_a2dp_tone((unsigned)f->rsi);
     if (f->rdi > 0xFFF || f->rdx < 2 || f->rdx > 256 || !aspace_user_ok(as, f->rsi, f->rdx, 1))
         return -1;
     char line[256];

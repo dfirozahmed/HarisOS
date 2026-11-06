@@ -392,6 +392,7 @@ static void chan_link_down(void)
         SD.why = "link ended";
         SD.code = 0;
     }
+    bt_a2dp_reset();
     bt_avdtp_reset(); /* before the channels are forgotten: it says "link ended" */
     for (int i = 0; i < CHAN_N; i++)
         CH[i].state = CH_FREE;
@@ -459,6 +460,18 @@ void bt_chan_close(int slot)
 int bt_chan_state(int slot) { return slot >= 0 && slot < CHAN_N ? CH[slot].state : CH_FREE; }
 int bt_chan_result(int slot) { return slot >= 0 && slot < CHAN_N ? CH[slot].result : 0; }
 unsigned bt_chan_mtu(int slot) { return slot >= 0 && slot < CHAN_N ? CH[slot].mtu : 0; }
+int bt_chan_send(int slot, const unsigned char *data, unsigned n)
+{
+    if (slot < 0 || slot >= CHAN_N || CH[slot].state != CH_OPEN || n > 1000 || L.state != BT_LINK_UP)
+        return -1;
+    unsigned char pdu[4 + 1000];
+    put16(pdu, n);
+    put16(pdu + 2, CH[slot].dcid);
+    for (unsigned i = 0; i < n; i++)
+        pdu[4 + i] = data[i];
+    return bt_acl_send(L.handle, pdu, 4 + n) < 0 ? -1 : 0;
+}
+
 int bt_chan_queue(int slot, const unsigned char *data, unsigned n)
 {
     if (slot < 0 || slot >= CHAN_N || CH[slot].state != CH_OPEN || L.txh - L.txt >= TXQ_N || n > PDU_MAX - 4)
@@ -1003,6 +1016,8 @@ void bt_link_step(void)
         L.tx_sent++;
     }
 
+    bt_a2dp_step(now); /* audio, after the signalling that is waiting */
+
     if (L.probe == 1)
     {
         int open = L.echo_state == 1 || L.ext_state == 1 || L.fix_state == 1;
@@ -1263,6 +1278,8 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
 {
     if (cap < 2)
         return -1;
+    if (index >= 0xB0) /* the audio line */
+        return bt_a2dp_line(index - 0xB0, buf, cap);
     if (index >= 0xA0) /* the A2DP lines */
         return bt_avdtp_line(index - 0xA0, buf, cap);
     if (index >= 0x90) /* diagnostics */

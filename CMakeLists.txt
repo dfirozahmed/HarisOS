@@ -292,6 +292,8 @@ set(KERNEL_SOURCES
     kernel/drivers/input/usb_xhci/usb_xhci_audio.c  # xHCI: USB audio (UAC 1.0 streaming, isochronous OUT)
     kernel/drivers/input/usb_xhci/usb_xhci_bt.c     # xHCI: Bluetooth controller (HCI over USB: control, interrupt, bulk)
     kernel/bluetooth/bt_hci.c                       # Bluetooth: HCI core (commands, events, start-up, status line)
+    kernel/bluetooth/bt_sbc.c                       # Bluetooth: SBC audio encoder (host-tested against libsbc)
+    kernel/bluetooth/bt_a2dp.c                      # Bluetooth: A2DP media sender (RTP packets, pacing, test tune)
     kernel/bluetooth/bt_avdtp.c                     # Bluetooth: AVDTP, the control side of A2DP streaming (host-tested)
     kernel/bluetooth/bt_pair.c                      # Bluetooth: pairing, link key, encryption (host-tested)
     kernel/bluetooth/bt_sdp.c                       # Bluetooth: SDP request and answer parser (host-tested)
