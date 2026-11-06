@@ -63,14 +63,36 @@ int bt_find(Xhci *x, u32 total, BtDesc *bd)
     return bd->iface >= 0 && bd->intr_addr && bd->in_addr && bd->out_addr && bd->intr_mps <= 512 && bd->in_mps <= 512 && bd->out_mps <= 512;
 }
 
+/* Bulk IN: several transfers wait at the controller at once, each into a buffer of its own. With one only, the chip's data (a file arrives as a
+ * stream of small packets) came out at one packet per pass of the main loop: the next transfer was queued only after the event of the last was
+ * handled. With BT_IN_SLOTS waiting, a pass takes everything that has arrived. A page holds 8 buffers of 512 bytes (the largest bulk packet). */
+#define BT_IN_SLOTS 8
+#define BT_IN_STRIDE 512
+
+static void bt_queue_in(Bt *b, unsigned slot)
+{
+    ring_put(&b->rin, b->abuf_phys + (u64)slot * BT_IN_STRIDE, b->in_mps, (1u << 10) | (1u << 5)); /* Normal TRB, interrupt on completion */
+}
+
+/* all slots, after the endpoint was reset (its queue is empty then) or at the start */
+static void bt_queue_in_all(Bt *b)
+{
+    for (unsigned i = 0; i < BT_IN_SLOTS; i++)
+        bt_queue_in(b, i);
+    b->a_next = 0;
+    mb();
+    wr32(b->x->db, (u32)b->slot * 4, (u32)b->in_dci);
+}
+
 /* One transfer of exactly one packet on the interrupt IN / bulk IN endpoint. The size must be the packet size: a bigger transfer would
  * not finish until it is full or a short packet comes, and a full-size packet is not "short". */
 static void bt_queue(Bt *b, int bulk)
 {
-    ring_put(bulk ? &b->rin : &b->rintr, bulk ? b->abuf_phys : b->ibuf_phys, bulk ? b->in_mps : b->intr_mps,
-             (1u << 10) | (1u << 5)); /* Normal TRB, interrupt on completion */
+    if (bulk) /* (the bulk endpoint is queued by bt_queue_in_all / bt_event) */
+        return;
+    ring_put(&b->rintr, b->ibuf_phys, b->intr_mps, (1u << 10) | (1u << 5)); /* Normal TRB, interrupt on completion */
     mb();
-    wr32(b->x->db, (u32)b->slot * 4, (u32)(bulk ? b->in_dci : b->intr_dci));
+    wr32(b->x->db, (u32)b->slot * 4, (u32)b->intr_dci);
 }
 
 /* A transfer event of this slot on the event or ACL endpoint: hand the packet on and queue the next one. (The bulk OUT endpoint's events
@@ -91,7 +113,8 @@ void bt_event(Xhci *x, const Trb *e)
         unsigned resid = e->d2 & 0xFFFFFF;
         unsigned n = mps > resid ? mps - resid : 0;
         u8 tmp[512];
-        volatile u8 *src = bulk ? b->abuf : b->ibuf;
+        unsigned slot = b->a_next % BT_IN_SLOTS;
+        volatile u8 *src = bulk ? b->abuf + slot * BT_IN_STRIDE : b->ibuf;
         for (unsigned i = 0; i < n && i < sizeof tmp; i++)
             tmp[i] = src[i];
         if (bulk)
@@ -108,9 +131,24 @@ void bt_event(Xhci *x, const Trb *e)
             return;
         }
         if (code == 6)
+        {
             ep_recover(x, b->slot, dci, bulk ? &b->rin : &b->rintr);
+            if (bulk) /* the reset threw away every transfer that waited: queue them all again */
+            {
+                bt_queue_in_all(b);
+                return;
+            }
+        }
     }
-    bt_queue(b, bulk);
+    if (bulk)
+    {
+        bt_queue_in(b, b->a_next % BT_IN_SLOTS); /* the buffer just emptied goes to the back of the queue */
+        b->a_next++;
+        mb();
+        wr32(b->x->db, (u32)b->slot * 4, (u32)b->in_dci);
+    }
+    else
+        bt_queue(b, 0);
 }
 
 /* ---- the transport handed to the HCI core ---- */
@@ -305,7 +343,7 @@ int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd)
 
     b->active = 1; /* from here dev_remove() takes care of it; bt_event() needs it to be set while the chip starts */
     bt_queue(b, 0);
-    bt_queue(b, 1);
+    bt_queue_in_all(b);
 
     BtTransport t;
     t.send_cmd = bt_send_cmd;

@@ -221,8 +221,9 @@ typedef struct
     Ring rintr, rin, rout;
     volatile u8 *ibuf; /* the interrupt IN transfer lands here (one packet, intr_mps bytes) */
     u64 ibuf_phys;
-    volatile u8 *abuf; /* the bulk IN transfer (ACL data in) lands here (one packet, in_mps bytes) */
+    volatile u8 *abuf; /* the bulk IN transfers (ACL data in) land here: BT_IN_SLOTS buffers of BT_IN_STRIDE bytes, each takes one packet (in_mps bytes) */
     u64 abuf_phys;
+    unsigned a_next;   /* the slot whose transfer completes next (they complete in the order they were queued) */
     volatile u8 *obuf; /* the HCI ACL packet being sent on the bulk OUT endpoint */
     u64 obuf_phys;
     int errs;
