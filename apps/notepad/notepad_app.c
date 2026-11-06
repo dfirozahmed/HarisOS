@@ -17,6 +17,7 @@
 #include "taskbar.h"
 #include "timer.h"
 #include "ui.h"
+#include "utf8.h"
 #include "vfs.h"
 #include "wm.h"
 
@@ -89,14 +90,72 @@ static int line_of(int p)
     return n;
 }
 
-/* copy up to `count` characters from `from` into out (cut at NP_LINE_MAX, 0-terminated) */
-static void copy_text(int from, int count, char *out)
+/* ---- UTF-8: the text is UTF-8, the caret and all offsets are byte offsets that lie between characters. One Left /
+ * Right / Backspace / Delete moves over one character (1 to 4 bytes; a Bengali letter is 3). ---- */
+
+/* start of the character before offset p */
+static int np_prev(int p)
 {
-    if (count > NP_LINE_MAX)
-        count = NP_LINE_MAX;
+    if (p <= 0)
+        return 0;
+    do
+        p--;
+    while (p > 0 && utf8_is_cont((unsigned char)NP_BUF[p]));
+    return p;
+}
+
+/* start of the character after the one at offset p */
+static int np_next(int p)
+{
+    if (p >= NP_LEN)
+        return NP_LEN;
+    do
+        p++;
+    while (p < NP_LEN && utf8_is_cont((unsigned char)NP_BUF[p]));
+    return p;
+}
+
+/* the character at s[0..n): its length (1..4) and *cp, or 0 if the bytes are not well-formed UTF-8. Never reads past n. */
+static int np_char(const char *s, int n, unsigned *cp)
+{
+    char t[5];
+    int m = n < 4 ? n : 4;
+    for (int i = 0; i < m; i++)
+        t[i] = s[i];
+    t[m] = 0; /* a character cut short by n runs into this 0 and is reported as bad */
+    if (m == 0)
+        return 0;
+    const char *p = t;
+    if (!utf8_decode_ok(&p, cp))
+        return 0;
+    return (int)(p - t);
+}
+
+/* A character that may be in the text: '\n', or printable (not a control: C0, DEL, C1). */
+static int np_printable(unsigned cp)
+{
+    return cp == '\n' || (cp >= 32 && cp != 127 && !(cp >= 0x80 && cp <= 0x9F));
+}
+
+/* How many of the `count` characters (bytes) at `from` go into one piece for the font functions: at most NP_LINE_MAX,
+ * and never ending in the middle of a UTF-8 character. */
+static int chunk_len(int from, int count)
+{
+    int n = count < NP_LINE_MAX ? count : NP_LINE_MAX;
+    if (n < count)
+        while (n > 1 && utf8_is_cont((unsigned char)NP_BUF[from + n]))
+            n--;
+    return n;
+}
+
+/* copy up to `count` bytes from `from` into out (one chunk_len piece, 0-terminated); returns how many were copied */
+static int copy_text(int from, int count, char *out)
+{
+    count = chunk_len(from, count);
     for (int i = 0; i < count; i++)
         out[i] = NP_BUF[from + i];
     out[count] = 0;
+    return count;
 }
 
 /* ---- editing and undo ----
@@ -399,10 +458,12 @@ static int delete_selection(void)
 static void insert_text(const char *s, int n)
 {
     int a, b;
+    unsigned cp;
+    int one_char = np_char(s, n, &cp) == n && cp != '\n'; /* exactly one character (a letter typed, maybe a Bengali one) */
     if (sel_range(&a, &b))
         edit_replace(a, b - a, s, n, NP_KIND_NONE);
     else
-        edit_replace(NP_CUR, 0, s, n, (n == 1 && s[0] != '\n') ? NP_KIND_TYPE : NP_KIND_NONE);
+        edit_replace(NP_CUR, 0, s, n, one_char ? NP_KIND_TYPE : NP_KIND_NONE);
 }
 
 /* ---- layout ---- */
@@ -442,8 +503,7 @@ static int span_w(int from, int count)
     int w = 0;
     while (count > 0)
     {
-        int n = count < NP_LINE_MAX ? count : NP_LINE_MAX;
-        copy_text(from, n, tmp);
+        int n = copy_text(from, count, tmp); /* a piece that never ends inside a character */
         w += gfx_text_w(np_font(), tmp);
         from += n;
         count -= n;
@@ -458,8 +518,7 @@ static int cols_in(int ls, int len, int px)
     int col = 0;
     while (col < len && px > 0)
     {
-        int n = len - col < NP_LINE_MAX ? len - col : NP_LINE_MAX;
-        copy_text(ls + col, n, tmp);
+        int n = copy_text(ls + col, len - col, tmp);
         int fit = gfx_text_fit(np_font(), tmp, px);
         col += fit;
         if (fit < n)
@@ -488,7 +547,7 @@ static int seg_end(int s, int lend)
     if (s + n >= lend)
         return lend;
     if (n < 1)
-        n = 1; /* a letter wider than the row still gets a row of its own */
+        n = np_next(s) - s; /* a letter wider than the row still gets a row of its own (a whole character) */
     if (NP_BUF[s + n] == ' ')
         return s + n + 1; /* the word ends exactly at the edge: the space hangs over it */
     for (int i = s + n - 1; i > s; i--)
@@ -532,7 +591,7 @@ static int row_soft(const Row *r)
 /* the last offset the caret can have on this row */
 static int row_last_pos(const Row *r)
 {
-    return r->end - (row_soft(r) ? 1 : 0);
+    return row_soft(r) ? np_prev(r->end) : r->end; /* (before the last character: never inside one) */
 }
 
 /* the index of the row the caret at offset pos is on (and the row in *r) */
@@ -757,9 +816,11 @@ static void np_draw(Window *w, UiRect body)
             char tmp[NP_LINE_MAX + 1];
             int first = cols_in(p, e - p, NP_HSCROLL);
             int x0 = span_w(p, first);
-            copy_text(p + first, e - p - first, tmp);
-            int shown = gfx_text_fit(f, tmp, in.w + NP_HSCROLL - x0 + 8) + 1; /* +1: a letter cut by the edge */
-            if (shown < NP_LINE_MAX)
+            int copied = copy_text(p + first, e - p - first, tmp);
+            int shown = gfx_text_fit(f, tmp, in.w + NP_HSCROLL - x0 + 8);
+            if (shown < copied) /* + one more character: a letter cut by the edge */
+                shown += utf8_len_of_lead((unsigned char)tmp[shown]);
+            if (shown < copied)
                 tmp[shown] = 0;
             gfx_text(f, in.x - NP_HSCROLL + x0, y, tmp, ink);
             if (is_cur && NP_BLINK && NP_FOCUS == 0)
@@ -782,7 +843,11 @@ static void np_draw(Window *w, UiRect body)
     put_str(st, &n, "Ln ");
     put_dec(st, &n, (unsigned)line_of(NP_CUR) + 1); /* the line of the text, not the row it is shown in */
     put_str(st, &n, ", Col ");
-    put_dec(st, &n, (unsigned)(NP_CUR - line_start(NP_CUR)) + 1);
+    int chars = 0; /* the column counts characters, not bytes */
+    for (int i = line_start(NP_CUR); i < NP_CUR; i++)
+        if (!utf8_is_cont((unsigned char)NP_BUF[i]))
+            chars++;
+    put_dec(st, &n, (unsigned)chars + 1);
     put_str(st, &n, "     ");
     put_dec(st, &n, (unsigned)NP_LEN);
     put_str(st, &n, " bytes");
@@ -808,7 +873,10 @@ static void goto_row_col(int index, int col)
     Row r;
     row_at(index, &r);
     int len = row_last_pos(&r) - r.start;
-    NP_CUR = r.start + (col < len ? col : len);
+    int pos = r.start + (col < len ? col : len);
+    while (pos > r.start && pos < NP_LEN && utf8_is_cont((unsigned char)NP_BUF[pos])) /* a byte column can fall inside a character */
+        pos--;
+    NP_CUR = pos;
 }
 
 /* the first and last row the selection (or just the caret) touches */
@@ -868,24 +936,35 @@ static int copy_selection(void)
     return 1;
 }
 
-/* What of the clipboard text can be pasted: '\n' and printable ASCII stay, a Tab becomes spaces, '\r' and other control
- * characters are dropped. Writes into out (if not NULL) and returns the length; stops at cap. */
+/* What of the clipboard text can be pasted: '\n' and printable characters (ASCII or well-formed UTF-8) stay, a Tab
+ * becomes spaces, '\r', other control characters and broken UTF-8 are dropped. Writes into out (if not NULL) and
+ * returns the length in bytes; stops at cap (never inside a character). */
 static int filter_clip(const char *clip, int n, char *out, int cap)
 {
     int o = 0;
-    for (int i = 0; i < n && o < cap; i++)
+    for (int i = 0; i < n;)
     {
-        unsigned char c = (unsigned char)clip[i];
-        if (c == '\n' || (c >= 32 && c < 127))
+        unsigned cp;
+        int len = np_char(clip + i, n - i, &cp);
+        if (len == 0) /* a broken byte: skip it */
         {
-            if (out)
-                out[o] = (char)c;
-            o++;
+            i++;
+            continue;
         }
-        else if (c == '\t')
+        if (np_printable(cp))
+        {
+            if (o + len > cap)
+                break;
+            if (out)
+                for (int k = 0; k < len; k++)
+                    out[o + k] = clip[i + k];
+            o += len;
+        }
+        else if (cp == '\t')
             for (int k = 0; k < NP_TAB && o < cap; k++, o++)
                 if (out)
                     out[o] = ' ';
+        i += len;
     }
     return o;
 }
@@ -910,7 +989,8 @@ static void paste(void)
 }
 
 /* ---- files: New / Open / Save / Save As ----
- * Text is plain ASCII (the font has no other letters). A file is found by its full path in the virtual file
+ * Text is UTF-8 (ASCII, Bengali ... whatever the fonts have glyphs for; a UTF-8 byte order mark is dropped, broken
+ * UTF-8 is refused). A file is found by its full path in the virtual file
  * system, e.g. "/HARISOS (nvme0p1)/notes.txt". Only a drive can hold content: the RAM Disk's files are just
  * names. Opening turns Tab into spaces and drops carriage returns (so Windows line endings become '\n'). */
 
@@ -952,7 +1032,11 @@ static void np_title(Window *w)
     while (name[len])
         len++;
     if (len > 16)
+    {
         len = 14;
+        while (len > 0 && utf8_is_cont((unsigned char)name[len])) /* cut between characters */
+            len--;
+    }
     for (int i = 0; i < len; i++)
         t[n++] = name[i];
     if (name[len]) /* cut: show that there is more */
@@ -1099,19 +1183,24 @@ static const char *open_file(const char *path)
             break;
         done += (unsigned)r;
     }
+    unsigned skip = 0; /* a UTF-8 byte order mark (EF BB BF, which Windows editors write) is not text */
+    if (done >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF)
+        skip = 3;
     long long out = 0; /* the length of the text: Tab becomes spaces, carriage returns go */
-    for (unsigned i = 0; i < done; i++)
+    for (unsigned i = skip; i < done;)
     {
-        unsigned char c = raw[i];
-        if (c == '\t')
-            out += NP_TAB;
-        else if (c == '\n' || (c >= 32 && c < 127))
-            out++;
-        else if (c != '\r')
+        unsigned cp;
+        int len = np_char((const char *)raw + i, (int)(done - i), &cp);
+        if (len == 0 || !(np_printable(cp) || cp == '\t' || cp == '\r'))
         {
             kfree(raw);
-            return "Only plain ASCII text can be opened";
+            return "Only UTF-8 (or plain ASCII) text can be opened";
         }
+        if (cp == '\t')
+            out += NP_TAB;
+        else if (cp != '\r')
+            out += len;
+        i += (unsigned)len;
     }
     if (out > NP_LIMIT)
     {
@@ -1125,14 +1214,14 @@ static const char *open_file(const char *path)
         return "Out of memory";
     }
     int len = 0;
-    for (unsigned i = 0; i < done; i++)
+    for (unsigned i = skip; i < done; i++)
     {
         unsigned char c = raw[i];
         if (c == '\t')
             for (int k = 0; k < NP_TAB; k++)
                 text[len++] = ' ';
         else if (c != '\r')
-            text[len++] = (char)c;
+            text[len++] = (char)c; /* (UTF-8 bytes are copied as they are: the check above passed them) */
     }
     kfree(raw);
     new_document(); /* frees the old text and the undo history */
@@ -2336,15 +2425,15 @@ static void np_key(Window *w, const KeyEvent *k)
             motion = 1;
             if (has_sel && !shift)
                 NP_CUR = sa; /* the selection collapses to its start */
-            else if (NP_CUR > 0)
-                NP_CUR--;
+            else
+                NP_CUR = np_prev(NP_CUR);
             break;
         case KEY_RIGHT:
             motion = 1;
             if (has_sel && !shift)
                 NP_CUR = sb;
-            else if (NP_CUR < NP_LEN)
-                NP_CUR++;
+            else
+                NP_CUR = np_next(NP_CUR);
             break;
         case KEY_UP:
         case KEY_DOWN:
@@ -2375,7 +2464,7 @@ static void np_key(Window *w, const KeyEvent *k)
         }
         case KEY_BACKSPACE:
             if (!delete_selection() && NP_CUR > 0)
-                edit_replace(NP_CUR - 1, 1, 0, 0, NP_KIND_BACK);
+                edit_replace(np_prev(NP_CUR), NP_CUR - np_prev(NP_CUR), 0, 0, NP_KIND_BACK); /* one whole character */
             break;
         case KEY_DELETE:
             if (shift) /* Shift+Delete = cut */
@@ -2384,7 +2473,7 @@ static void np_key(Window *w, const KeyEvent *k)
                     delete_selection();
             }
             else if (!delete_selection() && NP_CUR < NP_LEN)
-                edit_replace(NP_CUR, 1, 0, 0, NP_KIND_FWD);
+                edit_replace(NP_CUR, np_next(NP_CUR) - NP_CUR, 0, 0, NP_KIND_FWD);
             break;
         case KEY_INSERT:
             if (shift) /* Shift+Insert = paste */
@@ -2402,10 +2491,12 @@ static void np_key(Window *w, const KeyEvent *k)
                 cmd_wrap();
                 full = 1;
             }
-            else if (k->ch >= 32 && k->ch < 127 && !(k->mods & KMOD_ALT))
+            else if (((k->ch >= 32 && k->ch < 127) ||
+                      (k->ch >= 0xA0 && k->ch <= 0x10FFFF && !(k->ch >= 0xD800 && k->ch <= 0xDFFF))) && /* ASCII or a Unicode character */
+                     !(k->mods & KMOD_ALT))
             {
-                char c = (char)k->ch;
-                insert_text(&c, 1);
+                char u[4];
+                insert_text(u, utf8_encode((unsigned)k->ch, u));
             }
             break;
         }

@@ -77,13 +77,33 @@ unsigned gfx_width(void) { return 1024; }
 void gfx_restore_clip(GfxClip c) { (void)c; }
 void gfx_round_rect(int x, int y, int w, int h, int r, int t, GfxColor c) { (void)x; (void)y; (void)w; (void)h; (void)r; (void)t; (void)c; }
 void gfx_text(const Font *f, int x, int y, const char *s, GfxColor c) { (void)f; (void)x; (void)y; (void)s; (void)c; }
+/* 8 px per character (a UTF-8 character of several bytes is one character, as in the real font code) */
 int gfx_text_fit(const Font *f, const char *s, int max_w)
 {
     (void)f;
-    int n = (int)strlen(s), fit = max_w / 8; /* 8 px per character */
-    return fit < n ? (fit < 0 ? 0 : fit) : n;
+    int fit = max_w / 8, chars = 0, i = 0;
+    if (fit <= 0)
+        return 0;
+    while (s[i])
+    {
+        int j = i + 1;
+        while (utf8_is_cont((unsigned char)s[j]))
+            j++;
+        if (++chars > fit)
+            break;
+        i = j;
+    }
+    return i; /* the bytes of the characters that fit */
 }
-int gfx_text_w(const Font *f, const char *s) { (void)f; return (int)strlen(s) * 8; }
+int gfx_text_w(const Font *f, const char *s)
+{
+    (void)f;
+    int chars = 0;
+    for (; *s; s++)
+        if (!utf8_is_cont((unsigned char)*s))
+            chars++;
+    return chars * 8;
+}
 void ui_caret_restart(void) {}
 int ui_caret_visible(void) { return 1; }
 int ui_clipboard_set(const char *s, int len)
@@ -323,7 +343,7 @@ static void test_files(void)
 
     /* open refusals keep the current text */
     put_file("bin.dat", "ab\x01" "cd", 5);
-    put_file("utf.txt", "caf\xC3\xA9", 5);
+    put_file("utf.txt", "caf\xC3(", 5); /* a UTF-8 lead byte without its continuation: not text */
     assert(open_file("/Fake/bin.dat") != 0 && open_file("/Fake/utf.txt") != 0);
     assert(open_file("/Fake/missing.txt") != 0 && open_file("/Fake") != 0);
     assert(open_file("/RAM Disk/readme.txt") != 0);
@@ -618,6 +638,119 @@ static void expect_rows(int n, const int *starts)
         assert(row_next(&r) == (i < n - 1));
     }
     assert(row_count() == n);
+}
+
+/* UTF-8 text: the caret and every edit move over whole characters */
+static void test_unicode(void)
+{
+    static Window NW;
+    NP_WIN = &NW;
+    NP_WRAP = 0;
+    const char *KA = "\xe0\xa6\x95", *KHA = "\xe0\xa6\x96", *GA = "\xe0\xa6\x97"; /* ক খ গ: 3 bytes each */
+    char want[64];
+
+    /* a typed character is inserted as UTF-8, and typing in a row (Latin and Bengali) is one undo step */
+    reset();
+    np_key(&NW, &(KeyEvent){0, 'a', 1, 0});
+    np_key(&NW, &(KeyEvent){0, 0x995, 1, 0});
+    np_key(&NW, &(KeyEvent){0, 'b', 1, 0});
+    snprintf(want, sizeof want, "a%sb", KA);
+    assert(is(want) && NP_CUR == 5 && NP_UN == 1);
+    np_key(&NW, &(KeyEvent){0, 0xD800, 1, 0}); /* not a character */
+    np_key(&NW, &(KeyEvent){0, 0x85, 1, 0});   /* a C1 control */
+    assert(is(want));
+
+    /* Left / Right / Backspace / Delete move over whole characters */
+    np_key(&NW, &(KeyEvent){KEY_LEFT, 0, 1, 0});
+    assert(NP_CUR == 4);
+    np_key(&NW, &(KeyEvent){KEY_LEFT, 0, 1, 0});
+    assert(NP_CUR == 1);
+    np_key(&NW, &(KeyEvent){KEY_RIGHT, 0, 1, 0});
+    assert(NP_CUR == 4);
+    np_key(&NW, &(KeyEvent){KEY_BACKSPACE, 0, 1, 0}); /* removes the 3 bytes of ক */
+    assert(is("ab") && NP_CUR == 1);
+    snprintf(want, sizeof want, "%s%s", KA, KHA);
+    set_text(want);
+    NP_CUR = NP_ANCHOR = 3;
+    np_key(&NW, &(KeyEvent){KEY_DELETE, 0, 1, 0});
+    assert(is(KA) && NP_CUR == 3);
+    np_key(&NW, &(KeyEvent){KEY_BACKSPACE, 0, 1, 0});
+    assert(is("") && NP_CUR == 0);
+    undo();
+    assert(is(KA)); /* undo puts back whole characters */
+    undo();
+    snprintf(want, sizeof want, "%s%s", KA, KHA);
+    assert(is(want));
+
+    /* Shift+Left selects one character, and typing replaces it */
+    NP_CUR = NP_ANCHOR = 6;
+    np_key(&NW, &(KeyEvent){KEY_LEFT, 0, 1, KMOD_SHIFT});
+    assert(NP_ANCHOR == 6 && NP_CUR == 3);
+    np_key(&NW, &(KeyEvent){0, 'x', 1, 0});
+    snprintf(want, sizeof want, "%sx", KA);
+    assert(is(want));
+
+    /* Up / Down: a byte column that falls inside a character is moved to the character's start */
+    snprintf(want, sizeof want, "%s%s%s\nabcdefgh", KA, KHA, GA);
+    set_text(want);
+    NP_CUR = NP_ANCHOR = 9 + 1 + 4; /* line 2, after "abcd" */
+    NP_DESIRED = col_in_row();
+    np_key(&NW, &(KeyEvent){KEY_UP, 0, 1, 0});
+    assert(NP_CUR == 3); /* column 4 is inside খ (bytes 3..5): the caret goes to its start */
+    np_key(&NW, &(KeyEvent){KEY_DOWN, 0, 1, 0});
+    assert(NP_CUR == 9 + 1 + 4);
+
+    /* the status column counts characters */
+    snprintf(want, sizeof want, "%s%s", KA, KHA);
+    set_text(want);
+    NP_CUR = NP_ANCHOR = 6;
+    {
+        int chars = 0;
+        for (int i = line_start(NP_CUR); i < NP_CUR; i++)
+            if (!utf8_is_cont((unsigned char)NP_BUF[i]))
+                chars++;
+        assert(chars == 2);
+    }
+
+    /* paste keeps printable characters (UTF-8 too), turns Tab into spaces, drops CR, controls and broken bytes */
+    reset();
+    CLIP_N = snprintf(CLIP_STORE, sizeof CLIP_STORE, "%s\r\t%s\xff\x01\xc2\x85z\xe0\xa6", KA, GA);
+    paste();
+    snprintf(want, sizeof want, "%s    %sz", KA, GA);
+    assert(is(want));
+
+    /* opening a file: UTF-8 is text (a byte order mark is not), broken UTF-8 is refused */
+    memset(FF, 0, sizeof FF); /* the 8 slots of the fake drive are full of the earlier tests' files: start empty */
+    vfs_init();
+    assert(vfs_mount(&FAKE, 0, "Fake") == 1);
+    reset();
+    NP_PATH[0] = 0;
+    char file[32];
+    int fl = snprintf(file, sizeof file, "\xef\xbb\xbf%s\r\n%s", KA, KHA);
+    put_file("bn.txt", file, (unsigned)fl);
+    assert(open_file("/Fake/bn.txt") == 0);
+    snprintf(want, sizeof want, "%s\n%s", KA, KHA);
+    assert(is(want));
+    put_file("badutf.txt", "a\xe0\xa6", 3);
+    assert(open_file("/Fake/badutf.txt") != 0 && is(want)); /* refused, the text stays */
+    put_file("c1.txt", "a\xc2\x85", 3);
+    assert(open_file("/Fake/c1.txt") != 0);
+
+    /* word wrap never cuts a Bengali letter: 12 characters, 10 fit a row (8 px each in this test) */
+    NP_WRAP = 1;
+    NP_WRAPW = 80;
+    char twelve[64];
+    int tn = 0;
+    for (int i = 0; i < 12; i++)
+        memcpy(twelve + tn, KA, 3), tn += 3;
+    twelve[tn] = 0;
+    set_text(twelve);
+    expect_rows(2, (int[]){0, 30});
+    Row r;
+    row_first(&r);
+    assert(row_soft(&r) && row_last_pos(&r) == 27); /* the caret's last place on the row is before the last letter */
+    NP_WRAP = 0;
+    NP_WRAPW = 0;
 }
 
 static void test_wrap(void)
@@ -1321,6 +1454,7 @@ int main(void)
     test_find();
     test_close_clears();
     test_big_text();
+    test_unicode();
 
     printf("notepad tests passed\n");
     return 0;

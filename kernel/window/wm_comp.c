@@ -6,6 +6,7 @@
 #include "ui.h"
 #include "timer.h"
 #include "ui_anim.h"
+#include "utf8.h"
 
 #define WMC_MAX 64
 #define WMC_PARTS 4 /* changed parts kept apart per window (a list's new rows and its scrollbar); more are merged */
@@ -118,6 +119,9 @@ static void tally(Wmc *c, const Window *w, unsigned long long px, unsigned long 
     int k = 0;
     for (; k < (int)sizeof c->title - 1 && w->title[k]; k++)
         c->title[k] = w->title[k];
+    if (w->title[k]) /* cut: not in the middle of a UTF-8 character */
+        while (k > 0 && utf8_is_cont((unsigned char)w->title[k]))
+            k--;
     c->title[k] = 0;
     c->st_n++;
     c->st_px += px;

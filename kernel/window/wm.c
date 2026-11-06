@@ -3,6 +3,7 @@
 #include "heap.h"
 #include "taskbar.h"
 #include "timer.h"
+#include "utf8.h"
 #include "wm_internal.h"
 
 /* Windows live in chunks of WM_CHUNK, made with kmalloc when all the slots so far are in use. A closed window's slot is reused for the next
@@ -36,6 +37,9 @@ static void copy_title(char *dst, const char *src)
         dst[i] = src[i];
         i++;
     }
+    if (src && src[i]) /* cut: never in the middle of a UTF-8 character */
+        while (i > 0 && utf8_is_cont((unsigned char)src[i]))
+            i--;
     dst[i] = 0;
 }
 

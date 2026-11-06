@@ -2,6 +2,7 @@
 #include "explorer.h"
 #include "taskbar.h"
 #include "dnd.h"
+#include "utf8.h"
 
 #define DND_START 6 /* pixels the pointer must move with the button held on a row before the entries are dragged out */
 
@@ -468,7 +469,9 @@ int ex_wheel(Window *w, int steps)
     return 2;
 }
 
-/* Jump to the next entry (after the selection, wrapping) whose name starts with `c`. */
+/* Jump to the next entry (after the selection, wrapping) whose name starts with the character `c` (a Unicode code
+ * point; names are UTF-8, so the first character of a name is decoded, not just its first byte). Letters of other
+ * scripts must match exactly; only ASCII ignores case. */
 static void type_ahead(UiRect body, int c)
 {
     c = ex_lower(c);
@@ -476,7 +479,8 @@ static void type_ahead(UiRect body, int c)
     {
         int row = (EX_SEL + k + EX_NITEMS) % EX_NITEMS;
         const VfsNode *n = vfs_node(EX_ITEMS[row]);
-        if (n && ex_lower((unsigned char)n->name[0]) == c)
+        const char *p = n ? n->name : 0;
+        if (p && *p && ex_lower((int)utf8_decode(&p)) == c)
         {
             ex_select_row(body, row);
             return;
@@ -630,7 +634,9 @@ void ex_key(Window *w, const KeyEvent *k)
         target = EX_NITEMS - 1;
         break;
     default:
-        if (k->ch > ' ' && k->ch < 127 && !(k->mods & (KMOD_CTRL | KMOD_ALT)))
+        if (((k->ch > ' ' && k->ch < 127) ||
+             (k->ch >= 0xA0 && k->ch <= 0x10FFFF && !(k->ch >= 0xD800 && k->ch <= 0xDFFF))) && /* ASCII or a Unicode character */
+            !(k->mods & (KMOD_CTRL | KMOD_ALT)))
             type_ahead(body, k->ch);
         break;
     }
