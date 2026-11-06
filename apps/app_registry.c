@@ -9,6 +9,7 @@ extern const AppInfo APP_NOTEPAD;
 extern const AppInfo APP_IMAGEVIEWER;
 extern const AppInfo APP_TERMINAL;
 extern const AppInfo APP_WIFI;
+extern const AppInfo APP_BLUETOOTH;
 extern const AppInfo APP_PLAYER;
 extern const AppInfo APP_PERSONALIZE;
 
@@ -22,6 +23,7 @@ static const AppInfo *const APPS[] = {
     &APP_PLAYER,
     &APP_TERMINAL,
     &APP_WIFI,
+    &APP_BLUETOOTH,
     &APP_PERSONALIZE,
 };
 

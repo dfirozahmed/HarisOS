@@ -154,6 +154,16 @@ static void icon_plug(const Frame *f, GfxColor c)
     rrect(f, 19, 36, 10, 12, 4, c); /* cable */
 }
 
+/* the Bluetooth rune: a vertical stem with two arrowheads on each side, drawn as one connected stroke */
+static void icon_bluetooth(const Frame *f, GfxColor c)
+{
+    line(f, 14, 17, 34, 33, 4, c);
+    line(f, 34, 33, 24, 42, 4, c);
+    line(f, 24, 42, 24, 6, 4, c);
+    line(f, 24, 6, 34, 15, 4, c);
+    line(f, 34, 15, 14, 31, 4, c);
+}
+
 static void icon_close(const Frame *f, GfxColor c)
 {
     line(f, 12, 12, 36, 36, 5, c);
@@ -570,6 +580,9 @@ void ui_icon(UiIcon icon, int cx, int cy, int size, UiRgb tint)
         break;
     case UI_ICON_PLUG:
         icon_plug(&f, t);
+        break;
+    case UI_ICON_BLUETOOTH:
+        icon_bluetooth(&f, t);
         break;
     default:
         break;

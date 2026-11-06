@@ -264,6 +264,8 @@ static UiIcon app_icon(int icon)
         return UI_ICON_NOTEPAD;
     case TASKBAR_ICON_WIFI:
         return UI_ICON_WIFI;
+    case TASKBAR_ICON_BLUETOOTH:
+        return UI_ICON_BLUETOOTH;
     default:
         return UI_ICON_BROWSER;
     }
