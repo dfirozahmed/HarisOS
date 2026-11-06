@@ -153,9 +153,9 @@ int main(void)
     CHECK(i->have_addr && i->bdaddr[0] == 0x11 && i->bdaddr[5] == 0x66); /* shown most significant byte first */
     CHECK(i->vid == 0x0BDA && i->pid == 0xB00A);
     bt_status(line, sizeof line);
-    CHECK(strcmp(line, "BT 0bda:b00a hci 8 rev 000c sub 8821 mfr 93 rom 3 11:22:33:44:55:66") == 0);
+    CHECK(strcmp(line, "BT 0bda:b00a hci 8 rev 000c sub 8821 mfr 93 rom 3, addr 11:22:33:44:55:66") == 0);
     CHECK(strlen(line) < 96);
-    if (strcmp(line, "BT 0bda:b00a hci 8 rev 000c sub 8821 mfr 93 rom 3 11:22:33:44:55:66"))
+    if (strcmp(line, "BT 0bda:b00a hci 8 rev 000c sub 8821 mfr 93 rom 3, addr 11:22:33:44:55:66"))
         printf("  got: %s\n", line);
 
     /* 2. other events and answers for other commands arrive in between: they must not be taken for the answer */

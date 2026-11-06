@@ -293,9 +293,11 @@ void bt_status(char *buf, unsigned cap)
             puts_(&o, " rom ");
             putd(&o, i->rom_version);
         }
+        if (i->have_rom || i->have_addr)
+            putc_(&o, ',');
         if (i->have_addr)
         {
-            puts_(&o, " ");
+            puts_(&o, " addr ");
             for (int k = 0; k < 6; k++)
             {
                 if (k)
