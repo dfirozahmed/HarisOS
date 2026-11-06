@@ -12,8 +12,6 @@
 #define OP_CREATE_CONNECTION 0x0405
 #define OP_CREATE_CONNECTION_CANCEL 0x0408
 #define OP_DISCONNECT 0x0406
-#define OP_LINK_KEY_NEG_REPLY 0x040C
-#define OP_PIN_NEG_REPLY 0x040E
 
 #define EV_CONNECTION_COMPLETE 0x03
 #define EV_DISCONNECTION_COMPLETE 0x05
@@ -76,8 +74,6 @@ static struct
     unsigned fixed0;
 
     /* what the device asked of us and we still owe */
-    int neg_key, neg_pin;
-    unsigned char peer[6];
     unsigned key_requests, pin_requests;
     unsigned peer_cmds;        /* signalling commands received */
 
@@ -111,7 +107,11 @@ void bt_link_reset(void)
     L.last_reason = -1;
     L.auth_status = -1;
     chan_reset();
+    bt_pair_reset();
 }
+
+unsigned bt_link_handle(void) { return L.handle; }
+const unsigned char *bt_link_addr(void) { return L.addr; }
 
 BtLinkState bt_link_state(void) { return L.state; }
 
@@ -349,6 +349,7 @@ static void sdp_fail(const char *why, int code)
 /* the link is gone: every channel with it */
 static void chan_link_down(void)
 {
+    bt_pair_reset();
     if (SD.state == SDP_OPENING || SD.state == SDP_ASKING)
     {
         SD.state = SDP_FAILED;
@@ -735,7 +736,7 @@ static int same6(const unsigned char *a, const unsigned char *b)
 
 void bt_link_event(const unsigned char *e, unsigned len)
 {
-    (void)len;
+    bt_pair_event(e, len); /* pairing and security events: replies are queued there */
     unsigned plen = e[1];
     const unsigned char *p = e + 2;
     switch (e[0])
@@ -772,23 +773,13 @@ void bt_link_event(const unsigned char *e, unsigned len)
         if (plen >= 3 && (L.state == BT_LINK_UP) && (le16(p + 1) & 0x0FFF) == L.handle)
             L.auth_status = p[0];
         break;
-    case EV_LINK_KEY_REQUEST: /* the chip asks for the stored key of a device: we have none (no pairing yet) */
+    case EV_LINK_KEY_REQUEST: /* the chip asks for the stored key of a device (bt_pair.c answers) */
         if (plen >= 6)
-        {
-            for (int i = 0; i < 6; i++)
-                L.peer[i] = p[i];
-            L.neg_key = 1;
             L.key_requests++;
-        }
         break;
-    case EV_PIN_CODE_REQUEST: /* the legacy pairing asks for a PIN: we refuse */
+    case EV_PIN_CODE_REQUEST: /* the old style pairing asks for a PIN (bt_pair.c answers) */
         if (plen >= 6)
-        {
-            for (int i = 0; i < 6; i++)
-                L.peer[i] = p[i];
-            L.neg_pin = 1;
             L.pin_requests++;
-        }
         break;
     default:
         break;
@@ -862,17 +853,8 @@ void bt_link_step(void)
     unsigned char r[8];
     unsigned n;
 
-    /* refusals the chip waits for (these use bt_cmd, so they are not sent from inside an event handler) */
-    if (L.neg_key)
-    {
-        L.neg_key = 0;
-        bt_cmd(OP_LINK_KEY_NEG_REPLY, L.peer, 6, r, sizeof r, &n, 1000);
-    }
-    if (L.neg_pin)
-    {
-        L.neg_pin = 0;
-        bt_cmd(OP_PIN_NEG_REPLY, L.peer, 6, r, sizeof r, &n, 1000);
-    }
+    /* answers the chip waits for (key, PIN, pairing), and the pairing itself: these use bt_cmd, so they are not sent from inside an event handler */
+    bt_pair_step(now);
 
     if (L.state == BT_LINK_CONNECTING)
     {
@@ -893,6 +875,7 @@ void bt_link_step(void)
             L.last_reason = 0x16;
             L.state = BT_LINK_NONE;
             bt_acl_reset_credits();
+            chan_link_down();
         }
         return;
     }
@@ -1158,6 +1141,8 @@ int bt_link_line(unsigned index, char *buf, unsigned cap)
 {
     if (cap < 2)
         return -1;
+    if (index >= 0x80) /* the pairing lines */
+        return bt_pair_line(index - 0x80, buf, cap);
     Out o = {buf, cap, 0, 0};
     switch (index)
     {

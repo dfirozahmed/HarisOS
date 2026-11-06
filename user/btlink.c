@@ -1,8 +1,9 @@
-/* HarisOS user program: btlink AA:BB:CC:DD:EE:FF
+/* HarisOS user program: btlink AA:BB:CC:DD:EE:FF [pair]
  * Connects to a Bluetooth device (a headset, a phone ...: it must be switched on, in range and ready to be connected, which is often the same
  * "pairing" mode that btscan needs), tests that data flows both ways on the L2CAP signalling channel, asks it for its list of services (SDP:
  * does it play stereo music (A2DP), is it only for calls ...), prints what the device told, and ends the link again. Take the address from
- * btscan. Nothing is paired or remembered. */
+ * btscan. With the word "pair" it also pairs with the device first (the device must be in pairing mode: for a headset usually a blinking
+ * light after holding the button): secure simple pairing, or the old PIN 0000. The link key is kept in memory only, until the next restart. */
 #include "libc.h"
 
 #define WAIT_MS 40000
@@ -58,11 +59,12 @@ static void show(void)
 
 __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, char **argv)
 {
-    if (argc < 2 || parse_addr(argv[1]) < 0)
+    if (argc < 2 || parse_addr(argv[1]) < 0 || (argc >= 3 && !starts(argv[2], "pair")))
     {
-        fdprintf(2, "usage: btlink AA:BB:CC:DD:EE:FF   (the address from btscan)\n");
+        fdprintf(2, "usage: btlink AA:BB:CC:DD:EE:FF [pair]   (the address from btscan)\n");
         sys_exit(1);
     }
+    int want_pair = argc >= 3;
     long long r = syscall3(SYS_BTLINK, SYS_BTLINK_CONNECT, parse_addr(argv[1]), 0);
     if (r == -100)
     {
@@ -109,6 +111,30 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(long long argc, c
             fdprintf(2, "btlink: gave up waiting\n");
             break;
         }
+    }
+    if (ok && want_pair) /* pairing: authenticate and encrypt the link; lines 0x80 and 0x81 say how it went */
+    {
+        long long pr = syscall3(SYS_BTLINK, SYS_BTLINK_PAIR, 0, 0);
+        if (pr == 0)
+        {
+            fdprintf(1, "pairing (up to 30 seconds) ...\n");
+            long long t0 = sys_clock();
+            for (;;)
+            {
+                sys_sleep(250);
+                if (sys_btlink(0x80, line, sizeof line) < 0 || starts(line, "pair: done") || starts(line, "pair: failed"))
+                    break;
+                if (sys_clock() - t0 > 40000)
+                {
+                    fdprintf(2, "btlink: gave up waiting for the pairing\n");
+                    break;
+                }
+            }
+            for (unsigned i = 0x80; sys_btlink(i, line, sizeof line) >= 0; i++)
+                fdprintf(1, "%s\n", line);
+        }
+        else
+            fdprintf(2, "btlink: could not start the pairing (%d)\n", (int)pr);
     }
     if (ok) /* the link is up: the list of services. It runs in the kernel; line 4 tells when it is over. */
     {

@@ -230,7 +230,7 @@ static void setup(void)
             feat[i] = r[1 + i];
     /* The chip's default event mask (bits 0 .. 44) already has Inquiry Result, with RSSI, Remote Name; "Extended Inquiry Result"
      * (event 0x2F = bit 46, byte 5 bit 0x40) is not in it. */
-    static const unsigned char mask[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x5F, 0x00, 0x00};
+    static const unsigned char mask[8] = BT_EVENT_MASK;
     bt_cmd(OP_SET_EVENT_MASK, mask, 8, r, sizeof r, &n, 1000);
     /* Inquiry mode as in Linux hci_write_inquiry_mode_sync: 2 = extended results if the chip can (features byte 6 bit 0), else 1 = with
      * RSSI if it can (byte 3 bit 6); the default 0 has neither. */

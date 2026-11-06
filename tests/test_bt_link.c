@@ -37,10 +37,11 @@ typedef struct
 static struct
 {
     unsigned sent[64];     /* HCI command opcodes, in order */
-    unsigned char par[64][16]; /* the first parameter bytes of each */
+    unsigned char par[64][32]; /* the first parameter bytes of each */
     unsigned npar[64];
     int nsent;
     int create_status;     /* status in the Command Status of Create Connection */
+    int auth_status;       /* ... of Authentication Requested and Set Connection Encryption */
     int auto_credit;       /* report Number of Completed Packets for every ACL packet sent */
     unsigned unreported;
     AclCap acl[64];
@@ -79,7 +80,7 @@ static int fake_send(void *ctx, const unsigned char *pkt, unsigned len)
     if (F.nsent < 64)
     {
         F.sent[F.nsent] = op;
-        F.npar[F.nsent] = pkt[2] < 16 ? pkt[2] : 16;
+        F.npar[F.nsent] = pkt[2] < 32 ? pkt[2] : 32;
         memcpy(F.par[F.nsent], pkt + 3, F.npar[F.nsent]);
         F.nsent++;
     }
@@ -107,6 +108,21 @@ static int fake_send(void *ctx, const unsigned char *pkt, unsigned len)
     }
     case 0x0405:
         cs(op, F.create_status);
+        break;
+    case 0x0411: /* Authentication Requested */
+    case 0x0413: /* Set Connection Encryption */
+        cs(op, F.auth_status);
+        break;
+    case 0x0C01:
+    case 0x0C13:
+    case 0x0C56:
+    case 0x040B:
+    case 0x040D:
+    case 0x042B:
+    case 0x042C:
+    case 0x042D:
+    case 0x0434:
+        cc(op, &ok, 1);
         break;
     case 0x0401: /* Inquiry */
         cs(op, 0);
@@ -278,6 +294,17 @@ static void ev_disc_complete(unsigned handle, int reason)
 
 static const unsigned char ADDR[6] = {0xd3, 0x04, 0xdf, 0x0c, 0x47, 0x41}; /* as people write it */
 static const unsigned char ADDR_LSB[6] = {0x41, 0x47, 0x0c, 0xdf, 0x04, 0xd3};
+
+
+/* an HCI event with these parameters, from the chip */
+static void ev6(unsigned code, const unsigned char *par, unsigned n)
+{
+    unsigned char e[2 + 40];
+    e[0] = (unsigned char)code;
+    e[1] = (unsigned char)n;
+    memcpy(e + 2, par, n);
+    push(e);
+}
 
 static int line_is(unsigned i, const char *want)
 {
@@ -1028,6 +1055,230 @@ int main(void)
             bt_poll();
             CHECK(bt_link_state() == BT_LINK_UP);
         }
+    }
+
+
+    /* ================= pairing ================= */
+    {
+        static const unsigned char KEY[16] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
+        unsigned char par[40];
+        unsigned id, dl;
+        const unsigned char *d;
+        (void)id; (void)d; (void)dl;
+
+        /* 21. Secure Simple Pairing, "Just Works": every step in order, with the right answers */
+        bt_pair_forget();
+        up();
+        CHECK(line_is(0x80, "pair: -"));
+        CHECK(bt_pair_start() == 0);
+        CHECK(line_is(0x80, "pair: authenticating"));
+        CHECK(bt_pair_start() == BT_E_LINK_BUSY);
+        bt_poll();
+        CHECK(F.nsent >= 4 && F.sent[F.nsent - 4] == 0x0C01 && F.sent[F.nsent - 3] == 0x0C56 && F.sent[F.nsent - 2] == 0x0C13 && F.sent[F.nsent - 1] == 0x0411);
+        CHECK(F.npar[F.nsent - 4] == 8 && F.par[F.nsent - 4][5] == 0x5F && F.par[F.nsent - 4][6] == 0x3F && F.par[F.nsent - 4][7] == 0x1C); /* SSP events enabled */
+        CHECK(F.npar[F.nsent - 3] == 1 && F.par[F.nsent - 3][0] == 1);                                                                      /* SSP mode on */
+        CHECK(memcmp(F.par[F.nsent - 2], "HarisOS\0", 8) == 0);                                                                             /* our name */
+        CHECK(F.npar[F.nsent - 1] == 2 && le16(F.par[F.nsent - 1]) == HANDLE);                                                              /* Authentication Requested */
+        ev6(0x17, ADDR_LSB, 6); /* Link Key Request: we have none */
+        bt_poll();
+        CHECK(last_cmd() == 0x040C && memcmp(F.par[F.nsent - 1], ADDR_LSB, 6) == 0);
+        ev6(0x31, ADDR_LSB, 6); /* IO Capability Request */
+        bt_poll();
+        CHECK(last_cmd() == 0x042B && F.npar[F.nsent - 1] == 9 && memcmp(F.par[F.nsent - 1], ADDR_LSB, 6) == 0);
+        CHECK(F.par[F.nsent - 1][6] == 0x03 && F.par[F.nsent - 1][7] == 0x00 && F.par[F.nsent - 1][8] == 0x04); /* no input/output, no OOB, general bonding */
+        memcpy(par, ADDR_LSB, 6);
+        par[6] = 0x03; par[7] = 0; par[8] = 0x04;
+        ev6(0x32, par, 9); /* IO Capability Response: the device has no input or output either */
+        bt_poll();
+        CHECK(line_is(0x81, "pair: device io capability 3, simple pairing -"));
+        memcpy(par, ADDR_LSB, 6);
+        par[6] = 0x78; par[7] = 0x56; par[8] = 0x34; par[9] = 0x12;
+        ev6(0x33, par, 10); /* User Confirmation Request: accept */
+        bt_poll();
+        CHECK(last_cmd() == 0x042C && memcmp(F.par[F.nsent - 1], ADDR_LSB, 6) == 0);
+        par[0] = 0;
+        memcpy(par + 1, ADDR_LSB, 6);
+        ev6(0x36, par, 7); /* Simple Pairing Complete: success */
+        bt_poll();
+        CHECK(line_is(0x81, "pair: device io capability 3, simple pairing status 0x00"));
+        memcpy(par, ADDR_LSB, 6);
+        memcpy(par + 6, KEY, 16);
+        par[22] = 4; /* unauthenticated combination key (P-192) */
+        ev6(0x18, par, 23); /* Link Key Notification */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: authenticating"));
+        par[0] = 0; par[1] = HANDLE & 0xFF; par[2] = HANDLE >> 8;
+        ev6(0x06, par, 3); /* Authentication Complete */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: encrypting the link"));
+        CHECK(last_cmd() == 0x0413 && le16(F.par[F.nsent - 1]) == HANDLE && F.par[F.nsent - 1][2] == 1);
+        par[0] = 0; par[1] = HANDLE & 0xFF; par[2] = HANDLE >> 8; par[3] = 1;
+        ev6(0x08, par, 4); /* Encryption Change */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: done, unauthenticated key (P-192), link encrypted"));
+        CHECK(bt_link_line(0x80, buf, sizeof buf) > 0 && bt_link_line(0x82, buf, sizeof buf) == -1);
+
+        /* 22. the next link to the same device starts with the stored key */
+        CHECK(bt_link_disconnect() == 0);
+        bt_poll();
+        ev_disc_complete(HANDLE, 0x16);
+        bt_poll();
+        CHECK(line_is(0x80, "pair: done, unauthenticated key (P-192), link encrypted")); /* the result stays until the next try */
+        CHECK(bt_link_connect(ADDR) == 0);
+        ev_conn_complete(0, HANDLE, ADDR_LSB);
+        bt_poll();
+        CHECK(bt_pair_start() == 0); /* a finished pairing does not stop a new one */
+        bt_poll();
+        ev6(0x17, ADDR_LSB, 6);
+        bt_poll();
+        CHECK(last_cmd() == 0x040B && F.npar[F.nsent - 1] == 22 && memcmp(F.par[F.nsent - 1], ADDR_LSB, 6) == 0 && memcmp(F.par[F.nsent - 1] + 6, KEY, 16) == 0);
+        par[0] = 0; par[1] = HANDLE & 0xFF; par[2] = HANDLE >> 8;
+        ev6(0x06, par, 3);
+        bt_poll();
+        par[3] = 1;
+        ev6(0x08, par, 4);
+        bt_poll();
+        CHECK(line_is(0x80, "pair: done, unauthenticated key (P-192), link encrypted"));
+        CHECK(line_is(0x81, "pair: device io capability -, simple pairing -")); /* no pairing was needed */
+        /* a Link Key Request for another device does not get our key */
+        {
+            const unsigned char other[6] = {9, 8, 7, 6, 5, 4};
+            ev6(0x17, other, 6);
+            bt_poll();
+            CHECK(last_cmd() == 0x040C && memcmp(F.par[F.nsent - 1], other, 6) == 0);
+        }
+        /* and without being asked to pair, the stored key is still used when the device starts authenticating */
+        ev6(0x17, ADDR_LSB, 6);
+        bt_poll();
+        CHECK(last_cmd() == 0x040B);
+
+        /* 23. the device lost its key: the stored one is refused once, then pairing is done again from nothing */
+        up(); /* a new fake chip; the stored key survives in the host */
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        CHECK(F.nsent >= 4 && F.sent[F.nsent - 3] == 0x0C56); /* a chip that was reset gets its pairing settings again */
+        ev6(0x17, ADDR_LSB, 6);
+        bt_poll();
+        CHECK(last_cmd() == 0x040B);
+        int auths = 0;
+        for (int i = 0; i < F.nsent; i++)
+            auths += F.sent[i] == 0x0411;
+        par[0] = 0x06; par[1] = HANDLE & 0xFF; par[2] = HANDLE >> 8; /* Authentication Complete: PIN or key missing */
+        ev6(0x06, par, 3);
+        bt_poll();
+        int auths2 = 0;
+        for (int i = 0; i < F.nsent; i++)
+            auths2 += F.sent[i] == 0x0411;
+        CHECK(auths2 == auths + 1 && line_is(0x80, "pair: authenticating")); /* asked again at once */
+        ev6(0x17, ADDR_LSB, 6);
+        bt_poll();
+        CHECK(last_cmd() == 0x040C); /* this time without the old key */
+        CHECK(line_is(0x81, "pair: device io capability -, simple pairing -, the stored key was refused once"));
+        ev6(0x06, par, 3); /* ... and refused again: that is a failure */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: failed: authentication failed (status 0x06)"));
+
+        /* 24. the old PIN, for devices without secure simple pairing */
+        bt_pair_forget();
+        up();
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        ev6(0x16, ADDR_LSB, 6); /* PIN Code Request */
+        bt_poll();
+        CHECK(last_cmd() == 0x040D && F.npar[F.nsent - 1] == 23 && memcmp(F.par[F.nsent - 1], ADDR_LSB, 6) == 0);
+        CHECK(F.par[F.nsent - 1][6] == 4 && memcmp(F.par[F.nsent - 1] + 7, "0000", 4) == 0 && F.par[F.nsent - 1][11] == 0 && F.par[F.nsent - 1][22] == 0);
+        CHECK(line_is(0x80, "pair: authenticating (old style, PIN 0000)"));
+        memcpy(par, ADDR_LSB, 6);
+        memcpy(par + 6, KEY, 16);
+        par[22] = 0; /* combination key */
+        ev6(0x18, par, 23);
+        par[0] = 0; par[1] = HANDLE & 0xFF; par[2] = HANDLE >> 8;
+        ev6(0x06, par, 3);
+        bt_poll();
+        par[3] = 1;
+        ev6(0x08, par, 4);
+        bt_poll();
+        CHECK(line_is(0x80, "pair: done, combination key, link encrypted (PIN 0000)"));
+
+        /* 25. what can go wrong */
+        bt_pair_forget();
+        up();
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        par[0] = 0x18; /* Simple Pairing Complete: the device does not allow pairing (status 0x18) */
+        memcpy(par + 1, ADDR_LSB, 6);
+        ev6(0x36, par, 7);
+        bt_poll();
+        CHECK(line_is(0x81, "pair: device io capability -, simple pairing status 0x18"));
+        par[0] = 0x05; par[1] = HANDLE & 0xFF; par[2] = HANDLE >> 8;
+        ev6(0x06, par, 3); /* authentication failure (wrong PIN, device refuses) */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: failed: authentication failed (status 0x05)"));
+        up();
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        par[0] = 0; par[1] = 0x99; par[2] = 0x09; /* another link's Authentication Complete: not ours */
+        ev6(0x06, par, 3);
+        bt_poll();
+        CHECK(line_is(0x80, "pair: authenticating"));
+        par[1] = HANDLE & 0xFF; par[2] = HANDLE >> 8;
+        ev6(0x06, par, 3);
+        bt_poll();
+        par[0] = 0x03; par[3] = 0;
+        ev6(0x08, par, 4); /* the encryption does not start */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: failed: encryption failed (status 0x03)"));
+        up();
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        par[0] = 0; par[3] = 0;
+        ev6(0x06, par, 3);
+        bt_poll();
+        ev6(0x08, par, 4); /* "success" but encryption off: not accepted as secure */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: failed: encryption failed"));
+        up();
+        F.auth_status = 0x0C; /* the chip refuses Authentication Requested */
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        CHECK(line_is(0x80, "pair: failed: the chip refused (status 0x0c)"));
+        up();
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        F.clock += 31000; /* nobody answers */
+        bt_poll();
+        CHECK(line_is(0x80, "pair: failed: time-out"));
+        up();
+        CHECK(bt_pair_start() == 0);
+        bt_poll();
+        ev_disc_complete(HANDLE, 0x13);
+        bt_poll();
+        CHECK(line_is(0x80, "pair: failed: link ended"));
+        CHECK(bt_pair_start() == BT_E_NOT_UP);
+
+        /* 26. a pairing nobody here asked for is refused, a stored key answers anyway */
+        bt_pair_forget();
+        up();
+        ev6(0x31, ADDR_LSB, 6); /* IO Capability Request */
+        bt_poll();
+        CHECK(last_cmd() == 0x0434 && F.npar[F.nsent - 1] == 7 && memcmp(F.par[F.nsent - 1], ADDR_LSB, 6) == 0 && F.par[F.nsent - 1][6] == 0x18);
+        memcpy(par, ADDR_LSB, 6);
+        par[6] = par[7] = par[8] = par[9] = 0;
+        ev6(0x33, par, 10); /* User Confirmation Request */
+        bt_poll();
+        CHECK(last_cmd() == 0x042D);
+        ev6(0x16, ADDR_LSB, 6); /* PIN Code Request */
+        bt_poll();
+        CHECK(last_cmd() == 0x040E);
+        CHECK(bt_link_line(3, buf, sizeof buf) > 0 && strstr(buf, "PIN requests 1"));
+        /* events that are too short are not read */
+        ev6(0x17, ADDR_LSB, 3);
+        ev6(0x18, ADDR_LSB, 6);
+        ev6(0x33, ADDR_LSB, 2);
+        bt_poll();
+        CHECK(bt_link_state() == BT_LINK_UP);
+        CHECK(bt_pair_start() == 0 && line_is(0x80, "pair: authenticating"));
+        bt_pair_forget();
     }
 
     printf("bt_link: %d checks, %d failed\n", checks, failures);

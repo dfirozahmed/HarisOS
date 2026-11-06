@@ -206,6 +206,26 @@ int bt_sdp_parse(const unsigned char *lists, unsigned len, BtSdpService *out, un
 const char *bt_sdp_uuid_name(unsigned uuid); /* "A2DP sink" ... or "" */
 int bt_sdp_browse(void);                     /* 0 = started; BT_E_NOT_UP without a link, BT_E_LINK_BUSY while one runs */
 
+/* ---- pairing and link security (kernel/bluetooth/bt_pair.c) ----
+ * bt_pair_start() makes the link authenticated and encrypted: Secure Simple Pairing "Just Works" (no keys or screens needed on either side), or
+ * the old PIN ("0000") for devices that only know that. Needs a link that is up; the device must be willing (a headset usually: in pairing
+ * mode). The link key is kept in memory for the next link to the same device (not on any disk). Result: bt_pair_line() 0 and 1, which
+ * bt_link_line() also gives as lines 0x80 and 0x81. */
+int bt_pair_start(void); /* 0 = started; BT_E_NOT_UP without a link; BT_E_LINK_BUSY while one runs */
+int bt_pair_line(unsigned index, char *buf, unsigned cap);
+void bt_pair_forget(void); /* drop the stored link key: the next link has to pair again */
+
+/* The events we ask the chip to report: the chip's default set (bits 0 .. 44), Extended Inquiry Result (46) and the Secure Simple Pairing
+ * events (IO Capability Request / Response, User Confirmation / Passkey Request, Remote OOB, Simple Pairing Complete, Passkey / Keypress
+ * Notification, Remote Host Supported Features: bits 48 .. 52, 53, 58 .. 60), as in Linux hci_setup_event_mask(). */
+#define BT_EVENT_MASK {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x5F, 0x3F, 0x1C}
+
+unsigned bt_link_handle(void);
+const unsigned char *bt_link_addr(void); /* the device of the link, least significant byte first */
+void bt_pair_event(const unsigned char *evt, unsigned len);
+void bt_pair_step(unsigned long long now);
+void bt_pair_reset(void);
+
 /* ---- between bt_hci.c and bt_scan.c / bt_link.c ---- */
 void bt_link_event(const unsigned char *evt, unsigned len);
 void bt_link_acl(const unsigned char *pkt, unsigned len);
