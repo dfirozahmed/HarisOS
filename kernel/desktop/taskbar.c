@@ -162,6 +162,15 @@ int taskbar_set_battery(int percent, int charging, int ac)
     return changed;
 }
 
+static int IME_ON; /* Bangla typing is on (see bangla_ime.h) */
+
+int taskbar_set_ime(int on)
+{
+    int changed = (on != 0) != IME_ON;
+    IME_ON = on != 0;
+    return changed;
+}
+
 int taskbar_wifi_state(void) { return WIFI; }
 
 int taskbar_wifi_at(int x, int y)
@@ -356,12 +365,15 @@ void taskbar_draw(void)
         bat_w = ui_text_width(bat_txt, UI_TEXT_SMALL) + 6;
     }
     int plug_w = BAT_AC ? 20 + 6 : 0; /* the plug beside the battery: 20 px and a gap */
-    int tray_w = 14 + 20 + 14 + 22 + 14 + plug_w + 26 + 14 + bat_w;
+    int lang_w = 34 + 8; /* the typing language ("EN" / "বাং"): 34 px and a gap */
+    int tray_w = lang_w + 14 + 20 + 14 + 22 + 14 + plug_w + 26 + 14 + bat_w;
     int tx = rx - cw - 14 - tray_w;
     if (tx > x)
     {
         pill(tx, cy - 17, tray_w, 34, t->radius_m, -1, 0, t);
-        int ix = tx + 14 + 10;
+        ui_text_in_color(ui_rect(tx + 10, cy - 10, 34, 20), IME_ON ? "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82" : "EN", UI_TEXT_SMALL, UI_ALIGN_CENTER,
+                         IME_ON ? t->accent : t->text_dim); /* Ctrl+Space switches */
+        int ix = tx + lang_w + 14 + 10;
         ui_icon(UI_ICON_WIFI, ix, cy, 20, WIFI == 1 ? t->text : WIFI == 2 ? t->warning : t->text_dim);
         WIFI_X = ix - 10 - 7;
         WIFI_Y = cy - 17;

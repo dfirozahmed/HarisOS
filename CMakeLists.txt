@@ -286,6 +286,7 @@ set(KERNEL_SOURCES
     kernel/drivers/input/usb_xhci/usb_xhci_dev.c    # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_ctrl.c   # xHCI
     kernel/drivers/input/usb_xhci/usb_xhci_stub.c   # xHCI
+    kernel/input/bangla_ime.c   # Bangla phonetic typing (Avro style): Ctrl+Space turns it on
     kernel/input/aml_scan.c     # finds I2C-HID devices in ACPI byte code
     kernel/input/hid_desc.c     # HID report descriptor: where the mouse fields are
     kernel/drivers/input/i2c_dw.c       # DesignWare I2C controller (AMD / Intel)

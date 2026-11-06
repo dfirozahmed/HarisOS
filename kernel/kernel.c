@@ -1,4 +1,5 @@
 /* HarisOS kernel core: UEFI-independent entry point. */
+#include "bangla_ime.h"
 #include "battery.h"
 #include "blk.h"
 #include "bootinfo.h"
@@ -705,6 +706,8 @@ void kernel_main(const BootInfo *info)
             cpuload_section_begin();
             if (!woke)
                 desktop_pointer(m.x, m.y, m.buttons);
+            if (m.buttons)
+                ime_reset(); /* a click may move the text caret: a Bangla word being typed is over */
             cpuload_section_end(2);
             if (m.wheel && !woke)
             {
@@ -733,7 +736,13 @@ void kernel_main(const BootInfo *info)
         {
             cpuload_section_begin();
             if (!screensleep_activity()) /* a key that wakes the screen is not used for anything else */
-                desktop_key(&ke);
+            {
+                /* Bangla typing (Ctrl+Space turns it on): a letter may become a Unicode character, or a Backspace and new characters */
+                KeyEvent evs[IME_MAX_EVENTS];
+                int nev = ime_filter(&ke, evs, IME_MAX_EVENTS);
+                for (int ei = 0; ei < nev; ei++)
+                    desktop_key(&evs[ei]);
+            }
             cpuload_section_end(4);
             worked = 1;
         }

@@ -1,5 +1,6 @@
 /* Taskbar clock polling and caret blink updates. */
 #include "audio.h"
+#include "bangla_ime.h"
 #include "console.h"
 #include "battery.h"
 #include "net.h"
@@ -153,6 +154,7 @@ int desktop_tick(void)
     cpuload_section_begin();
     int clock_changed = refresh_taskbar_clock();
     clock_changed |= taskbar_set_volume(audio_volume());
+    clock_changed |= taskbar_set_ime(ime_active()); /* Ctrl+Space switched the typing language */
     cpuload_section_end(12);
     cpuload_section_begin();
     clock_changed |= refresh_wifi();
