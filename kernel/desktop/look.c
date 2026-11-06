@@ -146,6 +146,17 @@ static void save(void)
         while (k)
             *o++ = dg[--k];
     }
+    o = put(o, "\r\nbrightness=");
+    {
+        char dg[12];
+        int k = 0;
+        unsigned v = (unsigned)gfx_brightness();
+        do
+            dg[k++] = (char)('0' + v % 10);
+        while ((v /= 10) != 0);
+        while (k)
+            *o++ = dg[--k];
+    }
     o = put(o, "\r\n");
     int dir = cfg_folder();
     if (dir < 0 || vfs_save(dir, CFG_NAME, text, (unsigned)(o - text)) < 0)
@@ -296,6 +307,15 @@ void look_set_screenoff(int seconds)
     save();
 }
 
+/* The brightness itself is applied by the Display Settings app (gfx_set_brightness); this only writes THEME.CFG. It is called
+ * when a change is finished (slider released, key, Reset, window closed), not on every step of a drag: a drive write per pixel
+ * of slider movement would be slow. */
+void look_save_brightness(void)
+{
+    MSG = "";
+    save();
+}
+
 void look_load(void)
 {
     char text[CFG_MAX + 1];
@@ -332,6 +352,14 @@ void look_load(void)
                     v = v * 10 + (val[nd] - '0');
                 if (nd > 0)
                     SCREENOFF = v;
+            }
+            else if ((val = after(line, "brightness=")))
+            {
+                int v = 0, nd = 0;
+                for (; val[nd] >= '0' && val[nd] <= '9' && nd < 4; nd++)
+                    v = v * 10 + (val[nd] - '0');
+                if (nd > 0)
+                    gfx_set_brightness(v); /* clamped to GFX_BRIGHTNESS_MIN..MAX */
             }
             else if ((val = after(line, "wallpaper=")))
             {

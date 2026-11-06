@@ -137,11 +137,23 @@ static void ds_draw(Window *w, UiRect body)
         ui_text_color(body.x + MARGIN, y + 60, "No display adapter found on PCI", UI_TEXT_BODY, t->text_dim);
 }
 
+static int UNSAVED; /* the brightness changed since THEME.CFG was last written */
+
+static void flush_brightness(void)
+{
+    if (UNSAVED)
+    {
+        UNSAVED = 0;
+        look_save_brightness();
+    }
+}
+
 static int set_percent(int p)
 {
     if (p == gfx_brightness())
         return 0;
     gfx_set_brightness(p);
+    UNSAVED = 1;
     return 1;
 }
 
@@ -160,6 +172,7 @@ static int ds_drag(Window *w, int x, int y, unsigned buttons)
     if (!(buttons & 1))
     {
         DRAGGING = 0;
+        flush_brightness();
         return 0;
     }
     return DRAGGING ? set_percent(percent_at(slider_rect(wm_content(w)), x)) : 0;
@@ -191,6 +204,7 @@ static void ds_key(Window *w, const KeyEvent *k)
     default:
         break;
     }
+    flush_brightness(); /* a key press is a finished change (no-op after ESC closed the window: ds_close flushed) */
 }
 
 static void on_reset(UiButton *b, void *user)
@@ -198,6 +212,7 @@ static void on_reset(UiButton *b, void *user)
     (void)b;
     (void)user;
     set_percent(GFX_BRIGHTNESS_MAX);
+    flush_brightness();
 }
 
 /* the next / previous choice for the time before the screen goes off */
@@ -224,6 +239,7 @@ static void ds_close(Window *w)
     (void)w;
     DS_WIN = 0;
     DRAGGING = 0;
+    flush_brightness(); /* the button may have been released outside the window, without a final on_drag */
 }
 
 static void display_app_open(void)
