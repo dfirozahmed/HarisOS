@@ -27,8 +27,8 @@
 #define BTN_SCAN 0
 #define BTN_DISCONNECT 1
 #define BTN_CONNECT 2
-#define BTN_SEND 3
-#define BTN_BROWSE 4
+#define BTN_BROWSE 3 /* the order of wm_add_button_ex in bluetooth_app_open */
+#define BTN_SEND 4
 
 /* how long each step may take before the app gives up (the stack has time-outs of its own, these are the safety net) */
 #define T_LINK_MS 30000
