@@ -136,6 +136,8 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_wifiscan(f);
     case SYS_BTSCAN:
         return sys_btscan(f);
+    case SYS_BTLINK:
+        return sys_btlink(f);
     case SYS_CLOCK:
         return sys_clock(f);
     case SYS_TIME:

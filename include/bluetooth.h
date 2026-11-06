@@ -29,6 +29,8 @@ typedef struct
     void *ctx;
     /* Milliseconds since boot (for time-outs of scans); may be 0 for a transport without a clock: then nothing times out. */
     unsigned long long (*now_ms)(void *ctx);
+    /* Send one HCI ACL data packet (handle + flags, length, data; no USB framing byte). 0 = sent, <0 = failed. */
+    int (*send_acl)(void *ctx, const unsigned char *pkt, unsigned len);
 } BtTransport;
 
 typedef enum
@@ -73,6 +75,9 @@ typedef struct
     int fw_code;
     unsigned fw_version;      /* version number in the firmware file header */
     unsigned fw_done, fw_total; /* pieces sent / to send */
+    unsigned short acl_mtu;   /* largest ACL data packet the chip takes (Read Buffer Size) */
+    unsigned short acl_pkts;  /* ACL packets the chip can hold at a time (flow control credits) */
+    unsigned acl_rx, acl_tx, acl_dropped; /* ACL packets received / sent / dropped (queue full) */
 } BtInfo;
 
 /* bt_cmd() results below zero */
@@ -85,6 +90,9 @@ typedef struct
 void bt_attach(const BtTransport *t, unsigned short vid, unsigned short pid); /* runs the start-up commands (blocks for a while) */
 void bt_detach(void);                                                       /* chip unplugged */
 void bt_rx_event(const unsigned char *evt, unsigned len);                   /* one complete HCI event packet */
+void bt_rx_event_chunk(const unsigned char *data, unsigned len);            /* a piece of the event stream (one USB packet): put together by the length byte */
+void bt_rx_acl(const unsigned char *pkt, unsigned len);                     /* one complete HCI ACL data packet */
+void bt_rx_acl_chunk(const unsigned char *data, unsigned len);              /* a piece of the ACL stream (one USB packet): put together by the length field */
 void bt_fw_report(BtFwState state, const char *why, int code, unsigned fw_version, unsigned done, unsigned total); /* firmware outcome, for the status line */
 void bt_restart(void); /* Reset + read the versions and the address again (after a firmware patch changed the chip) */
 
@@ -146,7 +154,39 @@ const BtScanDev *bt_scan_dev(int i);
  * lines 1 .. n one device each. Returns the length of the line, or -1 if there is no such line or it does not fit in `cap`. */
 int bt_scan_line(unsigned index, char *buf, unsigned cap);
 
-/* ---- between bt_hci.c and bt_scan.c ---- */
+/* ---- ACL links and L2CAP (kernel/bluetooth/bt_link.c) ----
+ * One link to one device at a time. bt_link_connect() pages the device (Create Connection); when it answers, the link is up and a short
+ * probe runs on the L2CAP signalling channel: an Echo Request (is data flowing both ways, and how fast) and two Information Requests (what
+ * the device supports). Requests of the device are answered politely. The link is stepped by bt_poll(); nothing blocks.
+ * The device's requests for a link key or a PIN are refused: pairing comes later. */
+typedef enum
+{
+    BT_LINK_NONE = 0, /* no link (never was one, or it ended: see the last line of text) */
+    BT_LINK_CONNECTING,
+    BT_LINK_UP,
+    BT_LINK_CLOSING,
+    BT_LINK_FAILED    /* the connection could not be made (status in the text) */
+} BtLinkState;
+
+#define BT_E_LINK_BUSY (-102) /* bt_link_connect: a link exists or is being made */
+
+int bt_link_connect(const unsigned char addr[6]); /* addr most significant byte first, as people write it. 0 = started */
+int bt_link_disconnect(void);                     /* 0 = started (or nothing to do) */
+BtLinkState bt_link_state(void);
+/* The link as text lines: line 0 the state (starts with "idle", "connecting", "connected", "closing", "failed" or "closed"), then
+ * "echo:", "info:" and "acl:" lines. Returns the length, or -1 (no such line, does not fit). */
+int bt_link_line(unsigned index, char *buf, unsigned cap);
+
+/* Send an L2CAP PDU (length, channel id, payload: already framed) to a connection handle. Cut into ACL packets of the chip's size,
+ * waits (a little) for room in the chip's buffers. Not to be called from inside an event or ACL handler. 0 or a BT_E_* value. */
+int bt_acl_send(unsigned handle, const unsigned char *pdu, unsigned len);
+void bt_acl_reset_credits(void); /* the link ended: whatever was in the chip's buffers is gone */
+
+/* ---- between bt_hci.c and bt_scan.c / bt_link.c ---- */
+void bt_link_event(const unsigned char *evt, unsigned len);
+void bt_link_acl(const unsigned char *pkt, unsigned len);
+void bt_link_step(void);
+void bt_link_reset(void);
 unsigned long long bt_now(void);
 void bt_scan_event(const unsigned char *evt, unsigned len); /* an event nobody waits for in bt_cmd */
 void bt_scan_step(void);

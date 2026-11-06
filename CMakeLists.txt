@@ -292,6 +292,7 @@ set(KERNEL_SOURCES
     kernel/drivers/input/usb_xhci/usb_xhci_audio.c  # xHCI: USB audio (UAC 1.0 streaming, isochronous OUT)
     kernel/drivers/input/usb_xhci/usb_xhci_bt.c     # xHCI: Bluetooth controller (HCI over USB: control, interrupt, bulk)
     kernel/bluetooth/bt_hci.c                       # Bluetooth: HCI core (commands, events, start-up, status line)
+    kernel/bluetooth/bt_link.c                      # Bluetooth: ACL link, L2CAP signalling, probe (host-tested)
     kernel/bluetooth/bt_scan.c                      # Bluetooth: device discovery (inquiry, names), host-tested
     kernel/bluetooth/bt_rtl.c                       # Bluetooth: Realtek firmware file parser and download (host-tested)
     kernel/bluetooth/bt_fw.c                        # Bluetooth: reads BTFW.BIN / BTCFG.BIN from a drive and loads them
@@ -435,7 +436,7 @@ add_custom_command(
     VERBATIM
 )
 
-set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan btscan gstest play vol player)
+set(USER_PROGRAMS hello luatest files echo fpua fpub libctest heaptest argtest crash proctest dirtest ls cat sh init mkdir touch rm cp mv lock upper pipetest kill ps spin sigtest forktest ipctest ipcchild semtest sighand muxtest guidemo stktest wget nettest httpd wifiscan btscan btlink gstest play vol player)
 set(USER_CFLAGS
     --target=x86_64-pc-win32-coff
     -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone

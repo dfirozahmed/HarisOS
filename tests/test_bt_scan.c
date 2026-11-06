@@ -146,7 +146,7 @@ static unsigned long long fake_now(void *ctx)
     return F.clock;
 }
 
-static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, fake_now};
+static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, fake_now, 0};
 
 static void fresh(void)
 {

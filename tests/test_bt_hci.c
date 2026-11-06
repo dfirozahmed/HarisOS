@@ -101,6 +101,12 @@ static int fake_send(void *ctx, const unsigned char *pkt, unsigned len)
             cc(op, r, 2);
         }
     }
+    else if (op == 0x1005)
+    {
+        /* status, ACL length 1021, SCO length 64, 8 ACL packets, 4 SCO packets */
+        const unsigned char r[8] = {0, 0xFD, 0x03, 0x40, 0x08, 0x00, 0x04, 0x00};
+        cc(op, r, 8);
+    }
     else if (op == 0x1009)
     {
         const unsigned char r[7] = {0, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11}; /* least significant byte first */
@@ -132,7 +138,7 @@ static int fake_alive(void *ctx)
     return !F.dead;
 }
 
-static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, 0};
+static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, 0, 0};
 
 static void reset_fake(void) { memset(&F, 0, sizeof F); }
 
@@ -147,7 +153,8 @@ int main(void)
     const BtInfo *i = bt_info();
     CHECK(i->state == BT_HCI_UP);
     CHECK(bt_hci_up());
-    CHECK(F.nsent == 4 && F.sent[0] == 0x0C03 && F.sent[1] == 0x1001 && F.sent[2] == 0xFC6D && F.sent[3] == 0x1009);
+    CHECK(F.nsent == 5 && F.sent[0] == 0x0C03 && F.sent[1] == 0x1001 && F.sent[2] == 0xFC6D && F.sent[3] == 0x1009 && F.sent[4] == 0x1005);
+    CHECK(i->acl_mtu == 1021 && i->acl_pkts == 8);
     CHECK(i->hci_ver == 8 && i->hci_rev == 0x000C && i->lmp_ver == 8 && i->manufacturer == 93 && i->lmp_subver == 0x8821);
     CHECK(i->have_rom && i->rom_version == 3);
     CHECK(i->have_addr && i->bdaddr[0] == 0x11 && i->bdaddr[5] == 0x66); /* shown most significant byte first */
@@ -164,7 +171,7 @@ int main(void)
     F.wrong_opcode_first = 1;
     bt_attach(&T, 0x0BDA, 0xB00A);
     CHECK(bt_info()->state == BT_HCI_UP);
-    CHECK(bt_info()->hw_errors == 4); /* one per command */
+    CHECK(bt_info()->hw_errors == 5); /* one per command */
     CHECK(bt_info()->events >= 12);
 
     /* 3. Command Status instead of Command Complete is an answer too (status first) */
@@ -202,11 +209,11 @@ int main(void)
     /* 7. a chip from another maker: no vendor command; the Realtek command refused is not fatal */
     reset_fake();
     bt_attach(&T, 0x8087, 0x0A2B);
-    CHECK(bt_info()->state == BT_HCI_UP && !bt_info()->have_rom && F.nsent == 3);
+    CHECK(bt_info()->state == BT_HCI_UP && !bt_info()->have_rom && F.nsent == 4);
     reset_fake();
     F.rom_unknown = 1;
     bt_attach(&T, 0x0BDA, 0xB00A);
-    CHECK(bt_info()->state == BT_HCI_UP && !bt_info()->have_rom && F.nsent == 4);
+    CHECK(bt_info()->state == BT_HCI_UP && !bt_info()->have_rom && F.nsent == 5);
     bt_status(line, sizeof line);
     CHECK(strstr(line, " rom ") == 0);
 

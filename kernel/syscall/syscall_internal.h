@@ -101,6 +101,7 @@ long long sys_connect(const SyscallFrame *f);
 long long sys_resolve(const SyscallFrame *f);
 long long sys_wifiscan(const SyscallFrame *f);
 long long sys_btscan(const SyscallFrame *f);
+long long sys_btlink(const SyscallFrame *f);
 long long sys_bind(const SyscallFrame *f);
 long long sys_listen(const SyscallFrame *f);
 long long sys_accept(const SyscallFrame *f);

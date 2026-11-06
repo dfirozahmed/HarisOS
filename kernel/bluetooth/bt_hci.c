@@ -5,12 +5,14 @@
 #define OP_RESET 0x0C03            /* OGF 3 (controller & baseband), OCF 3 */
 #define OP_READ_LOCAL_VERSION 0x1001 /* OGF 4 (informational parameters), OCF 1 */
 #define OP_READ_BD_ADDR 0x1009     /* OGF 4, OCF 9 */
+#define OP_READ_BUFFER_SIZE 0x1005 /* OGF 4, OCF 5 */
 #define OP_RTL_READ_ROM_VERSION 0xFC6D /* OGF 0x3F (vendor), OCF 0x6D: Realtek, as in Linux btrtl.c */
 
 /* HCI event codes */
 #define EV_COMMAND_COMPLETE 0x0E
 #define EV_COMMAND_STATUS 0x0F
 #define EV_HARDWARE_ERROR 0x10
+#define EV_NUM_COMPLETED_PACKETS 0x13
 
 #define USB_VID_REALTEK 0x0BDA
 
@@ -23,6 +25,15 @@ typedef struct
     unsigned char data[EVQ_BYTES];
 } EvSlot;
 
+#define ACLQ_N 8
+#define ACL_BYTES 1032 /* 4 header bytes + up to 1028 of data */
+
+typedef struct
+{
+    unsigned short len;
+    unsigned char data[ACL_BYTES];
+} AclSlot;
+
 static struct
 {
     BtTransport t;
@@ -30,6 +41,15 @@ static struct
     BtInfo info;
     EvSlot q[EVQ_N];
     unsigned head, tail; /* free-running counters: head - tail = events waiting */
+    AclSlot aq[ACLQ_N];
+    unsigned ahead, atail; /* the same for received ACL packets */
+    unsigned credits;      /* ACL packets we may send before the chip says it has room again */
+    unsigned outstanding;  /* ACL packets sent that the chip has not reported as done */
+    /* the streams from the transport, put together packet by packet */
+    unsigned char sev[EVQ_BYTES];
+    unsigned sev_have;
+    unsigned char sacl[ACL_BYTES];
+    unsigned sacl_have;
 } B;
 
 static unsigned le16(const unsigned char *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
@@ -53,13 +73,112 @@ void bt_rx_event(const unsigned char *evt, unsigned len)
     B.head++;
 }
 
-/* An event nobody is waiting for. Later stages (inquiry results, connections, ...) hook in here. */
+void bt_rx_event_chunk(const unsigned char *data, unsigned len)
+{
+    if (!B.attached || len == 0)
+        return;
+    if (B.sev_have + len > EVQ_BYTES) /* cannot be one event: start again with this piece */
+    {
+        B.sev_have = 0;
+        if (len > EVQ_BYTES)
+            return;
+    }
+    for (unsigned i = 0; i < len; i++)
+        B.sev[B.sev_have++] = data[i];
+    while (B.sev_have >= 2 && B.sev_have >= 2u + B.sev[1]) /* header (code, length) + parameters complete */
+    {
+        unsigned need = 2u + B.sev[1];
+        bt_rx_event(B.sev, need);
+        B.sev_have -= need;
+        for (unsigned i = 0; i < B.sev_have; i++)
+            B.sev[i] = B.sev[need + i];
+    }
+}
+
+void bt_rx_acl(const unsigned char *pkt, unsigned len)
+{
+    if (!B.attached)
+        return;
+    if (len < 4 || len > ACL_BYTES || le16(pkt + 2) + 4u != len) /* the length field must agree with what arrived */
+        return;
+    B.info.acl_rx++;
+    if (B.ahead - B.atail >= ACLQ_N)
+    {
+        B.info.acl_dropped++;
+        return;
+    }
+    AclSlot *s = &B.aq[B.ahead % ACLQ_N];
+    s->len = (unsigned short)len;
+    for (unsigned i = 0; i < len; i++)
+        s->data[i] = pkt[i];
+    B.ahead++;
+}
+
+void bt_rx_acl_chunk(const unsigned char *data, unsigned len)
+{
+    if (!B.attached || len == 0) /* a zero length packet only ends a transfer */
+        return;
+    if (B.sacl_have + len > ACL_BYTES)
+    {
+        B.sacl_have = 0;
+        if (len > ACL_BYTES)
+            return;
+    }
+    for (unsigned i = 0; i < len; i++)
+        B.sacl[B.sacl_have++] = data[i];
+    while (B.sacl_have >= 4)
+    {
+        unsigned need = 4u + le16(B.sacl + 2);
+        if (need > ACL_BYTES) /* nonsense header: forget what we have */
+        {
+            B.sacl_have = 0;
+            return;
+        }
+        if (B.sacl_have < need)
+            return;
+        bt_rx_acl(B.sacl, need);
+        B.sacl_have -= need;
+        for (unsigned i = 0; i < B.sacl_have; i++)
+            B.sacl[i] = B.sacl[need + i];
+    }
+}
+
+/* An event nobody is waiting for. */
 static void on_event(const unsigned char *e, unsigned len)
 {
     if (e[0] == EV_HARDWARE_ERROR)
+    {
         B.info.hw_errors++;
-    else
-        bt_scan_event(e, len);
+        return;
+    }
+    if (e[0] == EV_NUM_COMPLETED_PACKETS && e[1] >= 1)
+    {
+        /* number of handles (1), then the handles (2 bytes each), then how many packets of each were sent on (2 bytes each) */
+        unsigned n = e[2];
+        if (e[1] >= 1 + 4 * n)
+            for (unsigned i = 0; i < n; i++)
+            {
+                unsigned done = le16(e + 3 + 2 * n + 2 * i);
+                B.outstanding = done > B.outstanding ? 0 : B.outstanding - done;
+                B.credits += done;
+            }
+        if (B.credits > B.info.acl_pkts)
+            B.credits = B.info.acl_pkts;
+        return;
+    }
+    bt_scan_event(e, len);
+    bt_link_event(e, len);
+}
+
+/* ACL data the chip handed over: for the link layer. */
+static void drain_acl(void)
+{
+    while (B.atail != B.ahead)
+    {
+        const AclSlot *s = &B.aq[B.atail % ACLQ_N];
+        bt_link_acl(s->data, s->len);
+        B.atail++;
+    }
 }
 
 unsigned long long bt_now(void) { return B.attached && B.t.now_ms ? B.t.now_ms(B.t.ctx) : 0; }
@@ -74,7 +193,9 @@ void bt_poll(void)
         on_event(s->data, s->len);
         B.tail++;
     }
+    drain_acl();
     bt_scan_step();
+    bt_link_step();
 }
 
 int bt_cmd(unsigned opcode, const void *params, unsigned plen, unsigned char *ret, unsigned ret_max, unsigned *ret_len, unsigned timeout_ms)
@@ -138,11 +259,65 @@ int bt_cmd(unsigned opcode, const void *params, unsigned plen, unsigned char *re
             on_event(e, s->len);
             B.tail++;
         }
+        drain_acl();
         if (!B.t.alive(B.t.ctx))
             return BT_E_TRANSPORT;
         B.t.wait_step(B.t.ctx);
     }
     return BT_E_TIMEOUT;
+}
+
+void bt_acl_reset_credits(void)
+{
+    B.credits = B.info.acl_pkts;
+    B.outstanding = 0;
+}
+
+int bt_acl_send(unsigned handle, const unsigned char *pdu, unsigned len)
+{
+    if (!B.attached || !B.t.send_acl || B.info.acl_mtu == 0)
+        return BT_E_BUSY;
+    unsigned char pkt[4 + 1024];
+    unsigned mtu = B.info.acl_mtu > 1024 ? 1024 : B.info.acl_mtu;
+    unsigned off = 0;
+    int first = 1;
+    do
+    {
+        unsigned n = len - off < mtu ? len - off : mtu;
+        /* room in the chip's buffers? The Number of Completed Packets event gives credits back. */
+        unsigned waited = 0;
+        while (B.credits == 0)
+        {
+            while (B.tail != B.head) /* only events: they carry the credits */
+            {
+                const EvSlot *s = &B.q[B.tail % EVQ_N];
+                on_event(s->data, s->len);
+                B.tail++;
+            }
+            if (B.credits)
+                break;
+            if (!B.t.alive(B.t.ctx))
+                return BT_E_TRANSPORT;
+            if (++waited > 10000) /* 1 s */
+                return BT_E_TIMEOUT;
+            B.t.wait_step(B.t.ctx);
+        }
+        /* handle (12 bits) and flags: packet boundary 0 = first piece of a PDU, 1 = continuation; length of the data */
+        pkt[0] = (unsigned char)handle;
+        pkt[1] = (unsigned char)(((handle >> 8) & 0x0F) | ((first ? 0u : 1u) << 4));
+        pkt[2] = (unsigned char)n;
+        pkt[3] = (unsigned char)(n >> 8);
+        for (unsigned i = 0; i < n; i++)
+            pkt[4 + i] = pdu[off + i];
+        if (B.t.send_acl(B.t.ctx, pkt, 4 + n) < 0)
+            return BT_E_TRANSPORT;
+        B.credits--;
+        B.outstanding++;
+        B.info.acl_tx++;
+        off += n;
+        first = 0;
+    } while (off < len);
+    return 0;
 }
 
 static void fail(const char *why, int code)
@@ -157,6 +332,9 @@ static void start(void)
     unsigned short vid = B.info.vid;
     unsigned char r[16];
     bt_scan_reset(); /* a reset puts the chip's settings back to the defaults */
+    bt_link_reset();   /* ... and ends every link */
+    B.sev_have = B.sacl_have = 0;
+    B.ahead = B.atail = 0;
     unsigned n;
     int st;
 
@@ -202,6 +380,17 @@ static void start(void)
         B.info.have_addr = 1;
     }
 
+    /* 5. Read Buffer Size: status, largest ACL packet (2), largest SCO packet (1), ACL packets the chip holds (2), SCO packets (2).
+     * The packet count is our number of credits for sending. */
+    B.info.acl_mtu = B.info.acl_pkts = 0;
+    st = bt_cmd(OP_READ_BUFFER_SIZE, 0, 0, r, sizeof r, &n, 1000);
+    if (st == 0 && n >= 8)
+    {
+        B.info.acl_mtu = (unsigned short)le16(r + 1);
+        B.info.acl_pkts = (unsigned short)le16(r + 4);
+    }
+    bt_acl_reset_credits();
+
     B.info.state = BT_HCI_UP;
 }
 
@@ -243,6 +432,7 @@ void bt_fw_report(BtFwState state, const char *why, int code, unsigned fw_versio
 void bt_detach(void)
 {
     bt_scan_reset();
+    bt_link_reset();
     B.attached = 0;
     B.info.state = BT_ABSENT;
 }

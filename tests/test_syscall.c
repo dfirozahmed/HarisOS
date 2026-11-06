@@ -814,6 +814,31 @@ int net_wifi_scan_line(unsigned index, char *buf, unsigned cap)
 }
 /* the Bluetooth scan the kernel would hold: a summary and one device; a scan can be started once */
 static int BT_START_RESULT = 0, BT_STARTS = 0, BT_PRESENT = 1;
+/* the Bluetooth link the kernel would hold */
+static int BT_LINK_RESULT = 0, BT_LINK_CALLS = 0, BT_DISC_CALLS = 0;
+static unsigned char BT_LINK_ADDR[6];
+int bt_link_connect(const unsigned char addr[6])
+{
+    BT_LINK_CALLS++;
+    memcpy(BT_LINK_ADDR, addr, 6);
+    return BT_LINK_RESULT;
+}
+int bt_link_disconnect(void)
+{
+    BT_DISC_CALLS++;
+    return 0;
+}
+int bt_link_line(unsigned index, char *buf, unsigned cap)
+{
+    static const char *const LINES[] = {"connected to d3:04:df:0c:47:41, handle 0x123", "echo: answered, 7 bytes back in 12 ms"};
+    if (index >= 2)
+        return -1;
+    unsigned n = (unsigned)strlen(LINES[index]);
+    if (n + 1 > cap)
+        return -1;
+    memcpy(buf, LINES[index], n + 1);
+    return (int)n;
+}
 static int BT_COEX_LAST = -99;
 void bt_coex(int mode) { BT_COEX_LAST = mode; }
 int bt_scan_start(void)
@@ -2569,6 +2594,32 @@ int main(void)
         BT_START_RESULT = -101;
         CHECK(call(SYS_BTSCAN, SYS_BTSCAN_START, 0, 0) == -101);
         BT_START_RESULT = 0;
+    }
+
+    /* ================= SYS_BTLINK ================= */
+
+    reset();
+    {
+        char line[256];
+        memset(line, 'x', sizeof line);
+        CHECK(call(SYS_BTLINK, 0, U(line), sizeof line) == 44 && strncmp(line, "connected to d3:04:df:0c:47:41", 30) == 0);
+        CHECK(OK_WRITE == 1 && OK_LEN == sizeof line);
+        CHECK(call(SYS_BTLINK, 1, U(line), sizeof line) == 37);
+        CHECK(call(SYS_BTLINK, 2, U(line), sizeof line) == -1);                    /* past the end */
+        CHECK(call(SYS_BTLINK, 0, U(line), 10) == -1);                             /* does not fit */
+        CHECK(call(SYS_BTLINK, 0, U(line), 1) == -1 && call(SYS_BTLINK, 0, U(line), 257) == -1);
+        CHECK(call(SYS_BTLINK, 0x1002, U(line), sizeof line) == -1);               /* not a line, not a command */
+        USER_OK = 0;
+        CHECK(call(SYS_BTLINK, 0, U(line), sizeof line) == -1);                    /* bad pointer */
+        USER_OK = 1;
+        /* connect: the 48-bit number becomes the address, first byte first */
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_CONNECT, 0xD304DF0C4741ULL, 0) == 0 && BT_LINK_CALLS == 1);
+        CHECK(memcmp(BT_LINK_ADDR, "\xd3\x04\xdf\x0c\x47\x41", 6) == 0);
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_CONNECT, 0x1000000000000ULL, 0) == -1 && BT_LINK_CALLS == 1); /* more than 48 bits: refused */
+        BT_LINK_RESULT = -102;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_CONNECT, 0x010203040506ULL, 0) == -102); /* the reason is passed on */
+        BT_LINK_RESULT = 0;
+        CHECK(call(SYS_BTLINK, SYS_BTLINK_DISCONNECT, 0, 0) == 0 && BT_DISC_CALLS == 1);
     }
 
     /* ================= sockets: the server calls ================= */

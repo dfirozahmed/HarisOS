@@ -204,8 +204,6 @@ typedef struct
 
 /* Bluetooth (USB class 0xE0 subclass 1 protocol 1, "Bluetooth Primary Controller"): interface 0 has an interrupt IN endpoint
  * (HCI events) and two bulk endpoints (ACL data in / out); HCI commands go over the control endpoint. One chip at a time. */
-#define BT_EV_BUF 260 /* an HCI event is at most 2 + 255 bytes */
-
 typedef struct
 {
     int iface, intr_addr, in_addr, out_addr;
@@ -219,12 +217,14 @@ typedef struct
     int slot, dev;
     unsigned short vid, pid;
     int intr_dci, in_dci, out_dci;
-    unsigned intr_mps;
+    unsigned intr_mps, in_mps, out_mps;
     Ring rintr, rin, rout;
     volatile u8 *ibuf; /* the interrupt IN transfer lands here (one packet, intr_mps bytes) */
     u64 ibuf_phys;
-    u8 ev[BT_EV_BUF]; /* HCI event being put together from the packets */
-    unsigned ev_have;
+    volatile u8 *abuf; /* the bulk IN transfer (ACL data in) lands here (one packet, in_mps bytes) */
+    u64 abuf_phys;
+    volatile u8 *obuf; /* the HCI ACL packet being sent on the bulk OUT endpoint */
+    u64 obuf_phys;
     int errs;
 } Bt;
 

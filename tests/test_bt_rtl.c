@@ -119,7 +119,7 @@ static int fake_alive(void *ctx)
     return 1;
 }
 
-static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, 0};
+static const BtTransport T = {fake_send, fake_wait, fake_alive, 0, 0, 0};
 
 /* ---- a synthetic firmware file in the real layout ---- */
 static unsigned put16(unsigned char *p, unsigned v)

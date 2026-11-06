@@ -3,8 +3,8 @@
  * The USB Bluetooth class (class 0xE0, subclass 1, protocol 1) maps the HCI packets onto USB like this:
  *   HCI command  -> control transfer on endpoint 0: bmRequestType 0x20 (class, to the device), bRequest 0, wValue 0, wIndex 0
  *   HCI event    -> interrupt IN endpoint (a long event is cut into packets of the endpoint's size; the length byte in the
- *                   event header tells where it ends, so we put the pieces together)
- *   ACL data     -> bulk IN / bulk OUT endpoints (configured here, used by a later stage)
+ *                   event header tells where it ends, so bt_rx_event_chunk() puts the pieces together)
+ *   ACL data     -> bulk IN endpoint (same: bt_rx_acl_chunk()) and bulk OUT endpoint (one transfer per HCI ACL packet)
  * Interface 1 (isochronous, for voice) is left alone: it needs alternate settings we do not use. */
 #include "usb_xhci_internal.h"
 #include "bluetooth.h"
@@ -60,55 +60,57 @@ int bt_find(Xhci *x, u32 total, BtDesc *bd)
             }
         }
     }
-    return bd->iface >= 0 && bd->intr_addr && bd->in_addr && bd->out_addr && bd->intr_mps <= 512;
+    return bd->iface >= 0 && bd->intr_addr && bd->in_addr && bd->out_addr && bd->intr_mps <= 512 && bd->in_mps <= 512 && bd->out_mps <= 512;
 }
 
-/* One transfer of exactly one packet on the interrupt IN endpoint. The size must be the packet size: a bigger transfer would not
- * finish until it is full or a short packet comes, and a full-size packet is not "short". */
-static void bt_queue(Bt *b)
+/* One transfer of exactly one packet on the interrupt IN / bulk IN endpoint. The size must be the packet size: a bigger transfer would
+ * not finish until it is full or a short packet comes, and a full-size packet is not "short". */
+static void bt_queue(Bt *b, int bulk)
 {
-    ring_put(&b->rintr, b->ibuf_phys, b->intr_mps, (1u << 10) | (1u << 5)); /* Normal TRB, interrupt on completion */
+    ring_put(bulk ? &b->rin : &b->rintr, bulk ? b->abuf_phys : b->ibuf_phys, bulk ? b->in_mps : b->intr_mps,
+             (1u << 10) | (1u << 5)); /* Normal TRB, interrupt on completion */
     mb();
-    wr32(b->x->db, (u32)b->slot * 4, (u32)b->intr_dci);
+    wr32(b->x->db, (u32)b->slot * 4, (u32)(bulk ? b->in_dci : b->intr_dci));
 }
 
-/* A transfer event of this slot / endpoint: hand the packet on and queue the next one. */
+/* A transfer event of this slot on the event or ACL endpoint: hand the packet on and queue the next one. (The bulk OUT endpoint's events
+ * are taken by bt_send_acl() itself.) */
 void bt_event(Xhci *x, const Trb *e)
 {
     Bt *b = &BT;
-    if (!b->active || b->x != x || (int)(e->d3 >> 24) != b->slot || (int)((e->d3 >> 16) & 31) != b->intr_dci)
+    if (!b->active || b->x != x || (int)(e->d3 >> 24) != b->slot)
+        return;
+    int dci = (int)((e->d3 >> 16) & 31);
+    int bulk = dci == b->in_dci;
+    if (!bulk && dci != b->intr_dci)
         return;
     int code = (int)(e->d2 >> 24);
     if (code == 1 || code == 13)
     {
+        unsigned mps = bulk ? b->in_mps : b->intr_mps;
         unsigned resid = e->d2 & 0xFFFFFF;
-        unsigned n = b->intr_mps > resid ? b->intr_mps - resid : 0;
-        if (b->ev_have + n > BT_EV_BUF) /* cannot be a real event: start again with the next packet */
-            b->ev_have = 0;
-        for (unsigned i = 0; i < n && b->ev_have < BT_EV_BUF; i++)
-            b->ev[b->ev_have++] = b->ibuf[i];
-        while (b->ev_have >= 2 && b->ev_have >= 2u + b->ev[1]) /* header (code, length) + parameters complete */
-        {
-            unsigned need = 2u + b->ev[1];
-            bt_rx_event(b->ev, need);
-            b->ev_have -= need;
-            for (unsigned i = 0; i < b->ev_have; i++)
-                b->ev[i] = b->ev[need + i];
-        }
+        unsigned n = mps > resid ? mps - resid : 0;
+        u8 tmp[512];
+        volatile u8 *src = bulk ? b->abuf : b->ibuf;
+        for (unsigned i = 0; i < n && i < sizeof tmp; i++)
+            tmp[i] = src[i];
+        if (bulk)
+            bt_rx_acl_chunk(tmp, n);
+        else
+            bt_rx_event_chunk(tmp, n);
         b->errs = 0;
     }
     else
     {
-        b->ev_have = 0;
         if (++b->errs > 16) /* unplugged or broken: give up, usb_poll() removes it */
         {
             DEV[b->dev].gone = 1;
             return;
         }
         if (code == 6)
-            ep_recover(x, b->slot, b->intr_dci, &b->rintr);
+            ep_recover(x, b->slot, dci, bulk ? &b->rin : &b->rintr);
     }
-    bt_queue(b);
+    bt_queue(b, bulk);
 }
 
 /* ---- the transport handed to the HCI core ---- */
@@ -126,6 +128,46 @@ static int bt_send_cmd(void *ctx, const unsigned char *pkt, unsigned len)
     if (code == 6)
         ep_recover(x, b->slot, 1, &d->ep0);
     return ctrl_ok(code) ? 0 : -1;
+}
+
+/* One HCI ACL packet on the bulk OUT endpoint: a single transfer. The device takes the length from the packet's own header, so there is
+ * no extra empty packet at the end. Waits for the transfer to finish (other events are handled meanwhile). */
+static int bt_send_acl(void *ctx, const unsigned char *pkt, unsigned len)
+{
+    Bt *b = (Bt *)ctx;
+    if (bt_gone() || len < 4 || len > 4096)
+        return -1;
+    Xhci *x = b->x;
+    for (unsigned i = 0; i < len; i++)
+        b->obuf[i] = pkt[i];
+    ring_put(&b->rout, b->obuf_phys, len, (1u << 10) | (1u << 5));
+    mb();
+    wr32(x->db, (u32)b->slot * 4, (u32)b->out_dci);
+    for (unsigned i = 0; i < 20000; i++) /* about 2 s */
+    {
+        Trb e;
+        if (ev_next(x, &e))
+        {
+            if (((e.d3 >> 10) & 63) == 32 && (int)(e.d3 >> 24) == b->slot && (int)((e.d3 >> 16) & 31) == b->out_dci)
+            {
+                int code = (int)(e.d2 >> 24);
+                if (code == 1 || code == 13)
+                    return 0;
+                if (code == 6)
+                    ep_recover(x, b->slot, b->out_dci, &b->rout);
+                return -1;
+            }
+            dispatch(x, &e);
+            continue;
+        }
+        if (bt_gone())
+            return -1;
+        udelay(100);
+    }
+    /* never finished: stop the endpoint and move the ring past the unfinished TRB */
+    command(x, 0, (15u << 10) | ((u32)b->out_dci << 16) | ((u32)b->slot << 24), 0);
+    ep_recover(x, b->slot, b->out_dci, &b->rout);
+    return -1;
 }
 
 /* 100 us of waiting; the events the controller reported meanwhile reach bt_event() through pump(). */
@@ -162,13 +204,31 @@ int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd)
     b->in_dci = (bd->in_addr & 15) * 2 + 1;
     b->out_dci = (bd->out_addr & 15) * 2;
     b->intr_mps = bd->intr_mps;
-    b->ev_have = 0;
+    b->in_mps = bd->in_mps;
+    b->out_mps = bd->out_mps;
     b->errs = 0;
     b->vid = b->pid = 0;
 
-    int rings = 0;
+    /* three buffer pages (events, ACL in, ACL out) and three rings */
+    int pages = 0, rings = 0;
+    int ok = 1;
+    b->ibuf = b->abuf = b->obuf = 0;
     b->ibuf = dma_page(x, &b->ibuf_phys);
-    int ok = b->ibuf != 0;
+    ok = b->ibuf != 0;
+    if (ok)
+    {
+        pages = 1;
+        b->abuf = dma_page(x, &b->abuf_phys);
+        ok = b->abuf != 0;
+    }
+    if (ok)
+    {
+        pages = 2;
+        b->obuf = dma_page(x, &b->obuf_phys);
+        ok = b->obuf != 0;
+    }
+    if (ok)
+        pages = 3;
     Ring *all[3] = {&b->rintr, &b->rin, &b->rout};
     for (int i = 0; ok && i < 3; i++)
     {
@@ -211,8 +271,12 @@ int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd)
     {
         for (int i = 0; i < rings; i++)
             pmm_free_page(all[i]->phys);
-        if (b->ibuf)
+        if (pages >= 1)
             pmm_free_page(b->ibuf_phys);
+        if (pages >= 2)
+            pmm_free_page(b->abuf_phys);
+        if (pages >= 3)
+            pmm_free_page(b->obuf_phys);
         d->used = 0;
         drop_slot(x, slot);
         return 0;
@@ -226,7 +290,8 @@ int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd)
     }
 
     b->active = 1; /* from here dev_remove() takes care of it; bt_event() needs it to be set while the chip starts */
-    bt_queue(b);
+    bt_queue(b, 0);
+    bt_queue(b, 1);
 
     BtTransport t;
     t.send_cmd = bt_send_cmd;
@@ -234,6 +299,7 @@ int bt_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const BtDesc *bd)
     t.alive = bt_alive;
     t.ctx = b;
     t.now_ms = bt_clock;
+    t.send_acl = bt_send_acl;
     bt_attach(&t, b->vid, b->pid); /* reset + version: even if the chip does not answer, the device stays and the status says why */
     return 1;
 }
@@ -248,6 +314,8 @@ void bt_release(void)
     pmm_free_page(b->rin.phys);
     pmm_free_page(b->rout.phys);
     pmm_free_page(b->ibuf_phys);
+    pmm_free_page(b->abuf_phys);
+    pmm_free_page(b->obuf_phys);
 }
 
 #endif

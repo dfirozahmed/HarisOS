@@ -74,6 +74,9 @@
 #define SYS_SLEEP 65
 #define SYS_AUDIO_STOP 66
 #define SYS_BTSCAN 67
+#define SYS_BTLINK 68
+#define SYS_BTLINK_CONNECT 0x1000
+#define SYS_BTLINK_DISCONNECT 0x1001
 #define SYS_BTSCAN_START 0xFFFF
 #define SYS_SOCK_STREAM 1
 #define SYS_GUI_DESTROY 0
@@ -235,6 +238,7 @@ static inline long long sys_audio_volume(long long percent) { return syscall3(SY
 static inline void sys_sleep(unsigned ms) { syscall3(SYS_SLEEP, ms, 0, 0); }
 /* stop the sound that plays: sys_audio_stop(1) asks (the player's sys_audio_play returns -113), sys_audio_stop(0) takes an unused request back */
 static inline void sys_audio_stop(int request) { syscall3(SYS_AUDIO_STOP, request, 0, 0); }
+static inline long long sys_btlink(unsigned index, char *buf, usize cap) { return syscall3(SYS_BTLINK, index, (long long)(usize)buf, (long long)cap); }
 static inline long long sys_btscan(unsigned index, char *buf, usize cap) { return syscall3(SYS_BTSCAN, index, (long long)(usize)buf, (long long)cap); }
 /* Unix time in seconds (the real-time clock read as UTC), or -1 */
 static inline long long sys_time(void) { return syscall3(SYS_TIME, 0, 0, 0); }
