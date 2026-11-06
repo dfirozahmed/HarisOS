@@ -8,21 +8,38 @@
 #define BN_UPEM 1000
 #define BN_GSUB_STAGES 9 /* stages 0..7 run before final reordering, stage 8 after it */
 
-/* Glyphs indexed by glyph id (not by character code); one Font per pixel size, baseline matching the Latin font of that size. */
-extern const Font font_bn_12, font_bn_14, font_bn_16, font_bn_20, font_bn_32;
+/* Weights: 0 regular, 1 medium, 2 bold (the Latin fonts font_ui_*, font_med_*, font_bold_*). */
+#define BN_WEIGHTS 3
+#define BN_REGULAR 0
+#define BN_MEDIUM 1
+#define BN_BOLD 2
 
-/* The font's own OpenType tables. */
-extern const unsigned char *const bn_gsub, *const bn_gpos, *const bn_gdef;
-extern const unsigned int bn_gsub_len, bn_gpos_len, bn_gdef_len;
+/* Glyphs indexed by glyph id (not by character code); one Font per pixel size, baseline matching the Latin font of that size.
+ * Regular has all five sizes, medium has 14 and 16, bold has 20. */
+extern const Font font_bn_12, font_bn_14, font_bn_16, font_bn_20, font_bn_32;
+extern const Font font_bn_med_14, font_bn_med_16, font_bn_bold_20;
+
+/* The font's own OpenType tables: GSUB and GDEF are the same for every weight, GPOS and the advances differ. */
+extern const unsigned char *const bn_gsub, *const bn_gdef;
+extern const unsigned int bn_gsub_len, bn_gdef_len;
+extern const unsigned char *const bn_gpos_w[BN_WEIGHTS];
+extern const unsigned int bn_gpos_len_w[BN_WEIGHTS];
+extern const unsigned short *const bn_gpos_lookups_w[BN_WEIGHTS];
+extern const unsigned short bn_gpos_nlookups_w[BN_WEIGHTS];
+extern const unsigned short *const bn_adv_w[BN_WEIGHTS]; /* advances in font design units (BN_UPEM per em) */
+/* the regular weight under the names the first version had */
+extern const unsigned char *const bn_gpos;
+extern const unsigned int bn_gpos_len;
+extern const unsigned short *const bn_gpos_lookups;
+extern const unsigned short bn_gpos_nlookups;
+extern const unsigned short *const bn_adv;
 
 /* Lookup indices to run: bn_gsub_stage[s]..bn_gsub_stage[s+1] of bn_gsub_lookups for GSUB stage s; one list for GPOS. */
 extern const unsigned short *const bn_gsub_lookups, *const bn_gsub_stage;
 extern const unsigned char *const bn_gsub_init; /* parallel to bn_gsub_lookups: 1 = only for the first glyph of a word */
-extern const unsigned short *const bn_gpos_lookups;
-extern const unsigned short bn_gpos_nlookups;
 
-/* code point (< 0x10000) -> glyph id: sorted arrays. Advances in font design units (BN_UPEM per em). */
-extern const unsigned short *const bn_cmap_cp, *const bn_cmap_gid, *const bn_adv;
+/* code point (< 0x10000) -> glyph id: sorted arrays (the same for every weight). */
+extern const unsigned short *const bn_cmap_cp, *const bn_cmap_gid;
 extern const unsigned int bn_cmap_n;
 
 #endif

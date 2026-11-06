@@ -177,6 +177,55 @@ int main(void)
         assert(gfx_text_w(&font_ui_14, "\xe0\xa6\x84") == q); /* U+0984: unassigned */
     }
 
+    /* ---- Bengali in the weight of the Latin font: regular, medium, bold ---- */
+    {
+        assert(bn_weight_of(&font_ui_14) == BN_REGULAR && bn_weight_of(&font_ui_32) == BN_REGULAR);
+        assert(bn_weight_of(&font_med_14) == BN_MEDIUM && bn_weight_of(&font_med_16) == BN_MEDIUM);
+        assert(bn_weight_of(&font_bold_20) == BN_BOLD);
+        assert(bn_face_for(&font_med_14) == &font_bn_med_14 && bn_face_for(&font_med_16) == &font_bn_med_16);
+        assert(bn_face_for(&font_bold_20) == &font_bn_bold_20);
+        assert(bn_face_for(&font_ui_12) == &font_bn_12 && bn_face_for(&font_ui_20) == &font_bn_20 && bn_face_for(&font_ui_32) == &font_bn_32);
+
+        /* the glyphs are the same in every weight (same count, same ids); their widths are not */
+        unsigned kormo[] = {0x09B0, 0x09CD, 0x09AE}, ko[] = {0x0995, 0x09CB};
+        BnGlyphPos r[16], m[16], b[16];
+        int nr = bn_shape_syllable_w(kormo, 3, 0, 20, BN_REGULAR, r, 16), nm = bn_shape_syllable_w(kormo, 3, 0, 20, BN_MEDIUM, m, 16),
+            nb = bn_shape_syllable_w(kormo, 3, 0, 20, BN_BOLD, b, 16);
+        assert(nr == nm && nm == nb && nr == 2);
+        for (int i = 0; i < nr; i++)
+            assert(r[i].gid == m[i].gid && m[i].gid == b[i].gid);
+        nr = bn_shape_syllable_w(ko, 2, 0, 20, BN_REGULAR, r, 16);
+        nb = bn_shape_syllable_w(ko, 2, 0, 20, BN_BOLD, b, 16);
+        assert(nr == 3 && nb == 3);
+        int differ = 0;
+        for (int i = 0; i < nr; i++)
+            differ |= r[i].adv != b[i].adv;
+        assert(differ); /* a bold letter is wider */
+        /* the weight-less call is the regular one */
+        BnGlyphPos plain[16];
+        assert(bn_shape_syllable(ko, 2, 0, 20, plain, 16) == 3);
+        for (int i = 0; i < 3; i++)
+            assert(plain[i].gid == r[i].gid && plain[i].adv == r[i].adv && plain[i].x_off == r[i].x_off);
+
+        /* text in the medium / bold Latin fonts is drawn with the medium / bold Bengali: wider, and with more ink */
+        const char *bangla = "\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\x82\xe0\xa6\xb2\xe0\xa6\xbe"; /* বাংলা */
+        assert(gfx_text_w(&font_med_14, bangla) != gfx_text_w(&font_ui_14, bangla));
+        assert(gfx_text_w(&font_bold_20, bangla) != gfx_text_w(&font_ui_20, bangla));
+        test_clip = (GfxClip){-100000, -100000, 100000, 100000};
+        int c0 = blend_calls;
+        gfx_text(&font_ui_20, 10, 5, bangla, gfx_rgb(255, 255, 255));
+        int regular_px = blend_calls - c0;
+        c0 = blend_calls;
+        gfx_text(&font_bold_20, 10, 5, bangla, gfx_rgb(255, 255, 255));
+        assert(regular_px > 0 && blend_calls - c0 > regular_px); /* bold covers more pixels */
+        /* mixed with Latin in a bold line: still one line, widths add up */
+        char mixed[32];
+        strcpy(mixed, "ab");
+        strcat(mixed, bangla);
+        int sum = gfx_text_w(&font_bold_20, "ab") + gfx_text_w(&font_bold_20, bangla);
+        assert(gfx_text_w(&font_bold_20, mixed) >= sum - 2 && gfx_text_w(&font_bold_20, mixed) <= sum + 2);
+    }
+
     /* ---- Latin-1, Latin Extended-A, Greek, Cyrillic: drawn from the extra faces, not '?' ---- */
     {
         int q = gfx_text_w(&font_ui_14, "?");

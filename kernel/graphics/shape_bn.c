@@ -16,10 +16,12 @@
 #define F_BASE 0x01 /* this glyph is (or contains) the base consonant of the syllable */
 
 /* The font's tables, as the engine wants them. (Made on the stack: the generated data are pointer variables, not constants.) */
-static OtFont bn_otfont(void)
+static OtFont bn_otfont(int weight)
 {
-    OtFont f = {bn_gsub, bn_gpos, bn_gdef, bn_gsub_lookups, bn_gsub_stage, bn_gsub_init, bn_gpos_lookups, bn_gpos_nlookups,
-                bn_adv, BN_UPEM, bn_cmap_cp, bn_cmap_gid, bn_cmap_n};
+    if (weight < 0 || weight >= BN_WEIGHTS)
+        weight = BN_REGULAR;
+    OtFont f = {bn_gsub, bn_gpos_w[weight], bn_gdef, bn_gsub_lookups, bn_gsub_stage, bn_gsub_init, bn_gpos_lookups_w[weight],
+                bn_gpos_nlookups_w[weight], bn_adv_w[weight], BN_UPEM, bn_cmap_cp, bn_cmap_gid, bn_cmap_n};
     return f;
 }
 
@@ -63,7 +65,7 @@ int bn_is_bengali(unsigned cp)
 {
     if ((cp >= 0x0980 && cp <= 0x09FF) || cp == 0x0964 || cp == 0x0965 || cp == 0x200C || cp == 0x200D)
     {
-        OtFont f = bn_otfont();
+        OtFont f = bn_otfont(BN_REGULAR); /* the cmap is the same in every weight */
         return ot_cmap(&f, cp) != 0;
     }
     return 0;
@@ -130,6 +132,33 @@ const Font *bn_face_for_size(int size)
     return &font_bn_32;
 }
 
+int bn_weight_of(const Font *latin)
+{
+    if (latin == &font_med_14 || latin == &font_med_16)
+        return BN_MEDIUM;
+    if (latin == &font_bold_20)
+        return BN_BOLD;
+    return BN_REGULAR;
+}
+
+const Font *bn_face_for(const Font *latin)
+{
+    switch (bn_weight_of(latin))
+    {
+    case BN_MEDIUM:
+        if (latin->size <= 15)
+            return &font_bn_med_14;
+        if (latin->size <= 18)
+            return &font_bn_med_16;
+        break;
+    case BN_BOLD:
+        if (latin->size >= 19 && latin->size <= 26)
+            return &font_bn_bold_20;
+        break;
+    }
+    return bn_face_for_size(latin->size);
+}
+
 static int scale16(int units, int size)
 {
     long v = (long)units * size * 16;
@@ -152,7 +181,12 @@ static unsigned stage_mask(int stage)
 
 int bn_shape_syllable(const unsigned *cp, int n, int word_start, int size, BnGlyphPos *out, int max_out)
 {
-    OtFont font = bn_otfont();
+    return bn_shape_syllable_w(cp, n, word_start, size, BN_REGULAR, out, max_out);
+}
+
+int bn_shape_syllable_w(const unsigned *cp, int n, int word_start, int size, int weight, BnGlyphPos *out, int max_out)
+{
+    OtFont font = bn_otfont(weight);
     OtBuf c;
     unsigned u[BN_SYL_MAX * 2 + 2];
     int m = 0;
@@ -279,7 +313,7 @@ int bn_shape_syllable(const unsigned *cp, int n, int word_start, int size, BnGly
         out[i].gid = g->gid;
         out[i].x_off = scale16(g->xoff, size);
         out[i].y_off = scale16(g->yoff, size);
-        out[i].adv = scale16((int)bn_adv[g->gid] + g->xadv, size);
+        out[i].adv = scale16((int)font.adv[g->gid] + g->xadv, size);
     }
     return cnt;
 }

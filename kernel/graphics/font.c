@@ -101,7 +101,7 @@ static const Font *q_font(const Font *f, int face)
     switch (face)
     {
     case Q_EXT: return ext_face_for_size(f->size);
-    case Q_BN: return bn_face_for_size(f->size);
+    case Q_BN: return bn_face_for(f); /* of the weight of the Latin font: regular, medium or bold */
     case Q_AR: return ar_face_for_size(f->size);
     }
     return f;
@@ -152,7 +152,7 @@ NOINLINE static int shape_ar_items(const Font *f, const unsigned *cps, int len, 
 NOINLINE static int shape_bn_items(const Font *f, const unsigned *cps, int len, int word_start, QItem *out, int room)
 {
     BnGlyphPos tmp[OT_CAP];
-    int cnt = bn_shape_syllable(cps, len, word_start, bn_face_for_size(f->size)->size, tmp, OT_CAP);
+    int cnt = bn_shape_syllable_w(cps, len, word_start, bn_face_for(f)->size, bn_weight_of(f), tmp, OT_CAP);
     if (cnt <= room)
         shaped_items(out, Q_BN, tmp, cnt);
     return cnt;

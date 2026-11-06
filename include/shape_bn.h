@@ -40,7 +40,16 @@ int bn_syllable_len(const unsigned *cp, int n);
  * (the font uses a different "e" sign there). Writes at most max_out glyphs and returns how many. */
 int bn_shape_syllable(const unsigned *cp, int n, int word_start, int size, BnGlyphPos *out, int max_out);
 
-/* The Bengali face for a Latin font of this nominal size: the nearest of the five sizes. */
+/* The same for a weight: BN_REGULAR, BN_MEDIUM or BN_BOLD (font_bn.h). The glyphs are the same in every weight; their widths and the
+ * anchors of the marks are not. */
+int bn_shape_syllable_w(const unsigned *cp, int n, int word_start, int size, int weight, BnGlyphPos *out, int max_out);
+
+/* The Bengali face for a Latin font of this nominal size: the nearest of the five sizes (regular). */
 const Font *bn_face_for_size(int size);
+
+/* The weight of a Latin font (font_ui_* regular, font_med_* medium, font_bold_* bold: any other font is regular) ... */
+int bn_weight_of(const Font *latin);
+/* ... and the Bengali face that goes with it: of its weight and size, or the regular one of that size if the weight has not the size. */
+const Font *bn_face_for(const Font *latin);
 
 #endif
