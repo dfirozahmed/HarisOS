@@ -23,4 +23,11 @@
 #define PRIxPTR "llx"
 #define PRIdMAX "lld"
 #define PRIuMAX "llu"
+#define SCNd32 "d"
+#define SCNi32 "i"
+#define SCNu32 "u"
+#define SCNx32 "x"
+#define SCNd64 "lld"
+#define SCNu64 "llu"
+#define SCNx64 "llx"
 #endif

@@ -50,4 +50,20 @@ double cosh(double x);
 double tanh(double x);
 double hypot(double x, double y);
 
+/* float forms: computed in double and rounded (long double is double on this target anyway) */
+float fabsf(float x);
+float sqrtf(float x);
+float floorf(float x);
+float ceilf(float x);
+float roundf(float x);
+float truncf(float x);
+float fmodf(float x, float y);
+float powf(float x, float y);
+float sinf(float x);
+float cosf(float x);
+float tanf(float x);
+float atan2f(float y, float x);
+float expf(float x);
+float logf(float x);
+
 #endif

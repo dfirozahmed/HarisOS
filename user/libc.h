@@ -178,6 +178,10 @@ extern int errno;
 #define EDOM 33
 #define ERANGE 34
 #define ENOSYS 38
+#define E2BIG 7
+#define EILSEQ 84
+#define ENOTEMPTY 39
+#define ENAMETOOLONG 36
 const char *strerror(int e);
 void perror(const char *msg); /* "msg: <strerror(errno)>" and a newline on fd 2 */
 
@@ -199,6 +203,16 @@ usize strcspn(const char *s, const char *reject);
 char *strpbrk(const char *s, const char *accept);
 usize strnlen(const char *s, usize max);
 int strcasecmp(const char *a, const char *b);
+char *strndup(const char *s, usize n);
+char *strtok(char *s, const char *delim);
+char *strtok_r(char *s, const char *delim, char **save);
+char *strcasestr(const char *hay, const char *needle);
+float strtof(const char *s, char **end);
+int isascii(int c);
+/* scanning: %d %i %u %x %o %c %s %[set] %f %e %g %n %%, width, '*' and the h hh l ll z length letters. Returns the conversions made, or
+ * EOF when the input ended first. The input is a string: fscanf is not offered. */
+int sscanf(const char *s, const char *fmt, ...);
+int vsscanf(const char *s, const char *fmt, va_list ap);
 int strncasecmp(const char *a, const char *b, usize n);
 int isxdigit(int c);
 int iscntrl(int c);
@@ -251,6 +265,9 @@ struct timespec
 #define CLOCK_MONOTONIC 1
 int clock_gettime(int clock, struct timespec *ts); /* REALTIME: RTC seconds + the ms clock's fraction; MONOTONIC: ms since boot */
 double difftime(time_t a, time_t b);
+char *ctime(const time_t *t);    /* "Thu Jan  1 00:00:00 1970
+" in a static buffer, UTC */
+char *asctime(const struct tm *tm);
 struct tm *gmtime(const time_t *t);
 struct tm *gmtime_r(const time_t *t, struct tm *out);
 struct tm *localtime(const time_t *t); /* the zone is UTC */

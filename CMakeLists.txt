@@ -455,7 +455,7 @@ set(USER_CFLAGS
     -O2 -Wall -Wextra -std=gnu11 -I${CMAKE_SOURCE_DIR}/user/include)
 # The user C library (user/libc.c, posix.c, libm.c) is compiled once and linked into every program.
 set(LIBC_OBJ "")
-foreach(LIBSRC libc posix libm numconv)
+foreach(LIBSRC libc posix posix2 libm numconv)
     set(LIBSRC_OBJ ${CMAKE_BINARY_DIR}/user/${LIBSRC}.obj)
     add_custom_command(
         OUTPUT  ${LIBSRC_OBJ}
