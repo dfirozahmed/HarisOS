@@ -179,6 +179,7 @@ extern int errno;
 #define ERANGE 34
 #define ENOSYS 38
 const char *strerror(int e);
+void perror(const char *msg); /* "msg: <strerror(errno)>" and a newline on fd 2 */
 
 /* ---- ISO C / POSIX odds and ends (posix.c) ---- */
 typedef usize size_t;
@@ -241,6 +242,14 @@ struct tm
 };
 time_t time(time_t *out);   /* Unix time from the real-time clock (UTC); -1 if there is none */
 clock_t clock(void);        /* milliseconds since the kernel started: wall time, not CPU time of this process */
+struct timespec
+{
+    time_t tv_sec;
+    long long tv_nsec;
+};
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+int clock_gettime(int clock, struct timespec *ts); /* REALTIME: RTC seconds + the ms clock's fraction; MONOTONIC: ms since boot */
 double difftime(time_t a, time_t b);
 struct tm *gmtime(const time_t *t);
 struct tm *gmtime_r(const time_t *t, struct tm *out);

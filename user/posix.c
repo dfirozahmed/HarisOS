@@ -3,6 +3,8 @@
 #include "libc.h"
 #include <math.h>
 #include <setjmp.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 int errno;
 
@@ -288,6 +290,33 @@ clock_t clock(void) { return sys_clock(); }
 
 double difftime(time_t a, time_t b) { return (double)(a - b); }
 
+/* The kernel offers a millisecond uptime clock (sys_clock) and a one-second RTC (sys_time). MONOTONIC uses the first. REALTIME takes
+ * the RTC seconds; the sub-second part is the uptime's, so it is only a fraction that moves, not a calibrated one. */
+int clock_gettime(int clock, struct timespec *ts)
+{
+    long long ms = sys_clock();
+    if (clock == CLOCK_MONOTONIC)
+    {
+        ts->tv_sec = ms / 1000;
+        ts->tv_nsec = (ms % 1000) * 1000000;
+        return 0;
+    }
+    if (clock != CLOCK_REALTIME)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    long long t = sys_time();
+    if (t < 0)
+    {
+        errno = ENOSYS;
+        return -1;
+    }
+    ts->tv_sec = t;
+    ts->tv_nsec = (ms % 1000) * 1000000;
+    return 0;
+}
+
 /* days since 1970-01-01 -> calendar date, the usual "civil from days" arithmetic (the year starts in March) */
 struct tm *gmtime_r(const time_t *t, struct tm *out)
 {
@@ -440,3 +469,50 @@ usize strftime(char *buf, usize size, const char *fmt, const struct tm *tm)
 }
 
 int raise(int sig) { return (int)sys_kill(sys_getpid(0), sig); }
+
+/* ---- unistd: pread / pwrite --------------------------------------------------------------------------------------------------- */
+/* HarisOS has no positional read/write call: these seek, transfer and seek back. Not atomic, which is fine while a process has one
+ * thread using the descriptor. */
+ssize_t pread(int fd, void *buf, usize n, off_t off)
+{
+    long long old = sys_seek(fd, 0, SEEK_CUR);
+    if (old < 0 || sys_seek(fd, off, SEEK_SET) < 0)
+    {
+        errno = ESPIPE;
+        return -1;
+    }
+    long long r = sys_read(fd, buf, n);
+    sys_seek(fd, old, SEEK_SET);
+    return r;
+}
+
+ssize_t pwrite(int fd, const void *buf, usize n, off_t off)
+{
+    long long old = sys_seek(fd, 0, SEEK_CUR);
+    if (old < 0 || sys_seek(fd, off, SEEK_SET) < 0)
+    {
+        errno = ESPIPE;
+        return -1;
+    }
+    long long r = sys_write(fd, buf, n);
+    sys_seek(fd, old, SEEK_SET);
+    return r;
+}
+
+int gettimeofday(struct timeval *tv, void *tz)
+{
+    struct timespec ts;
+    (void)tz;
+    if (clock_gettime(CLOCK_REALTIME, &ts) < 0)
+        return -1;
+    tv->tv_sec = ts.tv_sec;
+    tv->tv_usec = ts.tv_nsec / 1000;
+    return 0;
+}
+
+void perror(const char *msg)
+{
+    if (msg && *msg)
+        fdprintf(2, "%s: ", msg);
+    fdprintf(2, "%s\n", strerror(errno));
+}
