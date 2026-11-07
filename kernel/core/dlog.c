@@ -51,8 +51,15 @@ static void put_num(long long v)
 
 void dlog(const char *tag, const char *who, long long a, long long b, long long c)
 {
-    if (LEN > DLOG_MAX - 120)
-        return;
+    if (LEN > DLOG_MAX - 120) /* full: the oldest half goes (from a line start), the latest events are what matters */
+    {
+        unsigned cut = DLOG_MAX / 2;
+        while (cut < LEN && BUF[cut - 1] != '\n')
+            cut++;
+        for (unsigned i = cut; i < LEN; i++)
+            BUF[i - cut] = BUF[i];
+        LEN -= cut;
+    }
     put_char('[');
     put_num((long long)timer_ms());
     put_str("] ");
@@ -89,6 +96,9 @@ int dlog_save_due(void)
     return SAVE_AT && timer_ms() >= SAVE_AT;
 }
 
+static const char *NOTE = "TRACE.TXT";
+const char *dlog_save_note(void) { return NOTE; }
+
 int dlog_save(void)
 {
     PENDING = 0;
@@ -109,5 +119,6 @@ int dlog_save(void)
     if (was_locked)
         vfs_set_locked(vol, 1);
     serial_puts(ok ? "dlog: TRACE.TXT written\n" : "dlog: TRACE.TXT could not be written\n");
+    NOTE = ok ? "Trace saved to TRACE.TXT" : "Trace could not be saved (is the boot drive writable?)";
     return ok;
 }

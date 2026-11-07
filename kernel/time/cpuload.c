@@ -33,7 +33,7 @@ void cpuload_section_end(int id)
     unsigned long long len = timer_us() - SEC_T0, halted = IDLE_US - SEC_IDLE0;
     if (id < 0 || id >= CPULOAD_SECTIONS)
         return;
-    if (len - (len > halted ? halted : len) >= 25000) /* diagnostics (dlog.h): a part of the main loop pass that took long */
+    if (len - (len > halted ? halted : len) >= 60000) /* diagnostics (dlog.h): a part of the main loop pass that took long */
         dlog("loop-section", 0, id, (long long)(len / 1000), 0);
     SEC_US[id] += len > halted ? len - halted : 0;
     SEC_N[id]++;

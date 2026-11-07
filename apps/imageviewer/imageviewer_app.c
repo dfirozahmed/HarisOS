@@ -6,6 +6,8 @@
  * The decoded picture is one block of the kernel heap (4 bytes a pixel) kept while the window is open.
  * An app uses only public headers (ui.h, wm.h, desktop.h, gfx.h) - never desktop_internal.h. */
 #include "app.h"
+#include "dlog.h"
+#include "timer.h"
 #include "desktop.h"
 #include "gfx.h"
 #include "heap.h"
@@ -162,7 +164,9 @@ static const char *load_node(int id)
         done += (unsigned)r;
     }
     int w = 0, h = 0;
+    unsigned long long dlog_t0 = timer_ms(); /* (dlog.h) */
     unsigned int *px = done == size ? picture_decode(raw, size, &w, &h) : 0;
+    dlog("img-decode", IV_NAME, (long long)(timer_ms() - dlog_t0), w, h);
     kfree(raw);
     if (!px)
         return "Not a picture this viewer can read (BMP, PNG, baseline JPEG), or too large";

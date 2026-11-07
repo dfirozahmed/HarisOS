@@ -27,6 +27,7 @@
 #include "gfx.h"
 #include "hda.h"
 #include "dlog.h"
+#include "toast.h"
 #include "heap.h"
 #include "heapmon.h"
 #include "idle.h"
@@ -703,15 +704,16 @@ void kernel_main(const BootInfo *info)
         {
             /* diagnostics: the main loop polls the mouse and draws the windows, so a long gap between two passes is what a frozen pointer is */
             static unsigned long long prev_pass;
-            static int stalls;
-            if (prev_pass && pass_start - prev_pass >= 40000 && stalls < 150)
+            if (prev_pass && pass_start - prev_pass >= 80000)
             {
-                stalls++;
                 dlog("loop-gap", 0, (long long)((pass_start - prev_pass) / 1000), 0, 0); /* (dlog.h: written to TRACE.TXT) */
             }
             prev_pass = pass_start;
             if (dlog_save_due()) /* the trace file: only the main loop may write to a drive */
-                (void)dlog_save();
+            {
+                int saved = dlog_save(); /* (before dlog_save_note: the order of evaluation of arguments is not defined) */
+                toast_show(saved ? TOAST_INFO : TOAST_WARNING, dlog_save_note());
+            }
         }
         int worked = 0; /* this pass handled something: poll again at once instead of sleeping */
         cpuload_section_begin();
@@ -758,6 +760,8 @@ void kernel_main(const BootInfo *info)
             if (!screensleep_activity()) /* a key that wakes the screen is not used for anything else */
             {
                 /* Bangla typing (Ctrl+Space turns it on): a letter may become a Unicode character, or a Backspace and new characters */
+                if (ke.pressed && (ke.mods & KMOD_CTRL) && (ke.mods & KMOD_ALT) && (ke.key == 't' || ke.key == 'T'))
+                    dlog_request_save(); /* Ctrl+Alt+T: write TRACE.TXT now (dlog.h), e.g. right after something froze */
                 KeyEvent evs[IME_MAX_EVENTS];
                 int nev = ime_filter(&ke, evs, IME_MAX_EVENTS);
                 for (int ei = 0; ei < nev; ei++)

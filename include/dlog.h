@@ -22,5 +22,7 @@ void dlog_request_save(void);
 int dlog_save_due(void);
 /* Writes TRACE.TXT (the drive holding KERNEL.EFI is unlocked for it and locked again). 1 = written, 0 = not. */
 int dlog_save(void);
+/* A short sentence about the last dlog_save() (for a toast). */
+const char *dlog_save_note(void);
 
 #endif

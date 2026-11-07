@@ -1,5 +1,7 @@
 /* File Explorer: current folder, history, sorting, window layout and selection. */
 #include "explorer.h"
+#include "dlog.h"
+#include "timer.h"
 #include "console.h"
 #include "exec.h"
 #include "player.h"
@@ -24,6 +26,7 @@ static void note_for_folder(void)
 
 void ex_reload(void)
 {
+    unsigned long long dlog_t0 = timer_ms(); /* (dlog.h) */
     int focus = (EX_SEL >= 0 && EX_SEL < EX_NITEMS) ? EX_ITEMS[EX_SEL] : -1; /* by node: the rows may be in another order now */
     int total = vfs_list_by(EX_CUR, EX_ITEMS, VFS_MAX_NODES, EX_SORT_KEY, EX_SORT_DESC);
     EX_NITEMS = total < VFS_MAX_NODES ? total : VFS_MAX_NODES;
@@ -31,6 +34,8 @@ void ex_reload(void)
     if (EX_SCROLL > EX_NITEMS - 1)
         EX_SCROLL = EX_NITEMS > 0 ? EX_NITEMS - 1 : 0;
     ex_update_nav_buttons();
+    if (timer_ms() - dlog_t0 >= 15)
+        dlog("ex-reload", 0, EX_NITEMS, (long long)(timer_ms() - dlog_t0), 0);
 }
 
 /* ask the drive again (changed entries show up), then list */
@@ -132,6 +137,7 @@ static const char *run_program(int node, const VfsNode *n)
 
 void ex_open_item(int row)
 {
+    unsigned long long dlog_t0 = timer_ms(); /* (dlog.h) */
     if (row < 0 || row >= EX_NITEMS)
         return;
     const VfsNode *n = vfs_node(EX_ITEMS[row]);
@@ -162,6 +168,7 @@ void ex_open_item(int row)
         EX_NOTE = run_program(EX_ITEMS[row], n);
     else
         EX_NOTE = "No app can open this file yet.";
+    dlog("ex-open", 0, kind, (long long)(timer_ms() - dlog_t0), n->is_dir);
 }
 
 void ex_go_forward(void)

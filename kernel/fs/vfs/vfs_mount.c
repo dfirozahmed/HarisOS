@@ -1,5 +1,7 @@
 /* Virtual file system: reading folders from a drive, attaching, mounting volumes. */
 #include "vfs_internal.h"
+#include "dlog.h"
+#include "timer.h"
 
 /* ---- reading folders from a drive ------------------------------- */
 static void load_dir(int dir)
@@ -56,8 +58,10 @@ int vfs_refresh(int dir)
         return fail(VFS_ERR_ARG);
     if (!ops_of(dir))
         return 0;
+    unsigned long long dlog_t0 = timer_us(); /* (dlog.h) */
     NODES[dir].loaded = 0;
     load_dir(dir);
+    dlog("vfs_refresh", NODES[dir].name, dir, 0, (long long)((timer_us() - dlog_t0) / 1000));
     return NODES[dir].loaded ? 0 : -1;
 }
 

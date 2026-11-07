@@ -1,5 +1,7 @@
 /* Virtual file system: adding nodes, sorted lists, paths. */
 #include "vfs_internal.h"
+#include "dlog.h"
+#include "timer.h"
 
 /* ---- adding ------------------------------------------------------ */
 int vfs_add(int parent, const char *name, int is_dir, unsigned size)
@@ -85,7 +87,10 @@ int vfs_list_by(int dir, int *out, int max, int key, int descending)
     int total = 0;
     if (!vfs_node(dir) || !NODES[dir].is_dir)
         return 0;
+    unsigned long long dlog_t0 = timer_us(); /* (dlog.h) */
     ensure_loaded(dir);
+    if (timer_us() - dlog_t0 >= 10000) /* the folder was read from the drive */
+        dlog("vfs_list", NODES[dir].name, dir, 0, (long long)((timer_us() - dlog_t0) / 1000));
     for (int i = 1; i < VFS_MAX_NODES; i++)
     {
         if (!NODES[i].used || NODES[i].parent != dir)

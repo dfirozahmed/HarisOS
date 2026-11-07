@@ -1,5 +1,7 @@
 /* Virtual file system: the RAM Disk, rename, remove, copy and move. */
 #include "vfs_internal.h"
+#include "dlog.h"
+#include "timer.h"
 
 /* ---- demo content (the RAM Disk) ---------------------------------- */
 static void ram_info(void *ctx, VfsVolInfo *out)
@@ -138,9 +140,11 @@ int vfs_remove(int id)
         return remove_in_memory(id);
     if (!ops_of(id)->remove)
         return fail(VFS_ERR_NOWRITE);
+    unsigned long long dlog_t0 = timer_us(); /* (dlog.h) */
     batch(id, 1);
     int r = remove_on_drive(id);
     batch(id, 0);
+    dlog("vfs_remove", 0, id, r, (long long)((timer_us() - dlog_t0) / 1000));
     return r;
 }
 

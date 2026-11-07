@@ -1,5 +1,7 @@
 /* File Explorer: rename, new folder / file, clipboard (cut / copy / paste) and delete with its dialog. */
 #include "explorer.h"
+#include "dlog.h"
+#include "timer.h"
 
 /* delete confirmation: a modal dialog of the Explorer window */
 static Window *DEL_WIN;
@@ -240,6 +242,7 @@ static void forget(int id)
 
 static void do_delete(void)
 {
+    unsigned long long dlog_t0 = timer_ms(); /* (dlog.h) */
     int ids[EX_SEL_MAX];
     int n = DEL_N;
     for (int i = 0; i < n; i++)
@@ -277,6 +280,7 @@ static void do_delete(void)
         if (EX_WIN && row >= 0)
             ex_scroll_to(wm_content(EX_WIN), row);
     }
+    dlog("ex-delete", 0, n, failed, (long long)(timer_ms() - dlog_t0));
 }
 
 static void on_del_yes(UiButton *b, void *user)
