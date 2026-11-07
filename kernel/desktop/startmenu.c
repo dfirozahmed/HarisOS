@@ -100,6 +100,20 @@ const UiTheme *startmenu_theme(void)
     return &MENU_THEME;
 }
 
+/* Does the drawing area (the clip) reach r? A redraw of one row is clipped to that row: the parts far from it need not be worked out at all. */
+static int clip_hits(UiRect r)
+{
+    GfxClip c = gfx_get_clip();
+    return !(c.x0 >= r.x + r.w || c.x1 <= r.x || c.y0 >= r.y + r.h || c.y1 <= r.y);
+}
+
+/* is the whole clip inside r? */
+static int clip_inside(UiRect r)
+{
+    GfxClip c = gfx_get_clip();
+    return c.x0 >= r.x && c.y0 >= r.y && c.x1 <= r.x + r.w && c.y1 <= r.y + r.h;
+}
+
 /* the panel's glass with the fill at `alpha` */
 static void glass(UiRect r, int radius, int alpha)
 {
@@ -109,7 +123,9 @@ static void glass(UiRect r, int radius, int alpha)
     {
         RINGS = 14
     };
-    for (int k = RINGS; k >= 1; k--)
+    /* a redraw inside the panel (a row, the search box) reaches neither the rings (outside the rounded corners) nor the edge line */
+    int inner = clip_inside(ui_inset(r, radius + 1));
+    for (int k = inner ? 0 : RINGS; k >= 1; k--)
     {
         int left = RINGS - k + 1; /* 14 near the panel ... 1 at the far edge */
         int a = 44 * left * left / (RINGS * RINGS);
@@ -119,7 +135,8 @@ static void glass(UiRect r, int radius, int alpha)
                              (unsigned char)a);
     }
     gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, radius, ui_color(MENU_THEME.surface), (unsigned char)alpha);
-    gfx_round_rect_alpha(r.x, r.y, r.w, r.h, radius, 1, gfx_rgb(255, 255, 255), 235);
+    if (!inner)
+        gfx_round_rect_alpha(r.x, r.y, r.w, r.h, radius, 1, gfx_rgb(255, 255, 255), 235);
 }
 
 void startmenu_glass(UiRect r, int radius)
@@ -206,7 +223,7 @@ static UiFade ROW_F[MAX_ITEMS];
 static int ROW_SHOWN[MAX_ITEMS];
 static UiFade FOOT_F[2];
 static int FOOT_SHOWN[2];
-#define FADE_FRAME_MS 16 /* the fades are drawn at most this often (startmenu_tick) */
+#define FADE_FRAME_MS 33 /* the fades are drawn at most this often (startmenu_tick): about 30 frames a second */
 static unsigned long long FADE_LAST_MS;
 
 /* ---- geometry (small functions: no big structs are copied) ---- */
@@ -746,7 +763,7 @@ int startmenu_tick(int caret_flipped, unsigned long long now_ms)
     }
     /* A fade changes its level almost every millisecond (255 steps in 130 ms), and each change is a frame: with the GPU compositor every frame
      * blurs the panel's whole backdrop again (about 250 frames a second while the pointer moves over the rows). The levels are shown at most
-     * every FADE_FRAME_MS (about 60 frames a second); a fade that has arrived is shown at once, so it never stops short of its end. */
+     * every FADE_FRAME_MS (about 30 frames a second); a fade that has arrived is shown at once, so it never stops short of its end. */
     int frame_due = now_ms - FADE_LAST_MS >= FADE_FRAME_MS;
     int shown_any = 0;
     for (int i = 0; i < MAX_ITEMS; i++) /* rows past the end of the list fade out at once, so they start from nothing when they come back */
@@ -754,10 +771,10 @@ int startmenu_tick(int caret_flipped, unsigned long long now_ms)
         int on = i < VN && i == SEL && !FOOT_KEY;
         if (i >= VN && ROW_SHOWN[i] == 0 && ROW_F[i].target == 0)
             continue;
-        if (i >= VN)
+        if (i >= VN || !on) /* a row the pointer left goes out at once: only the row it entered fades, so a quick sweep over many rows is not many fades at a time */
             ui_fade_reset(&ROW_F[i]);
         else
-            ui_fade_to(&ROW_F[i], on ? 255 : 0, UI_FADE_MS, now_ms);
+            ui_fade_to(&ROW_F[i], 255, UI_FADE_MS, now_ms);
         int lv = ui_fade_level(&ROW_F[i], now_ms);
         if (lv != ROW_SHOWN[i] && (frame_due || lv == ROW_F[i].target))
         {
@@ -842,21 +859,27 @@ void startmenu_draw(void)
 
     /* search */
     UiRect s = search_rect();
-    ui_icon(UI_ICON_SEARCH, m.x + PAD + 9, s.y + s.h / 2, 16, t->text_dim);
-    ui_edit_draw(s, &SEARCH, "Search apps...", 1);
+    if (clip_hits(ui_rect(m.x + PAD, s.y - 4, m.w - 2 * PAD, s.h + 8)))
+    {
+        ui_icon(UI_ICON_SEARCH, m.x + PAD + 9, s.y + s.h / 2, 16, t->text_dim);
+        ui_edit_draw(s, &SEARCH, "Search apps...", 1);
+    }
 
     /* list */
     int ly = m.y + PAD + SEARCH_H + LABEL_GAP;
-    ui_text_in_color(ui_rect(m.x + PAD + 4, ly, m.w - 2 * PAD, LABEL_H), SEARCH.len ? "Results" : "Apps",
-                     UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
+    if (clip_hits(ui_rect(m.x + PAD + 4, ly, m.w - 2 * PAD, LABEL_H)))
+        ui_text_in_color(ui_rect(m.x + PAD + 4, ly, m.w - 2 * PAD, LABEL_H), SEARCH.len ? "Results" : "Apps",
+                         UI_TEXT_SMALL, UI_ALIGN_LEFT, t->text_dim);
     if (VN == 0)
         ui_text_in_color(ui_rect(m.x + PAD, rows_y(), m.w - 2 * PAD, ROW_H * 2), "No apps found", UI_TEXT_BODY,
                          UI_ALIGN_CENTER, t->text_dim);
     for (int i = SCROLL; i < VN && i < SCROLL + rows_shown(); i++)
     {
+        UiRect r = row_rect(i);
+        if (!clip_hits(r))
+            continue; /* this redraw is somewhere else (a row's hover is one row) */
         MenuItem item = item_get(VIS[i]);
         const MenuItem *it = &item;
-        UiRect r = row_rect(i);
         if (ROW_SHOWN[i] > 0) /* the highlight fades in and out (startmenu_tick) */
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_m, ui_color(t->accent),
                                       (unsigned char)((PRESS == i ? 56 : 30) * ROW_SHOWN[i] / 255));
@@ -880,6 +903,12 @@ void startmenu_draw(void)
 
     /* footer: a faint line, the user, and "Close all" */
     int fy = foot_y();
+    if (!clip_hits(ui_rect(m.x, fy - 40, m.w, FOOT_H + 42))) /* (the tip above a power button reaches up to 34 px over the footer) */
+    {
+        ui_menu_draw(&CTX);
+        ui_set_theme(prev);
+        return;
+    }
     gfx_fill_rect_alpha(m.x + PAD, fy, m.w - 2 * PAD, 1, 40, 60, 110, 40);
     int cy = fy + 1 + FOOT_H / 2;
     int ax = m.x + PAD + 18;
