@@ -836,10 +836,10 @@ static int comp_fence_wait(uint32_t seq)
  * time is counted idle (cpuload_note_idle). A frame that never finishes ends in amd_gpu_fence_wait's timeout as before. */
 static unsigned long long vblank_ahead_us(void);   /* below, with the wait for the blank */
 
-static int comp_fence_wait_sleepy(uint32_t seq)
+static int comp_fence_wait_halting(uint32_t seq, int blank_matters)
 {
     unsigned long long t0 = timer_us(), slept = 0, s0, now;
-    int may_sleep = vblank_ahead_us() > 3000u;   /* a halt is up to a millisecond too long: not when the blank is about to start */
+    int may_sleep = !blank_matters || vblank_ahead_us() > 3000u;   /* a halt is up to a millisecond too long: not when the blank is about to start */
     for (;;) {
         if (amd_gpu_fence_done(seq)) break;
         now = timer_us();
@@ -856,6 +856,8 @@ static int comp_fence_wait_sleepy(uint32_t seq)
     t_fence_us += timer_us() - t0 - slept;
     return 1;
 }
+
+static int comp_fence_wait_sleepy(uint32_t seq) { return comp_fence_wait_halting(seq, 1); }
 
 /* GPU load in percent since the last call: time the compositor's submissions took / elapsed time (TSC), or the GRBM_STATUS snapshot if
  * that is higher. -1 = registers not reachable. */
@@ -1698,9 +1700,17 @@ static int compose_to(uint64_t rt_mc, uint32_t rt_pitch_px, uint32_t w, uint32_t
         t_build_us += w0 - u0;
         seq = frame_submit(ib, na + nb);
         t_submit_us += timer_us() - w0;
-        w0 = timer_us();
-        if (!seq || !comp_fence_wait(seq)) return -1;
-        t_fence_us += timer_us() - w0;
+        /* A frame with the blur (six passes over the start menu's whole box, each time anything touches it - a mouse move, the caret) takes the GPU
+         * milliseconds: the CPU halts while it runs instead of spinning (that spin was counted as busy, about 60% with the menu open). A small
+         * frame is done within the first 40 microseconds, so it never halts and is as quick as before. */
+        if (!seq) return -1;
+        if (bi >= 0) {
+            if (!comp_fence_wait_halting(seq, 0)) return -1;   /* counts its own spin and halted time */
+        } else {
+            w0 = timer_us();
+            if (!comp_fence_wait(seq)) return -1;
+            t_fence_us += timer_us() - w0;
+        }
     }
     scval[AMD_COMP_SC_FRAMES]++;
     scval[AMD_COMP_SC_DWORDS] = na + nb;

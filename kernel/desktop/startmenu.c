@@ -206,6 +206,8 @@ static UiFade ROW_F[MAX_ITEMS];
 static int ROW_SHOWN[MAX_ITEMS];
 static UiFade FOOT_F[2];
 static int FOOT_SHOWN[2];
+#define FADE_FRAME_MS 16 /* the fades are drawn at most this often (startmenu_tick) */
+static unsigned long long FADE_LAST_MS;
 
 /* ---- geometry (small functions: no big structs are copied) ---- */
 /* How many app rows fit above the taskbar: on a short screen the menu would otherwise run under the taskbar and
@@ -742,6 +744,11 @@ int startmenu_tick(int caret_flipped, unsigned long long now_ms)
         wm_add_screen_damage(cd);
         redraw = 1;
     }
+    /* A fade changes its level almost every millisecond (255 steps in 130 ms), and each change is a frame: with the GPU compositor every frame
+     * blurs the panel's whole backdrop again (about 250 frames a second while the pointer moves over the rows). The levels are shown at most
+     * every FADE_FRAME_MS (about 60 frames a second); a fade that has arrived is shown at once, so it never stops short of its end. */
+    int frame_due = now_ms - FADE_LAST_MS >= FADE_FRAME_MS;
+    int shown_any = 0;
     for (int i = 0; i < MAX_ITEMS; i++) /* rows past the end of the list fade out at once, so they start from nothing when they come back */
     {
         int on = i < VN && i == SEL && !FOOT_KEY;
@@ -752,24 +759,26 @@ int startmenu_tick(int caret_flipped, unsigned long long now_ms)
         else
             ui_fade_to(&ROW_F[i], on ? 255 : 0, UI_FADE_MS, now_ms);
         int lv = ui_fade_level(&ROW_F[i], now_ms);
-        if (lv != ROW_SHOWN[i])
+        if (lv != ROW_SHOWN[i] && (frame_due || lv == ROW_F[i].target))
         {
             ROW_SHOWN[i] = lv;
             dmg_row(i);
-            redraw = 1;
+            redraw = shown_any = 1;
         }
     }
     for (int i = 0; i < 2; i++)
     {
         ui_fade_to(&FOOT_F[i], FOOT_HOVER == i + 1 || FOOT_KEY == i + 1 ? 255 : 0, UI_FADE_MS, now_ms);
         int lv = ui_fade_level(&FOOT_F[i], now_ms);
-        if (lv != FOOT_SHOWN[i])
+        if (lv != FOOT_SHOWN[i] && (frame_due || lv == FOOT_F[i].target))
         {
             FOOT_SHOWN[i] = lv;
             wm_add_screen_damage(power_btn_rect(i));
-            redraw = 1;
+            redraw = shown_any = 1;
         }
     }
+    if (shown_any)
+        FADE_LAST_MS = now_ms;
     return redraw;
 }
 
