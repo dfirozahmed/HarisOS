@@ -290,8 +290,10 @@ clock_t clock(void) { return sys_clock(); }
 
 double difftime(time_t a, time_t b) { return (double)(a - b); }
 
-/* The kernel offers a millisecond uptime clock (sys_clock) and a one-second RTC (sys_time). MONOTONIC uses the first. REALTIME takes
- * the RTC seconds; the sub-second part is the uptime's, so it is only a fraction that moves, not a calibrated one. */
+/* The kernel offers a millisecond uptime clock (sys_clock) and a one-second RTC (sys_time). MONOTONIC is the uptime. REALTIME reads the RTC once
+ * (the first time it is asked) and from then on adds the uptime that has passed since: a clock with millisecond steps that never jumps back,
+ * unlike the RTC seconds mixed with an uptime fraction, which the first version did (a program comparing two readings saw time stand still).
+ * It does not follow later changes of the RTC. */
 int clock_gettime(int clock, struct timespec *ts)
 {
     long long ms = sys_clock();
@@ -306,14 +308,23 @@ int clock_gettime(int clock, struct timespec *ts)
         errno = EINVAL;
         return -1;
     }
-    long long t = sys_time();
-    if (t < 0)
+    static long long base_real_ms, base_up_ms;
+    static int have_base;
+    if (!have_base)
     {
-        errno = ENOSYS;
-        return -1;
+        long long t = sys_time();
+        if (t < 0)
+        {
+            errno = ENOSYS;
+            return -1;
+        }
+        base_real_ms = t * 1000;
+        base_up_ms = ms;
+        have_base = 1;
     }
-    ts->tv_sec = t;
-    ts->tv_nsec = (ms % 1000) * 1000000;
+    long long real_ms = base_real_ms + (ms - base_up_ms);
+    ts->tv_sec = real_ms / 1000;
+    ts->tv_nsec = (real_ms % 1000) * 1000000;
     return 0;
 }
 

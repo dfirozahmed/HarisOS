@@ -6,6 +6,9 @@
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
+/* clock_gettime(CLOCK_MONOTONIC) exists: programs that test for it (libnsutils) use it instead of a gettimeofday fallback */
+#define _POSIX_TIMERS 200809L
+#define _POSIX_MONOTONIC_CLOCK 0
 #define F_OK 0
 #define R_OK 4
 #define W_OK 2
