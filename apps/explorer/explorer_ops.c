@@ -280,6 +280,10 @@ static void do_delete(void)
         if (EX_WIN && row >= 0)
             ex_scroll_to(wm_content(EX_WIN), row);
     }
+    /* This runs inside the Delete dialog's handler, so nothing marked the Explorer window: closing the dialog redraws only the part of the list it
+     * covered, and the rest would keep the old picture (the removed entries, rows of the old list) when the GPU compositor puts the desktop together. */
+    if (EX_WIN)
+        wm_redraw(EX_WIN);
     dlog("ex-delete", 0, n, failed, (long long)(timer_ms() - dlog_t0));
 }
 

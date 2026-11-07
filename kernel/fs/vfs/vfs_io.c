@@ -82,7 +82,18 @@ static int overwrite_in_place(int id, const void *buf, unsigned len)
 
 const char *vfs_save_step(void) { return SAVE_STEP; }
 
+static int vfs_save_work(int parent, const char *name, const void *buf, unsigned len);
+
+/* diagnostics (dlog.h): every save of a file, with the time it took (a save is several requests to the drive) */
 int vfs_save(int parent, const char *name, const void *buf, unsigned len)
+{
+    unsigned long long dlog_t0 = timer_us();
+    int r = vfs_save_work(parent, name, buf, len);
+    dlog("vfs_save", name, len, r, (long long)((timer_us() - dlog_t0) / 1000));
+    return r;
+}
+
+static int vfs_save_work(int parent, const char *name, const void *buf, unsigned len)
 {
     SAVE_STEP = "";
     const VfsNode *p = vfs_node(parent);

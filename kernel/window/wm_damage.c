@@ -127,6 +127,12 @@ void wm_add_screen_damage(UiRect r)
     wm_damage_internal(r.x, r.y, r.x + r.w, r.y + r.h);
 }
 
+void wm_redraw(Window *w)
+{
+    if (w && wm_z_index_internal(w) >= 0)
+        wm_damage_content_internal(w, WM_WHY_AREA);
+}
+
 void wm_add_damage(UiRect r)
 {
     wm_comp_why_internal(WM_WHY_AREA);

@@ -139,6 +139,10 @@ int wm_list(Window **out, int max);
 int wm_dragging(void); /* 1 while a window is being dragged or resized */
 /* Mark a screen rectangle as needing a redraw (e.g. the taskbar). */
 void wm_add_damage(UiRect r);
+/* The whole content of window `w` changed, and not inside one of its own handlers (so wm_add_damage cannot reach it: that marks the window that is
+ * being called): a dialog's button changed what the window under it shows and closed itself (File Explorer's Delete). The window is drawn again;
+ * with the GPU compositor a window is drawn only when it is marked, and a window that was not marked keeps its old picture on the screen. */
+void wm_redraw(Window *w);
 void wm_add_screen_damage(UiRect r); /* the same for what is not inside a window (taskbar, clock, menus): with the compositor no window is drawn again */
 
 /* Compositor (gfx.h "compositor"): each visible window in a surface of its own. wm_comp_set(1) starts tracking what

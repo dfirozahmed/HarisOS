@@ -60,6 +60,13 @@ static int on_wheel_scroll(Window*w,int steps){
   return 2;
 }
 
+/* a dialog's button changes what its owner shows (File Explorer's Delete: the list is made again) and closes the dialog */
+static Window *DLG, *OWNER;
+static int GO_REDRAW; /* 1: the handler tells the window manager (wm_redraw) */
+static void on_go(UiButton *bt, void *user) { (void)bt; (void)user; wm_close(DLG); if (GO_REDRAW) wm_redraw(OWNER); }
+/* how many pixels of the owner's content (below the title bar) were uploaded: closing the dialog redraws the part it covered, which is not the whole window */
+static long owner_uploads(int id, int n0) { long k = 0; (void)n0; for (int i = 0; i < 16; i++) if (LOG_ID[i] == id && LOG_Y[i] + LOG_H[i] > ui_theme()->titlebar_h + 4) k += (long)LOG_W[i] * LOG_H[i]; return k; }
+
 int main(void){
   int W=1024,H=640; unsigned*fb=calloc(W*H,4);
   unsigned long long bytes = (unsigned long long)W*H*4;
@@ -246,6 +253,31 @@ int main(void){
     for (k=0; k<nb && strcmp(bz[k].title,"Look"); k++) {}
     assert(UPLOADS==up3 && (k==nb || bz[k].look_n[WM_LOOK_OTHER]==0));   /* past the left edge: not drawn again (the layer holds it whole) */
     assert(strcmp(wm_look_name(WM_LOOK_SIZE),"size")==0 && strcmp(wm_look_name(42),"?")==0);
+  }
+  /* a dialog's button changes its owner and closes the dialog: the owner is drawn again only when something marks it */
+  for (int redraw = 0; redraw <= 1; redraw++) {
+    GO_REDRAW = redraw;
+    OWNER = wm_create("Owner",100,80,300,200,draw,0);
+    DLG = wm_create_dialog(OWNER,"Ask",160,140,200,100,draw,0);
+    wm_add_button(DLG,"Go",UI_BTN_PRIMARY,ui_rect(20,40,80,30),on_go,0);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    NOW += 600; wm_comp_anim_tick(NOW); NOW += 600; wm_comp_anim_tick(NOW); /* the open fades end */
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    wm_take_damage_rects(dmg,WM_DAMAGE_MAX);
+    int oid = 0;
+    for (int id = 1; id < NEXT_ID; id++) if (SW[id] == 300+2*M && SH[id] == 200+2*M) oid = id;   /* the owner's surface (the only one of that size) */
+    assert(oid > 0);
+    memset(LOG_ID, 0, sizeof LOG_ID);
+    int bx = DLG->r.x + 1 + 20 + 40, by = DLG->r.y + ui_theme()->titlebar_h + 1 + 40 + 15;       /* the middle of the button */
+    wm_pointer(bx,by,0); wm_pointer(bx,by,1); wm_pointer(bx,by,0);
+    assert(wm_z_index_internal(DLG) < 0);                                                         /* the click closed the dialog */
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
+    long content = (long)(300 - 2) * (200 - ui_theme()->titlebar_h - 2), up_px = owner_uploads(oid,0);
+    if (redraw) assert(up_px >= content);                /* told: the whole content is drawn again */
+    else assert(up_px < content);                        /* not told: only the part the dialog covered is: the rest keeps its old picture (the stale File Explorer list) */
+    wm_close(OWNER);
+    NOW += 600; wm_comp_anim_tick(NOW); NOW += 600; wm_comp_anim_tick(NOW);
+    assert(wm_comp_update(&OPS,a,b,bytes)==0);
   }
   puts("wm compositor tests passed");
   return 0;

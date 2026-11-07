@@ -141,10 +141,17 @@ int vfs_remove(int id)
     if (!ops_of(id)->remove)
         return fail(VFS_ERR_NOWRITE);
     unsigned long long dlog_t0 = timer_us(); /* (dlog.h) */
+    char dlog_name[VFS_NAME_MAX]; /* the name is gone after the removal */
+    {
+        int k = 0;
+        for (; NODES[id].name[k] && k < VFS_NAME_MAX - 1; k++)
+            dlog_name[k] = NODES[id].name[k];
+        dlog_name[k] = 0;
+    }
     batch(id, 1);
     int r = remove_on_drive(id);
     batch(id, 0);
-    dlog("vfs_remove", 0, id, r, (long long)((timer_us() - dlog_t0) / 1000));
+    dlog("vfs_remove", dlog_name, id, r, (long long)((timer_us() - dlog_t0) / 1000));
     return r;
 }
 
