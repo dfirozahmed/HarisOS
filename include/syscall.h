@@ -148,6 +148,11 @@
  *   SYS_CONNECT (55) rdi = socket descriptor, rsi = the server's IPv4 address as one number (a << 24 | b << 16 | c << 8 | d for a.b.c.d),
  *                  rdx = port 1 .. 65535. Waits for the TCP handshake (ARP, SYN, up to about 5 seconds, retrying). 0, or -1 (not a socket,
  *                  already connected, no answer, refused). Other threads keep running while it waits.
+ *                  With SYS_CONNECT_ASYNC (0x10000) or'ed into rdx it returns at once (0 = started; the ARP lookup of the server can still take
+ *                  up to a second) and the handshake goes on in the background: ask with SYS_SOCK_POLL until it says connected or failed.
+ *   SYS_SOCK_POLL (69) rdi = socket descriptor. What the connected socket can do now without waiting, as bits: 1 = SYS_READ would not wait
+ *                  (bytes are there, the server closed its side, or the connection broke), 2 = the handshake is complete, 4 = the connection
+ *                  failed or broke (then SYS_CLOSE it). -1: not a connected socket. Never waits.
  *   SYS_RESOLVE (56) rdi = pointer to a NUL-terminated host name ("example.com") or dotted number ("10.0.2.2"): its IPv4 address in the form
  *                  SYS_CONNECT takes (0 .. 2^32-1), or -1 (no such name, no DNS server, no network, name too long or not valid).
  *   SYS_BIND (57)  rdi = socket descriptor, rsi = local address (0 = any; the only value accepted), rdx = port 1 .. 65535: claims the port for this
@@ -292,6 +297,8 @@
 #define SYS_AUDIO_STOP 66
 #define SYS_BTSCAN 67
 #define SYS_BTLINK 68
+#define SYS_SOCK_POLL 69
+#define SYS_CONNECT_ASYNC 0x10000 /* SYS_CONNECT: or'ed into rdx (the port): do not wait for the handshake, poll with SYS_SOCK_POLL */
 #define SYS_BTLINK_CONNECT 0x1000    /* SYS_BTLINK: rdi values that act instead of reading a line */
 #define SYS_BTLINK_DISCONNECT 0x1001
 #define SYS_BTLINK_A2DP 0x1004 /* SYS_BTLINK: prepare a music stream with the device (AVDTP: discover, configure SBC, open, start); lines 0xA0 .. 0xA2 */

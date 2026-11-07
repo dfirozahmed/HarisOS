@@ -562,6 +562,43 @@ int main(void)
     }
     CLI_HOOK = 0;
 
+    /* 22. no waiting: tcp_connect_start, tcp_status and tcp_readable (what SYS_CONNECT_ASYNC and SYS_SOCK_POLL stand on) */
+    {
+        begin();
+        h = tcp_connect_start(IP_S, SRV_PORT);
+        CHECK(h >= 0 && count_frames(TCP_SYN, TCP_ACK, 0) == 1); /* the SYN is out, nobody waited for the answer */
+        int st = 0;
+        for (int i = 0; i < 5 && st == 0; i++)
+            st = tcp_status(h); /* every call looks at the network once: the fake server answers, the handshake completes */
+        CHECK(st == 1);
+        CHECK(tcp_readable(h) == 0);
+        srv_push("hi", 2, 0);
+        CHECK(tcp_readable(h) == 1);
+        CHECK(tcp_recv(h, buf, 100, 0) == 2 && memcmp(buf, "hi", 2) == 0);
+        CHECK(tcp_readable(h) == 0); /* nothing left, and it did not wait to find out */
+        srv_push(0, 0, 1);
+        CHECK(tcp_readable(h) == 1 && tcp_recv(h, buf, 100, 0) == 0); /* the FIN counts as readable: a read returns 0 at once */
+        CHECK(tcp_status(h) == 1);
+        tcp_close(h);
+        CHECK(tcp_status(h) == -1 && tcp_readable(h) == 1); /* a closed handle is an error, and an error is readable */
+
+        begin(); /* a server that does not answer: still connecting, no failure yet */
+        S.drop_syn = 100;
+        h = tcp_connect_start(IP_S, SRV_PORT);
+        CHECK(h >= 0 && tcp_status(h) == 0 && tcp_status(h) == 0 && tcp_readable(h) == 0);
+        tcp_close(h);
+
+        begin(); /* refused */
+        S.refuse = 1;
+        h = tcp_connect_start(IP_S, SRV_PORT);
+        CHECK(h >= 0);
+        st = 0;
+        for (int i = 0; i < 5 && st == 0; i++)
+            st = tcp_status(h);
+        CHECK(st == -1 && tcp_readable(h) == 1);
+        tcp_close(h);
+    }
+
     if (fails == 0)
         printf("tcp tests passed\n");
     return fails ? 1 : 0;

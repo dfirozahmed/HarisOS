@@ -668,6 +668,16 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/pconfig/WIFI.CFG)
     message(STATUS "Wi-Fi settings found: pconfig/WIFI.CFG goes onto haris.img")
 endif()
 
+# The NetSurf web browser is a separate project (D:/netsurf-haris, see its Makefile): `make` there makes build/NSURF.ELF, and res/ holds the files it
+# reads at start-up (stylesheets, messages, pictures; 8.3 names, because mkimg writes only those). If it has been built, both go into the top folder
+# of the boot disk; the browser looks for DEFAULT.CSS on every drive to find its resources. Another place: cmake -DHARIS_NETSURF_DIR=...
+set(HARIS_NETSURF_DIR "${CMAKE_SOURCE_DIR}/../netsurf-haris" CACHE PATH "folder of the NetSurf port (build/NSURF.ELF and res/)")
+if(EXISTS ${HARIS_NETSURF_DIR}/build/NSURF.ELF AND IS_DIRECTORY ${HARIS_NETSURF_DIR}/res)
+    file(GLOB NETSURF_RES_FILES ${HARIS_NETSURF_DIR}/res/*)
+    list(APPEND HARIS_EXTRA_FILES ${HARIS_NETSURF_DIR}/build/NSURF.ELF ${NETSURF_RES_FILES})
+    message(STATUS "NetSurf found: NSURF.ELF and its resource files go onto haris.img (${HARIS_NETSURF_DIR})")
+endif()
+
 add_custom_command(
     OUTPUT  ${HARIS_IMG}
     COMMAND ${MKIMG_EXE} ${HARIS_IMG} ${CMAKE_BINARY_DIR}/BOOTX64.EFI ${CMAKE_BINARY_DIR}/KERNEL.EFI ${USER_ELFS} ${HARIS_EXTRA_FILES}

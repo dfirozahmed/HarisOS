@@ -17,6 +17,11 @@
 #define TCP_BACKLOG 4       /* connections one listener holds before tcp_accept takes them (still handshaking or waiting) */
 
 int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms);
+/* Without waiting for the handshake: tcp_connect_start sends the SYN and returns the handle (or -1); tcp_status(h) then says 1 = established,
+ * 0 = still connecting, -1 = failed (close the handle). tcp_readable(h) is 1 when tcp_recv would not wait (data, the peer's FIN, or an error). */
+int tcp_connect_start(const unsigned char ip[4], unsigned port);
+int tcp_status(int h);
+int tcp_readable(int h);
 int tcp_send(int s, const void *data, unsigned len, unsigned timeout_ms);
 int tcp_recv(int s, void *buf, unsigned max, unsigned timeout_ms);
 void tcp_close(int s);

@@ -422,7 +422,9 @@ void tcp_tick(void)
 
 static int valid(int h) { return h >= 0 && h < TCP_MAX_SOCKETS && SOCKS[h].used; }
 
-int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
+/* Starts a connection and returns at once (after the ARP lookup of the server's MAC, which can take up to a second): the SYN is sent, the
+ * handshake finishes while the caller polls (tcp_status). The handle, or -1. */
+int tcp_connect_start(const unsigned char ip[4], unsigned port)
 {
     int h = -1;
     for (int i = 0; i < TCP_MAX_SOCKETS; i++)
@@ -457,7 +459,15 @@ int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
     s->state = ST_SYN_SENT;
     s->peer_mss = DEFAULT_MSS;
     emit(s, TCP_SYN, 0, 0);
+    return h;
+}
 
+int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
+{
+    int h = tcp_connect_start(ip, port);
+    if (h < 0)
+        return -1;
+    Sock *s = &SOCKS[h];
     unsigned long long end = timer_ms() + timeout_ms;
     while (s->state == ST_SYN_SENT && timer_ms() < end)
     {
@@ -471,6 +481,31 @@ int tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
         return -1;
     }
     return h;
+}
+
+/* Looks at the network once and says how the connection is: 1 = established (or the peer already closed its side: data may wait), 0 = the
+ * handshake is still going on, -1 = failed or reset (the caller closes the handle with tcp_close). Never waits. */
+int tcp_status(int h)
+{
+    if (!valid(h))
+        return -1;
+    Sock *s = &SOCKS[h];
+    net_poll();
+    if (s->err || s->state == ST_CLOSED)
+        return -1;
+    if (s->state == ST_SYN_SENT || s->state == ST_SYN_RCVD)
+        return 0;
+    return 1;
+}
+
+/* 1 when tcp_recv would not wait: bytes are waiting, the peer closed its side, or the connection is dead. Takes nothing out. Never waits. */
+int tcp_readable(int h)
+{
+    if (!valid(h))
+        return 1; /* an error is also an answer */
+    Sock *s = &SOCKS[h];
+    net_poll();
+    return s->rcv_count > 0 || s->rcv_fin || s->err || s->state == ST_CLOSED;
 }
 
 /* Waits (polling) until the segment in flight is acknowledged. 1 if it was, 0 on timeout or a dead connection. */

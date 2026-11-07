@@ -85,6 +85,43 @@ int sock_connect(int id, const unsigned char ip[4], unsigned port)
     return 0;
 }
 
+/* Like sock_connect, but returns at once: the handshake goes on while the program polls sock_poll. 0, or -1. */
+int sock_connect_start(int id, const unsigned char ip[4], unsigned port)
+{
+    if (!valid(id) || SOCKS[id].kind != SK_NEW || port == 0 || port > 65535)
+        return -1;
+    int h = tcp_connect_start(ip, port);
+    if (h < 0 || !valid(id) || SOCKS[id].kind != SK_NEW)
+    {
+        if (h >= 0)
+            tcp_close(h);
+        return -1;
+    }
+    SOCKS[id].kind = SK_CONN;
+    SOCKS[id].tcp = h;
+    return 0;
+}
+
+/* What can be done with the socket now, without waiting: SOCK_POLL_READ = sock_recv would not wait (data, the peer's end, or an error),
+ * SOCK_POLL_CONNECTED = the handshake is complete, SOCK_POLL_FAILED = the connection failed or broke. -1 for a socket that is not connected.
+ * Looks at the network once (net_poll). */
+int sock_poll(int id)
+{
+    if (!valid(id) || SOCKS[id].kind != SK_CONN)
+        return -1;
+    int st = tcp_status(SOCKS[id].tcp);
+    int r = 0;
+    if (st < 0)
+        r |= SOCK_POLL_FAILED | SOCK_POLL_READ; /* a read now returns the error at once */
+    else if (st > 0)
+    {
+        r |= SOCK_POLL_CONNECTED;
+        if (tcp_readable(SOCKS[id].tcp))
+            r |= SOCK_POLL_READ;
+    }
+    return r;
+}
+
 int sock_bind(int id, unsigned port)
 {
     if (!valid(id) || SOCKS[id].kind != SK_NEW || port == 0 || port > 65535 || tcp_port_busy(port))

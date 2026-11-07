@@ -125,6 +125,8 @@ static long long dispatch_call(SyscallFrame *f)
         return sys_socket(f);
     case SYS_CONNECT:
         return sys_connect(f);
+    case SYS_SOCK_POLL:
+        return sys_sock_poll(f);
     case SYS_RESOLVE:
         return sys_resolve(f);
     case SYS_BIND:

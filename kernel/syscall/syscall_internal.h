@@ -98,6 +98,7 @@ long long sys_cond_signal(const SyscallFrame *f);
 long long sys_sync_unlink(const SyscallFrame *f);
 long long sys_socket(const SyscallFrame *f);
 long long sys_connect(const SyscallFrame *f);
+long long sys_sock_poll(const SyscallFrame *f);
 long long sys_resolve(const SyscallFrame *f);
 long long sys_wifiscan(const SyscallFrame *f);
 long long sys_btscan(const SyscallFrame *f);

@@ -31,6 +31,11 @@ int sock_create(void);
 void sock_ref(int id);
 void sock_unref(int id);
 int sock_connect(int id, const unsigned char ip[4], unsigned port);
+#define SOCK_POLL_READ 1      /* sock_recv would not wait */
+#define SOCK_POLL_CONNECTED 2 /* the handshake is complete */
+#define SOCK_POLL_FAILED 4    /* the connection failed or broke */
+int sock_connect_start(int id, const unsigned char ip[4], unsigned port); /* 0, or -1; does not wait for the handshake */
+int sock_poll(int id); /* SOCK_POLL_* bits, or -1 (not a connected socket); never waits */
 int sock_bind(int id, unsigned port);
 int sock_listen(int id);
 int sock_accept(int id, unsigned char ip[4], unsigned *port);

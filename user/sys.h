@@ -75,6 +75,7 @@
 #define SYS_AUDIO_STOP 66
 #define SYS_BTSCAN 67
 #define SYS_BTLINK 68
+#define SYS_SOCK_POLL 69
 #define SYS_BTLINK_CONNECT 0x1000
 #define SYS_BTLINK_DISCONNECT 0x1001
 #define SYS_BTLINK_SDP 0x1002
@@ -200,6 +201,14 @@ static inline long long sys_getprio(int pid) { return syscall3(SYS_SETPRIO, pid,
 static inline long long sys_socket(void) { return syscall3(SYS_SOCKET, SYS_SOCK_STREAM, 0, 0); }
 /* connect to ip (see SOCK_IP) and port: 0, or -1 */
 static inline long long sys_connect(int fd, unsigned ip, unsigned port) { return syscall3(SYS_CONNECT, fd, (long long)ip, port); }
+/* like sys_connect, but returns at once (0 = started); then ask sys_sock_poll until it says SOCK_POLL_CONNECTED or SOCK_POLL_FAILED */
+#define SYS_CONNECT_ASYNC 0x10000
+static inline long long sys_connect_async(int fd, unsigned ip, unsigned port) { return syscall3(SYS_CONNECT, fd, (long long)ip, port | SYS_CONNECT_ASYNC); }
+/* what the connected socket can do now, without waiting: bits SOCK_POLL_*; -1 = not a connected socket */
+#define SOCK_POLL_READ 1      /* sys_recv would not wait: bytes are there, the server closed its side, or the connection broke */
+#define SOCK_POLL_CONNECTED 2 /* the handshake is complete */
+#define SOCK_POLL_FAILED 4    /* the connection failed or broke: close it */
+static inline long long sys_sock_poll(int fd) { return syscall3(SYS_SOCK_POLL, fd, 0, 0); }
 /* host name or dotted number -> the address in the form sys_connect takes (0 .. 2^32-1), or -1 */
 static inline long long sys_resolve(const char *name) { return syscall3(SYS_RESOLVE, (long long)(usize)name, 0, 0); }
 /* send all len bytes: len, or -1 if the connection broke (then some of it may have gone). One system call takes at most 4096 bytes. */

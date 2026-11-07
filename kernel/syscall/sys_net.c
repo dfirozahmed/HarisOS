@@ -36,10 +36,24 @@ static int sock_of(Process *p, ull fd)
 long long sys_connect(const SyscallFrame *f)
 {
     int s = sock_of(process_current(), f->rdi);
-    if (s < 0 || f->rsi > 0xFFFFFFFFULL || f->rdx == 0 || f->rdx > 65535)
+    ull port = f->rdx & 0xFFFF;
+    if (s < 0 || f->rsi > 0xFFFFFFFFULL || port == 0 || (f->rdx & ~(ull)(0xFFFF | SYS_CONNECT_ASYNC)) != 0)
         return -1;
     unsigned char ip[4] = {(unsigned char)(f->rsi >> 24), (unsigned char)(f->rsi >> 16), (unsigned char)(f->rsi >> 8), (unsigned char)f->rsi};
-    return sock_connect(s, ip, (unsigned)f->rdx);
+    if (f->rdx & SYS_CONNECT_ASYNC)
+        return sock_connect_start(s, ip, (unsigned)port); /* the handshake goes on in the background: SYS_SOCK_POLL */
+    return sock_connect(s, ip, (unsigned)port);
+}
+
+/* SYS_SOCK_POLL: rdi = socket descriptor. What the connected socket can do now without waiting, as bits: 1 = SYS_READ would not wait (bytes
+ * are there, the server closed its side, or the connection broke), 2 = the handshake is complete, 4 = the connection failed or broke.
+ * -1: not a connected socket. Never waits. */
+long long sys_sock_poll(const SyscallFrame *f)
+{
+    int s = sock_of(process_current(), f->rdi);
+    if (s < 0)
+        return -1;
+    return sock_poll(s);
 }
 
 /* SYS_RESOLVE: rdi = a host name ("example.com") or a dotted number. The address in the form SYS_CONNECT takes, or -1 (no such name, no DNS
