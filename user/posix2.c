@@ -88,6 +88,16 @@ float atan2f(float y, float x) { return (float)atan2(y, x); }
 float expf(float x) { return (float)exp(x); }
 float logf(float x) { return (float)log(x); }
 
+/* cube root: pow() on the magnitude, then one Newton step to make the result exact for perfect cubes (pow(27, 1/3) is 3.0000000000000004 or so) */
+double cbrt(double x)
+{
+    if (x == 0 || __isnan(x) || __isinf(x))
+        return x;
+    double a = fabs(x), y = pow(a, 1.0 / 3.0);
+    y = y - (y * y * y - a) / (3.0 * y * y);
+    return x < 0 ? -y : y;
+}
+
 /* ---- time text ----------------------------------------------------------------------------------------------------------------- */
 char *asctime(const struct tm *tm)
 {

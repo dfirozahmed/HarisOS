@@ -49,6 +49,7 @@ double sinh(double x);
 double cosh(double x);
 double tanh(double x);
 double hypot(double x, double y);
+double cbrt(double x);
 
 /* float forms: computed in double and rounded (long double is double on this target anyway) */
 float fabsf(float x);
