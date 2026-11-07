@@ -211,7 +211,7 @@ Cols ex_columns(const Layout *l)
 {
     Cols c;
     c.show_type = l->list.w >= 360;
-    int right = l->list.x + l->list.w - 14; /* leave room for the scrollbar */
+    int right = l->list.x + l->list.w - 14 - 36; /* room for the scrollbar, plus an empty gap right of the last column (like Windows) */
     c.size_x = right - SIZE_COL_W;
     c.type_x = c.show_type ? c.size_x - TYPE_COL_W : c.size_x;
     return c;
@@ -297,7 +297,7 @@ static void draw_list(const Layout *l, const UiTheme *t)
         const VfsNode *n = vfs_node(EX_ITEMS[ri]);
         if (!n)
             continue;
-        UiRect r = ui_rect(l->list.x + 6, l->list.y + i * ROW_H, l->list.w - 12 - 8, ROW_H - 2);
+        UiRect r = ui_rect(l->list.x + 6, l->list.y + i * ROW_H, size_x + SIZE_COL_W - (l->list.x + 6), ROW_H - 2); /* ends with the last column: the strip right of it stays empty */
         if (ex_is_selected(ri))
         {
             gfx_fill_round_rect_alpha(r.x, r.y, r.w, r.h, t->radius_s, ui_color(t->accent), 46);

@@ -139,7 +139,9 @@ int ex_press(Window *w, int x, int y)
     }
 
     int row = EX_SCROLL + (y - l.list.y) / ROW_H;
-    if (row < 0 || row >= EX_NITEMS)
+    Cols gcols = ex_columns(&l);
+    int in_gap = x >= gcols.size_x + SIZE_COL_W; /* the empty strip right of the last column counts as empty space, so a band can start on a row's line */
+    if (row < 0 || row >= EX_NITEMS || in_gap)
     {
         /* Empty space: a click there clears the selection; holding the button and moving draws a rubber band that selects the rows it
          * touches (with Ctrl or Shift the band adds to what is selected). */
@@ -362,7 +364,8 @@ int ex_rpress(Window *w, int x, int y)
     if (!ui_contains(l.list, x, y) && !ui_contains(l.head, x, y))
         return 1; /* toolbar, sidebar, status bar: no menu */
     l = ex_layout(body);
-    int row = ui_contains(l.list, x, y) ? EX_SCROLL + (y - l.list.y) / ROW_H : -1;
+    int in_gap = x >= ex_columns(&l).size_x + SIZE_COL_W; /* the empty strip right of the columns is empty space */
+    int row = ui_contains(l.list, x, y) && !in_gap ? EX_SCROLL + (y - l.list.y) / ROW_H : -1;
     if (row >= 0 && row < EX_NITEMS)
     {
         if (!ex_is_selected(row)) /* an entry that is not selected becomes the selection; one that is keeps the selection it is in */
@@ -403,7 +406,7 @@ int ex_hover(Window *w, int x, int y)
     else if (x >= 0)
     {
         Layout l = ex_layout(wm_content(w));
-        if (ui_contains(l.list, x, y) && x < l.list.x + l.list.w - UI_SCROLL_W) /* the scrollbar column is not a row */
+        if (ui_contains(l.list, x, y) && x < ex_columns(&l).size_x + SIZE_COL_W) /* the gap right of the columns and the scrollbar are not a row */
         {
             int row = EX_SCROLL + (y - l.list.y) / ROW_H;
             EX_HOVER_ROW = row < EX_NITEMS ? row : -1;
