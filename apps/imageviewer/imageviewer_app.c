@@ -4,6 +4,9 @@
  * the mouse or with the Up / Down keys. Left / Right (or PageUp / PageDown, the Prev / Next buttons) go to the other
  * pictures in the same folder. The view maths (zoom steps, position, drawing a row) is in imgview.c.
  * The decoded picture is one block of the kernel heap (4 bytes a pixel) kept while the window is open.
+ * Decoding a big photo takes a few hundred milliseconds of pure calculation. It runs in a thread of its own (IVDECODE) so that
+ * the main loop, which polls the mouse and draws every window, goes on meanwhile; the window shows "Loading picture..." until
+ * the thread is done (iv_tick picks the result up). Reading the file stays in the main loop: only it may use the drives.
  * An app uses only public headers (ui.h, wm.h, desktop.h, gfx.h) - never desktop_internal.h. */
 #include "app.h"
 #include "dlog.h"
@@ -15,6 +18,7 @@
 #include "imgview.h"
 #include "ntfs.h"
 #include "picture.h"
+#include "task.h"
 #include "taskbar.h"
 #include "ui.h"
 #include "vfs.h"
@@ -39,6 +43,60 @@ static const char *IV_NOTE = ""; /* a message: why no picture is shown, or a sho
 static int IV_DRAGGING, IV_DX, IV_DY; /* the picture is being moved: the pointer's last place */
 static int IV_HX = -1, IV_HY = -1;    /* the pointer's last place over the window (screen), for zooming about it */
 static unsigned int IV_LINE[IV_LINE_MAX];
+
+/* ---- decoding in a thread ---- */
+enum { JOB_RUNNING, JOB_DONE, JOB_ABANDONED };
+
+/* One picture being decoded. The thread owns `raw` (it frees it when it is done) and writes the result. `state` is changed with compare and
+ * swap by both sides: the thread RUNNING -> DONE (the main loop collects the result and frees the job), the main loop RUNNING -> ABANDONED
+ * (a new picture was asked for, or the window closed: the thread frees the result and the job itself). Whoever loses the swap cleans up. */
+typedef struct
+{
+    unsigned char *raw;
+    unsigned size;
+    unsigned int *px;
+    int w, h;
+    unsigned ms; /* how long the decoding took */
+    int state;
+} IvJob;
+
+static IvJob *IV_JOB; /* the picture being decoded for the window, NULL = none (only the main loop touches this pointer) */
+
+static void decode_thread(void *arg)
+{
+    IvJob *j = (IvJob *)arg;
+    unsigned long long t0 = timer_ms();
+    int w = 0, h = 0;
+    unsigned int *px = picture_decode(j->raw, j->size, &w, &h); /* only calculation and the heap (which has a lock of its own) */
+    kfree(j->raw);
+    j->raw = 0;
+    j->px = px;
+    j->w = w;
+    j->h = h;
+    j->ms = (unsigned)(timer_ms() - t0);
+    int expected = JOB_RUNNING;
+    if (!__atomic_compare_exchange_n(&j->state, &expected, JOB_DONE, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        kfree(px); /* it was abandoned while we worked: nobody wants the picture */
+        kfree(j);
+    }
+    /* after a successful swap the job belongs to the main loop: not touched here any more */
+}
+
+/* The main loop lets go of the job it waits for. */
+static void drop_job(void)
+{
+    IvJob *j = IV_JOB;
+    IV_JOB = 0;
+    if (!j)
+        return;
+    int expected = JOB_RUNNING;
+    if (!__atomic_compare_exchange_n(&j->state, &expected, JOB_ABANDONED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        kfree(j->px); /* it had finished already */
+        kfree(j);
+    }
+}
 
 /* ---- small text helpers ---- */
 static void put_str(char *out, int cap, int *n, const char *s)
@@ -120,6 +178,7 @@ static void title_set(Window *w)
 
 static void forget_picture(void)
 {
+    drop_job();
     if (IV_PX)
         kfree(IV_PX);
     IV_PX = 0;
@@ -162,6 +221,28 @@ static const char *load_node(int id)
         if (r == 0)
             break;
         done += (unsigned)r;
+    }
+    if (done == size)
+    {
+        IvJob *j = kmalloc(sizeof(IvJob));
+        if (j)
+        {
+            j->raw = raw;
+            j->size = size;
+            j->px = 0;
+            j->w = j->h = 0;
+            j->ms = 0;
+            j->state = JOB_RUNNING;
+            if (task_create_flags("IVDECODE", decode_thread, j, TASK_PREEMPTIBLE) >= 0)
+            {
+                IV_JOB = j; /* iv_tick shows the picture when the thread is done */
+                IV_FIT = 1;
+                IV_PCT = 100;
+                IV_OX = IV_OY = 0;
+                return 0;
+            }
+            kfree(j); /* no thread: decode here, as before */
+        }
     }
     int w = 0, h = 0;
     unsigned long long dlog_t0 = timer_ms(); /* (dlog.h) */
@@ -298,8 +379,8 @@ static void iv_draw(Window *w, UiRect body)
     else
     {
         gfx_fill_rect(v.x, v.y, v.w, v.h, ui_color(t->surface_alt));
-        ui_text_in_color(v, IV_NOTE[0] ? IV_NOTE : "Open a picture from the File Explorer", UI_TEXT_BODY, UI_ALIGN_CENTER,
-                         t->text_dim);
+        ui_text_in_color(v, IV_JOB ? "Loading picture..." : (IV_NOTE[0] ? IV_NOTE : "Open a picture from the File Explorer"), UI_TEXT_BODY,
+                         UI_ALIGN_CENTER, t->text_dim);
     }
     gfx_rect(v.x - 1, v.y - 1, v.w + 2, v.h + 2, ui_color(t->border));
 
@@ -400,6 +481,34 @@ static int iv_drag(Window *w, int x, int y, unsigned buttons)
     return 1;
 }
 
+/* Every pass of the main loop: has the decoding thread finished? 1 = what the window shows changed. */
+static int iv_tick(Window *w)
+{
+    (void)w;
+    IvJob *j = IV_JOB;
+    if (!j || __atomic_load_n(&j->state, __ATOMIC_ACQUIRE) != JOB_DONE)
+        return 0;
+    IV_JOB = 0;
+    unsigned int *px = j->px;
+    int pw = j->w, ph = j->h;
+    unsigned ms = j->ms;
+    kfree(j);
+    dlog("img-decode", IV_NAME, ms, pw, ph); /* (dlog.h) */
+    if (!px)
+    {
+        IV_NOTE = "Not a picture this viewer can read (BMP, PNG, baseline JPEG), or too large";
+        return 1;
+    }
+    IV_PX = px;
+    IV_W = pw;
+    IV_H = ph;
+    IV_FIT = 1;
+    IV_PCT = 100;
+    IV_OX = IV_OY = 0;
+    IV_NOTE = "";
+    return 1;
+}
+
 static void iv_close(Window *w)
 {
     (void)w;
@@ -441,6 +550,7 @@ static void imageviewer_app_open(void)
     win->on_hover = iv_hover;
     win->on_press = iv_press;
     win->on_drag = iv_drag;
+    win->on_tick = iv_tick;
     win->on_close = iv_close;
     win->icon = TASKBAR_ICON_BROWSER;
     wm_set_min_size(win, 440, 280);
