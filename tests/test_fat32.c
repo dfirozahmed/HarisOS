@@ -100,6 +100,14 @@ int main(void)
         same = 1;
         for (unsigned i = 0; i < 100000; i++) if (got[i] != pat(5, 1000 + i)) { same = 0; break; }
         CHECK(same);
+        /* far into the file after reading its start: the FAT is read 8 sectors at a time, not one request per FAT sector */
+        CHECK(fat_read(&F, &big, 0, got, 100) == 100);
+        r0 = READS;
+        CHECK(fat_read(&F, &big, 290 * 1024, got, 4096) == 4096);
+        CHECK(READS - r0 <= 2); /* the data, and at most one window of the FAT: 290 clusters need 3 FAT sectors, one request each before */
+        same = 1;
+        for (unsigned i = 0; i < 4096; i++) if (got[i] != pat(5, 290 * 1024 + i)) { same = 0; break; }
+        CHECK(same);
         free(got);
         /* two files that grow in turn: their clusters alternate, the data must still come back exactly */
         CHECK(fat_create(&F, fat_root(&F), "A.BIN", 0, &a) == 0 && fat_create(&F, fat_root(&F), "B.BIN", 0, &b) == 0);

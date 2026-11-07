@@ -17,6 +17,7 @@ static int fat_flush_cache(Fat *f)
             return r;
     }
     f->fat_dirty = 0;
+    f->fat_win_lba = ~0ULL; /* the window may hold the old copy of this sector */
     return 0;
 }
 
@@ -27,12 +28,39 @@ static int fat_load(Fat *f, u32 rel)
     int r = fat_flush_cache(f);
     if (r)
         return r;
-    r = f32_rd_sectors(f, f->fat_lba + rel, 1, f->fat_buf);
+    u32 per = FAT_WIN_BYTES / f->ss; /* sectors in a window (a drive with big sectors: just the one) */
+    if (per < 1)
+        per = 1;
+    if (f->fat_win_lba != ~0ULL && rel >= f->fat_win_lba && rel < f->fat_win_lba + f->fat_win_n)
+    {
+        copy(f->fat_buf, f->fat_win + (rel - (u32)f->fat_win_lba) * f->ss, f->ss); /* no request to the drive */
+        f->fat_buf_lba = rel;
+        return 0;
+    }
+    u32 base = rel - rel % per, n = per;
+    if (base + n > f->fat_sectors)
+        n = f->fat_sectors > base ? f->fat_sectors - base : 0;
+    if (n == 0 || rel >= base + n) /* outside the FAT: as before, the one sector */
+    {
+        r = f32_rd_sectors(f, f->fat_lba + rel, 1, f->fat_buf);
+        if (r)
+        {
+            f->fat_buf_lba = ~0ULL;
+            return r;
+        }
+        f->fat_buf_lba = rel;
+        return 0;
+    }
+    r = f32_rd_sectors(f, f->fat_lba + base, n, f->fat_win);
     if (r)
     {
         f->fat_buf_lba = ~0ULL;
+        f->fat_win_lba = ~0ULL;
         return r;
     }
+    f->fat_win_lba = base;
+    f->fat_win_n = n;
+    copy(f->fat_buf, f->fat_win + (rel - base) * f->ss, f->ss);
     f->fat_buf_lba = rel;
     return 0;
 }

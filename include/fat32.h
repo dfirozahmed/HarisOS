@@ -11,6 +11,7 @@
 
 #define FAT_NAME_MAX 256 /* longest name incl. the final 0 */
 #define FAT_SECTOR_MAX 4096
+#define FAT_WIN_BYTES 4096 /* the FAT is read this much at a time (8 sectors of 512 bytes = 1024 cluster entries) */
 
 /* error codes (negative) */
 #define FAT_ERR_IO -1
@@ -52,6 +53,11 @@ typedef struct
     unsigned char fat_buf[FAT_SECTOR_MAX];
     unsigned long long fat_buf_lba; /* sector of the FAT held in fat_buf, ~0 = none */
     int fat_dirty;
+    /* A window of the FAT that is only read (a drive costs a few ms per request: walking a long cluster chain one FAT sector at a time is slow).
+     * fat_load fills fat_buf from it; it is dropped whenever a FAT sector is written (fat_flush_cache) or the caches are reset. */
+    unsigned char fat_win[FAT_WIN_BYTES];
+    unsigned long long fat_win_lba; /* first FAT sector in the window, ~0 = none */
+    unsigned fat_win_n;             /* sectors in the window */
     unsigned char sec[FAT_SECTOR_MAX]; /* scratch sector for directories / partial data sectors */
     unsigned cur_first, cur_index, cur_cluster; /* cluster-chain position of the file used last */
 } Fat;

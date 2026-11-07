@@ -19,6 +19,7 @@ int fat_list(Fat *f, unsigned dir, FatListFn cb, void *user)
     if (!f->fat_dirty) /* listing is how a folder is read (again): do not trust what was cached earlier */
     {
         f->fat_buf_lba = ~0ULL;
+        f->fat_win_lba = ~0ULL;
         if (!f->batch && f->fsinfo_sector && f32_rd_sectors(f, f->fsinfo_sector, 1, f->sec) == 0 && rd32(f->sec) == 0x41615252u)
         {
             u32 fc = rd32(f->sec + 488);

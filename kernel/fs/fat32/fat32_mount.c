@@ -22,6 +22,7 @@ int fat_mount(Fat *f, int blk)
     f->blk = blk;
     f->ss = d->sector_size;
     f->fat_buf_lba = ~0ULL;
+    f->fat_win_lba = ~0ULL;
     if (blk_read(blk, 0, 1, f->sec) != 0)
         return -1;
     const u8 *b = f->sec;
