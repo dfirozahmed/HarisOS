@@ -7,6 +7,7 @@
  * ordinary page fault) when the drive has gone. A page that could not be loaded is never left half mapped: the bytes are read into a
  * buffer first and the page is mapped only when they all arrived. */
 #include "process_internal.h"
+#include "dlog.h"
 #include "vfs.h"
 
 static int image_ok(const LazyImage *im)
@@ -117,6 +118,7 @@ static int fill_page(LazyImage *im, AddressSpace *as, u64 page)
         im->pages += used || len == 0 ? npages : 0;
         im->bytes += total;
         im->ms += timer_ms() - t0;
+        dlog("lazyfill", 0, (long long)(page & 0xFFFFFF), (long long)total, (long long)(timer_ms() - t0)); /* (dlog.h) */
         return result;
     }
     return 0;
@@ -188,4 +190,6 @@ void process_lazy_report(const Process *p)
     serial_puts(" KiB, ");
     serial_putd((long long)im->ms);
     serial_puts(" ms\n");
+    dlog("lazy-total", 0, (long long)im->pages, (long long)im->reads, (long long)im->ms); /* (dlog.h) */
+    dlog_request_save(); /* the program ended: write TRACE.TXT */
 }

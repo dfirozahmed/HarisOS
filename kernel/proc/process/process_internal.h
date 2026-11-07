@@ -6,6 +6,7 @@
 #include "aspace.h"
 #include "bkl.h"
 #include "console.h"
+#include "dlog.h"
 #include "elf.h"
 #include "gui.h"
 #include "heap.h"

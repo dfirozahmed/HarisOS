@@ -31,6 +31,10 @@ int exf_cluster_read(ExFat *f, u32 cl, u32 pos, u8 *buf, u32 n)
     return 0;
 }
 
+/* The most bytes one read request covers when the clusters of a file follow each other on the disk (the most a USB drive moves in one
+ * SCSI command, usb_msc.c). A drive costs a few milliseconds per request whatever its size, so a cluster per request is slow (fat32_data.c). */
+#define RUN_BYTES (64u * 1024u)
+
 /* read `len` bytes of a cluster run starting at byte `offset` of the data (the data must be long enough) */
 static int data_read(ExFat *f, u32 first, int nofat, u32 offset, u8 *buf, u32 len)
 {
@@ -42,6 +46,16 @@ static int data_read(ExFat *f, u32 first, int nofat, u32 offset, u8 *buf, u32 le
     for (;;)
     {
         u32 n = csize - pos < len ? csize - pos : len;
+        u32 last = cl, used = 1; /* the clusters this piece covers: index ... index + used - 1 */
+        while (n < len && n < RUN_BYTES) /* clusters that are next to each other on the disk go in one request (exf_cluster_read is lba arithmetic) */
+        {
+            u32 following;
+            if (exf_cluster_at(f, first, nofat, index + used, &following) <= 0 || following != last + 1)
+                break;
+            n += len - n < csize ? len - n : csize;
+            last = following;
+            used++;
+        }
         if (exf_cluster_read(f, cl, pos, buf, n))
             return -1;
         buf += n;
@@ -49,7 +63,7 @@ static int data_read(ExFat *f, u32 first, int nofat, u32 offset, u8 *buf, u32 le
         if (!len)
             return 0;
         pos = 0;
-        index++;
+        index += used;
         r = exf_cluster_at(f, first, nofat, index, &cl);
         if (r <= 0)
             return -1;

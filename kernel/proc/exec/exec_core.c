@@ -1,7 +1,9 @@
 /* Running a program that is a file on a drive: find, read, load, start. */
 #include "exec_internal.h"
+#include "dlog.h"
 #include "gfx.h"
 #include "mouse.h"
+#include "timer.h"
 
 /* HarisOS exec: see include/exec.h. */
 
@@ -130,9 +132,13 @@ int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
     int e = 0;
     if (err)
         *err = 0;
+    unsigned long long spawn_t0 = timer_ms();
     int lazy_id = spawn_lazy(node, name, sp);
     if (lazy_id >= 0)
+    {
+        dlog("exec_spawn", name, (long long)(timer_ms() - spawn_t0), 1, 0); /* (dlog.h) */
         return lazy_id;
+    }
     unsigned size = 0;
     unsigned char *buf = read_whole(node, &size, &e);
     if (!buf)
@@ -146,6 +152,7 @@ int exec_spawn_node(int node, const char *name, ProcessSpawn *sp, int *err)
             *err = elf_err;
         return EXEC_ERR_LOAD;
     }
+    dlog("exec_spawn", name, (long long)(timer_ms() - spawn_t0), 0, (long long)size); /* (dlog.h) */
     return id;
 }
 

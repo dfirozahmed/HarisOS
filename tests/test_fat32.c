@@ -79,6 +79,45 @@ int main(void)
         CHECK(fat_mount(&g, disk_idx) == 0);
     }
 
+    /* ---- reading: clusters that follow each other go in one request ---- */
+    {
+        new_volume(20000, 2); /* 1 KiB clusters */
+        FatEntry big, a, b;
+        CHECK(fat_create(&F, fat_root(&F), "BIG.BIN", 0, &big) == 0);
+        CHECK(write_pattern(&big, 0, 300 * 1024 + 123, 5) == 300 * 1024 + 123); /* written alone: its clusters are in a row */
+        unsigned len = big.size;
+        unsigned char *got = malloc(len);
+        unsigned long long r0 = READS;
+        CHECK(fat_read(&F, &big, 0, got, len) == (int)len);
+        unsigned long long reads = READS - r0;
+        int same = 1;
+        for (unsigned i = 0; i < len; i++) if (got[i] != pat(5, i)) { same = 0; break; }
+        CHECK(same);
+        CHECK(reads <= len / (64 * 1024) + 6); /* about 5 pieces of 64 KiB plus a few FAT sectors; one request per 1 KiB cluster would be 300 */
+        r0 = READS; /* from the middle of a cluster, ending in the middle of one */
+        CHECK(fat_read(&F, &big, 1000, got, 100000) == 100000);
+        CHECK(READS - r0 <= 100000 / (64 * 1024) + 6);
+        same = 1;
+        for (unsigned i = 0; i < 100000; i++) if (got[i] != pat(5, 1000 + i)) { same = 0; break; }
+        CHECK(same);
+        free(got);
+        /* two files that grow in turn: their clusters alternate, the data must still come back exactly */
+        CHECK(fat_create(&F, fat_root(&F), "A.BIN", 0, &a) == 0 && fat_create(&F, fat_root(&F), "B.BIN", 0, &b) == 0);
+        for (unsigned k = 0; k < 40; k++) {
+            CHECK(write_pattern(&a, k * 1500, 1500, 6) == 1500);
+            CHECK(write_pattern(&b, k * 1500, 1500, 7) == 1500);
+        }
+        CHECK(verify_pattern(&a, 40 * 1500, 6) && verify_pattern(&b, 40 * 1500, 7));
+        unsigned char *whole = malloc(40 * 1500);
+        CHECK(fat_read(&F, &a, 0, whole, 40 * 1500) == 40 * 1500);
+        same = 1;
+        for (unsigned i = 0; i < 40 * 1500; i++) if (whole[i] != pat(6, i)) { same = 0; break; }
+        CHECK(same);
+        free(whole);
+        CHECK(fsck() == 0);
+        new_volume(20000, 2); /* the next section starts from a fresh volume as before */
+    }
+
     /* ---- creating files: names ---- */
     unsigned root = fat_root(&F);
     CHECK(fat_create(&F, root, "readme.txt", 0, &e) == 0 && e.nlfn == 0 && e.size == 0 && e.first_cluster == 0);

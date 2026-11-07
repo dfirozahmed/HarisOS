@@ -1,5 +1,7 @@
 /* Virtual file system: read, write, truncate, save. */
 #include "vfs_internal.h"
+#include "dlog.h"
+#include "timer.h"
 
 int vfs_read(int id, unsigned offset, void *buf, unsigned len)
 {
@@ -9,7 +11,11 @@ int vfs_read(int id, unsigned offset, void *buf, unsigned len)
     const VfsBackend *b = ops_of(id);
     if (!b || !b->read)
         return fail(VFS_ERR_UNSUPPORTED);
+    unsigned long long t0 = timer_us();
     int r = b->read(ctx_of(id), n, offset, buf, len);
+    unsigned long long us = timer_us() - t0;
+    if (us >= 5000) /* diagnostics (dlog.h): a read that kept the caller (and, in a system call, the whole kernel) waiting */
+        dlog("vfs_read", n->name, offset, len, (long long)(us / 1000));
     return r < 0 ? fail(r) : r;
 }
 

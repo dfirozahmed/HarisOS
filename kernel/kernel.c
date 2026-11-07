@@ -26,6 +26,7 @@
 #include "aspace.h"
 #include "gfx.h"
 #include "hda.h"
+#include "dlog.h"
 #include "heap.h"
 #include "heapmon.h"
 #include "idle.h"
@@ -703,14 +704,14 @@ void kernel_main(const BootInfo *info)
             /* diagnostics: the main loop polls the mouse and draws the windows, so a long gap between two passes is what a frozen pointer is */
             static unsigned long long prev_pass;
             static int stalls;
-            if (prev_pass && pass_start - prev_pass >= 300000 && stalls < 60)
+            if (prev_pass && pass_start - prev_pass >= 40000 && stalls < 150)
             {
                 stalls++;
-                serial_puts("main loop: ");
-                serial_putd((long long)((pass_start - prev_pass) / 1000));
-                serial_puts(" ms between two passes\n");
+                dlog("loop-gap", 0, (long long)((pass_start - prev_pass) / 1000), 0, 0); /* (dlog.h: written to TRACE.TXT) */
             }
             prev_pass = pass_start;
+            if (dlog_save_due()) /* the trace file: only the main loop may write to a drive */
+                (void)dlog_save();
         }
         int worked = 0; /* this pass handled something: poll again at once instead of sleeping */
         cpuload_section_begin();

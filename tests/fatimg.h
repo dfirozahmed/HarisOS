@@ -8,11 +8,13 @@ static int fails;
 static unsigned char *DISK;
 static unsigned long long NSEC;
 static unsigned long long WRITES;
+static unsigned long long READS; /* read requests the drive got (the fat32 test checks that clusters next to each other go in one) */
 
 /* the disk's memory is in d->ctx (so a test can have several images); DISK is the one the checker looks at */
 static inline int rd(BlkDev *d, unsigned long long lba, unsigned n, void *buf)
 {
     memcpy(buf, (unsigned char *)d->ctx + lba * SS, (size_t)n * SS);
+    READS++;
     return 0;
 }
 

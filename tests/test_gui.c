@@ -78,6 +78,8 @@ static GuiEvent move_ev(int x, int y)
     return e;
 }
 
+void dlog(const char *tag, const char *who, long long a, long long b, long long c) { (void)tag; (void)who; (void)a; (void)b; (void)c; } /* kernel diagnostics trace (dlog.h) */
+
 int main(void)
 {
     int seg = -1, w, h, x, y, n;

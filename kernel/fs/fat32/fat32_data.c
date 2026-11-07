@@ -44,6 +44,11 @@ static int cluster_io(Fat *f, u32 cl, u32 pos, u8 *buf, u32 n, int write)
     return 0;
 }
 
+/* The most bytes one read request covers when the clusters of a file follow each other on the disk (the most a USB drive moves in one
+ * SCSI command, usb_msc.c). A drive costs a few milliseconds per request whatever its size: a 4 KiB cluster per request is 0.8 MB/s
+ * on a stick that reads 30 MB/s in big pieces. */
+#define RUN_BYTES (64u * 1024u)
+
 /* read or write `len` bytes of a chain starting at byte `offset`; the chain must be long enough */
 int f32_chain_io(Fat *f, u32 first, u32 offset, u8 *buf, u32 len, int write)
 {
@@ -56,6 +61,20 @@ int f32_chain_io(Fat *f, u32 first, u32 offset, u8 *buf, u32 len, int write)
     for (;;)
     {
         u32 n = csize - pos < len ? csize - pos : len;
+        u32 last = cl, used = 1; /* the clusters this piece covers: cl ... last */
+        if (!write) /* reading: clusters that are next to each other on the disk go in one request (cluster_io only does lba arithmetic) */
+            while (n < len && n < RUN_BYTES)
+            {
+                u32 following;
+                r = f32_fat_get(f, last, &following);
+                if (r)
+                    return r;
+                if (following != last + 1 || !valid_cluster(f, following))
+                    break;
+                n += len - n < csize ? len - n : csize;
+                last = following;
+                used++;
+            }
         r = cluster_io(f, cl, pos, buf, n, write);
         if (r)
             return r;
@@ -65,14 +84,14 @@ int f32_chain_io(Fat *f, u32 first, u32 offset, u8 *buf, u32 len, int write)
             return 0;
         pos = 0;
         u32 next;
-        r = f32_fat_get(f, cl, &next);
+        r = f32_fat_get(f, last, &next);
         if (r)
             return r;
         if (!valid_cluster(f, next))
             return FAT_ERR_IO;
         cl = next;
         f->cur_first = first; /* keep the cursor with us */
-        f->cur_index = f->cur_index + 1;
+        f->cur_index = f->cur_index + used;
         f->cur_cluster = cl;
     }
 }

@@ -402,5 +402,7 @@ int process_spawn_elf_lazy(const char *name, int node, unsigned file_size, const
     serial_puts("process: ");
     serial_puts(name);
     serial_puts(" is demand paged\n");
+    dlog("lazy-spawn", name, (long long)file_size, 0, 0); /* (dlog.h) */
+    dlog_arm_save(25000); /* TRACE.TXT is written 25 s after the first demand paged program started, and again when it ends */
     return launch(name, as, info.entry, sp, heap_base, im); /* no segment page is mapped: the first touch loads it */
 }

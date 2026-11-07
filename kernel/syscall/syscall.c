@@ -1,5 +1,6 @@
 /* HarisOS system calls: see include/syscall.h. */
 #include "syscall_internal.h"
+#include "dlog.h"
 
 static ull COUNT;      /* atomic: the calls that run without the big kernel lock count themselves too */
 static ull FAST_COUNT; /* how many of them did */
@@ -173,17 +174,10 @@ long long syscall_dispatch(SyscallFrame *f)
     long long r = dispatch_call(f);
     ull took = timer_us() - t0; /* diagnostics: a call that takes long keeps the main loop (mouse, windows) waiting unless it sleeps or yields */
     static int reported;
-    if (took >= 30000 && reported < 60 && number != SYS_SLEEP && number != SYS_AUDIO_PLAY && number != SYS_WAIT) /* (these sleep on purpose: the lock is not held meanwhile) */
+    if (took >= 15000 && reported < 150 && number != SYS_SLEEP && number != SYS_AUDIO_PLAY && number != SYS_WAIT) /* (these sleep on purpose: the lock is not held meanwhile) */
     {
         reported++;
-        serial_puts("syscall ");
-        serial_putd((long long)number);
-        serial_puts(" took ");
-        serial_putd((long long)(took / 1000));
-        serial_puts(" ms in ");
-        const char *who = task_name(task_current());
-        serial_puts(who ? who : "?");
-        serial_puts("\n");
+        dlog("syscall", task_name(task_current()), (long long)number, (long long)(took / 1000), 0); /* (dlog.h: written to TRACE.TXT) */
     }
     if (f->rax != SYS_SIGRETURN && signal_deliverable(process_current()))
         r = signal_syscall_return(f, r);

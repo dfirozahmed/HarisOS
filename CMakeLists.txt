@@ -163,6 +163,7 @@ set(KERNEL_SOURCES
     kernel/cpu/fpu.c               # x87 / SSE state: per-process FXSAVE images, clean default state
     kernel/cpu/idle.c              # idle: own GDT/IDT, 1 ms LAPIC tick, hlt between polling passes
     kernel/core/power.c             # shut down / restart (firmware reset service + emulator fallbacks)
+    kernel/core/dlog.c              # diagnostic trace written to TRACE.TXT (laptops have no serial port)
     kernel/cpu/acpi.c               # ACPI tables (DSDT / SSDT byte code, MADT processor list)
     kernel/cpu/cpuinfo.c            # CPU name, base speed, sockets / cores / logical processors (CPUID)
     kernel/cpu/smp/smp_plan.c                       # SMP

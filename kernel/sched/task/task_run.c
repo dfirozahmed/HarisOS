@@ -43,11 +43,26 @@ AddressSpace *task_space_of(int id)
     return id >= 0 && id < CAP && tk(id)->state != TASK_UNUSED && tk(id)->state != TASK_DEAD && !tk(id)->kill_pending ? tk(id)->as : 0;
 }
 
+#if defined(__x86_64__) && !defined(HARIS_HOST)
+#include "dlog.h"
+#include "timer.h"
+extern char __ImageBase; /* the address the kernel image was loaded at (fault.c) */
+#endif
+
 void task_yield(void)
 {
     unsigned long long irq = irq_save();
+#if defined(__x86_64__) && !defined(HARIS_HOST)
+    /* diagnostics (dlog.h): the main loop polls the mouse and draws the windows. When it gives the CPU away and does not get it back for
+     * long, say who asked: the return address, minus the image base, is the place to look up in the disassembly of KERNEL.EFI. */
+    unsigned long long t0 = CUR == 0 ? timer_us() : 0;
+#endif
     schedule();
     bkl_yield(); /* code that waits by yielding in a loop must not keep the other processors out of the kernel (bkl.h) */
+#if defined(__x86_64__) && !defined(HARIS_HOST)
+    if (t0 && timer_us() - t0 >= 20000)
+        dlog("main-yield", 0, (long long)((timer_us() - t0) / 1000), (long long)((unsigned long long)__builtin_return_address(0) - (unsigned long long)&__ImageBase), 0);
+#endif
     irq_restore(irq);
 }
 

@@ -8,6 +8,8 @@ static int fails;
 static unsigned long long NOW_US;
 unsigned long long timer_us(void) { return NOW_US; }
 
+void dlog(const char *tag, const char *who, long long a, long long b, long long c) { (void)tag; (void)who; (void)a; (void)b; (void)c; } /* kernel diagnostics trace (dlog.h) */
+
 int main(void)
 {
     CHECK(cpuload_percent() == 0);

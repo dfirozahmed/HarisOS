@@ -10,8 +10,11 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
+static unsigned long long READS; /* read requests the drive got */
+
 static int xrd(BlkDev *d, unsigned long long lba, unsigned n, void *buf)
 {
+    READS++;
     memcpy(buf, (unsigned char *)d->ctx + lba * 512, (size_t)n * 512);
     return 0;
 }
@@ -80,6 +83,9 @@ int main(void)
     unsigned char *d1 = make_data(100, 1), *d2 = make_data(9000, 2), *d3 = make_data(20000, 3), *d4 = make_data(5000, 4);
     xfile_contig(&x, &root, "small.txt", d1, 100);                /* one cluster, NoFatChain */
     xfile_contig(&x, &root, "Medium File.bin", d2, 9000);         /* five clusters in a row */
+    unsigned char *dbig = make_data(300000, 8);
+    xfile_contig(&x, &root, "big-run.bin", dbig, 300000);         /* 147 clusters in a row (NoFatChain) */
+    free(dbig);
     xfile_chained(&x, &root, "fragmented.dat", d3, 20000);        /* ten clusters with gaps: a real FAT chain */
     xadd(&x, &root, "empty.txt", 0x20, 0, 0, 0, 0);               /* no cluster at all */
     {   /* ValidDataLength shorter than DataLength: the end reads as zeros */
@@ -127,11 +133,25 @@ int main(void)
     CHECK(exfat_list(&F, &r, lcb, &L) == (L.n = 0, exfat_list(&F, &r, lcb, &L)));
     L.n = 0;
     int total = exfat_list(&F, &r, lcb, &L);
-    CHECK(total == 10 && L.n == 10);                              /* 8 files + Docs + Big */
+    CHECK(total == 11 && L.n == 11);                              /* 9 files + Docs + Big */
 
     CHECK(find(&r, "small.txt", &e) && !(e.attr & EXFAT_ATTR_DIR) && e.nofat && e.size == 100);
     CHECK(content_ok(&e, 100, 1, 64));
     CHECK(find(&r, "Medium File.bin", &e) && content_ok(&e, 9000, 2, 777) && content_ok(&e, 9000, 2, 4096));
+    {   /* clusters in a row are read in big pieces: one request per 2 KiB cluster would be about 147 */
+        ExEntry bg;
+        CHECK(find(&r, "big-run.bin", &bg));
+        unsigned char *all = malloc(300000);
+        unsigned long long r0 = READS;
+        CHECK(exfat_read(&F, &bg, 0, all, 300000) == 300000);
+        CHECK(READS - r0 <= 300000 / (64 * 1024) + 3);
+        unsigned char *want = make_data(300000, 8);
+        CHECK(memcmp(all, want, 300000) == 0);
+        r0 = READS; /* from inside a cluster to inside another, 100 KB on */
+        CHECK(exfat_read(&F, &bg, 1500, all, 100000) == 100000);
+        CHECK(READS - r0 <= 100000 / (64 * 1024) + 3 && memcmp(all, want + 1500, 100000) == 0);
+        free(all); free(want);
+    }
     CHECK(find(&r, "fragmented.dat", &e) && !e.nofat && content_ok(&e, 20000, 3, 1000) && content_ok(&e, 20000, 3, 2048));
     CHECK(find(&r, "empty.txt", &e) && e.size == 0 && e.first_cluster == 0 && exfat_read(&F, &e, 0, &e.secondary, 1) == 0);
     CHECK(find(&r, longname, &e) && e.size == 100 && content_ok(&e, 100, 1, 100));

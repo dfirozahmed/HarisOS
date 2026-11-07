@@ -1,5 +1,6 @@
 /* xHCI: mass storage (bulk-only transport over the controller). */
 #include "usb_xhci_internal.h"
+#include "dlog.h"
 
 #if defined(__x86_64__)
 
@@ -261,6 +262,7 @@ int msc_setup(Xhci *x, int di, const Loc *L, u32 cfg_value, const MscDesc *md)
     m->in_dci = (md->in_addr & 15) * 2 + 1;
     m->out_dci = (md->out_addr & 15) * 2;
     m->errs = 0;
+    dlog("usb-msc", 0, L->speed, (long long)md->in_mps, (long long)md->in_burst); /* (dlog.h) speed: 1 full, 2 low, 3 high, 4 super; bulk IN packet size and burst */
 
     u64 bounce = pmm_alloc_contiguous_tag(MSC_BUF_PAGES, PMM_TAG_USB);
     if (bounce && !x->ac64 && bounce + (u64)MSC_BUF_PAGES * 4096 > 0x100000000ULL)

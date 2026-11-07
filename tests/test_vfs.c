@@ -173,6 +173,10 @@ static void test_save(void)
     CHECK(vfs_write(root, 0, "x", 1) == -1 && vfs_last_error() == VFS_ERR_ARG);
 }
 
+/* the kernel diagnostics trace (dlog.h) and its clock: vfs_read times itself */
+unsigned long long timer_us(void) { return 0; }
+void dlog(const char *tag, const char *who, long long a, long long b, long long c) { (void)tag; (void)who; (void)a; (void)b; (void)c; }
+
 int main(void)
 {
     vfs_reset();

@@ -1,5 +1,6 @@
 /* HarisOS GUI surfaces: see include/gui.h. A table of surfaces, their pixel segments and event queues. No window code. */
 #include "gui.h"
+#include "dlog.h"
 #include "heap.h"
 #include "shm.h"
 #include "task.h"
@@ -104,6 +105,7 @@ int gui_create(const char *title, int w, int h, int pid, int *seg)
 {
     if (!title || !title_ok(title) || w < GUI_W_MIN || w > GUI_W_MAX || h < GUI_H_MIN || h > GUI_H_MAX)
         return -1;
+    dlog("gui_create", title, w, h, 0); /* (dlog.h) */
     int slot = 0;
     while (slot < S_CAP && S[slot])
         slot++;
@@ -207,6 +209,12 @@ int gui_present(int hnd, int x, int y, int w, int h)
     Surface *s = get(hnd);
     if (!s)
         return -1;
+    static int logged;
+    if (logged < 12) /* (dlog.h) the first pictures a client hands over */
+    {
+        logged++;
+        dlog("gui_present", 0, hnd, w, h);
+    }
     if (w <= 0 || h <= 0) /* no rectangle: everything */
     {
         x = y = 0;

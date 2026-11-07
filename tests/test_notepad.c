@@ -188,6 +188,8 @@ void ui_icon(UiIcon i, int x, int y, int size, UiRgb t) { (void)i; (void)x; (voi
 void wm_set_button_icon(Window *w, int i, UiIcon icon) { (void)w; (void)i; (void)icon; }
 static unsigned long long NOW;
 unsigned long long timer_ms(void) { return NOW; }
+void dlog(const char *tag, const char *who, long long a, long long b, long long c) { (void)tag; (void)who; (void)a; (void)b; (void)c; } /* kernel diagnostics trace (dlog.h) */
+unsigned long long timer_us(void) { return 0; } /* the microsecond clock (the kernel yields every 2 ms of a long read) */
 static Window *STUB_CLOSED; /* the last window wm_close() was asked to close */
 void wm_close(Window *w)
 {

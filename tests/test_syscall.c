@@ -752,6 +752,11 @@ int sock_recv(int id, void *buf, unsigned max)
 #include "rtc.h"
 static unsigned long long TIMER_MS = 1234;
 unsigned long long timer_ms(void) { return TIMER_MS; }
+void dlog(const char *tag, const char *who, long long a, long long b, long long c) { (void)tag; (void)who; (void)a; (void)b; (void)c; } /* kernel diagnostics trace (dlog.h) */
+unsigned long long timer_us(void) { return 0; } /* the microsecond clock (the kernel yields every 2 ms of a long read) */
+const char *task_name(int id) { (void)id; return "TEST"; }
+void serial_puts(const char *s) { (void)s; }
+void serial_putd(long long v) { (void)v; }
 static RtcTime RTC = {2026, 10, 25, 15, 40, 7};
 static int RTC_OK = 1;
 int rtc_read(RtcTime *out)

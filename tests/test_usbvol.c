@@ -48,6 +48,9 @@ static int plug(unsigned char *mem, const char *name)
     return idx;
 }
 
+void dlog(const char *tag, const char *who, long long a, long long b, long long c) { (void)tag; (void)who; (void)a; (void)b; (void)c; } /* kernel diagnostics trace (dlog.h) */
+unsigned long long timer_us(void) { return 0; } /* the microsecond clock (the kernel yields every 2 ms of a long read) */
+
 int main(void)
 {
     blk_reset();
